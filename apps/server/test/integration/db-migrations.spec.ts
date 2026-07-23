@@ -293,9 +293,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
       expect(MIGRATION_NAMES).toContain('0057_campaigns_active_encounter');
-      expect(MIGRATION_NAMES).toContain('0059_encounter_links_campaign_scope');
+      expect(MIGRATION_NAMES).toContain('0058_campaigns_public_invites_enabled');
+      expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
+      expect(MIGRATION_NAMES).toContain('0063_encounter_links_campaign_scope');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
+      expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));
 
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
@@ -592,7 +595,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
         )
         .run(now, now);
-      legacy.prepare("DELETE FROM __migrations WHERE name = '0059_encounter_links_campaign_scope'").run();
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0063_encounter_links_campaign_scope'").run();
     } finally {
       legacy.close();
     }
@@ -749,6 +752,76 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(getRecordedAppVersion(opened.sqlite)).toBe(BINARY_VERSION);
     } finally {
       opened.sqlite.close();
+    }
+  });
+
+  // ── public invites kill switch (#857) ───────────────────────────────────────
+
+  it('0058 clears public_invites_enabled for paused campaigns when upgrading an old-shaped DB', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.prepare("UPDATE campaigns SET status = 'paused' WHERE id = 1").run();
+    } finally {
+      legacy.close();
+    }
+
+    const { sqlite } = openDatabase(dataDir);
+    try {
+      const row = sqlite.prepare('SELECT status, public_invites_enabled FROM campaigns WHERE id = 1').get() as {
+        status: string;
+        public_invites_enabled: number;
+      };
+      expect(row.status).toBe('paused');
+      expect(row.public_invites_enabled).toBe(0);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it('0059 clears public_invites_enabled left enabled on paused/completed/trashed campaigns', () => {
+    dataDir = makeTempDataDir();
+    const first = openDatabase(dataDir);
+    const now = '2026-07-23T00:00:00.000Z';
+    try {
+      // Simulate a DB that applied the original 0058 (DEFAULT 1 for every row)
+      // before the inactive-campaign clear landed.
+      first.sqlite
+        .prepare(
+          `INSERT INTO campaigns (name, status, public_invites_enabled, deleted_at, created_at, updated_at)
+           VALUES
+             ('Active Live', 'active', 1, NULL, ?, ?),
+             ('Paused Table', 'paused', 1, NULL, ?, ?),
+             ('Completed Saga', 'completed', 1, NULL, ?, ?),
+             ('Trashed Keep', 'active', 1, ?, ?, ?)`,
+        )
+        .run(now, now, now, now, now, now, now, now, now);
+      first.sqlite.prepare("DELETE FROM __migrations WHERE name = '0059_public_invites_disabled_inactive'").run();
+    } finally {
+      first.sqlite.close();
+    }
+
+    const second = openDatabase(dataDir);
+    try {
+      const rows = second.sqlite
+        .prepare(
+          `SELECT name, status, public_invites_enabled, deleted_at IS NOT NULL AS trashed
+           FROM campaigns
+           WHERE name IN ('Active Live', 'Paused Table', 'Completed Saga', 'Trashed Keep')
+           ORDER BY name`,
+        )
+        .all() as Array<{ name: string; status: string; public_invites_enabled: number; trashed: number }>;
+      expect(rows).toEqual([
+        { name: 'Active Live', status: 'active', public_invites_enabled: 1, trashed: 0 },
+        { name: 'Completed Saga', status: 'completed', public_invites_enabled: 0, trashed: 0 },
+        { name: 'Paused Table', status: 'paused', public_invites_enabled: 0, trashed: 0 },
+        { name: 'Trashed Keep', status: 'active', public_invites_enabled: 0, trashed: 1 },
+      ]);
+      expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
+    } finally {
+      second.sqlite.close();
     }
   });
 });

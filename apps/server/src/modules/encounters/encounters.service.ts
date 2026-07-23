@@ -18,7 +18,19 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { advanceTurn, applyCombatantHp, computeEncounterDifficulty, crToXp, generateEncounterGroup, hpBandFor, parseCr, sortCombatants, turnIndexFor } from './encounters.logic';
+import {
+  advanceTurn,
+  applyCombatantHp,
+  computeEncounterDifficulty,
+  crToXp,
+  generateEncounterGroup,
+  hpBandFor,
+  parseCr,
+  redactEncounterEventsForViewer,
+  sortCombatants,
+  turnIndexFor,
+  UNKNOWN_COMBATANT_LABEL,
+} from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
@@ -132,6 +144,8 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
     type: row.type as EncounterEventType,
     actor: row.actor,
     target: row.target,
+    actorId: row.actorId ?? null,
+    targetId: row.targetId ?? null,
     detail: row.detail,
     createdAt: row.createdAt,
   };
@@ -381,7 +395,7 @@ export class EncountersService {
     actorId: number | null | undefined,
     currentCombatantId: number | null,
     targetCombatantId: number,
-  ): Promise<string | null> {
+  ): Promise<{ id: number; name: string } | null> {
     // Explicit null = "do not attribute" (used by a11y e2e and callers that want the
     // legacy target-only phrasing). Distinct from omitted/undefined, which falls back
     // to the current-turn combatant.
@@ -395,34 +409,40 @@ export class EncountersService {
     if (actorId !== undefined) {
       if (actorId === targetCombatantId) return null; // explicit self-attribution
       const [explicit] = await this.db
-        .select({ name: combatants.name })
+        .select({ id: combatants.id, name: combatants.name })
         .from(combatants)
         .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
         .limit(1);
-      if (explicit?.name) return explicit.name;
+      if (explicit?.name) return { id: explicit.id, name: explicit.name };
       // explicit id didn't resolve — fall through to the current-turn fallback.
     }
     if (currentCombatantId === null || currentCombatantId === targetCombatantId) return null;
     const [current] = await this.db
-      .select({ name: combatants.name })
+      .select({ id: combatants.id, name: combatants.name })
       .from(combatants)
       .where(and(eq(combatants.id, currentCombatantId), eq(combatants.encounterId, encounterId)))
       .limit(1);
-    return current?.name ?? null;
+    return current?.name ? { id: current.id, name: current.name } : null;
   }
 
   /**
    * Persist one combat-log event (issue #61). Called from the combat mutations (HP
    * damage/heal, condition add/remove, death, turn/round) so the run view can show a
    * scrollable history that survives reload. `detail` must never carry a monster's
-   * exact HP total — only deltas — so the list endpoint can be member-visible without
-   * leaking what issue #43 redacts on the combatant rows.
+   * exact HP total — only deltas — and must not interpolate combatant names (issue
+   * #869) so listing can redact actor/target without prose bypassing the mask.
    */
   private async appendEvent(
     encounterId: number,
     round: number,
     type: EncounterEventType,
-    fields: { actor?: string | null; target?: string | null; detail?: string },
+    fields: {
+      actor?: string | null;
+      target?: string | null;
+      actorId?: number | null;
+      targetId?: number | null;
+      detail?: string;
+    },
   ): Promise<void> {
     await this.db.insert(encounterEvents).values({
       encounterId,
@@ -430,6 +450,8 @@ export class EncountersService {
       type,
       actor: fields.actor ?? null,
       target: fields.target ?? null,
+      actorId: fields.actorId ?? null,
+      targetId: fields.targetId ?? null,
       detail: fields.detail ?? '',
       createdAt: nowIso(),
     });
@@ -437,19 +459,41 @@ export class EncountersService {
 
   /**
    * Lists an encounter's persisted combat log in chronological (insertion) order —
-   * issue #61. Member-visible: `viewerRole` is accepted for symmetry with the redaction
-   * story, but the events are stored already-safe (deltas, never exact monster HP
-   * totals), so no per-row redaction is required — a non-DM sees the same trail the DM
-   * does, minus nothing that the combatant rows don't already show them.
+   * issue #61 / #869. Hidden encounters 404 for non-DMs (parity with roster/
+   * difficulty). For non-DMs, actor/target names (and any name-bearing detail) are
+   * projected from CURRENT hidden-NPC visibility so a later reveal unmasks
+   * historical lines; stable actorId/targetId are always returned.
    */
-  async listEvents(encounterId: number, _viewerRole?: Role): Promise<EncounterEvent[]> {
-    await this.getRowOrThrow(encounterId); // 404 if the encounter doesn't exist
+  async listEvents(encounterId: number, viewerRole?: Role): Promise<EncounterEvent[]> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (viewerRole !== undefined && !isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     const rows = await this.db
       .select()
       .from(encounterEvents)
       .where(eq(encounterEvents.encounterId, encounterId))
       .orderBy(encounterEvents.id);
-    return rows.map(eventToDomain);
+    const events = rows.map(eventToDomain);
+    if (viewerRole === undefined || viewerRole === 'dm' || events.length === 0) {
+      return events;
+    }
+
+    const combatantRows = await this.listCombatantRows(encounterId);
+    const linkedNpcIds = combatantRows.map((c) => c.npcId).filter((n): n is number => n !== null);
+    const hiddenNpcIds = new Set<number>();
+    if (linkedNpcIds.length > 0) {
+      const hiddenRows = await this.db
+        .select({ id: npcs.id })
+        .from(npcs)
+        .where(and(inArray(npcs.id, linkedNpcIds), eq(npcs.hidden, true)));
+      for (const r of hiddenRows) hiddenNpcIds.add(r.id);
+    }
+    return redactEncounterEventsForViewer(
+      events,
+      combatantRows.map((c) => ({ id: c.id, name: c.name, npcId: c.npcId })),
+      hiddenNpcIds,
+    );
   }
 
   /**
@@ -673,7 +717,7 @@ export class EncountersService {
         const hiddenIds = new Set(hiddenRows.map((r) => r.id));
         if (hiddenIds.size > 0) {
           list = list.map((c) =>
-            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: 'Unknown combatant' } : c,
+            c.npcId !== null && hiddenIds.has(c.npcId) ? { ...c, npcId: null, name: UNKNOWN_COMBATANT_LABEL } : c,
           );
         }
       }
@@ -870,11 +914,23 @@ export class EncountersService {
    * Broadcast a transient battle-map ping (issue #238). Unlike fog/AoE this persists nothing —
    * it rides the campaign event stream as a one-shot `encounter.ping` signal every open client
    * renders briefly and lets fade. Any writing member may drop one (a live table gesture, not
-   * DM-gated); the caller-side controller asserts membership. The ping location is a coordinate
-   * the sender chose, so there is no secret to leak (contrast the id-only updated/deleted
-   * signals). Returns nothing meaningful — the effect is the emitted event.
+   * DM-gated); the caller-side controller asserts membership. Hidden encounters are
+   * non-enumerating 404s for non-DMs (issue #869 — parity with roster/events/difficulty).
+   * The ping location is a coordinate the sender chose, so there is no secret to leak
+   * (contrast the id-only updated/deleted signals). Returns nothing meaningful — the effect
+   * is the emitted event.
    */
-  pingMap(encounterId: number, campaignId: number, ping: MapPing): void {
+  pingMap(
+    encounterId: number,
+    campaignId: number,
+    ping: MapPing,
+    viewerRole?: Role,
+    /** Encounter.hidden from the caller's already-fetched row (issue #869). */
+    hidden = false,
+  ): void {
+    if (viewerRole !== undefined && !isVisibleTo({ hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
     this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
   }
 
@@ -1753,7 +1809,10 @@ export class EncountersService {
     // a combatant NOT in this encounter is dropped (the lookup returns null) so a stale
     // client can't pollute the log with a phantom name; it doesn't 400, mirroring how
     // other optional metadata is best-effort rather than fail-loud.
-    const actorName = await this.resolveCombatLogActor(encounterId, patch.actorId, encounterRow.currentCombatantId, combatantId);
+    const actor = await this.resolveCombatLogActor(encounterId, patch.actorId, encounterRow.currentCombatantId, combatantId);
+    const actorName = actor?.name ?? null;
+    const actorCombatantId = actor?.id ?? null;
+    const targetCombatantId = combatantId;
 
     // HP damage/heal — only when an HP change was actually requested (not a pure temp-HP
     // grant or a death-save toggle). Compare the TOTAL pool (hp + temp) so temp-HP
@@ -1761,9 +1820,21 @@ export class EncountersService {
     if (patch.hpDelta !== undefined || patch.hpSet !== undefined) {
       const poolDelta = afterHp + afterTemp - (beforeHp + beforeTemp);
       if (poolDelta < 0) {
-        await this.appendEvent(encounterId, round, 'damage', { actor: actorName, target: targetName, detail: `took ${-poolDelta} damage` });
+        await this.appendEvent(encounterId, round, 'damage', {
+          actor: actorName,
+          target: targetName,
+          actorId: actorCombatantId,
+          targetId: targetCombatantId,
+          detail: `took ${-poolDelta} damage`,
+        });
       } else if (poolDelta > 0) {
-        await this.appendEvent(encounterId, round, 'heal', { actor: actorName, target: targetName, detail: `healed ${poolDelta} HP` });
+        await this.appendEvent(encounterId, round, 'heal', {
+          actor: actorName,
+          target: targetName,
+          actorId: actorCombatantId,
+          targetId: targetCombatantId,
+          detail: `healed ${poolDelta} HP`,
+        });
       }
     }
 
@@ -1772,9 +1843,21 @@ export class EncountersService {
     // kill when the attacker is known and distinct (issue #620), so a recap can say who
     // felled the boss rather than only that it dropped.
     if (afterDeath === 'dead' && beforeDeath !== 'dead') {
-      await this.appendEvent(encounterId, round, 'death', { actor: actorName, target: targetName, detail: 'died' });
+      await this.appendEvent(encounterId, round, 'death', {
+        actor: actorName,
+        target: targetName,
+        actorId: actorCombatantId,
+        targetId: targetCombatantId,
+        detail: 'died',
+      });
     } else if ((existing.kind === 'monster' || existing.kind === 'npc') && afterHp <= 0 && beforeHp > 0) {
-      await this.appendEvent(encounterId, round, 'death', { actor: actorName, target: targetName, detail: 'dropped to 0 HP' });
+      await this.appendEvent(encounterId, round, 'death', {
+        actor: actorName,
+        target: targetName,
+        actorId: actorCombatantId,
+        targetId: targetCombatantId,
+        detail: 'dropped to 0 HP',
+      });
     }
 
     // A rolled death save (issue #619) — record the roll + its 5e outcome so the combat
@@ -1794,6 +1877,7 @@ export class EncountersService {
                 : 'marked a death save';
       await this.appendEvent(encounterId, round, 'roll', {
         target: targetName,
+        targetId: targetCombatantId,
         detail: `death save d20 ${patch.deathSaveRoll} — ${outcome}`,
       });
     }
@@ -1808,10 +1892,22 @@ export class EncountersService {
     // still logs exactly the conditions this caller's delta flipped.
     if (conditionsTouched) {
       for (const c of afterConditions) {
-        if (!beforeConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `gained ${c}` });
+        if (!beforeConditions.has(c)) {
+          await this.appendEvent(encounterId, round, 'condition', {
+            target: targetName,
+            targetId: targetCombatantId,
+            detail: `gained ${c}`,
+          });
+        }
       }
       for (const c of beforeConditions) {
-        if (!afterConditions.has(c)) await this.appendEvent(encounterId, round, 'condition', { target: targetName, detail: `cleared ${c}` });
+        if (!afterConditions.has(c)) {
+          await this.appendEvent(encounterId, round, 'condition', {
+            target: targetName,
+            targetId: targetCombatantId,
+            detail: `cleared ${c}`,
+          });
+        }
       }
     }
 
@@ -2010,12 +2106,15 @@ export class EncountersService {
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
     });
 
-    // Seed the combat log with the opening turn (issue #61).
+    // Seed the combat log with the opening turn (issue #61). Detail stays name-free
+    // (issue #869) so listing can redact actor/target without prose leaking identity.
     const first = sorted[0];
     await this.appendEvent(encounterId, 1, 'turn', {
       actor: first?.name ?? null,
       target: first?.name ?? null,
-      detail: first ? `Combat started — ${first.name}'s turn (round 1)` : 'Combat started (round 1)',
+      actorId: first?.id ?? null,
+      targetId: first?.id ?? null,
+      detail: 'Combat started',
     });
 
     await this.audit.log({
@@ -2054,13 +2153,15 @@ export class EncountersService {
       .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
       .where(eq(encounters.id, encounterId));
 
-    // Combat-log turn marker (issue #61) — names whose turn it now is, and the round,
-    // so the persisted history reads "round 2 — Lyra's turn".
+    // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail
+    // stays name-free so #869 redaction cannot be bypassed by prose.
     const current = sorted.find((c) => c.id === currentCombatantId);
     await this.appendEvent(encounterId, round, 'turn', {
       actor: current?.name ?? null,
       target: current?.name ?? null,
-      detail: current ? `${current.name}'s turn (round ${round})` : `Round ${round}`,
+      actorId: current?.id ?? null,
+      targetId: current?.id ?? null,
+      detail: '',
     });
 
     await this.audit.log({

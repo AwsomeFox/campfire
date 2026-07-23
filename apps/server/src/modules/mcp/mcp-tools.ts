@@ -895,7 +895,7 @@ export class McpToolsService {
         // Any member may list; the DM sees all, a non-DM member sees only their own.
         const role = await this.access.requireMember(user, campaignId as number);
         const opts = role === 'dm' ? undefined : { proposerUserId: user.id };
-        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, opts);
+        return this.proposals.listForCampaign(campaignId as number, status as string | undefined, role, opts);
       },
     );
 

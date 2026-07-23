@@ -3399,6 +3399,192 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(diff.status).toBe(200);
       expect(diff.body.monsterCount).toBe(1);
     });
+
+    it('a player/viewer events + ping of a hidden encounter are denied (404); the DM can list events (issue #869)', async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      const dmEvents = await request(server).get(`/api/v1/encounters/${id}/events`).set(dm);
+      expect(dmEvents.status).toBe(200);
+      expect(Array.isArray(dmEvents.body)).toBe(true);
+
+      for (const who of [player, viewer]) {
+        expect((await request(server).get(`/api/v1/encounters/${id}/events`).set(who)).status).toBe(404);
+        expect(
+          (await request(server).post(`/api/v1/encounters/${id}/ping`).set(who).send({ x: 40, y: 60 })).status,
+        ).toBe(404);
+      }
+
+      // DM may still ping a hidden prep fight (they can see it).
+      const dmPing = await request(server).post(`/api/v1/encounters/${id}/ping`).set(dm).send({ x: 40, y: 60 });
+      expect(dmPing.status).toBe(201);
+
+      // Reveal restores events parity with roster/difficulty.
+      await request(server).patch(`/api/v1/encounters/${id}`).set(dm).send({ hidden: false });
+      expect((await request(server).get(`/api/v1/encounters/${id}/events`).set(player)).status).toBe(200);
+    });
+  });
+
+  // Issue #869: combat-log projection must mask hidden NPC identities (and name-bearing
+  // detail) for non-DMs, keep stable combatant ids, and unmask after reveal. Covers the
+  // damage/heal/condition/death/turn/roll families plus a reconnect-style re-list.
+  describe('combat-log event secrecy for hidden NPCs (issue #869)', () => {
+    let secrecyCampId: number;
+    let secrecyEncounterId: number;
+    let traitorCombatantId: number;
+    let ariaCombatantIdLocal: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Event Secrecy Camp' });
+      secrecyCampId = campRes.body.id;
+
+      // Party PC so we have a non-hidden actor for attributed damage.
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${secrecyCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpMax: 30 });
+      expect(charRes.status).toBe(201);
+
+      const npcId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${secrecyCampId}/npcs`)
+          .set(dm)
+          .send({ name: 'The Traitor', hidden: true })
+      ).body.id as number;
+
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${secrecyCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Traitor Fight' });
+      secrecyEncounterId = encRes.body.id;
+
+      const traitorAdd = await request(server)
+        .post(`/api/v1/encounters/${secrecyEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 40 });
+      expect(traitorAdd.status).toBe(201);
+      traitorCombatantId = traitorAdd.body.id;
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ initiative: 10 });
+
+      // Find the auto-added Aria combatant (or add if the campaign create didn't).
+      const roster = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}`).set(dm);
+      const aria = (roster.body.combatants as Array<{ id: number; name: string; kind: string }>).find(
+        (c) => c.name === 'Aria',
+      );
+      if (aria) {
+        ariaCombatantIdLocal = aria.id;
+      } else {
+        const add = await request(server)
+          .post(`/api/v1/encounters/${secrecyEncounterId}/combatants`)
+          .set(dm)
+          .send({ kind: 'character', characterId: charRes.body.id });
+        expect(add.status).toBe(201);
+        ariaCombatantIdLocal = add.body.id;
+      }
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${ariaCombatantIdLocal}`)
+        .set(dm)
+        .send({ initiative: 20 });
+
+      // DEV_AUTH headers short-circuit RoleResolver (player/viewer/dm) without a
+      // campaign_members row — same pattern as the issue #43 redaction suite above.
+
+      const start = await request(server).post(`/api/v1/encounters/${secrecyEncounterId}/start`).set(dm);
+      expect(start.status).toBe(201);
+
+      // Produce one of each name-bearing event family against the hidden NPC.
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpDelta: -5, actorId: ariaCombatantIdLocal });
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ addConditions: ['Poisoned'] });
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpDelta: 2, actorId: null });
+      await request(server).post(`/api/v1/encounters/${secrecyEncounterId}/next-turn`).set(dm);
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpSet: 0, actorId: ariaCombatantIdLocal });
+    });
+
+    it('DM sees raw NPC names + stable combatant ids on every event type', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(dm);
+      expect(res.status).toBe(200);
+      const body = res.body as Array<{
+        type: string;
+        actor: string | null;
+        target: string | null;
+        actorId: number | null;
+        targetId: number | null;
+        detail: string;
+      }>;
+      const types = new Set(body.map((e) => e.type));
+      for (const t of ['turn', 'damage', 'condition', 'heal', 'death'] as const) {
+        expect(types.has(t)).toBe(true);
+      }
+      const againstTraitor = body.filter((e) => e.targetId === traitorCombatantId);
+      expect(againstTraitor.length).toBeGreaterThan(0);
+      for (const e of againstTraitor) {
+        expect(e.target).toBe('The Traitor');
+        expect(e.detail).not.toMatch(/Traitor/); // name-free detail
+      }
+      const opening = body.find((e) => e.type === 'turn' && e.detail === 'Combat started');
+      expect(opening).toBeTruthy();
+      expect(opening!.actorId).toBeTruthy();
+    });
+
+    it('non-DM list masks hidden NPC identity across event types; detail cannot bypass', async () => {
+      const server = ctx.app.getHttpServer();
+      for (const who of [player, viewer]) {
+        const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(who);
+        expect(res.status).toBe(200);
+        const raw = JSON.stringify(res.body);
+        expect(raw).not.toMatch(/Traitor/);
+        const body = res.body as Array<{
+          type: string;
+          actor: string | null;
+          target: string | null;
+          actorId: number | null;
+          targetId: number | null;
+          detail: string;
+        }>;
+        const againstTraitor = body.filter((e) => e.targetId === traitorCombatantId);
+        expect(againstTraitor.length).toBeGreaterThan(0);
+        for (const e of againstTraitor) {
+          expect(e.target).toBe('Unknown combatant');
+          expect(e.detail).not.toMatch(/Traitor/i);
+        }
+        // Stable ids remain for roster correlation / client projection.
+        expect(againstTraitor.some((e) => e.targetId === traitorCombatantId)).toBe(true);
+      }
+    });
+
+    it('revealing the NPC unmasks historical events on reconnect/poll-style re-list', async () => {
+      const server = ctx.app.getHttpServer();
+      const npcList = await request(server).get(`/api/v1/campaigns/${secrecyCampId}/npcs`).set(dm);
+      const traitorNpc = (npcList.body as Array<{ id: number; name: string }>).find((n) => n.name === 'The Traitor')!;
+      const revealed = await request(server).patch(`/api/v1/npcs/${traitorNpc.id}`).set(dm).send({ hidden: false });
+      expect(revealed.status).toBe(200);
+
+      // Re-list (poll / SSE-driven refetch) sees current projection with real names.
+      const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(player);
+      expect(res.status).toBe(200);
+      const againstTraitor = (res.body as Array<{ target: string | null; targetId: number | null }>).filter(
+        (e) => e.targetId === traitorCombatantId,
+      );
+      expect(againstTraitor.length).toBeGreaterThan(0);
+      expect(againstTraitor.every((e) => e.target === 'The Traitor')).toBe(true);
+    });
   });
 
   // Issue #715 — initiative is nullable in storage but the update schema only accepted

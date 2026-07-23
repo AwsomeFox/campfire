@@ -19,9 +19,19 @@ function punctuate(value: string): string {
 export function formatCombatLogEventSummary(event: EncounterEvent): string {
   const detail = event.detail.trim();
 
-  // Current turn events already contain the acting combatant in their human-readable
-  // detail. Prefixing actor/target would turn this into “Mira: Mira's turn”.
-  if (event.type === 'turn') return detail || (event.actor ? `${event.actor}'s turn` : 'Turn changed');
+  // Turn events keep names on actor/target (issue #869) so redaction cannot be bypassed
+  // by prose in detail. Compose the visible line from actor; treat a name-free
+  // "Combat started" detail as an opening-turn prefix.
+  if (event.type === 'turn') {
+    if (event.actor) {
+      if (/^combat started$/i.test(detail)) return `Combat started — ${event.actor}'s turn`;
+      // Legacy rows may still embed the name in detail — prefer that verbatim only when
+      // it already mentions the (possibly redacted) actor, otherwise build from actor.
+      if (detail && detail.includes(event.actor)) return detail;
+      return `${event.actor}'s turn`;
+    }
+    return detail || 'Turn changed';
+  }
 
   const actor = event.actor?.trim() || null;
   const target = event.target?.trim() || null;
