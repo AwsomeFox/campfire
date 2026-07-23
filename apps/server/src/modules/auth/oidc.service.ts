@@ -1,25 +1,56 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
 import type * as client from 'openid-client';
 import {
   EMPTY_STORED_OIDC,
-  effectiveIssuer,
   effectiveRedirectUri,
   oidcEnvKeysSet,
   oidcSecretSet,
+  resolveDiagnosticCandidate,
   resolveOidcConfig,
+  type OidcDiagnosticDraft,
+  type OidcDiagnosticResolved,
   type OidcResolvedConfig,
   type StoredOidcConfig,
 } from './oidc.config';
+import {
+  canonicalIssuer,
+  checkFail,
+  checkPass,
+  checkSkip,
+  evaluateGroupPolicy,
+  groupsFromClaims,
+  isAbsoluteHttpUrl,
+  issuersMatch,
+  oidcConfigFingerprint,
+} from './oidc-diagnostics';
 import { SettingsService } from '../settings/settings.service';
 import { UsersService } from '../users/users.service';
-import type { OidcSettings, OidcSettingsUpdate, OidcTestResult, User } from '@campfire/schema';
+import type {
+  OidcLastE2eTest,
+  OidcSettings,
+  OidcSettingsUpdate,
+  OidcTestLoginStart,
+  OidcTestRequest,
+  OidcTestResult,
+  User,
+} from '@campfire/schema';
+import { OidcTestResult as OidcTestResultSchema } from '@campfire/schema';
 import { OidcRecoveryFailure } from './oidc-recovery';
 
 /** Settings-store key under which the in-app OIDC config blob is persisted. */
 const OIDC_SETTINGS_KEY = 'oidcConfig';
+/** Persisted last admin end-to-end diagnostic summary (non-secret). */
+const OIDC_LAST_E2E_KEY = 'oidcLastE2eTest';
+/** Ephemeral pending diagnostic login state (includes secret — server-side only). */
+const OIDC_TEST_PENDING_KEY = 'oidcTestPending';
+/** Ephemeral completed diagnostic result awaiting the admin UI poll/redirect. */
+const OIDC_TEST_RESULT_KEY = 'oidcTestResult';
 
 /** How long to wait for the discovery document during a test-connection probe. */
 const TEST_CONNECTION_TIMEOUT_MS = 5_000;
+/** Pending diagnostic login expires after this (matches the test-flow cookie). */
+const TEST_LOGIN_PENDING_MAX_AGE_MS = 5 * 60 * 1000;
 
 /** Minimal shape of the ID token / userinfo claims we care about. */
 export interface OidcClaims {
@@ -28,6 +59,29 @@ export interface OidcClaims {
   email?: string;
   name?: string;
   [key: string]: unknown;
+}
+
+/** Server-side pending state for an admin diagnostic login (includes secret — never returned to clients). */
+interface OidcTestPending {
+  flowTokenHash: string;
+  state: string;
+  codeVerifier: string;
+  candidate: OidcDiagnosticResolved;
+  fingerprint: string;
+  expiresAt: number;
+}
+
+function emptyFieldSources(): OidcTestResult['fieldSources'] {
+  return {
+    issuer: 'default',
+    clientId: 'default',
+    clientSecret: 'default',
+    redirectUri: 'default',
+    adminGroup: 'default',
+    allowedGroup: 'default',
+    groupsClaim: 'default',
+    scope: 'default',
+  };
 }
 
 /** Filesystem-safe, User.username-regex-safe slug: lowercase, [a-z0-9_.-], min length 2. */
@@ -134,6 +188,8 @@ export class OidcService {
   async getAdminView(): Promise<OidcSettings> {
     const stored = await this.loadStored();
     const resolved = resolveOidcConfig(stored);
+    const effective = resolveDiagnosticCandidate(stored);
+    const lastE2e = await this.settings.getJson<OidcLastE2eTest>(OIDC_LAST_E2E_KEY);
     return {
       providerName: stored.providerName,
       issuer: stored.issuer,
@@ -147,6 +203,8 @@ export class OidcService {
       enabled: resolved !== null,
       envKeys: oidcEnvKeysSet(),
       effectiveRedirectUri: effectiveRedirectUri(stored),
+      configFingerprint: oidcConfigFingerprint(effective),
+      lastE2eTest: lastE2e,
     };
   }
 
@@ -182,23 +240,64 @@ export class OidcService {
   }
 
   /**
-   * Fetches and validates the issuer's OIDC discovery document
-   * (`/.well-known/openid-configuration`). Uses the provided issuer override if
-   * given (so an admin can test before saving), else the effective issuer.
-   * Never throws — always resolves to a structured ok/error result.
+   * Discovery + static client/redirect probe (issue #848). Never throws —
+   * always resolves to a structured result. Labels a successful discovery as
+   * "Discovery reachable." (not "Connection OK"). Token exchange, claims, and
+   * group policy are skipped here — use {@link startTestLogin} for those.
    */
-  async testConnection(issuerOverride?: string): Promise<OidcTestResult> {
-    const issuer = (issuerOverride?.trim() || effectiveIssuer(await this.loadStored())).replace(/\/+$/, '');
-    if (!issuer) {
-      return { ok: false, issuer: '', message: 'No issuer configured to test.', authorizationEndpoint: null, tokenEndpoint: null };
+  async testConnection(draft: OidcTestRequest = {}): Promise<OidcTestResult> {
+    const stored = await this.loadStored();
+    const candidate = resolveDiagnosticCandidate(stored, draft as OidcDiagnosticDraft);
+    const testedAt = new Date().toISOString();
+    const fingerprint = oidcConfigFingerprint(candidate);
+    const base = {
+      kind: 'discovery' as const,
+      issuer: candidate.issuer,
+      testedAt,
+      fingerprint,
+      fieldSources: candidate.fieldSources,
+    };
+
+    if (!candidate.issuer) {
+      return OidcTestResultSchema.parse({
+        ...base,
+        ok: false,
+        message: 'No issuer configured to test.',
+        authorizationEndpoint: null,
+        tokenEndpoint: null,
+        checks: {
+          discovery: checkFail('No issuer configured.'),
+          redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+          tokenExchange: checkSkip('Requires end-to-end test login.'),
+          requiredClaims: checkSkip('Requires end-to-end test login.'),
+          groupPolicy: checkSkip('Requires end-to-end test login.'),
+        },
+      });
     }
 
     let discoveryUrl: string;
     try {
-      discoveryUrl = new URL('.well-known/openid-configuration', `${issuer}/`).toString();
+      discoveryUrl = new URL('.well-known/openid-configuration', `${candidate.issuer}/`).toString();
     } catch {
-      return { ok: false, issuer, message: 'Issuer must be an absolute URL (e.g. https://idp.example.com).', authorizationEndpoint: null, tokenEndpoint: null };
+      return OidcTestResultSchema.parse({
+        ...base,
+        ok: false,
+        message: 'Issuer must be an absolute URL (e.g. https://idp.example.com).',
+        authorizationEndpoint: null,
+        tokenEndpoint: null,
+        checks: {
+          discovery: checkFail('Issuer must be an absolute URL.'),
+          redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+          tokenExchange: checkSkip('Requires end-to-end test login.'),
+          requiredClaims: checkSkip('Requires end-to-end test login.'),
+          groupPolicy: checkSkip('Requires end-to-end test login.'),
+        },
+      });
     }
+
+    let authorizationEndpoint: string | null = null;
+    let tokenEndpoint: string | null = null;
+    let discoveredIssuer: string | null = null;
 
     try {
       const res = await fetch(discoveryUrl, {
@@ -206,19 +305,541 @@ export class OidcService {
         signal: AbortSignal.timeout(TEST_CONNECTION_TIMEOUT_MS),
       });
       if (!res.ok) {
-        return { ok: false, issuer, message: `Discovery endpoint returned HTTP ${res.status}.`, authorizationEndpoint: null, tokenEndpoint: null };
+        return OidcTestResultSchema.parse({
+          ...base,
+          ok: false,
+          message: `Discovery endpoint returned HTTP ${res.status}.`,
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          checks: {
+            discovery: checkFail(`Discovery endpoint returned HTTP ${res.status}.`),
+            redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+            tokenExchange: checkSkip('Requires end-to-end test login.'),
+            requiredClaims: checkSkip('Requires end-to-end test login.'),
+            groupPolicy: checkSkip('Requires end-to-end test login.'),
+          },
+        });
       }
       const doc = (await res.json()) as Record<string, unknown>;
-      const authorizationEndpoint = typeof doc.authorization_endpoint === 'string' ? doc.authorization_endpoint : null;
-      const tokenEndpoint = typeof doc.token_endpoint === 'string' ? doc.token_endpoint : null;
-      if (typeof doc.issuer !== 'string' || !authorizationEndpoint || !tokenEndpoint) {
-        return { ok: false, issuer, message: 'Discovery document is missing required fields (issuer, authorization_endpoint, token_endpoint).', authorizationEndpoint, tokenEndpoint };
+      discoveredIssuer = typeof doc.issuer === 'string' ? doc.issuer : null;
+      authorizationEndpoint = typeof doc.authorization_endpoint === 'string' ? doc.authorization_endpoint : null;
+      tokenEndpoint = typeof doc.token_endpoint === 'string' ? doc.token_endpoint : null;
+
+      if (!discoveredIssuer || !authorizationEndpoint || !tokenEndpoint) {
+        return OidcTestResultSchema.parse({
+          ...base,
+          ok: false,
+          message: 'Discovery document is missing required fields (issuer, authorization_endpoint, token_endpoint).',
+          authorizationEndpoint,
+          tokenEndpoint,
+          checks: {
+            discovery: checkFail('Discovery document is missing required fields.'),
+            redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+            tokenExchange: checkSkip('Requires end-to-end test login.'),
+            requiredClaims: checkSkip('Requires end-to-end test login.'),
+            groupPolicy: checkSkip('Requires end-to-end test login.'),
+          },
+        });
       }
-      return { ok: true, issuer, message: `Discovery succeeded — issuer "${doc.issuer}".`, authorizationEndpoint, tokenEndpoint };
+
+      if (!issuersMatch(candidate.issuer, discoveredIssuer)) {
+        return OidcTestResultSchema.parse({
+          ...base,
+          ok: false,
+          message: `Issuer mismatch: configured "${canonicalIssuer(candidate.issuer)}" ≠ discovery "${canonicalIssuer(discoveredIssuer)}".`,
+          authorizationEndpoint,
+          tokenEndpoint,
+          checks: {
+            discovery: checkFail(
+              `Canonical issuer mismatch (configured "${canonicalIssuer(candidate.issuer)}" vs discovery "${canonicalIssuer(discoveredIssuer)}").`,
+            ),
+            redirectClient: checkSkip('Skipped — discovery issuer mismatch.'),
+            tokenExchange: checkSkip('Requires end-to-end test login.'),
+            requiredClaims: checkSkip('Requires end-to-end test login.'),
+            groupPolicy: checkSkip('Requires end-to-end test login.'),
+          },
+        });
+      }
+
+      if (!isAbsoluteHttpUrl(authorizationEndpoint) || !isAbsoluteHttpUrl(tokenEndpoint)) {
+        return OidcTestResultSchema.parse({
+          ...base,
+          ok: false,
+          message: 'Discovery endpoints must be absolute http(s) URLs.',
+          authorizationEndpoint,
+          tokenEndpoint,
+          checks: {
+            discovery: checkFail('authorization_endpoint or token_endpoint is not an absolute http(s) URL.'),
+            redirectClient: checkSkip('Skipped — discovery endpoints invalid.'),
+            tokenExchange: checkSkip('Requires end-to-end test login.'),
+            requiredClaims: checkSkip('Requires end-to-end test login.'),
+            groupPolicy: checkSkip('Requires end-to-end test login.'),
+          },
+        });
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      return { ok: false, issuer, message: `Could not reach the discovery endpoint: ${reason}`, authorizationEndpoint: null, tokenEndpoint: null };
+      const timedOut = /aborted|timeout|TimeoutError/i.test(reason);
+      return OidcTestResultSchema.parse({
+        ...base,
+        ok: false,
+        message: timedOut
+          ? `Discovery timed out after ${TEST_CONNECTION_TIMEOUT_MS}ms.`
+          : `Could not reach the discovery endpoint: ${reason}`,
+        authorizationEndpoint: null,
+        tokenEndpoint: null,
+        checks: {
+          discovery: checkFail(
+            timedOut
+              ? `Timed out after ${TEST_CONNECTION_TIMEOUT_MS}ms.`
+              : `Could not reach discovery: ${reason}`,
+          ),
+          redirectClient: checkSkip('Skipped — discovery did not succeed.'),
+          tokenExchange: checkSkip('Requires end-to-end test login.'),
+          requiredClaims: checkSkip('Requires end-to-end test login.'),
+          groupPolicy: checkSkip('Requires end-to-end test login.'),
+        },
+      });
     }
+
+    // When client credentials are absent, skip the redirect/client probe rather
+    // than failing discovery — admins often validate the issuer URL first.
+    let redirectClient: OidcTestResult['checks']['redirectClient'];
+    if (!candidate.clientId || !candidate.clientSecret) {
+      redirectClient = checkSkip('Provide client ID and secret (draft or stored) to probe redirect/client configuration.');
+    } else {
+      redirectClient = await this.probeRedirectAndClient(
+        candidate,
+        authorizationEndpoint!,
+        tokenEndpoint!,
+      );
+    }
+
+    // Discovery-kind `ok` means the issuer is reachable and validated — not that
+    // login works. Redirect/client failures are reported in `checks` separately.
+    return OidcTestResultSchema.parse({
+      ...base,
+      ok: true,
+      message: 'Discovery reachable.',
+      authorizationEndpoint,
+      tokenEndpoint,
+      checks: {
+        discovery: checkPass('Discovery reachable; issuer and endpoint URLs validated.'),
+        redirectClient,
+        tokenExchange: checkSkip('Requires end-to-end test login.'),
+        requiredClaims: checkSkip('Requires end-to-end test login.'),
+        groupPolicy: checkSkip('Requires end-to-end test login.'),
+      },
+    });
+  }
+
+  /**
+   * Static redirect URI format + client credential probe against the token
+   * endpoint (invalid code → invalid_grant means client auth worked;
+   * invalid_client means bad id/secret). Does not perform a user login.
+   */
+  private async probeRedirectAndClient(
+    candidate: OidcDiagnosticResolved,
+    authorizationEndpoint: string,
+    tokenEndpoint: string,
+  ): Promise<OidcTestResult['checks']['redirectClient']> {
+    if (!candidate.redirectUri || !isAbsoluteHttpUrl(candidate.redirectUri)) {
+      return checkFail('Redirect URI must be an absolute http(s) URL.');
+    }
+    if (!candidate.clientId) {
+      return checkFail('Client ID is required to validate client configuration.');
+    }
+    if (!candidate.clientSecret) {
+      return checkFail('Client secret is required to validate client configuration.');
+    }
+
+    // Confirm the authorization endpoint accepts our redirect_uri (unregistered
+    // URIs typically error without completing a login).
+    try {
+      const authorizeUrl = new URL(authorizationEndpoint);
+      authorizeUrl.searchParams.set('client_id', candidate.clientId);
+      authorizeUrl.searchParams.set('response_type', 'code');
+      authorizeUrl.searchParams.set('redirect_uri', candidate.redirectUri);
+      authorizeUrl.searchParams.set('scope', 'openid');
+      authorizeUrl.searchParams.set('state', 'campfire-diag');
+      const authRes = await fetch(authorizeUrl.toString(), {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(TEST_CONNECTION_TIMEOUT_MS),
+      });
+      // 3xx to our redirect_uri (or IdP login) is fine; 4xx usually means bad client/redirect.
+      if (authRes.status >= 400) {
+        return checkFail(
+          `Authorization endpoint rejected the client/redirect configuration (HTTP ${authRes.status}).`,
+        );
+      }
+      const location = authRes.headers.get('location');
+      if (location) {
+        try {
+          const loc = new URL(location, authorizationEndpoint);
+          if (loc.searchParams.get('error') === 'invalid_request' || loc.searchParams.get('error') === 'unauthorized_client') {
+            return checkFail(
+              `Authorization endpoint reported ${loc.searchParams.get('error')} for this client/redirect.`,
+            );
+          }
+        } catch {
+          // Non-URL Location headers are IdP-specific; ignore.
+        }
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return checkFail(`Could not probe authorization endpoint: ${reason}`);
+    }
+
+    // Probe client authentication with an intentionally invalid code.
+    try {
+      const body = new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: 'campfire-diagnostic-invalid-code',
+        redirect_uri: candidate.redirectUri,
+        client_id: candidate.clientId,
+        client_secret: candidate.clientSecret,
+      });
+      const tokenRes = await fetch(tokenEndpoint, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body,
+        signal: AbortSignal.timeout(TEST_CONNECTION_TIMEOUT_MS),
+      });
+      let errorCode = '';
+      try {
+        const json = (await tokenRes.json()) as { error?: string };
+        errorCode = typeof json.error === 'string' ? json.error : '';
+      } catch {
+        // Non-JSON error bodies still carry useful HTTP status.
+      }
+      if (errorCode === 'invalid_client' || tokenRes.status === 401) {
+        return checkFail('Token endpoint rejected the client ID or client secret.');
+      }
+      // invalid_grant / invalid_request with a fake code means client auth succeeded.
+      if (
+        errorCode === 'invalid_grant' ||
+        errorCode === 'invalid_request' ||
+        tokenRes.status === 400 ||
+        tokenRes.ok
+      ) {
+        return checkPass('Redirect URI format OK; client credentials accepted by the token endpoint.');
+      }
+      return checkFail(
+        `Unexpected token-endpoint response while probing client credentials (HTTP ${tokenRes.status}${errorCode ? `, ${errorCode}` : ''}).`,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return checkFail(`Could not probe token endpoint: ${reason}`);
+    }
+  }
+
+  /**
+   * Starts an admin-only end-to-end test login (issue #848). Returns an
+   * authorization URL; the browser round-trip completes via the normal OIDC
+   * callback path when the test-flow cookie is present — without replacing the
+   * admin session or provisioning a user.
+   */
+  async startTestLogin(draft: OidcTestRequest = {}): Promise<OidcTestLoginStart & { flowToken: string }> {
+    const stored = await this.loadStored();
+    const candidate = resolveDiagnosticCandidate(stored, draft as OidcDiagnosticDraft);
+    if (!candidate.issuer || !candidate.clientId || !candidate.clientSecret) {
+      throw new BadRequestException(
+        'End-to-end test login requires issuer, client ID, and client secret (draft, stored, or environment).',
+      );
+    }
+    if (!isAbsoluteHttpUrl(candidate.redirectUri)) {
+      throw new BadRequestException('Redirect URI must be an absolute http(s) URL.');
+    }
+
+    const oidc = await loadClient();
+    const options: Parameters<typeof oidc.discovery>[4] =
+      process.env.NODE_ENV === 'test' || process.env.OIDC_ALLOW_INSECURE === '1'
+        ? { execute: [oidc.allowInsecureRequests] }
+        : undefined;
+    let config: client.Configuration;
+    try {
+      config = await oidc.discovery(
+        new URL(candidate.issuer),
+        candidate.clientId,
+        candidate.clientSecret,
+        undefined,
+        options,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new BadRequestException(`OIDC discovery failed: ${reason}`);
+    }
+
+    const codeVerifier = oidc.randomPKCECodeVerifier();
+    const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+    const state = oidc.randomState();
+    const url = oidc.buildAuthorizationUrl(config, {
+      redirect_uri: candidate.redirectUri,
+      scope: candidate.scope,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256',
+      state,
+    });
+
+    const flowToken = randomBytes(16).toString('hex');
+    const fingerprint = oidcConfigFingerprint(candidate);
+    const pending: OidcTestPending = {
+      flowTokenHash: createHash('sha256').update(flowToken).digest('hex'),
+      state,
+      codeVerifier,
+      candidate,
+      fingerprint,
+      expiresAt: Date.now() + TEST_LOGIN_PENDING_MAX_AGE_MS,
+    };
+    await this.settings.setJson(OIDC_TEST_PENDING_KEY, pending);
+    // Clear any stale result so the UI doesn't show a previous run.
+    await this.settings.setJson(OIDC_TEST_RESULT_KEY, null);
+
+    return {
+      authorizationUrl: url.toString(),
+      fingerprint,
+      fieldSources: candidate.fieldSources,
+      flowToken,
+    };
+  }
+
+  /** True when a non-expired diagnostic pending state exists for this flow token. */
+  async hasActiveTestLogin(flowToken: string | undefined): Promise<boolean> {
+    if (!flowToken) return false;
+    const pending = await this.loadPendingTestLogin();
+    if (!pending) return false;
+    const hash = createHash('sha256').update(flowToken).digest('hex');
+    return pending.flowTokenHash === hash;
+  }
+
+  /**
+   * Completes an admin diagnostic login at the OIDC callback. Validates token
+   * exchange, required claims, and group policy; never provisions a user or
+   * issues a session. Persists the structured result for the admin UI.
+   *
+   * `callbackQuery` is the inbound request's query string; the callback URL is
+   * reconstructed from the pending candidate's redirect URI (which may be a
+   * draft value distinct from the effective stored redirect).
+   */
+  async completeTestLogin(
+    flowToken: string,
+    callbackQuery: Record<string, unknown>,
+  ): Promise<OidcTestResult> {
+    const pending = await this.loadPendingTestLogin();
+    await this.settings.setJson(OIDC_TEST_PENDING_KEY, null);
+
+    const testedAt = new Date().toISOString();
+    if (!pending) {
+      return this.persistE2eResult(
+        OidcTestResultSchema.parse({
+          ok: false,
+          kind: 'e2e',
+          issuer: '',
+          message: 'Diagnostic login flow expired or was missing.',
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          testedAt,
+          fingerprint: '',
+          fieldSources: emptyFieldSources(),
+          checks: {
+            discovery: checkSkip('Flow expired before completion.'),
+            redirectClient: checkSkip('Flow expired before completion.'),
+            tokenExchange: checkFail('Diagnostic login flow expired or was missing.'),
+            requiredClaims: checkSkip('Skipped — token exchange did not succeed.'),
+            groupPolicy: checkSkip('Skipped — token exchange did not succeed.'),
+          },
+        }),
+      );
+    }
+
+    const callbackState = typeof callbackQuery.state === 'string' ? callbackQuery.state : undefined;
+    const tokenHash = createHash('sha256').update(flowToken).digest('hex');
+    if (pending.flowTokenHash !== tokenHash || !callbackState || pending.state !== callbackState) {
+      return this.persistE2eResult(
+        OidcTestResultSchema.parse({
+          ok: false,
+          kind: 'e2e',
+          issuer: pending.candidate.issuer,
+          message: 'Diagnostic login state mismatch.',
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          testedAt,
+          fingerprint: pending.fingerprint,
+          fieldSources: pending.candidate.fieldSources,
+          checks: {
+            discovery: checkSkip('Not re-checked during callback.'),
+            redirectClient: checkFail('State or flow-token mismatch.'),
+            tokenExchange: checkFail('State or flow-token mismatch.'),
+            requiredClaims: checkSkip('Skipped — token exchange did not succeed.'),
+            groupPolicy: checkSkip('Skipped — token exchange did not succeed.'),
+          },
+        }),
+      );
+    }
+
+    const candidate = pending.candidate;
+    const currentUrl = new URL(candidate.redirectUri);
+    for (const [key, value] of Object.entries(callbackQuery)) {
+      if (typeof value === 'string') currentUrl.searchParams.set(key, value);
+    }
+
+    const providerError = typeof callbackQuery.error === 'string' ? callbackQuery.error : '';
+    if (providerError) {
+      return this.persistE2eResult(
+        OidcTestResultSchema.parse({
+          ok: false,
+          kind: 'e2e',
+          issuer: candidate.issuer,
+          message: `Provider returned error "${providerError}" during test login.`,
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          testedAt,
+          fingerprint: pending.fingerprint,
+          fieldSources: candidate.fieldSources,
+          checks: {
+            discovery: checkPass('Discovery succeeded during test login.'),
+            redirectClient: checkFail(`Provider error: ${providerError}`),
+            tokenExchange: checkFail(`Provider error: ${providerError}`),
+            requiredClaims: checkSkip('Skipped — authorization did not succeed.'),
+            groupPolicy: checkSkip('Skipped — authorization did not succeed.'),
+          },
+        }),
+      );
+    }
+
+    const oidc = await loadClient();
+    const options: Parameters<typeof oidc.discovery>[4] =
+      process.env.NODE_ENV === 'test' || process.env.OIDC_ALLOW_INSECURE === '1'
+        ? { execute: [oidc.allowInsecureRequests] }
+        : undefined;
+
+    let claims: Record<string, unknown>;
+    try {
+      const config = await oidc.discovery(
+        new URL(candidate.issuer),
+        candidate.clientId,
+        candidate.clientSecret,
+        undefined,
+        options,
+      );
+      const tokens = await oidc.authorizationCodeGrant(config, currentUrl, {
+        expectedState: pending.state,
+        pkceCodeVerifier: pending.codeVerifier,
+      });
+      const rawClaims = tokens.claims();
+      if (!rawClaims) {
+        return this.persistE2eResult(
+          OidcTestResultSchema.parse({
+            ok: false,
+            kind: 'e2e',
+            issuer: candidate.issuer,
+            message: 'Token exchange succeeded but ID token claims were missing.',
+            authorizationEndpoint: null,
+            tokenEndpoint: null,
+            testedAt,
+            fingerprint: pending.fingerprint,
+            fieldSources: candidate.fieldSources,
+            checks: {
+              discovery: checkPass('Discovery succeeded during test login.'),
+              redirectClient: checkPass('Redirect and client configuration accepted.'),
+              tokenExchange: checkPass('Authorization code exchanged for tokens.'),
+              requiredClaims: checkFail('ID token contained no claims.'),
+              groupPolicy: checkSkip('Skipped — required claims missing.'),
+            },
+          }),
+        );
+      }
+      claims = rawClaims as Record<string, unknown>;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return this.persistE2eResult(
+        OidcTestResultSchema.parse({
+          ok: false,
+          kind: 'e2e',
+          issuer: candidate.issuer,
+          message: `Token exchange failed: ${reason}`,
+          authorizationEndpoint: null,
+          tokenEndpoint: null,
+          testedAt,
+          fingerprint: pending.fingerprint,
+          fieldSources: candidate.fieldSources,
+          checks: {
+            discovery: checkPass('Discovery succeeded during test login.'),
+            redirectClient: checkFail(`Client/redirect or token exchange failed: ${reason}`),
+            tokenExchange: checkFail(reason),
+            requiredClaims: checkSkip('Skipped — token exchange did not succeed.'),
+            groupPolicy: checkSkip('Skipped — token exchange did not succeed.'),
+          },
+        }),
+      );
+    }
+
+    const sub = typeof claims.sub === 'string' ? claims.sub : '';
+    const requiredClaims =
+      sub.length > 0
+        ? checkPass('Required subject (sub) claim present.')
+        : checkFail('Required subject (sub) claim is missing.');
+
+    const groups = groupsFromClaims(claims, candidate.groupsClaim);
+    const adminGroup = candidate.adminGroup || null;
+    const allowedGroup = candidate.allowedGroup || null;
+    const groupPolicy = evaluateGroupPolicy(groups, adminGroup, allowedGroup);
+
+    const ok =
+      requiredClaims.status === 'pass' &&
+      (groupPolicy.status === 'pass' || groupPolicy.status === 'skip');
+
+    return this.persistE2eResult(
+      OidcTestResultSchema.parse({
+        ok,
+        kind: 'e2e',
+        issuer: candidate.issuer,
+        message: ok
+          ? 'End-to-end test login succeeded (no session created, no user provisioned).'
+          : `End-to-end test login failed: ${requiredClaims.status === 'fail' ? requiredClaims.message : groupPolicy.message}`,
+        authorizationEndpoint: null,
+        tokenEndpoint: null,
+        testedAt,
+        fingerprint: pending.fingerprint,
+        fieldSources: candidate.fieldSources,
+        checks: {
+          discovery: checkPass('Discovery succeeded during test login.'),
+          redirectClient: checkPass('Redirect and client configuration accepted.'),
+          tokenExchange: checkPass('Authorization code exchanged for tokens.'),
+          requiredClaims,
+          groupPolicy,
+        },
+      }),
+    );
+  }
+
+  /** Latest completed diagnostic result (cleared after read by the admin UI, or left for SettingsCard). */
+  async getTestLoginResult(): Promise<OidcTestResult | null> {
+    return this.settings.getJson<OidcTestResult>(OIDC_TEST_RESULT_KEY);
+  }
+
+  private async loadPendingTestLogin(): Promise<OidcTestPending | null> {
+    const pending = await this.settings.getJson<OidcTestPending>(OIDC_TEST_PENDING_KEY);
+    if (!pending) return null;
+    if (typeof pending.expiresAt !== 'number' || pending.expiresAt < Date.now()) {
+      await this.settings.setJson(OIDC_TEST_PENDING_KEY, null);
+      return null;
+    }
+    return pending;
+  }
+
+  private async persistE2eResult(result: OidcTestResult): Promise<OidcTestResult> {
+    await this.settings.setJson(OIDC_TEST_RESULT_KEY, result);
+    const summary: OidcLastE2eTest = {
+      testedAt: result.testedAt,
+      fingerprint: result.fingerprint,
+      ok: result.ok,
+    };
+    await this.settings.setJson(OIDC_LAST_E2E_KEY, summary);
+    return result;
   }
 
   /** Resolves the discovered client Configuration, discovering (once, cached) on first call. */
