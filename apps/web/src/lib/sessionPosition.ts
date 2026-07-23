@@ -11,8 +11,8 @@
  */
 
 export type CampaignSessionPosition = {
-  sessionCount: number;
-  latestSessionNumber: number;
+  sessionCount?: number | null;
+  latestSessionNumber?: number | null;
 };
 
 function recapLabel(count: number): string {
@@ -26,10 +26,13 @@ function recapLabel(count: number): string {
  * - Contiguous (count === latest) → "Session N"
  * - Gaps / non-contiguous → "Session N · M recaps" (count is useful when it
  *   diverges from the canonical session number)
+ *
+ * Nullish / missing fields coalesce to 0 before clamping so mixed-version
+ * deploys and unvalidated payloads never produce "Session NaN".
  */
 export function formatCampaignSessionPosition(campaign: CampaignSessionPosition): string {
-  const count = Math.max(0, campaign.sessionCount);
-  const latest = Math.max(0, campaign.latestSessionNumber);
+  const count = Math.max(0, campaign.sessionCount ?? 0);
+  const latest = Math.max(0, campaign.latestSessionNumber ?? 0);
 
   if (count === 0 && latest === 0) return 'No sessions yet';
 

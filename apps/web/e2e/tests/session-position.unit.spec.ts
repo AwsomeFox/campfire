@@ -39,4 +39,12 @@ test.describe('formatCampaignSessionPosition (issue #841)', () => {
   test('defensive: latest without count still shows Session N', () => {
     expect(formatCampaignSessionPosition({ sessionCount: 0, latestSessionNumber: 5 })).toBe('Session 5');
   });
+
+  test('defensive: missing / null fields coalesce to 0 (never Session NaN)', () => {
+    expect(formatCampaignSessionPosition({})).toBe('No sessions yet');
+    expect(formatCampaignSessionPosition({ sessionCount: null, latestSessionNumber: undefined })).toBe(
+      'No sessions yet',
+    );
+    expect(formatCampaignSessionPosition({ sessionCount: 3, latestSessionNumber: undefined })).toBe('3 recaps');
+  });
 });
