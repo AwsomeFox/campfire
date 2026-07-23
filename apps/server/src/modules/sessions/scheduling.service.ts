@@ -1,7 +1,12 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { ScheduledSessionCreate, ScheduledSessionUpdate, RsvpSet } from '@campfire/schema';
+import {
+  ScheduledSessionCreate,
+  ScheduledSessionUpdate,
+  RsvpSet,
+  partitionSchedules,
+} from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
@@ -135,13 +140,33 @@ export class SchedulingService {
     return rows.map(toDomain);
   }
 
-  /** The campaign's "next session": earliest schedule not yet in the past, or null. */
+  /**
+   * The campaign's active schedule card: earliest in-progress game night, else the
+   * soonest not-yet-started one. A session stays "current" from scheduledAt through
+   * scheduledAt+durationMinutes (issue #818) so /schedule/next does not go blank at
+   * the start of play.
+   */
   async nextForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps | null> {
+    const { inProgressSession, nextSession } = await this.currentAndNextForCampaign(campaignId);
+    return inProgressSession ?? nextSession;
+  }
+
+  /**
+   * Split the live schedule projection into the in-progress game (if any) and the
+   * next not-yet-started night. Overlapping in-progress rows prefer the earliest
+   * start; list order from listForCampaign is soonest-first.
+   */
+  async currentAndNextForCampaign(campaignId: number): Promise<{
+    inProgressSession: ScheduledSessionWithRsvps | null;
+    nextSession: ScheduledSessionWithRsvps | null;
+  }> {
     const all = await this.listForCampaign(campaignId);
     const now = Date.now();
-    // scheduledAt is normalized ISO UTC (see normalizeScheduledAt), but compare
-    // via Date.parse rather than string order to be robust to legacy rows.
-    return all.find((s) => Date.parse(s.scheduledAt) >= now) ?? null;
+    const { inProgress, upcoming } = partitionSchedules(all, now);
+    return {
+      inProgressSession: inProgress[0] ?? null,
+      nextSession: upcoming[0] ?? null,
+    };
   }
 
   async getRowOrThrow(id: number) {

@@ -118,4 +118,26 @@ describe('RFC 5545 UTF-8 content-line folding', () => {
     expect(event!.getFirstPropertyValue('location')).toBe(location);
     expect(event!.getFirstPropertyValue('description')).toBe(notes.replace(/\r\n|\r|\n/g, '\n'));
   });
+
+  it('uses a 1-minute DTEND when durationMinutes is 0 (ended-now)', () => {
+    const ics = buildCampaignIcs(
+      { id: 1, name: 'Test' },
+      [
+        {
+          id: 9,
+          campaignId: 1,
+          scheduledAt: '2099-06-01T17:30:00.000Z',
+          durationMinutes: 0,
+          title: 'Ended',
+          location: '',
+          notes: '',
+          createdAt: '2099-01-01T00:00:00.000Z',
+          updatedAt: '2099-01-01T00:00:00.000Z',
+        },
+      ],
+    );
+    expect(ics).toContain('DTSTART:20990601T173000Z');
+    expect(ics).toContain('DTEND:20990601T173100Z');
+  });
+
 });

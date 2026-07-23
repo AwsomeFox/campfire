@@ -66,8 +66,8 @@ export default function DashboardPage() {
       const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`);
       if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
       // Replace the complete server projection in one state transition. In
-      // particular, nextSession is never field-merged: reschedules replace every
-      // detail and cancellation replaces the object with null atomically.
+      // particular, inProgressSession/nextSession are never field-merged:
+      // reschedules replace every detail and cancellation replaces each with null.
       setProjection({ campaignId: id, data });
       setSummaryStale(false);
       // Keep the sidebar/topbar/Home tiles in sync — StatusHeader can rename the
@@ -221,8 +221,10 @@ export default function DashboardPage() {
           <SessionLog
             campaignId={id}
             sessions={summary.sessions}
+            inProgressSession={summary.inProgressSession}
             nextSession={summary.nextSession}
             scheduleSync={scheduleSync}
+            role={role}
           />
         </div>
 

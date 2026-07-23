@@ -2200,7 +2200,7 @@ export class CampaignsService {
   async summary(id: number, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
-    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryList, commentList, nextSession] =
+    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryList, commentList, scheduleNow] =
       await Promise.all([
         this.quests.listForCampaignWithObjectives(id, role),
         this.npcs.listForCampaign(id, role),
@@ -2214,7 +2214,8 @@ export class CampaignsService {
         this.inventory.getTreasury(id),
         this.inventory.listForCampaign(id),
         this.comments.listForCampaign(id, role),
-        this.scheduling.nextForCampaign(id),
+        // Issue #818: keep the in-progress game night separate from the later upcoming one.
+        this.scheduling.currentAndNextForCampaign(id),
       ]);
 
     const currentLocation = campaign.currentLocationId
@@ -2241,7 +2242,8 @@ export class CampaignsService {
       treasury: { cp: treasury.cp, sp: treasury.sp, ep: treasury.ep, gp: treasury.gp, pp: treasury.pp },
       inventoryCount: inventoryList.length,
       commentCount: commentList.length,
-      nextSession,
+      inProgressSession: scheduleNow.inProgressSession,
+      nextSession: scheduleNow.nextSession,
       openInboxCount,
     };
   }

@@ -826,15 +826,32 @@ export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
   scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
-  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  // min 0 allows mid-session "End session" to shrink the window immediately
+  // (issue #818). Create still requires ≥15 via ScheduledSessionCreate.
+  durationMinutes: z.number().int().min(0).max(24 * 60).default(240), // drives DTEND in the ICS feed
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
-export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
-export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ scheduledAt: true })
+  .extend({
+    // Planned game nights stay at least 15 minutes; keep the 240-minute default when
+    // callers omit the field (updates may shrink to 0 via ScheduledSessionUpdate).
+    durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  });
+// Explicit optional fields without `.default()` so PATCH bodies that omit a key
+// do not materialize create-time defaults (Zod applies defaults on undefined).
+export const ScheduledSessionUpdate = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(0).max(24 * 60).optional(),
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+});
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;
@@ -854,6 +871,9 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+// Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
+export * from './scheduleWindow';
 
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
@@ -2525,7 +2545,12 @@ export const CampaignSummary = z.object({
   }),
   inventoryCount: z.number().int().nonnegative(), // number of loot/inventory items tracked
   commentCount: z.number().int().nonnegative(), // discussion comments the caller may see (anchor-visibility redacted)
-  nextSession: ScheduledSessionWithRsvps.nullable(), // the soonest not-yet-past game night (with RSVPs), or null
+  // Issue #818: split "happening now" from "next" so an in-progress game night stays
+  // visible without hiding the later upcoming event. `nextSession` is the soonest
+  // not-yet-started night (scheduledAt >= now); `inProgressSession` is the soonest
+  // still inside its [scheduledAt, scheduledAt+duration) window.
+  inProgressSession: ScheduledSessionWithRsvps.nullable(),
+  nextSession: ScheduledSessionWithRsvps.nullable(),
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
