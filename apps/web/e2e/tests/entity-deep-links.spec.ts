@@ -17,6 +17,8 @@ function paths() {
     comment: `/c/${c}/sessions?session=${n.sessionId}&comment=${n.commentId}#entity-comment-${n.commentId}`,
     arc: `/c/${c}/storylines?arc=${n.arcId}#entity-arc-${n.arcId}`,
     beat: `/c/${c}/storylines?beat=${n.beatId}#entity-beat-${n.beatId}`,
+    encounter: `/c/${c}/encounters/${n.encounterId}#entity-encounter-${n.encounterId}`,
+    scheduled_session: `/c/${c}/sessions?tab=schedule&schedule=${n.scheduledSessionId}#entity-scheduled_session-${n.scheduledSessionId}`,
   };
 }
 
@@ -38,7 +40,7 @@ test.describe('cross-entity deep links', () => {
     }
   });
 
-  test('session, timeline, arc, and beat links open and focus across back/forward', async ({ page }) => {
+  test('detail and list-backed links open and focus across back/forward', async ({ page }) => {
     const { campaignId, navigation } = seed();
     const hrefs = paths();
     await page.goto(`/c/${campaignId}/search?q=DLRNAV`);
@@ -48,6 +50,8 @@ test.describe('cross-entity deep links', () => {
       ['timeline', navigation.timelineId],
       ['arc', navigation.arcId],
       ['beat', navigation.beatId],
+      ['encounter', navigation.encounterId],
+      ['scheduled_session', navigation.scheduledSessionId],
     ] as const) {
       const href = hrefs[type];
       await page.locator(`a[href="${href}"]`).first().click();
@@ -103,6 +107,10 @@ test.describe('cross-entity deep links', () => {
     await page.goto(paths().session);
     await expect(page.getByRole('heading', { name: 'DLRNAV First Crossing' })).toBeVisible();
     await expectFocused(page, `entity-session-${navigation.sessionId}`);
+
+    await page.goto(paths().scheduled_session);
+    await expect(page.getByText('DLRNAV Saturday Game')).toBeVisible();
+    await expectFocused(page, `entity-scheduled_session-${navigation.scheduledSessionId}`);
     await context.close();
   });
 });

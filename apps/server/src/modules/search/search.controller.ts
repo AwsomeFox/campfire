@@ -1,9 +1,11 @@
 import { Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiOkResponse } from '@nestjs/swagger';
+import type { SearchResponse } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { SearchService } from './search.service';
+import { SearchResponseDto } from './search.dto';
 
 /**
  * Campaign-wide search + @-mention link targets (issue #64). Both routes require
@@ -22,15 +24,16 @@ export class SearchController {
   @ApiOperation({
     summary: 'Search across a campaign',
     description:
-      'Free-text search over quests, NPCs, locations, characters, sessions and notes. Requires campaign membership; hidden entities and dmSecret are never returned to non-DM.',
+      'Free-text search over campaign content, including role-visible encounters and scheduled sessions. Encounter-linked labels are indexed only when visible to the caller; hidden entities and dmSecret are never returned to non-DM. Requires campaign membership.',
   })
   @ApiQuery({ name: 'q', required: false, description: 'Free-text query. Empty returns no results.' })
-  @ApiResponse({ status: 200, description: 'Matching results across the campaign.' })
+  @ApiOkResponse({ description: 'Role-safe matching results across the campaign.', type: SearchResponseDto })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
   async searchCampaign(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('q') q: string | undefined,
     @CurrentUser() user: RequestUser,
-  ) {
+  ): Promise<SearchResponse> {
     const role = await this.access.requireMember(user, campaignId);
     return this.search.search(campaignId, user, role, q ?? '');
   }
