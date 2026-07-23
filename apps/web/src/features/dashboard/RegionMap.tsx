@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
 import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -64,6 +64,9 @@ export function RegionMap({
   const [kbAnnouncement, setKbAnnouncement] = useState('');
   const [kbSaving, setKbSaving] = useState(false);
   const kbAnnounceRaf = useRef<number | null>(null);
+  const kbPinXRef = useRef<HTMLInputElement>(null);
+  /** Bumped on cancel so an in-flight save does not apply success UI after dismiss. */
+  const kbSaveGen = useRef(0);
 
   const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
 
@@ -74,13 +77,26 @@ export function RegionMap({
     kbAnnounceRaf.current = requestAnimationFrame(() => setKbAnnouncement(message));
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (kbAnnounceRaf.current != null) cancelAnimationFrame(kbAnnounceRaf.current);
+    };
+  }, []);
+
+  // After opening the panel the Move button unmounts — move focus into the form
+  // so arrow keys work without an extra Tab.
+  useEffect(() => {
+    if (kbMovingId == null) return;
+    kbPinXRef.current?.focus();
+  }, [kbMovingId]);
+
   const startKbMove = useCallback((loc: Location) => {
-    const x = Math.max(0, Math.min(100, loc.mapX ?? 50));
-    const y = Math.max(0, Math.min(100, loc.mapY ?? 50));
+    const x = Math.round(Math.max(0, Math.min(100, loc.mapX ?? 50)));
+    const y = Math.round(Math.max(0, Math.min(100, loc.mapY ?? 50)));
     setKbMovingId(loc.id);
     setKbPos({ x, y });
     announceKb(
-      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${Math.round(x)}% horizontal, ${Math.round(y)}% vertical.`,
+      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${x}% horizontal, ${y}% vertical.`,
     );
   }, [announceKb]);
 
@@ -129,6 +145,8 @@ export function RegionMap({
   }
 
   function cancelKbMove() {
+    kbSaveGen.current += 1;
+    setKbSaving(false);
     setKbMovingId(null);
     setKbPos(null);
     announceKb('Pin move cancelled.');
@@ -136,18 +154,23 @@ export function RegionMap({
 
   async function saveKbMove() {
     if (kbMovingId == null || kbPos == null || kbSaving) return;
+    const gen = kbSaveGen.current;
+    const locationId = kbMovingId;
+    const x = Math.round(kbPos.x);
+    const y = Math.round(kbPos.y);
     setKbSaving(true);
     try {
-      const ok = await savePinPercent(kbMovingId, kbPos.x, kbPos.y);
+      const ok = await savePinPercent(locationId, x, y);
+      if (gen !== kbSaveGen.current) return; // cancelled while in flight
       if (!ok) {
         announceKb('Failed to save pin position.');
         return;
       }
-      announceKb(`Pin saved at ${Math.round(kbPos.x)}% horizontal, ${Math.round(kbPos.y)}% vertical.`);
+      announceKb(`Pin saved at ${x}% horizontal, ${y}% vertical.`);
       setKbMovingId(null);
       setKbPos(null);
     } finally {
-      setKbSaving(false);
+      if (gen === kbSaveGen.current) setKbSaving(false);
     }
   }
 
@@ -217,7 +240,7 @@ export function RegionMap({
   }
 
   function onPinPointerDown(e: ReactPointerEvent<HTMLDivElement>, locationId: number) {
-    if (!isDm || !mapImageUrl) return;
+    if (!isDm || !mapImageUrl || kbMovingId != null) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
