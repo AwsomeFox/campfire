@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   ics_token TEXT,
   ics_token_expires_at TEXT,
   storage_quota_bytes INTEGER,
+  active_encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
   deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
