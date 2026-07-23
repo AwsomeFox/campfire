@@ -427,6 +427,7 @@ export function classifyDriverRead(toolName: string): DriverReadDisposition {
 export function wrapUntrustedPlayerInput(input: string): string {
   const neutralized = (input ?? '')
     // Drop control chars (keep normal whitespace) that could scramble the framing.
+    // eslint-disable-next-line no-control-regex -- deliberate control-char strip, not a typo
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
     .replace(/\[\s*player_message_(start|end)\s*\]/gi, (_m, g: string) => `(player_message_${g.toLowerCase()})`);
   return `${PLAYER_INPUT_START}\n${neutralized}\n${PLAYER_INPUT_END}`;
@@ -472,10 +473,27 @@ export class AiDriverService {
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
-  ) {}
+  ) {
+    // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
+    this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
+  }
 
   getSession(campaignId: number): AiDmSessionState {
     return this.sessions.get(campaignId) ?? this.freshSession(campaignId);
+  }
+
+  /**
+   * Reset the in-memory driver session to fresh idle when the seat leaves Driver mode (#1071).
+   * Clears actingDm / vote / stuck / status / state (and the rest of the session snapshot) so a
+   * later re-select of Driver starts clean — not stranded behind a human_control handback.
+   * Emits a lifecycle `state` SSE so open stream clients refetch.
+   */
+  teardownSession(campaignId: number): AiDmSessionState {
+    const fresh = this.freshSession(campaignId);
+    this.sessions.set(campaignId, fresh);
+    this.lastInputs.delete(campaignId);
+    this.stream.emit({ type: 'state', campaignId, state: fresh.state });
+    return fresh;
   }
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */

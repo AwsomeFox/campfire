@@ -317,6 +317,7 @@ function LayoutContent() {
   const [lostAccess, setLostAccess] = useState(false);
   const [inboxCount, setInboxCount] = useState(0);
   const [pendingProposals, setPendingProposals] = useState(0);
+  const [trashCount, setTrashCount] = useState(0);
   const [desktopLayout, setDesktopLayout] = useState(
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
   );
@@ -401,6 +402,28 @@ function LayoutContent() {
         if (!cancelled) setPendingProposals(items.length);
       } catch {
         if (!cancelled) setPendingProposals(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, isDm, location.pathname]);
+
+  // Campaign Trash badge (issue #638) — dm-only recovery surface. Same best-effort
+  // pattern as inbox/proposals: empty or failed fetch means no badge. Re-checks on
+  // campaign switch and route change so restoring an item clears the count.
+  useEffect(() => {
+    if (campaignId === undefined || !isDm) {
+      setTrashCount(0);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await api.get<unknown[]>(`${API}/campaigns/${campaignId}/trash`);
+        if (!cancelled) setTrashCount(items.length);
+      } catch {
+        if (!cancelled) setTrashCount(0);
       }
     })();
     return () => {
@@ -528,6 +551,7 @@ function LayoutContent() {
         { key: 'settings', label: t('nav.settings'), to: `/c/${campaignId}/settings` },
         { key: 'inbox', label: t('nav.scribeInbox'), to: `/c/${campaignId}/inbox`, badge: inboxCount },
         { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals`, badge: pendingProposals },
+        { key: 'trash', label: t('nav.trash'), to: `/c/${campaignId}/trash`, badge: trashCount },
         { key: 'members', label: t('nav.members'), to: `/c/${campaignId}/members` },
       ]
     : [];

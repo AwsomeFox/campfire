@@ -44,6 +44,9 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
   // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
   // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
   process.env.THROTTLE_DISABLED = '1';
+  // Fake in-process providers bind 127.0.0.1; opt into private hosts so existing
+  // AI-provider suites keep working. SSRF suites (#1064) unset this themselves.
+  process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
   for (const { token, useValue } of options.overrides ?? []) {
@@ -89,6 +92,7 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
   // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
   process.env.THROTTLE_DISABLED = '1';
+  process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
