@@ -201,6 +201,21 @@ export class AuditService implements OnApplicationBootstrap {
     };
   }
 
+  /**
+   * Recompute `meta.truncated` after the rest of a campaign export payload is assembled,
+   * so audit rows appended while other tables are being read are still disclosed (#731).
+   */
+  async finalizeCampaignExportMeta(
+    campaignId: number,
+    meta: CampaignAuditExportMeta,
+  ): Promise<CampaignAuditExportMeta> {
+    const postSnapshotCount = await this.countForCampaignAbove(campaignId, meta.cutoff.snapshotMaxId);
+    return {
+      ...meta,
+      truncated: computeCampaignAuditExportTruncated(meta.total, meta.exported, postSnapshotCount),
+    };
+  }
+
   async listForCampaign(
     campaignId: number,
     limit = 100,

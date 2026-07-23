@@ -236,6 +236,8 @@ export class ExportService {
       updatedAt: m.updatedAt,
     }));
 
+    const auditMeta = await this.audit.finalizeCampaignExportMeta(campaignId, auditExport.meta);
+
     return {
       campaign,
       quests: questList,
@@ -247,7 +249,7 @@ export class ExportService {
       comments: commentList,
       members,
       audit: auditExport.entries,
-      auditMeta: auditExport.meta,
+      auditMeta,
       auditNote:
         'Campaign portability export (GET /api/v1/campaigns/:campaignId/export) includes the retained audit trail captured in ' +
         'auditMeta.cutoff — not a full-server backup. A server-wide SQLite/disk backup preserves every table ' +
