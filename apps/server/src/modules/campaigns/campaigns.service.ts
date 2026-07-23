@@ -43,6 +43,7 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiScribeConfigs,
   encounterEvents,
   auditLog,
   participantSupportPreferences,
@@ -648,6 +649,12 @@ export class CampaignsService {
       ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
       : [];
 
+    // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
+
     const ts = nowIso();
     const newId = this.db.transaction((tx) => {
       const [campaignRow] = tx
@@ -997,6 +1004,34 @@ export class CampaignsService {
         }
       }
 
+      // AI seat + scribe config (issue #1078): carry the DM's hand-authored steering
+      // and trigger settings across clone; reset runtime counters to zero.
+      if (aiSeatRow) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cloneId,
+          mode: aiSeatRow.mode,
+          enabled: aiSeatRow.enabled,
+          model: aiSeatRow.model,
+          instructions: aiSeatRow.instructions,
+          tokenBudget: aiSeatRow.tokenBudget,
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigRow) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cloneId,
+          postSession: aiScribeConfigRow.postSession,
+          cron: aiScribeConfigRow.cron,
+          budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+
       return cloneId;
     });
 
@@ -1098,6 +1133,10 @@ export class CampaignsService {
     const treasurySrc = asRec(doc.treasury);
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
+
+    // Issue #1078: AI seat + scribe config from the export document.
+    const aiSeatSrc = asRec(doc.aiSeat);
+    const aiScribeConfigSrc = asRec(doc.aiScribeConfig);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -1842,6 +1881,33 @@ export class CampaignsService {
         if (mapAttachmentId != null) {
           tx.update(campaigns).set({ mapAttachmentId }).where(eq(campaigns.id, cid)).run();
         }
+      }
+
+      // AI seat + scribe config (issue #1078): restore from export with counters zeroed.
+      if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cid,
+          mode: str(aiSeatSrc.mode, 'off'),
+          enabled: boolOf(aiSeatSrc.enabled),
+          model: str(aiSeatSrc.model),
+          instructions: str(aiSeatSrc.instructions),
+          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigSrc && Object.keys(aiScribeConfigSrc).length > 0) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cid,
+          postSession: boolOf(aiScribeConfigSrc.postSession),
+          cron: boolOf(aiScribeConfigSrc.cron),
+          budgetPerRun: Math.max(0, intOr(aiScribeConfigSrc.budgetPerRun, 2000)),
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
       }
 
       // Issue #725: fold the importer's dm membership AND the import audit row
