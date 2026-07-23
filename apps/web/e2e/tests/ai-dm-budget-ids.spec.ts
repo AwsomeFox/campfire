@@ -44,12 +44,15 @@ test.describe('AI DM budget ids accessibility (#751)', () => {
 
     // CampaignSettingsPage scrolls the hash target into view once AiDmCard mounts
     // the section (may land slightly under the sticky header via scrollMarginTop).
+    // App observer waits up to 10s; poll timeout must clear that window on slow CI.
     await expect
-      .poll(async () =>
-        section.evaluate((el) => {
-          const rect = el.getBoundingClientRect();
-          return rect.bottom > 0 && rect.top < window.innerHeight;
-        }),
+      .poll(
+        async () =>
+          section.evaluate((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.bottom > 0 && rect.top < window.innerHeight;
+          }),
+        { timeout: 15_000 },
       )
       .toBe(true);
     // Hash resolution must hit the section, not the input (document.getElementById uniqueness).

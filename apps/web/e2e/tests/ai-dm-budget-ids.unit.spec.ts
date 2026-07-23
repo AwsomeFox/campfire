@@ -15,6 +15,7 @@ import {
   AI_DM_BUDGET_INPUT_ID,
   AI_DM_BUDGET_SECTION_ID,
 } from '../../src/features/settings/AiDmCard';
+import { decodeLocationHashId } from '../../src/lib/decodeLocationHashId';
 
 const AI_DM_CARD = resolve(__dirname, '../../src/features/settings/AiDmCard.tsx');
 
@@ -30,15 +31,23 @@ test.describe('AI DM budget DOM ids (#751)', () => {
     // Match both id="…" literals and id={CONST} after inlining the section constant.
     const sectionLiteralMatches = src.match(/id=["']ai-dm-budget["']/g) ?? [];
     const inputLiteralMatches = src.match(/id=["']ai-dm-budget-input["']/g) ?? [];
-    // Section + input must be referenced via the distinct exported constants.
-    expect(src).toContain('id={AI_DM_BUDGET_SECTION_ID}');
-    expect(src).toContain('id={AI_DM_BUDGET_INPUT_ID}');
-    expect(src).toContain('htmlFor={AI_DM_BUDGET_INPUT_ID}');
+    // Section + input must be referenced via the distinct exported constants
+    // (regex keeps the check stable across harmless JSX whitespace/formatting).
+    expect(src).toMatch(/id\s*=\s*\{\s*AI_DM_BUDGET_SECTION_ID\s*\}/);
+    expect(src).toMatch(/id\s*=\s*\{\s*AI_DM_BUDGET_INPUT_ID\s*\}/);
+    expect(src).toMatch(/htmlFor\s*=\s*\{\s*AI_DM_BUDGET_INPUT_ID\s*\}/);
     // No leftover duplicate string ids.
     expect(sectionLiteralMatches).toHaveLength(0);
     expect(inputLiteralMatches).toHaveLength(0);
     // And the two constant values themselves stay unique in the file.
     expect(src.match(/=\s*['"]ai-dm-budget['"]/g)?.length ?? 0).toBe(1);
     expect(src.match(/=\s*['"]ai-dm-budget-input['"]/g)?.length ?? 0).toBe(1);
+  });
+
+  test('decodeLocationHashId falls back when percent-encoding is malformed', () => {
+    expect(decodeLocationHashId('#ai-dm-budget')).toBe('ai-dm-budget');
+    expect(decodeLocationHashId('#ai-dm-%20budget')).toBe('ai-dm- budget');
+    expect(decodeLocationHashId('#ai-dm-%')).toBe('ai-dm-%');
+    expect(decodeLocationHashId('#ai-dm-%GG')).toBe('ai-dm-%GG');
   });
 });

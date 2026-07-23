@@ -18,6 +18,7 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
+import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -70,7 +71,7 @@ export default function CampaignSettingsPage() {
   // own async seat load — observe the tree until the anchor exists, then scroll once.
   useEffect(() => {
     if (!campaign || !location.hash) return;
-    const id = decodeURIComponent(location.hash.slice(1));
+    const id = decodeLocationHashId(location.hash);
     let observer: MutationObserver | null = null;
     let frame = 0;
     let timeout = 0;
