@@ -299,10 +299,13 @@ export function OidcCard() {
     }
   }
 
-  const e2eVerified =
-    !!cfg?.lastE2eTest?.ok &&
+  const e2eFingerprintMatches =
+    !!cfg?.lastE2eTest &&
     !!cfg.configFingerprint &&
     cfg.lastE2eTest.fingerprint === cfg.configFingerprint;
+  // Successful e2e against the current effective config — drives the amber
+  // "run Test login" banner. Fingerprint match alone must not require ok.
+  const e2eVerified = e2eFingerprintMatches && !!cfg?.lastE2eTest?.ok;
 
   return (
     <Card className="space-y-3">
@@ -466,7 +469,9 @@ export function OidcCard() {
               Last end-to-end test: {cfg.lastE2eTest.ok ? 'OK' : 'failed'} at{' '}
               {new Date(cfg.lastE2eTest.testedAt).toLocaleString()} · fingerprint{' '}
               <span className="font-mono">{cfg.lastE2eTest.fingerprint || '—'}</span>
-              {e2eVerified ? ' (matches current config)' : ' (does not match current config)'}
+              {e2eFingerprintMatches
+                ? ' (matches current config)'
+                : ' (does not match current config)'}
             </p>
           )}
 

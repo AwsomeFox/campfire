@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import type * as client from 'openid-client';
+import { pkceS256Challenge } from '../../common/crypto';
 import {
   EMPTY_STORED_OIDC,
   effectiveRedirectUri,
@@ -449,14 +450,19 @@ export class OidcService {
     }
 
     // Confirm the authorization endpoint accepts our redirect_uri (unregistered
-    // URIs typically error without completing a login).
+    // URIs typically error without completing a login). Mirror real SSO / test
+    // login: same resolved scope + S256 PKCE so IdPs that require either do not
+    // fail this probe while end-to-end login would succeed.
     try {
+      const codeVerifier = randomBytes(32).toString('base64url');
       const authorizeUrl = new URL(authorizationEndpoint);
       authorizeUrl.searchParams.set('client_id', candidate.clientId);
       authorizeUrl.searchParams.set('response_type', 'code');
       authorizeUrl.searchParams.set('redirect_uri', candidate.redirectUri);
-      authorizeUrl.searchParams.set('scope', 'openid');
+      authorizeUrl.searchParams.set('scope', candidate.scope.trim() || 'openid profile email');
       authorizeUrl.searchParams.set('state', 'campfire-diag');
+      authorizeUrl.searchParams.set('code_challenge', pkceS256Challenge(codeVerifier));
+      authorizeUrl.searchParams.set('code_challenge_method', 'S256');
       const authRes = await fetch(authorizeUrl.toString(), {
         redirect: 'manual',
         signal: AbortSignal.timeout(TEST_CONNECTION_TIMEOUT_MS),
