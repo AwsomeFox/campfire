@@ -1111,6 +1111,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // Ids are stable and ascending (chronological insertion order).
     const ids = events.map((e) => e.id);
     expect([...ids].sort((a, b) => a - b)).toEqual(ids);
+
+    // Clean up: end this fight so it doesn't hold the campaign's single active-encounter
+    // slot (#744) and break later tests that begin their own encounter.
+    await dmC.callTool({ name: 'end_encounter', arguments: { encounterId: enc.id } });
   });
 
   it('list_encounter_events 404s a hidden encounter for a non-DM viewer PAT (issue #869 parity)', async () => {
