@@ -5,9 +5,15 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Public } from '../../common/decorators/public.decorator';
 import { OidcService } from './oidc.service';
 import { AuthService } from './auth.service';
-import { SESSION_COOKIE_NAME, OIDC_FLOW_COOKIE_NAME, OIDC_FLOW_COOKIE_MAX_AGE_MS } from './auth.constants';
+import {
+  SESSION_COOKIE_NAME,
+  OIDC_FLOW_COOKIE_NAME,
+  OIDC_RETURN_COOKIE_NAME,
+  OIDC_FLOW_COOKIE_MAX_AGE_MS,
+} from './auth.constants';
 import { sessionCookieOptions } from './session-cookie';
 import { resolveCookieSecure } from '../../common/security-config';
+import { safeInternalPath } from './safe-internal-path';
 import {
   classifyOidcRecovery,
   OidcRecoveryFailure,
@@ -61,17 +67,31 @@ export class OidcController {
 
   @Public()
   @Get('login')
-  @ApiOperation({ summary: 'Start OIDC SSO login', description: 'Redirects to the configured OIDC provider. Sets a short-lived flow cookie for the PKCE state/verifier round trip.' })
+  @ApiOperation({
+    summary: 'Start OIDC SSO login',
+    description:
+      'Redirects to the configured OIDC provider. Sets a short-lived flow cookie for the PKCE state/verifier round trip. ' +
+      'Optional `?redirect=` (validated same-origin in-app path) is stashed for the post-callback return (issue #478).',
+  })
   @ApiResponse({ status: 302, description: 'Redirect to the IdP authorization endpoint, or same-origin `/login/sso-error` with only a safe category and support reference when the flow cannot start.' })
-  async login(@Res() res: Response): Promise<void> {
+  async login(@Req() req: Request, @Res() res: Response): Promise<void> {
     // Discard any abandoned flow before creating a fresh state/verifier pair.
     res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
     try {
       if (!(await this.oidc.isEnabled())) {
         throw new OidcRecoveryFailure('provider_unavailable', 'oidc_not_configured');
       }
       const { url, state, codeVerifier } = await this.oidc.buildAuthorizationRequest();
       res.cookie(OIDC_FLOW_COOKIE_NAME, `${state}:${codeVerifier}`, flowCookieOptions());
+      // Preserve a validated relative return target through the IdP round-trip so
+      // invite links (`/join/:code`) survive SSO for existing users (issue #478).
+      const returnTo = safeInternalPath(
+        typeof req.query.redirect === 'string' ? req.query.redirect : undefined,
+      );
+      if (returnTo) {
+        res.cookie(OIDC_RETURN_COOKIE_NAME, returnTo, flowCookieOptions());
+      }
       res.redirect(url.toString());
     } catch (error) {
       this.redirectToRecovery(res, 'start', error);
@@ -80,11 +100,18 @@ export class OidcController {
 
   @Public()
   @Get('callback')
-  @ApiOperation({ summary: 'OIDC callback (redirect target)', description: 'Provider redirects here after authentication. Campfire verifies state + PKCE, provisions/updates the user, and sets the session cookie. Success redirects to `/`; expected failures redirect same-origin to `/login/sso-error` with only a safe category and random support reference.' })
-  @ApiResponse({ status: 302, description: 'Session cookie set and redirect to `/` on success; safe same-origin recovery redirect on expected failure. Provider payloads, code, state, tokens, claims, and secrets are never included in the recovery location.' })
+  @ApiOperation({
+    summary: 'OIDC callback (redirect target)',
+    description:
+      'Provider redirects here after authentication. Campfire verifies state + PKCE, provisions/updates the user, and sets the session cookie. ' +
+      'Success redirects to the stashed same-origin return path (or `/`); expected failures redirect same-origin to `/login/sso-error` with only a safe category and random support reference.',
+  })
+  @ApiResponse({ status: 302, description: 'Session cookie set and redirect to the validated return path (or `/`) on success; safe same-origin recovery redirect on expected failure. Provider payloads, code, state, tokens, claims, and secrets are never included in the recovery location.' })
   async callback(@Req() req: Request, @Res() res: Response): Promise<void> {
     const flowCookie = req.cookies?.[OIDC_FLOW_COOKIE_NAME] as string | undefined;
+    const returnCookie = req.cookies?.[OIDC_RETURN_COOKIE_NAME] as string | undefined;
     res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
     try {
       if (!(await this.oidc.isEnabled())) {
         throw new OidcRecoveryFailure('provider_unavailable', 'oidc_not_configured');
@@ -110,7 +137,8 @@ export class OidcController {
       const { token } = await this.auth.issueSessionFor(user.id);
 
       res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
-      res.redirect('/');
+      // Re-validate the cookie value at use time — never trust a client-set return path.
+      res.redirect(safeInternalPath(returnCookie) ?? '/');
     } catch (error) {
       this.redirectToRecovery(res, 'callback', error);
     }
