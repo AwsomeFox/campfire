@@ -8,6 +8,7 @@ import helmet from 'helmet';
 import express from 'express';
 import { AppModule } from './app.module';
 import { SESSION_COOKIE_NAME } from './modules/auth/auth.constants';
+import { APP_VERSION } from './common/build-metadata';
 import { resolveTrustProxy, resolveAllowInsecureHttp, isDevAuthActive } from './common/security-config';
 
 patchNestJsSwagger();
@@ -158,7 +159,7 @@ export function setupApiDocs(app: INestApplication): void {
             'x-dev-user (default dev-user) headers when no session cookie is present — used by e2e tests only.'
           : ''),
     )
-    .setVersion('0.1.0')
+    .setVersion(APP_VERSION)
     .addTag('auth')
     .addTag('users')
     .addTag('settings')

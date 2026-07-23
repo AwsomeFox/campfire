@@ -39,6 +39,11 @@ import {
 } from '../features/auth/useAuthStorageListener';
 import { applyReadingPreference } from './readingPreferences';
 import { clearLiveAnnouncements } from '../components/Announcer';
+import {
+  resetSessionExpiredSignal,
+  subscribeSessionExpired,
+} from '../lib/sessionExpiry';
+import { applyAccentColor } from './accentPalette';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -49,37 +54,10 @@ export {
   type MeFetchOutcome,
 } from './authDecision';
 import { decideAuthOutcome, type MeFetchOutcome } from './authDecision';
-
-/**
- * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
- * lighter "-2"/hover tint from the user's chosen accent, mirroring the static
- * --color-accent-2 relationship baked into index.css for the default palette.
- */
-function mixWithWhite(hex: string, ratio: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff;
-  const g = (n >> 8) & 0xff;
-  const b = n & 0xff;
-  const blend = (c: number) => Math.round(c + (255 - c) * ratio);
-  return `#${[blend(r), blend(g), blend(b)].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
-}
-
-/** Applies (or clears, when null) the user's personal accent color override as CSS custom properties. */
-function applyAccentColor(accentColor: string | null): void {
-  const root = document.documentElement.style;
-  if (accentColor) {
-    const accent2 = mixWithWhite(accentColor, 0.3);
-    root.setProperty('--color-accent', accentColor);
-    root.setProperty('--cf-accent', accentColor);
-    root.setProperty('--color-accent-2', accent2);
-    root.setProperty('--cf-accent-2', accent2);
-  } else {
-    root.removeProperty('--color-accent');
-    root.removeProperty('--cf-accent');
-    root.removeProperty('--color-accent-2');
-    root.removeProperty('--cf-accent-2');
-  }
-}
+import {
+  isMembershipSyncMessage,
+  openMembershipSyncChannel,
+} from '../lib/membershipLiveSync';
 
 /** Translates a thrown /me error into a MeFetchOutcome. */
 function outcomeFromError(err: unknown): MeFetchOutcome {
@@ -95,6 +73,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [connectionError, setConnectionError] = useState(false);
   const [staleIdentity, setStaleIdentity] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
   // Last authenticated user id we've seen this page-session. Lets us detect a
   // proven-live change of identity (first sign-in or an account switch) so we can
   // drop any cached campaign data belonging to a prior session before it renders.
@@ -109,6 +88,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // in-flight refresh() that resolves after sign-out discards its result instead
   // of resurrecting `me` from a cookie that hasn't been revoked yet.
   const logoutEpochRef = useRef(0);
+  // Latest `me` for the session-expiry subscriber (stable effect; no resubscribe).
+  const meRef = useRef<Me | null>(null);
+  meRef.current = me;
 
   const handleMultiTabSignOut = useCallback(() => {
     logoutEpochRef.current += 1;
@@ -122,6 +104,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
+    // Peer-tab intentional sign-out is not a mid-session expiry bounce.
+    setSessionExpired(false);
     // Issue #506: peer tabs must not keep assertive/polite combat/HP text after
     // another tab signs out (AnnounceProvider sits below us, so use the module
     // entrypoint rather than the React hook).
@@ -135,6 +119,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useAuthStorageListener(handleMultiTabSignOut);
+
+  // Issue #885: any provenance-safe 401 from the API/SSE clients (not offline,
+  // not a campaign 403) clears identity-scoped state while the tab was still
+  // showing protected UI. Only act when this tab had a confirmed-live identity
+  // — a cold `/me` 401 for a signed-out visitor must not look like "session expired".
+  useEffect(() => {
+    return subscribeSessionExpired(() => {
+      const hadIdentity = lastUserIdRef.current != null || meRef.current != null;
+      if (!hadIdentity) return;
+      logoutEpochRef.current += 1;
+      setMe(null);
+      lastUserIdRef.current = null;
+      lastInstanceRef.current = null;
+      applyAccentColor(null);
+      applyReadingPreference(document.documentElement, 'default');
+      // Clear the cross-tab sentinel (other tabs sign out) but do NOT POST
+      // /auth/logout — the server already rejected the cookie as expired.
+      clearAuthStorage();
+      clearMeSnapshot();
+      setStaleIdentity(false);
+      setLastSyncedAt(null);
+      setConnectionError(false);
+      setSessionExpired(true);
+      clearLiveAnnouncements();
+      // Identity-scoped query cache only — local draft keys / unrelated storage stay.
+      queryClient.clear();
+      setReady(true);
+      void clearApiCache();
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     const epoch = logoutEpochRef.current;
@@ -203,7 +217,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
       applyReadingPreference(document.documentElement, decision.me.user.textSize);
-      if (outcome.kind === 'live') setAuthStorage(decision.me.user);
+      if (outcome.kind === 'live') {
+        setAuthStorage(decision.me.user);
+        // Successful reauth after a mid-session 401: clear the login banner and
+        // bump the SSE resume epoch so campaign/AI streams reopen (#885).
+        setSessionExpired(false);
+        resetSessionExpiredSignal();
+      }
     } else {
       applyAccentColor(null);
       applyReadingPreference(document.documentElement, 'default');
@@ -217,6 +237,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Issue #437: when another tab of this origin learns about a role change for
+  // this user (via campaign SSE), it posts on the membership sync channel so
+  // tabs without that campaign's stream (home, /screen, /admin) still refresh
+  // /me. Listening here — above Layout — covers every authenticated surface.
+  useEffect(() => {
+    if (!me?.user.id) return;
+    const channel = openMembershipSyncChannel(me.user.id);
+    if (!channel) return;
+    const onMessage = (event: MessageEvent) => {
+      if (!isMembershipSyncMessage(event.data)) return;
+      void refresh();
+    };
+    channel.addEventListener('message', onMessage);
+    return () => {
+      channel.removeEventListener('message', onMessage);
+      channel.close();
+    };
+  }, [me?.user.id, refresh]);
 
   // #723 cross-tab purge: when ANOTHER tab of this origin clears the SW cache
   // (account switch, restore, logout — anything that calls clearApiCache), it
@@ -263,6 +302,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
+    setSessionExpired(false);
     applyAccentColor(null);
     applyReadingPreference(document.documentElement, 'default');
     // Clear React Query synchronously so a fast shared-device re-login cannot
@@ -287,8 +327,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<AuthState>(
-    () => ({ me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout }),
-    [me, ready, connectionError, staleIdentity, lastSyncedAt, isAdmin, roleIn, refresh, logout],
+    () => ({
+      me,
+      ready,
+      connectionError,
+      staleIdentity,
+      lastSyncedAt,
+      sessionExpired,
+      isAdmin,
+      roleIn,
+      refresh,
+      logout,
+    }),
+    [
+      me,
+      ready,
+      connectionError,
+      staleIdentity,
+      lastSyncedAt,
+      sessionExpired,
+      isAdmin,
+      roleIn,
+      refresh,
+      logout,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

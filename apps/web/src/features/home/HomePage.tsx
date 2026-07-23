@@ -10,6 +10,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
+import { noteUnauthorizedResponse } from '../../lib/sessionExpiry';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
@@ -75,6 +76,7 @@ async function importArchive(file: File): Promise<Campaign> {
     body: form,
   });
   if (!res.ok) {
+    noteUnauthorizedResponse(`${API}/campaigns/import/archive`, res.status);
     let message = res.statusText;
     try {
       const body = await res.json();

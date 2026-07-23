@@ -124,6 +124,9 @@ type InputFieldProps = CommonProps & {
   title?: string;
   list?: string;
   onKeyDown?: KeyboardEventHandler<HTMLInputElement>;
+  /** Composition-safe submit gates (IME confirm ≠ submit). */
+  onCompositionStart?: InputHTMLAttributes<HTMLInputElement>['onCompositionStart'];
+  onCompositionEnd?: InputHTMLAttributes<HTMLInputElement>['onCompositionEnd'];
 };
 
 type TextareaFieldProps = CommonProps & {
@@ -250,6 +253,8 @@ export function Field(props: FieldProps) {
       title: props.title,
       list: props.list,
       onKeyDown: props.onKeyDown,
+      onCompositionStart: props.onCompositionStart,
+      onCompositionEnd: props.onCompositionEnd,
       'aria-required': required || undefined,
       'aria-invalid': invalid,
       'aria-describedby': ariaDescribedBy,

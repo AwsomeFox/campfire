@@ -30,6 +30,7 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
+import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -363,6 +364,10 @@ function LayoutContent() {
 
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
+
+  // Issue #437: live promote/demote — refresh /me when this user's campaign role
+  // changes over SSE (and fan out to other tabs). Keeps the current route.
+  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined);
 
   // AI-DM seat mode drives the "Table" nav item (issue #339): the player-facing table
   // only exists when the AI holds the DM seat (Driver mode). The seat read stops on a

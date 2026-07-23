@@ -4,6 +4,7 @@
  */
 import { useId, useRef, useState } from 'react';
 import { API, ApiError } from '../../lib/api';
+import { noteUnauthorizedResponse } from '../../lib/sessionExpiry';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 
 export interface BackupInspectResult {
@@ -36,6 +37,7 @@ async function inspectBackupArchive(file: File): Promise<BackupInspectResult> {
     body: form,
   });
   if (!res.ok) {
+    noteUnauthorizedResponse(`${API}/backup/inspect`, res.status);
     let message = res.statusText;
     try {
       const body = await res.json();

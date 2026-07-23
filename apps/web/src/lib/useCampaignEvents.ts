@@ -12,12 +12,19 @@
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
  * offline. Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
- * — the TCP/HTTP connection stayed up. A 401/403 stops the loop entirely
- * (no access — retrying won't help).
+ * — the TCP/HTTP connection stayed up. A proven 401 signals session expiry
+ * (issue #885) and stops until reauth bumps the resume epoch; a campaign-scoped
+ * 403 stops without clearing identity (retrying won't help).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
 import { API } from './api';
+import {
+  classifyStreamConnectStatus,
+  getSessionResumeEpoch,
+  signalSessionExpired,
+  subscribeSessionResume,
+} from './sessionExpiry';
 import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
@@ -42,19 +49,21 @@ const RECONNECT_MAX_MS = 15_000;
 /**
  * Runtime guard for the CampaignEvent union (issue #527 widened it to a
  * discriminated union; #582 added treasury.updated; #790 added schedule.updated;
- * #421 added character.updated).
+ * #421 added character.updated; #437 added membership.updated).
  * Accepts every variant: the
  * encounter.* signals carry an encounterId; membership.revoked carries
- * userId/memberId; treasury.updated carries userId (the actor); schedule.updated
+ * userId/memberId; membership.updated carries userId/memberId/role;
+ * treasury.updated carries userId (the actor); schedule.updated
  * carries scheduleId; character.updated carries characterId + userId. Consumers
  * narrow by `type` before reading variant-specific fields (see RunSessionPage
  * and DashboardPage).
  *
  * Note: the server filters membership.revoked out of the data path as an internal
  * control signal, so in practice this client sees encounter.*, treasury.updated,
- * schedule.updated, and character.updated frames — but validating the full union
- * here keeps the guard correct if that filtering ever changes, and lets the type
- * system prove that `onEvent` callbacks handle every variant (or explicitly narrow).
+ * schedule.updated, character.updated, and membership.updated frames — but validating
+ * the full union here keeps the guard correct if that filtering ever changes, and
+ * lets the type system prove that `onEvent` callbacks handle every variant (or
+ * explicitly narrow).
  */
 const ENCOUNTER_EVENT_TYPES = new Set(['encounter.updated', 'encounter.deleted', 'encounter.ping']);
 function isCampaignEvent(value: unknown): value is CampaignEvent {
@@ -76,6 +85,14 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'membership.revoked') {
     // membership.revoked: userId + memberId instead of encounterId.
     return typeof v.userId === 'string' && typeof v.memberId === 'number';
+  }
+  if (v.type === 'membership.updated') {
+    // membership.updated (#437): role change invalidation for the affected member.
+    return (
+      typeof v.userId === 'string'
+      && typeof v.memberId === 'number'
+      && (v.role === 'dm' || v.role === 'player' || v.role === 'viewer')
+    );
   }
   if (v.type === 'treasury.updated') {
     // treasury.updated (#582): the actor's userId so the editor can attribute the
@@ -99,6 +116,9 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
   // Latest handlers in a ref so a re-render never tears down the connection.
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
+  // After a 401 stop, reauth bumps this epoch so the effect reopens the stream
+  // even when campaignId is unchanged (issue #885).
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
@@ -163,7 +183,15 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
             headers,
             signal: activeRequest.signal,
           });
-          if (res.status === 401 || res.status === 403) {
+          const auth = classifyStreamConnectStatus(res.status);
+          if (auth === 'session-expired') {
+            // Proven 401 — not offline, not a campaign 403. Fan out so AuthProvider
+            // can show reauth; stop until resumeEpoch advances after login.
+            signalSessionExpired();
+            setStatus('stopped');
+            return;
+          }
+          if (auth === 'forbidden') {
             setStatus('stopped');
             return;
           }
@@ -227,5 +255,5 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
       wakeSleep?.();
       activeRequest?.abort();
     };
-  }, [campaignId]);
+  }, [campaignId, resumeEpoch]);
 }

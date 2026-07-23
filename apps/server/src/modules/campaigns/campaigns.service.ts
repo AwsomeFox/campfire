@@ -1088,6 +1088,8 @@ export class CampaignsService {
     const timelineCalendarSrc = asRec(doc.timelineCalendar);
     const sessionZeroSrc = asRec(doc.sessionZero);
     const treasurySrc = asRec(doc.treasury);
+    // Issue #813: immutable prose versions (tips + superseded), remapped below.
+    const revisionRows = asArr(doc.revisions);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -1460,6 +1462,7 @@ export class CampaignsService {
         character: charMap,
         session: sessionMap,
       };
+      const noteMap = new Map<number, number>();
       for (const n of noteRows) {
         let entityType = typeof n.entityType === 'string' ? n.entityType : null;
         let entityId: number | null = null;
@@ -1470,7 +1473,9 @@ export class CampaignsService {
           entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
           if (entityId == null) entityType = null; // dangling link in the source — drop it
         }
-        tx.insert(notes)
+        const noteSrcId = intOrNull(n.id);
+        const [noteRow] = tx
+          .insert(notes)
           .values({
             campaignId: cid,
             authorUserId: importerId, // author ids are per-install — the importer owns imported notes
@@ -1485,7 +1490,9 @@ export class CampaignsService {
             createdAt: ts,
             updatedAt: ts,
           })
-          .run();
+          .returning()
+          .all();
+        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
       }
 
       const encounterMap = new Map<number, number>();
@@ -1631,6 +1638,71 @@ export class CampaignsService {
         const parentSrc = intOrNull(c.parentId);
         if (parentSrc == null) continue;
         insertImportedComment(c, commentMap.get(parentSrc) ?? null);
+      }
+
+      // Issue #813: prose revision versions (author + replacer provenance). Entity ids and
+      // restoredFromRevisionId are remapped; dangling entity links are dropped. Author
+      // user ids are install-local provenance strings and travel as-is (like comment names).
+      const revisionEntityMaps: Record<string, Map<number, number>> = {
+        session: sessionMap,
+        quest: questMap,
+        npc: npcMap,
+        location: locMap,
+        faction: factionMap,
+        note: noteMap,
+      };
+      const revisionSourceKinds = new Set(['human', 'ai', 'tool']);
+      const revisionSource = (value: unknown): 'human' | 'ai' | 'tool' =>
+        typeof value === 'string' && revisionSourceKinds.has(value) ? (value as 'human' | 'ai' | 'tool') : 'human';
+      const revisionIdMap = new Map<number, number>();
+      // Two passes so restoredFromRevisionId can point at a sibling imported later.
+      for (const rev of revisionRows) {
+        const srcId = intOrNull(rev.id);
+        const entityType = str(rev.entityType);
+        const sourceEntityId = intOrNull(rev.entityId);
+        const entityId = sourceEntityId != null ? revisionEntityMaps[entityType]?.get(sourceEntityId) : undefined;
+        if (entityId == null) continue;
+        const snapshot =
+          rev.snapshot && typeof rev.snapshot === 'object' && !Array.isArray(rev.snapshot)
+            ? (rev.snapshot as Record<string, unknown>)
+            : {};
+        const snapshotText: Record<string, string> = {};
+        for (const [key, value] of Object.entries(snapshot)) {
+          if (typeof value === 'string') snapshotText[key] = value;
+        }
+        const [row] = tx
+          .insert(entityRevisions)
+          .values({
+            campaignId: cid,
+            entityType,
+            entityId,
+            snapshot: JSON.stringify(snapshotText),
+            authorUserId: str(rev.authorUserId).slice(0, 120),
+            authorName: str(rev.authorName).slice(0, 120),
+            authorSource: revisionSource(rev.authorSource),
+            authorSourceDetail: str(rev.authorSourceDetail).slice(0, 200),
+            createdAt: typeof rev.createdAt === 'string' ? rev.createdAt : '',
+            replacedByUserId: str(rev.replacedByUserId).slice(0, 120),
+            replacedByName: str(rev.replacedByName).slice(0, 120),
+            replacedBySource: revisionSource(rev.replacedBySource),
+            replacedBySourceDetail: str(rev.replacedBySourceDetail).slice(0, 200),
+            replacedAt: typeof rev.replacedAt === 'string' ? rev.replacedAt : null,
+            restoredFromRevisionId: null, // remapped in the second pass
+            authorshipKnown: rev.authorshipKnown !== false && rev.authorshipKnown !== 0,
+          })
+          .returning()
+          .all();
+        if (srcId != null) revisionIdMap.set(srcId, row.id);
+      }
+      for (const rev of revisionRows) {
+        const srcId = intOrNull(rev.id);
+        const newId = srcId != null ? revisionIdMap.get(srcId) : undefined;
+        if (newId == null) continue;
+        const sourceRestoredFrom = intOrNull(rev.restoredFromRevisionId);
+        if (sourceRestoredFrom == null) continue;
+        const remapped = revisionIdMap.get(sourceRestoredFrom);
+        if (remapped == null) continue;
+        tx.update(entityRevisions).set({ restoredFromRevisionId: remapped }).where(eq(entityRevisions.id, newId)).run();
       }
 
       // Storylines (issue #27/#266): the arc→beat→branch graph. Arcs first (arcMap),
