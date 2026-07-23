@@ -30,18 +30,24 @@ function buildService(entities: {
 }): ExportService {
   const noop = async () => [];
   const campaign = campaignRow();
+  // Each property is a service-shaped object exposing only the methods
+  // buildExport / buildMarkdownZip actually call.
+  const emptyDbQuery = {
+    from: () => ({ where: () => ({ limit: async () => [] }) }),
+  };
   return new ExportService(
-    { getOrThrow: async () => campaign } as any,
-    { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any,
-    { listForCampaign: async () => entities.npcs ?? [] } as any,
-    { listForCampaign: async () => entities.locations ?? [] } as any,
-    { listRecapsForCampaign: async () => entities.sessions ?? [] } as any,
-    { listForCampaign: async () => entities.characters ?? [] } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
+    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
+    { getOrThrow: async () => campaign } as any, // campaigns
+    { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any, // quests
+    { listForCampaign: async () => entities.npcs ?? [] } as any, // npcs
+    { listForCampaign: async () => entities.locations ?? [] } as any, // locations
+    { listRecapsForCampaign: async () => entities.sessions ?? [] } as any, // sessions
+    { listForCampaign: async () => entities.characters ?? [] } as any, // characters
+    { listForCampaign: noop as any } as any, // notes
+    { listForCampaign: noop as any } as any, // comments
+    { listForCampaign: noop as any } as any, // members
+    { listForCampaign: noop as any } as any, // audit
+    { listForCampaign: noop as any } as any, // proposals
     {
       listForCampaign: async () => (entities.encounters ?? []).map((e: any) => ({ id: e.id, name: e.name })),
       getWithCombatantsOrThrow: async (id: number) => (entities.encounters ?? []).find((e: any) => e.id === id),

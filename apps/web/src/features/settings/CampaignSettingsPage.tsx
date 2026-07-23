@@ -1143,8 +1143,9 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
       <span className="card-kicker">Duplicate campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         Reuse your prep. A full copy duplicates everything — quests, NPCs, locations, characters, sessions, notes and
-        encounters. A template copies the world only and resets progress: quests back to available, objectives
-        unchecked, no sessions or play state. Members aren't copied — you become the new campaign's DM.
+        encounters (encounter combat state is reset: fights go back to preparing with full HP and no conditions). A template
+        copies the world only and resets progress: quests back to available, objectives unchecked, no sessions or play
+        state. Members aren't copied — you become the new campaign's DM.
       </p>
       <div className="field">
         <label htmlFor="settings-clone-name">New campaign name</label>
