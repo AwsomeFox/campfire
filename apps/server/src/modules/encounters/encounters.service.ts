@@ -666,6 +666,10 @@ export class EncountersService {
       const combatantValues = partyRows.map((character, index) => {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         const initMod = adapter.initiativeModifier(stats);
+        // Issue #711: seed the combatant's death/temp-HP slice from the persistent
+        // sheet so a stable-but-unconscious PC (carried over from a prior fight via
+        // /end reconciliation) re-enters the next encounter still down, not silently
+        // revived. Defaults hold for pre-#711 sheets (alive + temp-less).
         return {
           encounterId: encounterRow.id,
           kind: 'character' as const,
@@ -675,6 +679,10 @@ export class EncountersService {
           initMod,
           hpCurrent: character.hpCurrent,
           hpMax: character.hpMax,
+          hpTemp: character.hpTemp,
+          deathState: character.deathState,
+          deathSaveSuccesses: character.deathSaveSuccesses,
+          deathSaveFailures: character.deathSaveFailures,
           conditions: '[]',
           ruleEntryId: null,
           sortOrder: index,
@@ -970,6 +978,14 @@ export class EncountersService {
     let hpMax = input.hpMax;
     let initMod = input.initMod ?? 0;
     let hpCurrent: number | undefined;
+    // Issue #711: the persistent death/temp-HP slice a character carries into
+    // combat. Only populated on the kind='character' branch (monsters/NPCs start
+    // alive + temp-less); threaded into the INSERT below so a stable/dying PC
+    // late-joining a fight doesn't get silently revived.
+    let characterHpTemp = 0;
+    let characterDeathState = 'none';
+    let characterDeathSaveSuccesses = 0;
+    let characterDeathSaveFailures = 0;
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -1049,6 +1065,13 @@ export class EncountersService {
       name = name ?? character.name;
       hpMax = hpMax ?? character.hpMax;
       hpCurrent = character.hpCurrent;
+      // Issue #711: seed the death/temp-HP slice from the persistent sheet so a
+      // late-joining stable/dying PC re-enters combat in that state (mirrors the
+      // create() auto-add path). Monsters/NPCs below default to alive/temp-less.
+      characterHpTemp = character.hpTemp;
+      characterDeathState = character.deathState;
+      characterDeathSaveSuccesses = character.deathSaveSuccesses;
+      characterDeathSaveFailures = character.deathSaveFailures;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         initMod = adapter.initiativeModifier(stats);
@@ -1123,6 +1146,17 @@ export class EncountersService {
             initMod,
             hpCurrent,
             hpMax,
+            // Issue #711: only a character combatant carries the persistent
+            // death/temp-HP slice in; monsters/NPCs default to alive/temp-less
+            // (the Combatant schema defaults handle the unset monster case).
+            ...(characterId !== null
+              ? {
+                  hpTemp: characterHpTemp,
+                  deathState: characterDeathState,
+                  deathSaveSuccesses: characterDeathSaveSuccesses,
+                  deathSaveFailures: characterDeathSaveFailures,
+                }
+              : {}),
             conditions: '[]',
             ruleEntryId,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
@@ -1348,7 +1382,22 @@ export class EncountersService {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
       if (mirrorHp) {
-        tx.update(characters).set({ hpCurrent: updated.hpCurrent, updatedAt: nowIso() }).where(eq(characters.id, existing.characterId!)).run();
+        // Issue #711: live-mirror the full combat death/temp-HP slice, not just
+        // hpCurrent, so a downed/dead character is reflected on the sheet the
+        // moment it happens mid-fight (the same authoritative write-through
+        // contract the HP path already uses). The post-/end reconciliation below
+        // does the same write once more for the final state; both are idempotent.
+        tx.update(characters)
+          .set({
+            hpCurrent: updated.hpCurrent,
+            hpTemp: updated.hpTemp,
+            deathState: updated.deathState,
+            deathSaveSuccesses: updated.deathSaveSuccesses,
+            deathSaveFailures: updated.deathSaveFailures,
+            updatedAt: nowIso(),
+          })
+          .where(eq(characters.id, existing.characterId!))
+          .run();
       }
     });
 
@@ -1702,6 +1751,16 @@ export class EncountersService {
    * actually ended. The HP write-back + status update run in one db.transaction() (mirrors
    * QuestsService.remove()'s subquest-promotion pattern) so a mid-loop failure can't leave
    * some characters' HP synced and others not while the encounter still shows 'running'.
+   *
+   * Issue #711: the write-back now persists the FULL combat death/temp-HP slice, not just
+   * hpCurrent. The combatant tracker has carried hpTemp/deathState/death-save counters
+   * since issue #57; without this reconciliation a dead PC was silently resurrected on
+   * sheet read and re-conscripted into the next fight. The dead/stable/dying/temp-HP
+   * state travels back onto the character row, and a `dead` combatant additionally flips
+   * the character's lifecycle `status` to 'dead' so it is excluded from future auto-add
+   * (create() only auto-adds 'active' PCs, issue #115). A revived (hp > 0) character is
+   * explicitly kept 'active' here so the death doesn't linger past a real revival —
+   * revival is a deliberate transition, never a side effect.
    */
   async end(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
@@ -1710,12 +1769,77 @@ export class EncountersService {
     }
     const rows = await this.listCombatantRows(encounterId);
 
+    // Pre-compute the per-character write-back set inside the loop's planning phase
+    // so the transaction body is a tight, sequenced set of writes — same shape as the
+    // existing HP-only loop, just richer. The death-state → lifecycle mapping is the
+    // one piece of policy: only `dead` flips status; `dying`/`stable` leave it alone
+    // (a dying PC is still 'active' once the next encounter starts), and a revived
+    // (hp > 0) character is forced back to 'active' if it had been marked dead.
+    const characterWrites: Array<{
+      characterId: number;
+      hpCurrent: number;
+      hpTemp: number;
+      deathState: string;
+      deathSaveSuccesses: number;
+      deathSaveFailures: number;
+      status: 'active' | 'dead';
+    }> = [];
+    for (const row of rows) {
+      if (row.kind !== 'character' || row.characterId === null) continue;
+      const dead = row.deathState === 'dead';
+      const revived = !dead && row.hpCurrent > 0;
+      // Only flip lifecycle status on a definitive transition: dead -> 'dead', or a
+      // previously-dead character back to 'active' once they're healed above 0. A
+      // dying/stable character at 0 HP keeps whatever status it had (typically
+      // 'active') — the death STATE is carried by deathState, not lifecycle status.
+      let nextStatus: 'active' | 'dead' | undefined;
+      if (dead) nextStatus = 'dead';
+      else if (revived) nextStatus = 'active'; // cleared below if status is already 'active'
+      characterWrites.push({
+        characterId: row.characterId,
+        hpCurrent: row.hpCurrent,
+        hpTemp: row.hpTemp,
+        deathState: row.deathState,
+        deathSaveSuccesses: row.deathSaveSuccesses,
+        deathSaveFailures: row.deathSaveFailures,
+        status: nextStatus ?? 'active',
+      });
+    }
+
+    // Pull the current lifecycle status of every affected character so the
+    // write-back only touches `status` when it actually changes — avoids a
+    // wasteful write AND a misleading audit trail (a no-op status 'flip' would
+    // look like a deliberate DM action). Single round-trip via inArray.
+    const characterIds = characterWrites.map((w) => w.characterId);
+    const priorStatusById = new Map<number, string>();
+    if (characterIds.length > 0) {
+      const priorRows = await this.db
+        .select({ id: characters.id, status: characters.status })
+        .from(characters)
+        .where(inArray(characters.id, characterIds));
+      for (const r of priorRows) priorStatusById.set(r.id, r.status);
+    }
+
     const ts = nowIso();
     this.db.transaction((tx) => {
-      for (const row of rows) {
-        if (row.kind === 'character' && row.characterId !== null) {
-          tx.update(characters).set({ hpCurrent: row.hpCurrent, updatedAt: ts }).where(eq(characters.id, row.characterId)).run();
+      for (const w of characterWrites) {
+        // Issue #711: write the full combat slice — HP, temp HP, death state, and
+        // death-save counters — so the sheet reflects the post-fight truth. The
+        // lifecycle status flip is gated on a real change so a stable/dying PC
+        // whose status was already 'active' doesn't get a spurious write.
+        const set: Partial<typeof characters.$inferInsert> = {
+          hpCurrent: w.hpCurrent,
+          hpTemp: w.hpTemp,
+          deathState: w.deathState,
+          deathSaveSuccesses: w.deathSaveSuccesses,
+          deathSaveFailures: w.deathSaveFailures,
+          updatedAt: ts,
+        };
+        const prior = priorStatusById.get(w.characterId);
+        if (prior !== undefined && prior !== w.status) {
+          set.status = w.status;
         }
+        tx.update(characters).set(set).where(eq(characters.id, w.characterId)).run();
       }
       tx.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
     });
