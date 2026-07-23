@@ -692,10 +692,16 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       } catch {
         // Restricted filesystems may refuse chmod — skip rather than fail the suite.
         // Still clean up the isolated campaign so later tests don't see residual
-        // rows/files, but treat that cleanup itself as best-effort so a cleanup
-        // failure can't turn an intentional skip into a test failure.
+        // rows/files, but treat each cleanup step as independently best-effort
+        // (in its own try/catch) so a failure in one step can't prevent the
+        // other from running, and neither can turn an intentional skip into a
+        // test failure.
         try {
           await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
+        } catch {
+          // Ignore — this path only runs when chmod already failed.
+        }
+        try {
           fs.rmSync(campaignDir, { recursive: true, force: true });
         } catch {
           // Ignore — this path only runs when chmod already failed.
