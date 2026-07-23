@@ -404,9 +404,8 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       const res = await adminAgent
         .post('/api/v1/admin/attachments/diagnostics/fix')
         .send({ action: 'quarantine', diskPath: '../outside.txt' });
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(false);
-      expect(res.body.detail).toContain('uploads root');
+      expect(res.status).toBe(400);
+      expect(String(res.body.message)).toContain('uploads root');
     });
   });
 });

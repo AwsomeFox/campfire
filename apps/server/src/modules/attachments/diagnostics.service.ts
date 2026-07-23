@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments } from '../../db/schema';
@@ -429,23 +429,13 @@ export class DiagnosticsService {
 
     const safeRelPath = relPath.trim();
     if (!safeRelPath || path.isAbsolute(safeRelPath)) {
-      return {
-        success: false,
-        action: 'quarantine',
-        attachmentId: req.attachmentId ?? null,
-        detail: 'diskPath must be a non-empty relative path',
-      };
+      throw new BadRequestException('diskPath must be a non-empty relative path');
     }
 
     const srcPath = path.resolve(root, safeRelPath);
     const srcRelative = path.relative(root, srcPath);
-    if (srcRelative.startsWith('..') || path.isAbsolute(srcRelative)) {
-      return {
-        success: false,
-        action: 'quarantine',
-        attachmentId: req.attachmentId ?? null,
-        detail: 'diskPath must stay within uploads root',
-      };
+    if (srcRelative.startsWith('..')) {
+      throw new BadRequestException('diskPath must stay within uploads root');
     }
 
     if (!fs.existsSync(srcPath)) {
@@ -459,13 +449,8 @@ export class DiagnosticsService {
 
     const destPath = path.resolve(qRoot, srcRelative);
     const destRelative = path.relative(qRoot, destPath);
-    if (destRelative.startsWith('..') || path.isAbsolute(destRelative)) {
-      return {
-        success: false,
-        action: 'quarantine',
-        attachmentId: req.attachmentId ?? null,
-        detail: 'diskPath must stay within quarantine root',
-      };
+    if (destRelative.startsWith('..')) {
+      throw new BadRequestException('diskPath must stay within quarantine root');
     }
 
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
