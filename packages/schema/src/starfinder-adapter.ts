@@ -17,7 +17,7 @@
 // `StarfinderAdapter` with a two-line change. See #275 (candidate rulesets), #70 (the
 // RuleSystemAdapter seam), #295-300 (sibling rulesets following the same pattern).
 
-import type { MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
 
 /** Family id of the Starfinder 1e adapter. Matches the rule-pack slug the importer stamps, so a
  *  campaign whose `ruleSystem` is set to the installed Starfinder pack resolves to this adapter. */
@@ -161,9 +161,14 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   initiativeDie: 20,
   // Starfinder 1e caps characters at level 20 (Core Rulebook), the same ceiling as 5e/PF.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = starfinderDexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — no runtime import from ./index (cycle).
+    return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
   conditions: STARFINDER_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): StarfinderStatblockData {
@@ -181,6 +186,7 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
       hitPoints: total > 0 ? total : null,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       eac: d.eac ?? d.energyArmorClass ?? d.energy_armor_class ?? null,
