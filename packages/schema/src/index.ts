@@ -4825,6 +4825,34 @@ export const StorageOrphans = z.object({
 });
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
+export const FsCleanupPendingItem = z.object({
+  id: z.number().int().positive(),
+  relPath: z.string(),
+  scope: z.enum(['attachment', 'campaign_purge']),
+  // `held` = reserved before metadata commit; drain must not erase until armed.
+  status: z.enum(['held', 'pending', 'failed']),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  updatedAt: IsoDate,
+});
+export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
+
+export const FsCleanupSummary = z.object({
+  pendingCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  /** Total rows in fs_deletion_queue (items may be truncated for the admin UI). */
+  queueCount: z.number().int().nonnegative(),
+  items: z.array(FsCleanupPendingItem),
+});
+export type FsCleanupSummary = z.infer<typeof FsCleanupSummary>;
+
+/** Response when metadata is removed but filesystem erasure may still be in flight (issue #727). */
+export const PermanentDeletionResult = z.object({
+  filesPending: z.boolean(),
+  pendingPaths: z.array(z.string()).optional(),
+});
+export type PermanentDeletionResult = z.infer<typeof PermanentDeletionResult>;
+
 export const StorageStats = z.object({
   totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
   committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
@@ -4834,6 +4862,7 @@ export const StorageStats = z.object({
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,
+  fsCleanup: FsCleanupSummary,
 });
 export type StorageStats = z.infer<typeof StorageStats>;
 

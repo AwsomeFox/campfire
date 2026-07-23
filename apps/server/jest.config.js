@@ -12,6 +12,9 @@ module.exports = {
   // is `-`, not `.`), so the two patterns never double-count a file.
   testRegex: ['.*\\.e2e-spec\\.ts$', '.*\\.spec\\.ts$'],
   moduleFileExtensions: ['js', 'json', 'ts'],
+  moduleNameMapper: {
+    '^@campfire/schema$': '<rootDir>/../../packages/schema/src/index.ts',
+  },
   testTimeout: 30000,
   maxWorkers: 1,
   // The integration-heavy suite creates a fresh Nest application and SQLite
