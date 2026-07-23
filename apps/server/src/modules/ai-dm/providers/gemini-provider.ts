@@ -180,7 +180,9 @@ export class GeminiProvider implements AiProvider {
     let totalText = '';
     const toolCalls: AiToolCall[] = [];
     let usage: AiUsage | undefined;
-    let finishReason: AiFinishReason = 'unknown';
+    // Default to 'stop' (parity with parseResult and the OpenAI/Anthropic stream
+    // adapters) so an omitted Gemini finishReason never leaks 'unknown' downstream.
+    let finishReason: AiFinishReason = 'stop';
 
     // Idle/read timeout stays armed until the body completes or aborts (#1063).
     for await (const event of parseSse(res.body, {
@@ -198,10 +200,13 @@ export class GeminiProvider implements AiProvider {
       const candidate = chunk.candidates?.[0];
       if (candidate?.content?.parts) {
         for (const part of candidate.content.parts) {
+          // Handle text and functionCall independently (a part could carry both),
+          // mirroring the non-streaming parse so the two paths never diverge.
           if (part.text) {
             totalText += part.text;
             yield { type: 'text', delta: part.text };
-          } else if (part.functionCall) {
+          }
+          if (part.functionCall) {
             // Gemini streams each functionCall as a whole part (not JSON deltas), so
             // emit the complete call in one tool_call event and record it for `done`.
             const index = toolCalls.length;

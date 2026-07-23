@@ -187,4 +187,26 @@ describe('GeminiProvider — streaming (#1062)', () => {
     expect(done.result.toolCalls).toEqual([{ id: 'call_0', name: 'roll_dice', arguments: { sides: 20 } }]);
     expect(done.result.finishReason).toBe('tool_calls');
   });
+
+  it('keeps both the text and the tool call when one part carries both', async () => {
+    const { fetchImpl } = fakeFetch(
+      streamResponse([
+        frame({ candidates: [{ content: { parts: [{ text: 'You swing. ', functionCall: { name: 'roll_dice', args: { sides: 20 } } }] }, finishReason: 'STOP' }] }),
+      ]),
+    );
+    const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const events = await collect<AiStreamEvent>(p.stream(req));
+    expect(events.some((e) => e.type === 'text' && (e as { delta: string }).delta === 'You swing. ')).toBe(true);
+    const done = events.find((e) => e.type === 'done') as { type: 'done'; result: { text: string; toolCalls: unknown[] } };
+    expect(done.result.text).toBe('You swing. ');
+    expect(done.result.toolCalls).toEqual([{ id: 'call_0', name: 'roll_dice', arguments: { sides: 20 } }]);
+  });
+
+  it('defaults finishReason to stop when Gemini omits it (no unknown leak)', async () => {
+    const { fetchImpl } = fakeFetch(streamResponse([frame({ candidates: [{ content: { parts: [{ text: 'hi' }] } }] })]));
+    const p = new GeminiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const events = await collect<AiStreamEvent>(p.stream(req));
+    const done = events.find((e) => e.type === 'done') as { type: 'done'; result: { finishReason: string } };
+    expect(done.result.finishReason).toBe('stop');
+  });
 });
