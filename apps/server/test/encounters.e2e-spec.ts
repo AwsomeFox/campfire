@@ -1024,6 +1024,24 @@ describe('encounters (e2e)', () => {
       expect(selfDamage[selfDamage.length - 1].target).toBe('Ember');
     });
 
+    it('honors actorId: null as an explicit opt-out of current-turn attribution', async () => {
+      const server = ctx.app.getHttpServer();
+      // Ember is the current-turn combatant, so an omitted actorId would attribute to
+      // Ember. Passing null must suppress attribution entirely (tri-state contract).
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -1, actorId: null });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Goblin' && e.detail.includes('1'),
+      );
+      expect(damage.length).toBeGreaterThanOrEqual(1);
+      expect(damage[damage.length - 1].actor).toBeNull();
+    });
+
     it('ignores an actorId that does not reference a combatant in this encounter', async () => {
       const server = ctx.app.getHttpServer();
       // A stale client sends an actorId that doesn't belong to any combatant here. The
