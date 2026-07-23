@@ -29,6 +29,7 @@ import {
   type RetryConfig,
   DEFAULT_RETRY,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
   postJson,
   parseSse,
 } from './http';
@@ -124,7 +125,12 @@ export class AnthropicProvider implements AiProvider {
     if (!res.body) throw new AiProviderError('transport', 'anthropic: streaming response had no body', { provider: this.name });
 
     const acc = new AnthropicStreamAccumulator(req.model || this.opts.model);
-    for await (const { event, data } of parseSse(res.body)) {
+    // Idle/read timeout stays armed until the body completes or aborts (#1063).
+    for await (const { event, data } of parseSse(res.body, {
+      signal: opts?.signal,
+      idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+      provider: this.name,
+    })) {
       let payload: AnthropicStreamEvent;
       try {
         payload = JSON.parse(data) as AnthropicStreamEvent;

@@ -1557,6 +1557,26 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
 }
 
 /**
+ * Migration for DBs created before combat-log combatant ids (issue #869):
+ * `encounter_events.actor_id` / `target_id` didn't exist. Plain nullable ADD
+ * COLUMNs — no table rebuild needed. Existing rows keep denormalized name strings
+ * and get NULL ids; listing still best-effort redacts by matching those names to
+ * currently-hidden NPC combatants. Fresh DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateEncounterEventsTableForCombatantIds(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_events'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounter_events)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('actor_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN actor_id INTEGER');
+  if (!has('target_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN target_id INTEGER');
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
@@ -1686,6 +1706,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
   { name: '0058_campaigns_public_invites_enabled', run: migrateCampaignsTableForPublicInvitesEnabled },
   { name: '0059_public_invites_disabled_inactive', run: migratePublicInvitesDisabledForInactiveCampaigns },
+  { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
 
 ];
 
