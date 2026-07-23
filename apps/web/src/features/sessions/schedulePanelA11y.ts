@@ -32,6 +32,13 @@ export function formatDatetimeLocalInputValue(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** ISO instant → value for `<input type="datetime-local">` in the viewer's local time. */
+export function isoToDatetimeLocalInputValue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return formatDatetimeLocalInputValue(d);
+}
+
 /**
  * Relative datetime-local value for Playwright fills (days from today at hour:minute).
  * Callers that need a guaranteed-future instant should pass days >= 1.
