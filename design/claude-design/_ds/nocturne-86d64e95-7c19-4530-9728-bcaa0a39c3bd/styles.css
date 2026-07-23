@@ -1,6 +1,7 @@
-/* Nocturne — design-system tokens and component classes. This file is the source of truth for the system's look; retune it here and see readme.md. */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
+/* Nocturne — design-system tokens and component classes. This file is the source of truth for the system's look; retune it here and see readme.md.
+   When syncing into apps/web/src/nocturne.css, keep Inter self-hosted via @fontsource
+   (see apps/web/src/main.tsx, issue #433). Do not reintroduce a Google Fonts @import —
+   nested @import url() after generated CSS triggers Vite warnings and may drop the font. */
 :root {
   --color-bg: #161826;
   --color-surface: #232532;

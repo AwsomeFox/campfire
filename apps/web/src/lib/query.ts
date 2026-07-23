@@ -61,6 +61,16 @@ export function invalidateEncounter(client: QueryClient, encounterId: number): v
   void client.invalidateQueries({ queryKey: queryKeys.encounter(encounterId) });
 }
 
+/**
+ * Invalidate campaign character reads (issue #421). Called from the run-session SSE
+ * handler on `character.updated` so inline encounter cards reconcile sheet edits
+ * (actions/stats/saves/skills/slots) without requiring an encounterId on the frame.
+ */
+export function invalidateCampaignCharacters(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+  void client.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+}
+
 // ---------------------------------------------------------------------------
 // AI-DM reads (#338 foundation). Mirror of the server's thin session/seat truth so
 // the Table page + levers + co-DM surfaces (#339–#344) all read through one seam.

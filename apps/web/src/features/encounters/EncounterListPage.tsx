@@ -13,6 +13,12 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  ENCOUNTER_NAME_HELP,
+  ENCOUNTER_NAME_ID,
+  ENCOUNTER_NAME_LABEL,
+  ENCOUNTER_NAME_PLACEHOLDER,
+} from './postCreateGuidance';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -165,12 +171,16 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Enter an encounter name.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, {
-        name: name.trim(),
+        name: trimmed,
         locationId: locationId ? Number(locationId) : undefined,
         questId: questId ? Number(questId) : undefined,
         sessionId: sessionId ? Number(sessionId) : undefined,
@@ -182,18 +192,43 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     }
   }
 
+  const nameHelpId = `${ENCOUNTER_NAME_ID}-help`;
+  const nameErrorId = `${ENCOUNTER_NAME_ID}-error`;
+  const nameInvalid = !!error && !name.trim();
+
   return (
     <Card className="space-y-3">
       <h2 className="font-bold text-white text-sm">New encounter</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && (
+        <p id={nameErrorId} className="text-sm text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
       <form onSubmit={submit} className="space-y-3">
-        <TextInput
-          placeholder="Ambush at the ford"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          maxLength={120}
-          autoFocus
-        />
+        <div className="space-y-1">
+          <label htmlFor={ENCOUNTER_NAME_ID} className="text-xs text-slate-400 block">
+            {ENCOUNTER_NAME_LABEL}
+          </label>
+          <TextInput
+            id={ENCOUNTER_NAME_ID}
+            name="encounterName"
+            placeholder={ENCOUNTER_NAME_PLACEHOLDER}
+            value={name}
+            onChange={(e) => {
+              setName(e.target.value);
+              if (error) setError(null);
+            }}
+            maxLength={120}
+            autoFocus
+            required
+            aria-required="true"
+            aria-invalid={nameInvalid || undefined}
+            aria-describedby={`${nameHelpId}${error ? ` ${nameErrorId}` : ''}`}
+          />
+          <p id={nameHelpId} className="text-muted" style={{ fontSize: 11, margin: 0 }}>
+            {ENCOUNTER_NAME_HELP}
+          </p>
+        </div>
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
           <label className="text-xs text-slate-400 space-y-1">
             <span className="inline-flex items-center gap-1"><GameIcon slug="treasure-map" size={12} /> Location</span>

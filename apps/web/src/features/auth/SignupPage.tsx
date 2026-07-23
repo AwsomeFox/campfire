@@ -4,13 +4,25 @@
  * language as LoginPage/SetupPage. Bounces to /setup on first run and to /login
  * when signup is disabled.
  */
-import { useState, type FormEvent } from 'react';
+import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
+import {
+  AUTH_ERROR_IDS,
+  AUTH_FIELD_IDS,
+  AUTH_GENERIC_ERROR,
+  AUTH_RATE_LIMIT_ERROR,
+  AUTH_SIGNUP_DISABLED_ERROR,
+  AUTH_USERNAME_TAKEN_ERROR,
+  type AuthErrorState,
+  describedBy,
+  focusAuthError,
+  validateNewAccountFields,
+} from './authFormA11y';
 
 function FlameMark() {
   return (
@@ -40,8 +52,12 @@ export function SignupPage() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useLayoutEffect(() => {
+    if (error) focusAuthError(error);
+  }, [error]);
 
   if (!loading && status?.setupRequired) {
     return <Navigate to="/setup" replace />;
@@ -54,16 +70,9 @@ export function SignupPage() {
     e.preventDefault();
     setError(null);
 
-    if (!/^[a-z0-9_.-]+$/i.test(username)) {
-      setError('Username may only contain letters, numbers, and _ . -');
-      return;
-    }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters.');
-      return;
-    }
-    if (password !== confirm) {
-      setError('Passwords do not match.');
+    const clientError = validateNewAccountFields({ username, password, confirm });
+    if (clientError) {
+      setError(clientError);
       return;
     }
 
@@ -78,18 +87,28 @@ export function SignupPage() {
       navigate('/', { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setError('That username is already taken.');
+        setError({
+          kind: 'fields',
+          fields: { username: AUTH_USERNAME_TAKEN_ERROR },
+          focus: 'username',
+        });
       } else if (err instanceof ApiError && err.status === 403) {
-        setError('Signup is disabled — ask your server admin for an account.');
+        setError({ kind: 'form', message: AUTH_SIGNUP_DISABLED_ERROR });
       } else if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts — wait a minute and try again.');
+        setError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
       } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setSubmitting(false);
     }
   }
+
+  const fieldErrors = error?.kind === 'fields' ? error.fields : {};
+  const formError = error?.kind === 'form' ? error.message : null;
 
   return (
     <div
@@ -109,25 +128,35 @@ export function SignupPage() {
             </p>
           </div>
 
-          <form onSubmit={onSubmit} className="w-full flex flex-col gap-3">
+          <form onSubmit={onSubmit} className="w-full flex flex-col gap-3" noValidate>
             <div className="field">
-              <label htmlFor="username">Username</label>
+              <label htmlFor={AUTH_FIELD_IDS.username}>Username</label>
               <input
-                id="username"
+                id={AUTH_FIELD_IDS.username}
                 className="input"
                 value={username}
-                onChange={(e) => setUsername(e.target.value)}
+                onChange={(e) => {
+                  setUsername(e.target.value);
+                  if (fieldErrors.username) setError(null);
+                }}
                 autoComplete="username"
                 autoFocus
                 required
+                aria-invalid={fieldErrors.username ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.username && AUTH_ERROR_IDS.username)}
               />
+              {fieldErrors.username && (
+                <p id={AUTH_ERROR_IDS.username} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.username}
+                </p>
+              )}
             </div>
             <div className="field">
-              <label htmlFor="displayName">
+              <label htmlFor={AUTH_FIELD_IDS.displayName}>
                 Display name <span className="text-muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· optional</span>
               </label>
               <input
-                id="displayName"
+                id={AUTH_FIELD_IDS.displayName}
                 className="input"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
@@ -135,30 +164,60 @@ export function SignupPage() {
               />
             </div>
             <div className="field">
-              <label htmlFor="password">Password</label>
+              <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
               <PasswordInput
-                id="password"
+                id={AUTH_FIELD_IDS.password}
                 className="input"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (fieldErrors.password) setError(null);
+                }}
                 autoComplete="new-password"
                 required
+                aria-invalid={fieldErrors.password ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.password && AUTH_ERROR_IDS.password)}
               />
+              {fieldErrors.password && (
+                <p id={AUTH_ERROR_IDS.password} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.password}
+                </p>
+              )}
             </div>
             <div className="field">
-              <label htmlFor="confirm">Confirm password</label>
+              <label htmlFor={AUTH_FIELD_IDS.confirm}>Confirm password</label>
               <PasswordInput
-                id="confirm"
+                id={AUTH_FIELD_IDS.confirm}
                 className="input"
                 value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
+                onChange={(e) => {
+                  setConfirm(e.target.value);
+                  if (fieldErrors.confirm) setError(null);
+                }}
                 autoComplete="new-password"
                 revealNoun="confirm password"
                 required
+                aria-invalid={fieldErrors.confirm ? true : undefined}
+                aria-describedby={describedBy(fieldErrors.confirm && AUTH_ERROR_IDS.confirm)}
               />
+              {fieldErrors.confirm && (
+                <p id={AUTH_ERROR_IDS.confirm} role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>
+                  {fieldErrors.confirm}
+                </p>
+              )}
             </div>
 
-            {error && <p className="text-sm text-rose-400">{error}</p>}
+            {formError && (
+              <p
+                id={AUTH_ERROR_IDS.form}
+                role="alert"
+                tabIndex={-1}
+                className="text-sm text-rose-400"
+                style={{ margin: 0 }}
+              >
+                {formError}
+              </p>
+            )}
 
             <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
               {submitting ? 'Creating account…' : 'Create account'}

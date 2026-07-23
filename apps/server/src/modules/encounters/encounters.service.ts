@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -11,6 +11,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
@@ -25,13 +26,13 @@ import {
   crToXp,
   generateEncounterGroup,
   hpBandFor,
-  parseCr,
   redactEncounterEventsForViewer,
   sortCombatants,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import { AttachmentsService } from '../attachments/attachments.service';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
@@ -67,9 +68,7 @@ function clampPercent(value: number): number {
  * fog is a display aid, never a reason to fail a whole encounter read.
  */
 function parseFog(text: string | null): FogState | null {
-  if (text == null) return null;
-  const parsed = FogState.safeParse(fromJsonText<unknown>(text, null));
-  return parsed.success ? parsed.data : null;
+  return parseFogState(text);
 }
 
 /**
@@ -133,6 +132,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
+    tokenHiddenByFog: false,
   };
 }
 
@@ -181,10 +181,14 @@ function tokenInRevealedRegion(c: Combatant, fog: FogState): boolean {
  * on those combatants server-side (the client never receives the coordinates), the same
  * server-side-gate approach as the issue #43 monster-HP band. Tokens inside a revealed
  * rectangle, and unplaced combatants, are returned unchanged.
+ *
+ * Issue #418: also set `tokenHiddenByFog: true` so the client can show an owner-safe
+ * "placed outside the revealed area" state instead of falsely listing the token as
+ * Unplaced (and offering a no-op place-at-center action). Coordinates stay null.
  */
 function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
   if (tokenInRevealedRegion(c, fog)) return c;
-  return { ...c, tokenX: null, tokenY: null };
+  return { ...c, tokenX: null, tokenY: null, tokenHiddenByFog: true };
 }
 
 export type EncounterSearchEntry = {
@@ -204,6 +208,7 @@ export class EncountersService {
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
     private readonly revisions: RevisionsService,
+    private readonly attachmentsService: AttachmentsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -323,6 +328,17 @@ export class EncountersService {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
+  }
+
+  /**
+   * Lightweight encounter domain mapping for GET /encounters/:id/map.
+   * Applies the same hidden-entity gate as getWithCombatantsOrThrow without joining combatants.
+   */
+  encounterForMapOrThrow(row: typeof encounters.$inferSelect, viewerRole: Role): Encounter {
+    if (!isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${row.id} not found`);
+    }
+    return encounterToDomain(row);
   }
 
   /**
@@ -721,9 +737,29 @@ export class EncountersService {
           );
         }
       }
-      // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
+      // Fog of war (issue #40 / #463): withhold the position of any token in an
+      // unrevealed region. Encounter JSON still degrades invalid fog to `null` for
+      // the fog field itself, but token coordinates must fail closed the same way
+      // the map-byte path does — otherwise a corrupt fog row would leak monster
+      // positions while the image stayed fully masked. Sibling fog protection is
+      // mirrored here too: when another encounter still conceals the shared map,
+      // this fight's tokens must not float on a fully masked board.
       const fog = parseFog(row.fog);
-      if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
+      const invalidFog = row.fog !== null && fog === null;
+      // Sibling protection applies whenever THIS encounter does not itself conceal
+      // pixels — including fog enabled but fully revealed (no rectangles masked).
+      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+      const siblingProtects =
+        !invalidFog &&
+        !ownFogConceals &&
+        row.mapAttachmentId != null &&
+        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
+      if (invalidFog || siblingProtects) {
+        const concealAll: FogState = { enabled: true, revealed: [] };
+        list = list.map((c) => redactTokenInFog(c, concealAll));
+      } else if (fog?.enabled) {
+        list = list.map((c) => redactTokenInFog(c, fog));
+      }
     }
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
@@ -880,6 +916,41 @@ export class EncountersService {
       return this.getWithCombatantsOrThrow(encounterId, role);
     }
 
+    // If this update activates fog over a map that had previously been revealed as
+    // a handout, restage the raw attachment immediately. The raw-file route also
+    // checks fog dynamically (defense in depth), so even a failure here cannot leak
+    // source pixels; this keeps the attachment metadata/UI consistent as well.
+    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
+      // Reusing the campaign region-map attachment as a fogged battle map would
+      // block players from GET /attachments/:id/file (RegionMap has no fog-safe
+      // alternate). Clone the bytes onto a dedicated battle-map row and retarget
+      // this encounter so the shared campaign background stays player-visible.
+      const [campaign] = await this.db
+        .select({ mapAttachmentId: campaigns.mapAttachmentId })
+        .from(campaigns)
+        .where(eq(campaigns.id, encounterRow.campaignId))
+        .limit(1);
+      if (campaign?.mapAttachmentId === effectiveMapId) {
+        const clone = await this.attachmentsService.duplicate(effectiveMapId, user, role, {
+          filenamePrefix: 'battle-',
+        });
+        await this.db
+          .update(encounters)
+          .set({ mapAttachmentId: clone.id, updatedAt: nowIso() })
+          .where(eq(encounters.id, encounterId));
+        effectiveMapId = clone.id;
+      }
+
+      const attachment = await this.attachmentsService.getRowOrThrow(effectiveMapId);
+      // Only hide attachments that belong to this encounter's campaign — never
+      // side-effect another campaign's row if a stale/cross-campaign id slipped through.
+      if (attachment.campaignId === encounterRow.campaignId && !attachment.hidden) {
+        await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
+      }
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -1028,20 +1099,27 @@ export class EncountersService {
   }
 
   /**
-   * Compute a read-only 5e difficulty band for an encounter (issue #58). Pulls the PC
-   * levels from the character-combatants' linked character sheets and the monster CRs
-   * from the monster-combatants' linked rule entries (dataJson.challengeRating), then
-   * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
+   * Compute a read-only difficulty estimate for an encounter (issues #58 + #429). Pulls the
+   * PC levels from character-combatants and monster CRs from linked rule entries, then
+   * asks the campaign's RuleSystemAdapter to own the math/labels/support status. Homebrew
+   * and non-5e systems return an explicit unsupported result; manual enemies with no CR/XP
+   * return unknown ("Unknown—add XP/CR") instead of a misleading Trivial band.
    */
   async getDifficulty(encounterId: number, viewerRole?: Role): Promise<EncounterDifficulty> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    // Entity-level secrecy (issue #262): a hidden encounter's 5e difficulty (monsterCount +
+    // Entity-level secrecy (issue #262): a hidden encounter's difficulty (monsterCount +
     // adjustedXp) is DM-only prep — deny a non-DM the same way the roster read does (404, so
     // existence isn't leaked). undefined role is DM-facing and always allowed.
     if (viewerRole !== undefined && !isVisibleTo({ hidden: encounterRow.hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
-    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const [campaignRow] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, encounterRow.campaignId))
+      .limit(1);
+    const ruleSystem = campaignRow?.ruleSystem ?? null;
+    const adapter = ruleSystemAdapter(ruleSystem);
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -1060,7 +1138,7 @@ export class EncountersService {
 
     // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
     // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
-    // (0 XP) rather than being dropped, so the monster COUNT still drives the multiplier.
+    // rather than being dropped, so missing data can surface as unknown (issue #429).
     const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
     const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
@@ -1077,7 +1155,10 @@ export class EncountersService {
     }
     const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
-    return computeEncounterDifficulty(partyLevels, monsterCrs);
+    return estimateEncounterDifficultyForRuleSystem(ruleSystem, {
+      partyLevels,
+      monsterChallengeRatings: monsterCrs,
+    });
   }
 
   /**

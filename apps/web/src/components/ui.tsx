@@ -143,16 +143,29 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
 export function ErrorNote({
   message,
   onRetry,
+  onDismiss,
   pending = false,
+  context,
 }: {
   message: string;
   onRetry?: () => void | Promise<void>;
+  /** Optional dismiss — used when the error is stale and no longer actionable (#430). */
+  onDismiss?: () => void;
   /** Keeps Retry visible but disabled while the loader/mutation is in flight. */
   pending?: boolean;
+  /** Light secondary context (e.g. relative time) shown after the message. */
+  context?: string;
 }) {
   return (
     <div role="alert" className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
-      {message}{' '}
+      <span>{message}</span>
+      {context && (
+        <span className="text-[var(--color-neutral-500)]">
+          {' '}
+          · {context}
+        </span>
+      )}
+      {' '}
       {onRetry && (
         <button
           type="button"
@@ -166,6 +179,15 @@ export function ErrorNote({
           className="font-semibold text-[var(--cf-accent)] hover:underline disabled:opacity-60 disabled:no-underline"
         >
           {pending ? 'Retrying…' : 'Retry'}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="ml-2 font-semibold text-[var(--color-neutral-500)] hover:underline"
+        >
+          Dismiss
         </button>
       )}
     </div>

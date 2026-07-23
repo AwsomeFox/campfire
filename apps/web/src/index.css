@@ -1,7 +1,9 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
 @import "tailwindcss";
 /* Nocturne design-system component classes (.card, .btn, .input, .field, .dialog, …) —
-   copied verbatim from design/claude-design/_ds/nocturne-…/styles.css (source of truth). */
+   copied verbatim from design/claude-design/_ds/nocturne-…/styles.css (source of truth).
+   Inter is self-hosted via @fontsource/inter imports in main.tsx (issue #433) — do not
+   reintroduce a Google Fonts @import here or inside nocturne.css; nested @import url()
+   after Tailwind/generated rules triggers Vite's CSS optimizer warning and can drop the font. */
 @import "./nocturne.css";
 
 /*
