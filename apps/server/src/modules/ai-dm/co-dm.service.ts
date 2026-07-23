@@ -12,6 +12,7 @@ import {
   LocationCreate,
   QuestCreate,
   SessionCreate,
+  FactionCreate,
   EncounterGenerate,
   GenerateMapParams,
 } from '@campfire/schema';
@@ -38,13 +39,15 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   npc: 'npc',
   location: 'location',
   beat: 'quest', // a story beat / next objective is filed as a quest (#27)
+  quest: 'quest', // a direct quest draft (#1056)
+  faction: 'faction', // a faction draft (#1056)
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content for the DM's approval queue.
@@ -262,7 +265,9 @@ export class CoDmService {
     switch (target) {
       case 'npc':
       case 'location':
-      case 'beat': {
+      case 'beat':
+      case 'quest':
+      case 'faction': {
         if (parsed === null) {
           throw new UnprocessableEntityException(
             `The AI did not return a JSON ${target} draft. Configure a real provider (the default no-op scaffold cannot author content) or retry.`,
@@ -301,6 +306,20 @@ export class CoDmService {
             body: raw.body ?? raw.summary ?? raw.description ?? '',
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
+        case 'quest':
+          return QuestCreate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled quest',
+            body: raw.body ?? raw.description ?? '',
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+            ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
+          }) as Record<string, unknown>;
+        case 'faction':
+          return FactionCreate.parse({
+            name: raw.name ?? 'Untitled faction',
+            ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+            ...(typeof raw.standing === 'string' ? { standing: raw.standing } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
         case 'recap':
           return SessionCreate.parse(raw) as Record<string, unknown>;
         case 'encounter':
@@ -331,6 +350,8 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
   beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
+  quest: '{"title": string (required), "body"?: string (markdown), "status"?: "active"|"completed"|"failed", "dmSecret"?: string}',
+  faction: '{"name": string (required), "body"?: string (markdown), "standing"?: string, "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',

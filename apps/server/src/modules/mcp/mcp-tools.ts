@@ -3041,7 +3041,7 @@ export class McpToolsService {
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | quest | faction | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
       },

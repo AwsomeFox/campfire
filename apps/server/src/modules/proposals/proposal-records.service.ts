@@ -28,9 +28,9 @@ import { projectProposal, projectProposals } from './proposal-projection';
 // their proposals carry generate params, not a persisted row. `map` is not one of the
 // note-pin EntityTypes (a map is an attachment, not an entity table), so this union is
 // standalone rather than derived from EntityType. Factions (issue #221) stay DM-write-only.
-export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'faction'> | 'map';
+export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map';
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -233,6 +233,10 @@ export class ProposalRecordsService {
       // to diff against a fresh generation. Return null explicitly to keep the switch total.
       case 'encounter':
       case 'map':
+        return null;
+      // Factions (issue #1056) are proposable for Co-DM drafting but create-only in v1;
+      // update proposals are not yet filed for factions. Return null to keep the switch total.
+      case 'faction':
         return null;
     }
   }

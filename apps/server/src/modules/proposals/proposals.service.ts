@@ -13,6 +13,8 @@ import {
   CharacterUpdate,
   EncounterGenerate,
   GenerateMapParams,
+  FactionCreate,
+  FactionUpdate,
   ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
@@ -29,6 +31,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
+import { FactionsService } from '../factions/factions.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
@@ -54,6 +57,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationCreate.strict(),
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
+  faction: FactionCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
   // generate_map (#306). These are create-only in v1; the update entries below reuse the
@@ -67,6 +71,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationUpdate.strict(),
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
+  faction: FactionUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
 };
@@ -84,6 +89,7 @@ export class ProposalsService {
     private readonly characters: CharactersService,
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
+    private readonly factions: FactionsService,
   ) {}
 
   async listForCampaign(
@@ -182,6 +188,8 @@ export class ProposalsService {
           update: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
         };
+      case 'faction':
+        return this.factions;
     }
   }
 
