@@ -343,6 +343,42 @@ describe('campaign ZIP import — attachments round-trip (e2e)', () => {
     expect(sourceCamp.body.mapAttachmentId).toBe(mapAttachmentId);
   });
 
+  // Issue #630: Unicode attachment filenames must survive export → import and
+  // still emit RFC 5987 Content-Disposition on the restored file.
+  it('preserves Unicode attachment filenames across export/restore', async () => {
+    const unicodeName = '地図🎉.png';
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Unicode Filename Source' });
+    expect(campRes.status).toBe(201);
+    const srcId = campRes.body.id as number;
+
+    const up = await dmAgent
+      .post(`/api/v1/campaigns/${srcId}/attachments`)
+      .field('kind', 'image')
+      .attach('file', TINY_PNG, { filename: unicodeName, contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    expect(up.body.filename).toBe(unicodeName);
+
+    const zipRes = await getBuffer(dmAgent, `/api/v1/campaigns/${srcId}/export?format=mdzip`);
+    expect(zipRes.status).toBe(200);
+
+    const importRes = await dmAgent
+      .post('/api/v1/campaigns/import/archive')
+      .attach('file', zipRes.body as Buffer, { filename: 'export.zip', contentType: 'application/zip' });
+    expect(importRes.status).toBe(201);
+
+    const atts = await dmAgent.get(`/api/v1/campaigns/${importRes.body.id}/attachments`);
+    expect(atts.status).toBe(200);
+    const restored = atts.body.find((a: { filename: string }) => a.filename === unicodeName);
+    expect(restored).toBeDefined();
+
+    const fileRes = await getBuffer(dmAgent, `/api/v1/attachments/${restored.id}/file`);
+    expect(fileRes.status).toBe(200);
+    const disposition = String(fileRes.headers['content-disposition']);
+    expect(disposition).toContain("filename*=UTF-8''");
+    expect(disposition).toContain(encodeURIComponent(unicodeName));
+    expect(disposition).not.toMatch(/filename="%/);
+  });
+
   it('rejects a non-zip upload with 400', async () => {
     const res = await dmAgent
       .post('/api/v1/campaigns/import/archive')
