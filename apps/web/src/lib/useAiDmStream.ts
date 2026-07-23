@@ -20,6 +20,7 @@
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { API } from './api';
+import { abortableDelay } from './abortableDelay';
 import {
   classifyStreamConnectStatus,
   getSessionResumeEpoch,
@@ -207,15 +208,6 @@ export function useAiDmStream(
     const controller = new AbortController();
     let disposed = false;
 
-    const sleep = (ms: number) =>
-      new Promise<void>((resolve) => {
-        const handle = setTimeout(resolve, ms);
-        controller.signal.addEventListener('abort', () => {
-          clearTimeout(handle);
-          resolve();
-        });
-      });
-
     (async () => {
       let attempt = 0;
       while (!disposed) {
@@ -277,7 +269,7 @@ export function useAiDmStream(
           throw new Error('AI-DM SSE stream ended');
         } catch {
           if (disposed || controller.signal.aborted) return;
-          await sleep(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
+          await abortableDelay(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS), controller.signal);
           attempt += 1;
         }
       }
