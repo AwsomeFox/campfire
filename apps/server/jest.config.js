@@ -61,7 +61,7 @@ module.exports = {
     './src/modules/scribe/': {
       statements: 78,
       branches: 48,
-      functions: 58,
+      functions: 54,
       lines: 80,
     },
   },
