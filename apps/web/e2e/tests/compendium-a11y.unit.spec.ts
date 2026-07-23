@@ -111,4 +111,29 @@ test.describe('compendium results status (issue #647)', () => {
       }),
     ).toBe('12 results.');
   });
+
+  test('suppresses empty/count copy when the search request failed', () => {
+    // ErrorNote (role="alert") owns the failure announcement — avoid "no results" chatter.
+    expect(
+      compendiumResultsStatus({
+        loading: false,
+        resultCount: 0,
+        query: 'fire',
+        typeKey: 'spell',
+        typeLabel: 'Spells',
+        failed: true,
+      }),
+    ).toBe('');
+
+    expect(
+      compendiumResultsStatus({
+        loading: false,
+        resultCount: 3,
+        query: '',
+        typeKey: 'all',
+        typeLabel: 'All',
+        failed: true,
+      }),
+    ).toBe('');
+  });
 });

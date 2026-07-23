@@ -180,6 +180,7 @@ export default function CompendiumPage() {
         query: debouncedQuery,
         typeKey: type,
         typeLabel: activeTypeLabel,
+        failed: Boolean(error),
       })
     : '';
 
@@ -327,67 +328,68 @@ export default function CompendiumPage() {
         ) : (
           <>
             {error && <ErrorNote message={error} />}
-            {loading && !results ? (
-              <Card>
-                <Skeleton lines={5} />
-              </Card>
-            ) : results && results.length === 0 ? (
-              <div className="card items-center text-center" style={{ padding: 24 }}>
-                {debouncedQuery.trim() ? (
-                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                    Nothing matches “{debouncedQuery.trim()}”
-                    {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
-                    {type !== 'all' ? ', or switch to All' : ''}.
-                  </p>
-                ) : type !== 'all' ? (
-                  <>
-                    <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-                      No {activeTypeLabel.toLowerCase()} in this rule system.
+            {!error &&
+              (loading && !results ? (
+                <Card>
+                  <Skeleton lines={5} />
+                </Card>
+              ) : results && results.length === 0 ? (
+                <div className="card items-center text-center" style={{ padding: 24 }}>
+                  {debouncedQuery.trim() ? (
+                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                      Nothing matches “{debouncedQuery.trim()}”
+                      {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
+                      {type !== 'all' ? ', or switch to All' : ''}.
                     </p>
-                    <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-                      This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
+                  ) : type !== 'all' ? (
+                    <>
+                      <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
+                        No {activeTypeLabel.toLowerCase()} in this rule system.
+                      </p>
+                      <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
+                        This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                      This rule system has no entries yet.
                     </p>
-                  </>
-                ) : (
-                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                    This rule system has no entries yet.
-                  </p>
-                )}
-              </div>
-            ) : (
-              (results ?? []).map((entry) => (
-                <Link
-                  key={entry.id}
-                  to={`/c/${id}/compendium/${entry.id}`}
-                  className="card elev-sm text-left"
-                  style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
-                >
-                  {/* Type/school/monster glyph (issue #305): the DM's override if set,
-                      else derived from the entry's type + dataJson. Decorative — the
-                      name beside it carries the label. */}
-                  <span
-                    aria-hidden="true"
-                    style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                  )}
+                </div>
+              ) : (
+                (results ?? []).map((entry) => (
+                  <Link
+                    key={entry.id}
+                    to={`/c/${id}/compendium/${entry.id}`}
+                    className="card elev-sm text-left"
+                    style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                   >
-                    <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
-                  </span>
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
-                      {entry.name}
+                    {/* Type/school/monster glyph (issue #305): the DM's override if set,
+                        else derived from the entry's type + dataJson. Decorative — the
+                        name beside it carries the label. */}
+                    <span
+                      aria-hidden="true"
+                      style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                    >
+                      <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
                     </span>
-                    <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
-                      {entry.summary}
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
+                        {entry.name}
+                      </span>
+                      <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+                        {entry.summary}
+                      </span>
                     </span>
-                  </span>
-                  <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
-                    {entry.type}
-                  </span>
-                  <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
-                    ›
-                  </span>
-                </Link>
-              ))
-            )}
+                    <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
+                      {entry.type}
+                    </span>
+                    <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
+                      ›
+                    </span>
+                  </Link>
+                ))
+              ))}
           </>
         )}
       </div>

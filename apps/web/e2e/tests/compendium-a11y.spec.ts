@@ -181,4 +181,20 @@ test.describe('Compendium accessibility (issue #647)', () => {
     await expect(page.getByRole('link', { name: /Goblin/ })).toHaveCount(0);
     await expect(page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL })).toBeVisible();
   });
+
+  test('search failure shows an alert and does not announce empty results', async ({ page }) => {
+    const { campaignId } = seed();
+    await stubCompendiumBrowse(page, FIXTURE_ENTRIES);
+    await page.route('**/api/v1/rules/search**', (route) =>
+      route.fulfill({ status: 503, json: { message: "Couldn't search the compendium." } }),
+    );
+    await page.goto(`/c/${campaignId}/compendium`);
+
+    const alert = page.getByRole('alert').filter({ hasText: /couldn't search the compendium/i });
+    await expect(alert).toBeVisible();
+    await expect(page.getByText(/nothing matches|no entries in this rule system/i)).toHaveCount(0);
+
+    const polite = page.locator('.sr-only[aria-live="polite"][role="status"]');
+    await expect(polite).toHaveText('');
+  });
 });

@@ -61,9 +61,13 @@ export function compendiumResultsStatus(opts: {
   query: string;
   typeKey: string;
   typeLabel: string;
+  /** Search request failed — suppress empty/count copy (ErrorNote is the alert). */
+  failed?: boolean;
 }): string {
   const q = opts.query.trim();
   if (opts.loading) return 'Searching the compendium…';
+  // Failure is announced via ErrorNote (role="alert"); do not also claim "no results".
+  if (opts.failed) return '';
   if (opts.resultCount == null) return '';
   if (opts.resultCount === 0) {
     if (q) {
