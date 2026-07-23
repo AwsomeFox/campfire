@@ -25,6 +25,7 @@ import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { generatePngThumbnail } from './thumbnail';
+import { sanitizeAttachmentFilename } from './filename';
 
 /** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
 export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
@@ -346,7 +347,9 @@ export class AttachmentsService {
         campaignId,
         uploaderUserId: user.id,
         kind,
-        filename: file.originalname.slice(0, 255),
+        // Issue #630: grapheme-safe truncation + path/control scrubbing (not
+        // bare String#slice, which can bisect a surrogate pair).
+        filename: sanitizeAttachmentFilename(file.originalname),
         mime: file.mimetype,
         size: file.size,
         hidden: defaultHiddenForKind(kind),
@@ -396,7 +399,7 @@ export class AttachmentsService {
         campaignId,
         uploaderUserId: user.id,
         kind,
-        filename: file.filename.slice(0, 255),
+        filename: sanitizeAttachmentFilename(file.filename),
         mime: file.mime,
         size: file.bytes.length,
         hidden: defaultHiddenForKind(kind),
