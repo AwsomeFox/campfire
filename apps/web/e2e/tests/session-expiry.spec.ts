@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { CREDS, MONSTERS } from '../global-setup';
-import { seed, stateFor } from './seed';
+import { CREDS } from '../global-setup';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
  * Issue #885 — mid-session expiry must bounce the SPA to a session-expired login
@@ -9,8 +9,6 @@ import { seed, stateFor } from './seed';
  * Scenarios: background 401 during encounters, uploads, AI stream connect, and
  * campaign-events reconnect after login. Campaign 403 must NOT look like expiry.
  */
-
-const [boss] = MONSTERS;
 
 async function fulfillJson(route: Route, status: number, body: unknown) {
   await route.fulfill({
@@ -61,6 +59,10 @@ async function signInFromExpiredScreen(page: Page) {
 test.describe('issue #885 - session expiry reauth', () => {
   test.use({ storageState: stateFor('dm') });
 
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
+
   test('encounter mutation 401 shows session-expired login and restores deep link', async ({ page }) => {
     const { campaignId, encounterId } = seed();
     const deepLink = `/c/${campaignId}/encounters/${encounterId}`;
@@ -69,8 +71,10 @@ test.describe('issue #885 - session expiry reauth', () => {
     await page.goto(deepLink);
     await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 
+    const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
+    await expect(actionBtn).toBeVisible();
     await expireProtectedApi(page);
-    await page.getByRole('button', { name: new RegExp(`Increase ${boss.name}'s HP`) }).first().click();
+    await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
     const banner = page.getByTestId('session-expired-banner');
@@ -190,8 +194,10 @@ test.describe('issue #885 - session expiry reauth', () => {
     await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
     await expect.poll(() => streamOpens).toBeGreaterThan(0);
 
+    const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
+    await expect(actionBtn).toBeVisible();
     await expireProtectedApi(page);
-    await page.getByRole('button', { name: new RegExp(`Increase ${boss.name}'s HP`) }).first().click();
+    await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByTestId('session-expired-banner')).toBeVisible();

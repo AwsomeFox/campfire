@@ -32,9 +32,40 @@ const INVITE_STUB = {
 };
 
 async function setupPage(page: Page) {
+  await page.route(/\/api\/v1\//, (route) =>
+    route.request().method() === 'GET'
+      ? route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
+      : route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }),
+  );
   await page.route(ME_URL, (route) =>
     route.fulfill({ status: 200, json: ME_BODY }),
   );
+  await page.route(`**/api/v1/campaigns`, (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({
+      status: 200,
+      json: [
+        {
+          id: CAMPAIGN_ID,
+          name: 'Invite Test Campaign',
+          description: '',
+          status: 'active',
+          currentLocationId: null,
+          dangerLevel: 'low',
+          dmControlsProgression: false,
+          publicRecapSharingEnabled: true,
+          publicInvitesEnabled: true,
+          sessionCount: 0,
+          ruleSystem: '',
+          mapAttachmentId: null,
+          storageQuotaBytes: null,
+          deletedAt: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    });
+  });
   await page.route(MEMBERS_URL, (route) =>
     route.fulfill({ status: 200, json: [{ id: 1, userId: 1, campaignId: CAMPAIGN_ID, role: 'dm', username: 'dm', displayName: 'Dungeon Master', characterId: null, disabled: false }] }),
   );
@@ -42,6 +73,17 @@ async function setupPage(page: Page) {
     route.fulfill({ status: 200, json: [] }),
   );
   await page.route(`**/api/v1/campaigns/${CAMPAIGN_ID}/audit`, (route) =>
+    route.fulfill({ status: 200, json: [] }),
+  );
+  // The global NotificationsBell polls these on every authed page; unmocked they
+  // 401 against the real server and issue #885 reauth boots the SPA to /login.
+  await page.route('**/api/v1/notifications/unread-count', (route) =>
+    route.fulfill({ status: 200, json: { count: 0 } }),
+  );
+  await page.route('**/api/v1/notifications?**', (route) =>
+    route.fulfill({ status: 200, json: [] }),
+  );
+  await page.route('**/api/v1/notifications', (route) =>
     route.fulfill({ status: 200, json: [] }),
   );
 }

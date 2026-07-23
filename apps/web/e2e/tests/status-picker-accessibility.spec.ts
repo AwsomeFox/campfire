@@ -316,6 +316,9 @@ test.describe('location status picker accessibility', () => {
 
   test('commits via Enter and updates the header chip', async ({ page }) => {
     const { semantic: fixture } = seed();
+    await page.request
+      .patch(`/api/v1/locations/${fixture.locationId}`, { data: { status: 'undiscovered' } })
+      .catch(() => undefined);
     await page.goto(`/c/${fixture.campaignId}/locations/${fixture.locationId}`);
 
     const trigger = page.getByRole('button', { name: /^Location status:/ });
