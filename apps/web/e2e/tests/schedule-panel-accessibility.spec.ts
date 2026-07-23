@@ -25,8 +25,9 @@ async function clearIssue645Schedules(request: APIRequestContext, campaignId: nu
   }
 }
 
+/** App-root Announcer polite region (bare div — feature status regions use role=status). */
 function appPoliteAnnouncer(page: Page) {
-  return page.locator('.sr-only[aria-live="polite"][aria-atomic="true"]');
+  return page.locator('div.sr-only[aria-live="polite"][aria-atomic="true"]:not([role])');
 }
 
 function appAssertiveAnnouncer(page: Page) {
