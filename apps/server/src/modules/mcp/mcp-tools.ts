@@ -106,7 +106,9 @@ import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 
-const SERVER_INFO = { name: 'campfire', version: '0.1.0' };
+import { APP_VERSION } from '../../common/build-metadata';
+
+const SERVER_INFO = { name: 'campfire', version: APP_VERSION };
 
 interface ToolResult {
   [x: string]: unknown;

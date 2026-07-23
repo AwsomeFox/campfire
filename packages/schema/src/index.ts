@@ -2646,6 +2646,8 @@ export const AuthStatus = z.object({
   // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
   oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
@@ -4587,6 +4589,8 @@ export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
 export const AdminMetrics = z.object({
   version: z.string(), // server package.json version (same source as /healthz)
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
   now: IsoDate, // server clock when this snapshot was taken
   startedAt: IsoDate, // process start (now - uptime)
   uptimeSeconds: z.number().nonnegative(),
