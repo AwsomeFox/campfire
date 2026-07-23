@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import { NpcCreate, NpcUpdate } from '@campfire/schema';
 import type { Npc, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { npcs, locations, quests, factions } from '../../db/schema';
+import { npcs, locations, factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';

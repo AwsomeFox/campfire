@@ -26,10 +26,6 @@ async function createArcWithBeat(page: Page, campaignId: number, arcTitle: strin
   return { arc, beat };
 }
 
-function politeAnnouncement(page: Page, message: string) {
-  return page.locator('[aria-live="polite"]').filter({ hasText: message });
-}
-
 test.describe('storylines error surfaces (issue #688)', () => {
   test.use({ storageState: stateFor('dm') });
 
@@ -142,7 +138,7 @@ test.describe('storylines error surfaces (issue #688)', () => {
   test('branch delete failure keeps the branch and offers a retry that succeeds', async ({ page }) => {
     const { campaignId } = seed();
     const suffix = Date.now();
-    const { arc, beat } = await createArcWithBeat(page, campaignId, `Branch-del arc ${suffix}`, `Branch-del beat ${suffix}`);
+    const { beat } = await createArcWithBeat(page, campaignId, `Branch-del arc ${suffix}`, `Branch-del beat ${suffix}`);
     const branch = await create<CreatedBranch>(
       page,
       `/api/v1/beats/${beat.id}/branches`,

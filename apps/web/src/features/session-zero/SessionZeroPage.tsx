@@ -21,7 +21,7 @@ import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibi
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea } from '../../components/ui';
+import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
 
 interface Draft {
   lines: string[];

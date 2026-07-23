@@ -23,20 +23,6 @@ import { seed, stateFor } from './seed';
 
 const STATUS_URL = (campaignId: number) => `/c/${campaignId}/settings`;
 
-async function restoreActive(page: import('@playwright/test').Page, campaignId: number) {
-  // Best-effort cleanup so a mid-test failure doesn't poison the shared seed.
-  // The recovery direction PATCHes directly (no confirm), so this is one click.
-  await page.goto(STATUS_URL(campaignId));
-  const card = page.getByTestId('campaign-status-settings');
-  const select = card.getByLabel('Campaign status');
-  // If already active, nothing to do.
-  if ((await select.inputValue()) === 'active') return;
-  await select.selectOption('active');
-  // The recovery direction applies directly with no confirm — wait for the
-  // network to settle so the next test starts from a known-active state.
-  await expect.poll(() => select.inputValue()).toBe('active');
-}
-
 test.describe.configure({ mode: 'serial' });
 
 test.describe('campaign status confirmation + undo (#640)', () => {
