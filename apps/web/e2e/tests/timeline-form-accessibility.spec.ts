@@ -151,4 +151,37 @@ test.describe('timeline authoring form accessibility (issue #453)', () => {
     await expect(page.getByTestId('timeline-event-edit-form')).toHaveCount(0);
     await expect(trigger).toBeFocused();
   });
+
+  test('delete while create form is open focuses the create title, not a missing New event control', async ({
+    page,
+  }) => {
+    const { navigation } = seed();
+    const { form: createForm } = await openCreateForm(page);
+    const createTitle = createForm.getByRole('textbox', { name: 'Title' });
+    await expect(createTitle).toBeFocused();
+    await expect(page.getByRole('button', { name: '+ New event' })).toHaveCount(0);
+
+    // Keep the create form mounted: open edit on the seeded event without navigating away.
+    const event = page.locator(
+      `[data-entity-type="timeline"][data-entity-id="${navigation.timelineId}"]`,
+    );
+    await event.getByRole('button', { name: 'Edit' }).click();
+    const editForm = page.getByTestId('timeline-event-edit-form');
+    await expect(editForm).toBeVisible();
+    await expect(page.getByTestId('timeline-event-create-form')).toBeVisible();
+
+    const deleteResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes('/timeline/') &&
+        response.request().method() === 'DELETE' &&
+        response.ok(),
+    );
+    await editForm.getByRole('button', { name: 'Delete' }).click();
+    await deleteResponse;
+
+    await expect(page.getByTestId('timeline-event-edit-form')).toHaveCount(0);
+    await expect(page.getByTestId('timeline-event-create-form')).toBeVisible();
+    await expect(page.getByRole('button', { name: '+ New event' })).toHaveCount(0);
+    await expect(createTitle).toBeFocused();
+  });
 });
