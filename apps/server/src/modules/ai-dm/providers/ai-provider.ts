@@ -20,7 +20,7 @@
  */
 
 /** Which built-in adapter (or a fully custom binding) backs a provider. */
-export type AiProviderType = 'openai' | 'anthropic' | 'mock' | 'noop' | 'custom';
+export type AiProviderType = 'openai' | 'anthropic' | 'gemini' | 'mock' | 'noop' | 'custom';
 
 /** Role of a message in the conversation. `tool` carries a tool result back to the model. */
 export type AiRole = 'system' | 'user' | 'assistant' | 'tool';
@@ -145,8 +145,13 @@ export interface AiProvider {
   /** Single-shot generation. Resolves with narration + tool calls + real usage. */
   generate(req: AiGenerateRequest, opts?: AiGenerateOptions): Promise<AiGenerateResult>;
   /**
-   * Streaming generation. Yields text/tool-call/usage deltas and finishes with a
+   * Streaming generation. Yields text/tool-call/usage/done deltas and finishes with a
    * single `done` event carrying the aggregated result.
    */
   stream(req: AiGenerateRequest, opts?: AiGenerateOptions): AsyncIterable<AiStreamEvent>;
+  /**
+   * List available model IDs from the provider's API (issue #987). Optional — providers
+   * that don't support model discovery leave this undefined.
+   */
+  listModels?(): Promise<string[]>;
 }

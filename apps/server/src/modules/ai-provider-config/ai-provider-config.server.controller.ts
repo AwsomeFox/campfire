@@ -83,4 +83,19 @@ export class AiProviderServerConfigController {
   async test(@Body() body: AiProviderTestRequestDto) {
     return this.configs.testConnection(null, body);
   }
+
+  @Post('models')
+  @Throttle({ ai: { limit: 10, ttl: 60000 } })
+  @ApiOperation({
+    summary: 'Fetch available models from the configured or draft AI provider',
+    description:
+      'Server-admin only. Queries the provider\'s model list (e.g. GET /v1/models). Accepts an optional draft body ' +
+      'so models can be discovered before saving. Returns a string array of model IDs.',
+  })
+  @ApiBody({ schema: AI_PROVIDER_TEST_REQUEST_OPENAPI_SCHEMA })
+  @ApiResponse({ status: 201, description: 'Available model IDs.', type: Object })
+  async models(@Body() body: AiProviderTestRequestDto) {
+    const models = await this.configs.fetchAvailableModels(null, body);
+    return { models };
+  }
 }

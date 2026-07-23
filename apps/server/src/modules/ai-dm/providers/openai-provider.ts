@@ -26,6 +26,7 @@ import {
   DEFAULT_RETRY,
   DEFAULT_TIMEOUT_MS,
   postJson,
+  getJson,
   parseSse,
 } from './http';
 
@@ -148,6 +149,17 @@ export class OpenAiProvider implements AiProvider {
       finishReason: mapFinishReason(choice?.finish_reason),
       model: json.model ?? requestedModel,
     };
+  }
+
+  /** Issue #987: list models from `GET ${baseUrl}/models`. */
+  async listModels(): Promise<string[]> {
+    const res = await getJson(this.fetchImpl, `${this.baseUrl}/models`, this.authHeaders(), {
+      provider: this.name,
+      timeoutMs: this.timeoutMs,
+    });
+    if (!res.ok) throw new AiProviderError('invalid_request', `${this.name}: models request failed (${res.status})`, { provider: this.name });
+    const data = (await res.json()) as { data?: Array<{ id: string }> };
+    return (data.data ?? []).map((m) => m.id).sort();
   }
 }
 

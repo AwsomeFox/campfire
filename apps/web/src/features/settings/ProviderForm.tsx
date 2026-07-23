@@ -21,7 +21,7 @@ import type {
 import { api, ApiError, API } from '../../lib/api';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
-const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'mock'];
+const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'gemini', 'mock'];
 
 interface ProviderDraft {
   providerType: AiProviderConfigType;
@@ -70,6 +70,9 @@ export function ProviderForm({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
 
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<AiProviderTestResult | null>(null);
@@ -208,6 +211,26 @@ export function ProviderForm({
     }
   }
 
+  async function fetchModels() {
+    setFetchingModels(true);
+    setModelsError(null);
+    setAvailableModels([]);
+    try {
+      const result = await api.post<{ models: string[] }>(`${API}${basePath}/models`, {
+        providerType,
+        model: model || 'placeholder',
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(apiKey ? { apiKey } : {}),
+      });
+      setAvailableModels(result.models ?? []);
+      if ((result.models ?? []).length === 0) setModelsError('No models returned by the provider.');
+    } catch (err) {
+      setModelsError(err instanceof ApiError ? err.message : "Couldn't fetch models.");
+    } finally {
+      setFetchingModels(false);
+    }
+  }
+
   async function remove() {
     invalidateTestForAction();
     setRemoving(true);
@@ -310,13 +333,34 @@ export function ProviderForm({
           </div>
           <div className="field" style={{ flex: 1, minWidth: 160 }}>
             <label htmlFor={`ai-provider-model-${scope}`}>Model</label>
-            <input
-              id={`ai-provider-model-${scope}`}
-              className="input"
-              value={model}
-              onChange={(e) => editDraft('model', e.target.value)}
-              placeholder="e.g. gpt-4o-mini"
-            />
+            <div className="flex gap-1">
+              <input
+                id={`ai-provider-model-${scope}`}
+                className="input"
+                value={model}
+                onChange={(e) => editDraft('model', e.target.value)}
+                placeholder="e.g. gpt-4o-mini"
+                list={`ai-provider-models-${scope}`}
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ fontSize: 11, whiteSpace: 'nowrap', padding: '4px 8px' }}
+                disabled={fetchingModels}
+                onClick={() => void fetchModels()}
+                title="Fetch available models from the provider"
+              >
+                {fetchingModels ? 'Fetching…' : 'Fetch Models'}
+              </button>
+            </div>
+            <datalist id={`ai-provider-models-${scope}`}>
+              {availableModels.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+            {modelsError && <p className="text-danger" style={{ fontSize: 11, margin: '2px 0 0' }}>{modelsError}</p>}
+            {availableModels.length > 0 && <p className="text-muted" style={{ fontSize: 11, margin: '2px 0 0' }}>{availableModels.length} models found — start typing to filter.</p>}
           </div>
         </div>
         <div className="field">

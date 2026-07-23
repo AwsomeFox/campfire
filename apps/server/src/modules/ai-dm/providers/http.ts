@@ -140,6 +140,32 @@ export async function postJson(
   throw lastErr ?? new AiProviderError('unknown', `${opts.provider}: request failed`);
 }
 
+/**
+ * Issue #987: GET helper for model discovery (`GET /v1/models`). Simpler than `postJson`
+ * — no body, no retry loop (model lists are not transient), just a timeout-guarded GET
+ * with the same error classification.
+ */
+export async function getJson(
+  fetchImpl: FetchLike,
+  url: string,
+  headers: Record<string, string>,
+  opts: { provider: string; timeoutMs: number; signal?: AbortSignal },
+): Promise<FetchResponse> {
+  const t = withTimeout(opts.timeoutMs, opts.signal);
+  try {
+    return await fetchImpl(url, { method: 'GET', headers, signal: t.signal });
+  } catch (cause) {
+    const aborted = t.didTimeout() || opts.signal?.aborted;
+    throw t.didTimeout()
+      ? new AiProviderError('timeout', `${opts.provider}: request timed out after ${opts.timeoutMs}ms`, { provider: opts.provider, cause })
+      : aborted
+        ? new AiProviderError('timeout', `${opts.provider}: request aborted`, { provider: opts.provider, retryable: false, cause })
+        : new AiProviderError('transport', `${opts.provider}: network error`, { provider: opts.provider, cause });
+  } finally {
+    t.cleanup();
+  }
+}
+
 async function safeText(res: FetchResponse): Promise<string> {
   try {
     return await res.text();

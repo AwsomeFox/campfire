@@ -613,6 +613,22 @@ export class AiProviderConfigService {
     }
   }
 
+  /**
+   * Issue #987: fetch the list of available models from the configured (or draft) provider.
+   * Reuses the same resolve-config / createAiProvider pattern as testConnection. Returns
+   * an empty array if the provider doesn't support model discovery (no `listModels` method).
+   */
+  async fetchAvailableModels(campaignId: number | null, input?: TestInput): Promise<string[]> {
+    const resolved = input
+      ? await this.resolveDraftTestCandidate(campaignId, input)
+      : await this.resolveStoredTestCandidate(campaignId);
+    const config = resolved.config;
+    if (!config) return [];
+    const provider = createAiProvider(config);
+    if (!provider.listModels) return [];
+    return provider.listModels();
+  }
+
   /** Resolve a submitted draft without writing it or auditing it. */
   private async resolveDraftTestCandidate(
     campaignId: number | null,
@@ -763,7 +779,9 @@ function environmentApiKey(providerType: string): string | undefined {
       ? process.env.OPENAI_API_KEY
       : providerType === 'anthropic'
         ? process.env.ANTHROPIC_API_KEY
-        : undefined;
+        : providerType === 'gemini'
+          ? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
+          : undefined;
   const value = raw?.trim();
   return value ? value : undefined;
 }

@@ -14,6 +14,7 @@ import { AiProviderError } from './errors';
 import type { FetchLike, RetryConfig } from './http';
 import { OpenAiProvider } from './openai-provider';
 import { AnthropicProvider } from './anthropic-provider';
+import { GeminiProvider } from './gemini-provider';
 import { MockAiProvider, type MockResponse } from './mock-provider';
 
 /** Default sampling/limit params for a provider. */
@@ -69,6 +70,19 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
     case 'anthropic':
       requireKey(config);
       return new AnthropicProvider({
+        apiKey: config.apiKey!,
+        baseUrl: config.baseUrl,
+        model: config.model,
+        temperature: config.params?.temperature,
+        maxTokens: config.params?.maxTokens,
+        timeoutMs: config.timeoutMs,
+        retry: config.retry,
+        headers: config.headers,
+        fetchImpl: config.fetchImpl,
+      });
+    case 'gemini':
+      requireKey(config);
+      return new GeminiProvider({
         apiKey: config.apiKey!,
         baseUrl: config.baseUrl,
         model: config.model,
