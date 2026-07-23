@@ -67,6 +67,7 @@ async function openGestureFixture(page: Page) {
 
   let encounter: EncounterWithCombatants = {
     ...original,
+    status: 'running',
     mapAttachmentId: MAP_ATTACHMENT_ID,
     gridSize: 10,
     gridScale: 5,

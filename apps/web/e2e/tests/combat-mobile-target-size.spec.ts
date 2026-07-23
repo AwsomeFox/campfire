@@ -95,6 +95,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
           data: { hpSet: 0, deathSaveSuccesses: 1, deathSaveFailures: 1 },
         });
         expect(hpRes.ok(), `drop HP: ${await hpRes.text()}`).toBeTruthy();
+        await dm.post(`/api/v1/encounters/${enc.id}/start`).catch(() => undefined);
 
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await page.goto(`/c/${campaignId}/encounters/${enc.id}`);

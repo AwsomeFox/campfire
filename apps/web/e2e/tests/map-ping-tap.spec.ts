@@ -70,6 +70,7 @@ async function openPingFixture(page: Page) {
 
   const encounter: EncounterWithCombatants = {
     ...original,
+    status: 'running',
     mapAttachmentId: MAP_ATTACHMENT_ID,
     gridSize: 10,
     gridScale: 5,
