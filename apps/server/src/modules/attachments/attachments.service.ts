@@ -897,8 +897,9 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
     const filePath = this.filePath(existing);
     const thumbPath = this.thumbPath(existing);
-    // Reserve FS cleanup rows BEFORE metadata commit so a crash cannot orphan bytes
-    // without a durable retry record (issue #727).
+    // Reserve FS cleanup rows as `held` BEFORE metadata commit so a crash cannot
+    // orphan bytes without a durable retry record — drain skips `held` until
+    // metadata is gone (orchestrator / #727).
     const planned = await this.fsDeletion.reserveUploadPaths([filePath, thumbPath], auditCtx);
 
     const portraitSuffix = `%/attachments/${id}/file`;

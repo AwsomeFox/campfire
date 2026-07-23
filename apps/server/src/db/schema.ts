@@ -1049,7 +1049,7 @@ export const fsDeletionQueue = sqliteTable('fs_deletion_queue', {
   scope: text('scope').notNull(), // 'attachment' | 'campaign_purge'
   campaignId: integer('campaign_id'),
   entityId: integer('entity_id'),
-  status: text('status').notNull().default('pending'), // 'pending' | 'failed'
+  status: text('status').notNull().default('pending'), // 'held' | 'pending' | 'failed'
   attempts: integer('attempts').notNull().default(0),
   lastError: text('last_error').notNull().default(''),
   createdAt: text('created_at').notNull(),

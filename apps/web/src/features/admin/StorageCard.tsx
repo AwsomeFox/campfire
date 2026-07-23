@@ -158,6 +158,9 @@ export function StorageCard() {
             {stats.fsCleanup.items.map((item) => (
               <li key={item.id}>
                 <span className="font-mono text-slate-400">{item.relPath}</span>
+                {item.status === 'held' && (
+                  <span className="text-amber-400"> — held until metadata deletion commits</span>
+                )}
                 {item.status === 'failed' && (
                   <span className="text-rose-400"> — {item.lastError || 'failed'}</span>
                 )}

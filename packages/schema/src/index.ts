@@ -4820,7 +4820,8 @@ export const FsCleanupPendingItem = z.object({
   id: z.number().int().positive(),
   relPath: z.string(),
   scope: z.enum(['attachment', 'campaign_purge']),
-  status: z.enum(['pending', 'failed']),
+  // `held` = reserved before metadata commit; drain must not erase until armed.
+  status: z.enum(['held', 'pending', 'failed']),
   attempts: z.number().int().nonnegative(),
   lastError: z.string(),
   updatedAt: IsoDate,

@@ -1,9 +1,9 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import fs from 'node:fs';
-import { count, eq } from 'drizzle-orm';
+import { asc, count, eq } from 'drizzle-orm';
 import type { AuditActorRole, FsCleanupSummary } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { fsDeletionQueue } from '../../db/schema';
+import { attachments, campaigns, fsDeletionQueue } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import {
@@ -17,6 +17,7 @@ import { uploadsAbsolutePath, uploadsRelativePath, uploadsRoot } from './uploads
 const FS_CLEANUP_SUMMARY_ITEMS_LIMIT = 100;
 
 export type FsDeletionScope = 'attachment' | 'campaign_purge';
+export type FsDeletionQueueStatus = 'held' | 'pending' | 'failed';
 
 export interface FsDeletionAuditContext {
   scope: FsDeletionScope;
@@ -36,6 +37,8 @@ export interface FsDeletionOutcome {
 @Injectable()
 export class FsDeletionService implements OnApplicationBootstrap {
   private readonly logger = new Logger(FsDeletionService.name);
+  /** Serialize drain runs so boot/interval/manual cannot overlap. */
+  private drainInFlight: Promise<number> | null = null;
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -76,10 +79,10 @@ export class FsDeletionService implements OnApplicationBootstrap {
   }
 
   /**
-   * Durably reserve upload paths for erasure BEFORE metadata deletion commits, then
-   * attempt verified removal. Crash between reserve+metadata commit and FS remove
-   * leaves retryable queue rows (issue #727). Paths that erase successfully are
-   * dequeued immediately.
+   * Durably reserve upload paths for erasure BEFORE metadata deletion commits.
+   * Rows are inserted as `held` so drainQueue will NOT erase bytes while the
+   * attachment/campaign metadata still exists (orchestrator / #727).
+   * After metadata commit, completeReservedUploadPaths arms/erases them.
    */
   async reserveUploadPaths(
     absolutePaths: string[],
@@ -109,7 +112,8 @@ export class FsDeletionService implements OnApplicationBootstrap {
         scope: ctx.scope,
         campaignId: ctx.campaignId,
         entityId: ctx.entityId,
-        error: 'awaiting verified erasure',
+        error: 'awaiting metadata deletion before verified erasure',
+        status: 'held',
       });
       planned.push({ abs, rel, kind });
     }
@@ -118,7 +122,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
 
   /**
    * After metadata deletion: verify FS removal for reserved paths, dequeue successes,
-   * and emit filesystem audit stages.
+   * and emit filesystem audit stages. Failures are armed as `pending` for drain retry.
    */
   async completeReservedUploadPaths(
     planned: Array<{ abs: string; rel: string; kind: 'file' | 'directory' }>,
@@ -142,6 +146,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
         campaignId: ctx.campaignId,
         entityId: ctx.entityId,
         error: `${result.code}: ${result.message}`,
+        status: 'pending',
       });
     }
 
@@ -188,10 +193,11 @@ export class FsDeletionService implements OnApplicationBootstrap {
       .from(fsDeletionQueue)
       .where(eq(fsDeletionQueue.status, 'failed'));
     const [queueRow] = await this.db.select({ value: count() }).from(fsDeletionQueue);
+    // Oldest first by createdAt (updatedAt moves on every retry).
     const rows = await this.db
       .select()
       .from(fsDeletionQueue)
-      .orderBy(fsDeletionQueue.updatedAt)
+      .orderBy(asc(fsDeletionQueue.createdAt), asc(fsDeletionQueue.id))
       .limit(FS_CLEANUP_SUMMARY_ITEMS_LIMIT);
     return {
       pendingCount: pendingRow?.value ?? 0,
@@ -201,7 +207,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
         id: r.id,
         relPath: r.relPath,
         scope: r.scope as FsDeletionScope,
-        status: r.status as 'pending' | 'failed',
+        status: r.status as FsDeletionQueueStatus,
         attempts: r.attempts,
         lastError: r.lastError,
         updatedAt: r.updatedAt,
@@ -209,11 +215,28 @@ export class FsDeletionService implements OnApplicationBootstrap {
     };
   }
 
-  /** Retry every queued path (boot + background interval). */
+  /** Retry every drainable queued path (boot + background interval + manual). */
   async drainQueue(trigger: 'boot' | 'interval' | 'manual'): Promise<number> {
+    if (this.drainInFlight) {
+      if (trigger === 'interval') return this.drainInFlight;
+      return this.drainInFlight.then(() => this.drainQueue(trigger));
+    }
+
+    this.drainInFlight = this.runDrain(trigger).finally(() => {
+      this.drainInFlight = null;
+    });
+    return this.drainInFlight;
+  }
+
+  private async runDrain(trigger: 'boot' | 'interval' | 'manual'): Promise<number> {
+    await this.reconcileHeldRows();
+
     const rows = await this.db.select().from(fsDeletionQueue);
     let cleared = 0;
     for (const row of rows) {
+      // `held` means metadata deletion has not committed — never erase live bytes.
+      if (row.status === 'held') continue;
+
       let abs: string;
       try {
         abs = uploadsAbsolutePath(row.relPath);
@@ -270,6 +293,58 @@ export class FsDeletionService implements OnApplicationBootstrap {
     return cleared;
   }
 
+  /**
+   * Crash recovery for `held` reservations:
+   * - metadata still present → abandon the hold (do not delete live files)
+   * - metadata gone → arm as pending so drain can erase orphans
+   */
+  private async reconcileHeldRows(): Promise<void> {
+    const held = await this.db.select().from(fsDeletionQueue).where(eq(fsDeletionQueue.status, 'held'));
+    for (const row of held) {
+      const metadataAlive = await this.isReservedMetadataAlive(row.scope, row.entityId, row.campaignId);
+      if (metadataAlive) {
+        await this.db.delete(fsDeletionQueue).where(eq(fsDeletionQueue.id, row.id));
+        this.logger.warn(
+          `Abandoned held fs cleanup for ${row.relPath}: metadata still present (incomplete delete)`,
+        );
+        continue;
+      }
+      await this.db
+        .update(fsDeletionQueue)
+        .set({
+          status: 'pending',
+          lastError: 'armed after metadata loss (crash recovery)',
+          updatedAt: nowIso(),
+        })
+        .where(eq(fsDeletionQueue.id, row.id));
+    }
+  }
+
+  private async isReservedMetadataAlive(
+    scope: string,
+    entityId: number | null,
+    campaignId: number | null,
+  ): Promise<boolean> {
+    if (scope === 'attachment' && entityId != null) {
+      const [row] = await this.db
+        .select({ id: attachments.id })
+        .from(attachments)
+        .where(eq(attachments.id, entityId))
+        .limit(1);
+      return Boolean(row);
+    }
+    if (scope === 'campaign_purge' && campaignId != null) {
+      const [row] = await this.db
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1);
+      return Boolean(row);
+    }
+    // Unknown scope / missing ids: fail closed — do not erase.
+    return true;
+  }
+
   private async enqueue(
     relPath: string,
     params: {
@@ -278,6 +353,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
       campaignId: number | null;
       entityId: number | null;
       error: string;
+      status: FsDeletionQueueStatus;
     },
   ): Promise<void> {
     if (relPath === '' || relPath.trim() === '') {
@@ -293,7 +369,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
         scope: params.scope,
         campaignId: params.campaignId,
         entityId: params.entityId,
-        status: 'pending',
+        status: params.status,
         attempts: 0,
         lastError: params.error,
         createdAt: now,
@@ -304,8 +380,12 @@ export class FsDeletionService implements OnApplicationBootstrap {
         set: {
           lastError: params.error,
           updatedAt: now,
-          status: 'pending',
+          status: params.status,
           attempts: 0,
+          scope: params.scope,
+          campaignId: params.campaignId,
+          entityId: params.entityId,
+          kind: params.kind,
         },
       });
   }
