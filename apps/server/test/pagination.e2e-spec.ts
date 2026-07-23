@@ -128,20 +128,25 @@ describe('list pagination (e2e, issue #71)', () => {
       }
     });
 
-    it('?limit/?offset page over the notes list', async () => {
+    it('?limit/?cursor page over the notes list', async () => {
       const server = ctx.app.getHttpServer();
-      const page1 = await request(server).get(`/api/v1/campaigns/${noteCampaign}/notes?limit=4&offset=0`).set(dm);
-      const page2 = await request(server).get(`/api/v1/campaigns/${noteCampaign}/notes?limit=4&offset=4`).set(dm);
-      expect(page1.body).toHaveLength(4);
-      expect(page2.body).toHaveLength(2);
-      const ids1 = new Set((page1.body as Array<{ id: number }>).map((n) => n.id));
-      const overlap = (page2.body as Array<{ id: number }>).filter((n) => ids1.has(n.id));
+      const page1 = await request(server).get(`/api/v1/campaigns/${noteCampaign}/notes?limit=4`).set(dm);
+      expect(page1.status).toBe(200);
+      expect(page1.body.items).toHaveLength(4);
+      expect(page1.body.hasMore).toBe(true);
+      const page2 = await request(server)
+        .get(`/api/v1/campaigns/${noteCampaign}/notes?limit=4&cursor=${page1.body.nextCursor}`)
+        .set(dm);
+      expect(page2.status).toBe(200);
+      expect(page2.body.items).toHaveLength(2);
+      const ids1 = new Set((page1.body.items as Array<{ id: number }>).map((n) => n.id));
+      const overlap = (page2.body.items as Array<{ id: number }>).filter((n) => ids1.has(n.id));
       expect(overlap).toHaveLength(0); // no row appears on both pages
     });
 
     it('no paging params returns every visible note (backward compatible)', async () => {
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${noteCampaign}/notes`).set(dm);
-      expect(res.body).toHaveLength(6);
+      expect(res.body.items).toHaveLength(6);
     });
 
     it('paging still respects note visibility (a private note stays hidden from a non-author)', async () => {
@@ -155,8 +160,8 @@ describe('list pagination (e2e, issue #71)', () => {
       const playerAll = await request(server).get(`/api/v1/campaigns/${noteCampaign}/notes?limit=50`).set(player);
       expect(playerAll.status).toBe(200);
       // Player sees the 6 party_shared notes but NOT the dm's private one.
-      expect(playerAll.body).toHaveLength(6);
-      for (const n of playerAll.body as Array<{ body: string }>) {
+      expect(playerAll.body.items).toHaveLength(6);
+      for (const n of playerAll.body.items as Array<{ body: string }>) {
         expect(n.body).not.toBe('dm private');
       }
     });
