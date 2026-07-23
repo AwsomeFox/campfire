@@ -60,10 +60,9 @@ export function clearLiveAnnouncements(): void {
 
 /**
  * Playwright / automation bridge (issue #434). Namespaced under one symbol and
- * attached only when automation is detected (`navigator.webdriver`) or an
- * explicit `__CAMPFIRE_E2E__` flag/object is already present — never in normal
- * production browsing. Specs seed React announcer state via
- * `window.__CAMPFIRE_E2E__.announce` without mutating shared fixtures.
+ * attached only when the same window reports `navigator.webdriver` — never in
+ * normal production browsing (a bare `__CAMPFIRE_E2E__` object is not enough).
+ * Specs seed React announcer state via `window.__CAMPFIRE_E2E__.announce`.
  */
 type CampfireE2EHooks = {
   announce?: AnnounceFn;
@@ -75,8 +74,11 @@ type CampfireE2EWindow = Window & {
 };
 
 function shouldAttachE2EBridge(w: CampfireE2EWindow): boolean {
-  if (typeof navigator !== 'undefined' && Boolean(navigator.webdriver)) return true;
-  return w.__CAMPFIRE_E2E__ != null;
+  // Require an automation signal from the same window. A bare
+  // `__CAMPFIRE_E2E__` object without webdriver must not expose announcer hooks
+  // to ordinary browsing (injected scripts).
+  const nav = (w as Window & { navigator?: Navigator }).navigator;
+  return Boolean(nav?.webdriver);
 }
 
 function createProviderQueue(

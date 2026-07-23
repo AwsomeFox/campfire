@@ -26,8 +26,8 @@ async function signIn(page: Page, who: keyof typeof CREDS) {
   await page.goto('/login');
   // OIDC-capable servers collapse local auth behind a disclosure; open it when present.
   const localToggle = page.getByRole('button', { name: /local account|username and password/i });
-  if (await localToggle.count()) {
-    await localToggle.click();
+  if (await localToggle.first().isVisible().catch(() => false)) {
+    await localToggle.first().click();
   }
   await page.getByLabel('Username').fill(CREDS[who].username);
   await page.getByLabel('Password').fill(CREDS[who].password);
@@ -36,11 +36,11 @@ async function signIn(page: Page, who: keyof typeof CREDS) {
 }
 
 function politeRegion(page: Page) {
-  return page.locator('.sr-only[aria-live="polite"]');
+  return page.locator('[aria-live="polite"]');
 }
 
 function assertiveRegion(page: Page) {
-  return page.locator('.sr-only[role="alert"]');
+  return page.getByRole('alert');
 }
 
 async function seedEncounterAnnouncement(page: Page) {

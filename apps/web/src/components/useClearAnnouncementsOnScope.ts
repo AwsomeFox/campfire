@@ -20,7 +20,7 @@ import { useClearAnnouncements } from './Announcer';
 
 export function useClearAnnouncementsOnScope(
   userId: number | null,
-  campaignId: number | undefined = undefined,
+  campaignId?: number,
 ): void {
   const clear = useClearAnnouncements();
   const prevRef = useRef<AnnounceScope | null>(null);
