@@ -28,7 +28,7 @@
  *    added by callers via `levelInitiativeBonus` (monsters carry a flat Initiative in
  *    their statblock instead, surfaced from dataJson).
  */
-import type { MonsterStatblockData, RuleSystemAdapter } from '../index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from '../index';
 
 /** Family id of the 13th Age (Archmage Engine) adapter. Matches the importer's pack slug family. */
 export const ARCHMAGE_ADAPTER_ID = 'archmage';
@@ -120,9 +120,14 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   // to 5e). Sourced from the adapter, not hardcoded, so a 13th-Age campaign rejects a level-11
   // level-up that 5e's hardcoded cap would wrongly allow (issue #535).
   maxLevel: 10,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = dexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — no runtime import from ../index (cycle).
+    return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
   conditions: ARCHMAGE_CONDITIONS,
   escalationDieMax: ESCALATION_DIE_MAX,
@@ -154,6 +159,7 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.traits,
       actions: d.actions ?? d.attacks,
     };
