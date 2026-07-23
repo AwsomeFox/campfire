@@ -5,6 +5,8 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { notDeleted } from '../../common/soft-delete';
+import { isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
@@ -17,6 +19,7 @@ import { toDomain as npcToDomain } from '../npcs/npcs.service';
 import { toDomain as locationToDomain } from '../locations/locations.service';
 import { toDomain as sessionToDomain } from '../sessions/sessions.service';
 import { toDomain as characterToDomain } from '../characters/characters.service';
+import { projectProposal, projectProposals } from './proposal-projection';
 
 // The entity types that can be filed as a proposal. Co-DM authoring (issue #313) added
 // `encounter` and `map`: a co-DM draft never writes canon directly, so those two must
@@ -92,7 +95,15 @@ export class ProposalRecordsService {
     // Capture the target's current state so the DM review UI can show a real
     // before/after diff (issue #3). Creates have no "before"; snapshot stays null.
     // Deletes snapshot too, so the DM can see exactly what would be removed.
-    const snapshot = action !== 'create' && entityId !== null ? await this.snapshotEntity(entityType, entityId) : null;
+    // Issue #817: authorize visibility (campaign-bound) BEFORE snapshotting — a
+    // non-DM proposing against a hidden/unexplored id must get an indistinguishable
+    // 404, never a proposal whose snapshot leaks prep. The persisted snapshot stays
+    // the full DM-review copy; create/list responses project a redacted view for
+    // non-DM callers (see projectProposal).
+    const snapshot =
+      action !== 'create' && entityId !== null
+        ? await this.captureAuthorizedSnapshot(campaignId, entityType, entityId, role)
+        : null;
 
     const ts = nowIso();
     const [row] = await this.db
@@ -144,38 +155,77 @@ export class ProposalRecordsService {
       });
     }
 
-    return toDomain(row);
+    // Egress projection (#817): non-DM proposers never see the raw DM-review snapshot
+    // (or dmSecret in the echoed payload) on the create response.
+    return projectProposal(toDomain(row), role);
   }
 
   /**
-   * Domain-shaped state of the target entity right now, or null if it doesn't
-   * exist (the entity could be deleted between the caller's existence check and
-   * here; approve would 404 later anyway, and a null snapshot just means the UI
-   * shows proposed values without a "before" column). Snapshots are stored
-   * unredacted (dmSecret included) — proposals are only readable via dm-gated
-   * endpoints, matching what the dm sees on the entity itself.
+   * Load the target in the already-authorized campaign, enforce the same visibility
+   * rules as the entity GET endpoints (hidden / unexplored → indistinguishable 404),
+   * and return the FULL unredacted domain snapshot for DM review persistence.
    */
-  private async snapshotEntity(entityType: ProposableEntityType, entityId: number): Promise<Record<string, unknown> | null> {
+  private async captureAuthorizedSnapshot(
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number,
+    role: Role,
+  ): Promise<Record<string, unknown> | null> {
     switch (entityType) {
       case 'quest': {
-        const [row] = await this.db.select().from(quests).where(eq(quests.id, entityId)).limit(1);
-        return row ? { ...questToDomain(row) } : null;
+        const [row] = await this.db
+          .select()
+          .from(quests)
+          .where(and(eq(quests.id, entityId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Quest ${entityId} not found`);
+        const domain = questToDomain(row);
+        if (!isVisibleTo(domain, role)) throw new NotFoundException(`Quest ${entityId} not found`);
+        return { ...domain };
       }
       case 'npc': {
-        const [row] = await this.db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1);
-        return row ? { ...npcToDomain(row) } : null;
+        const [row] = await this.db
+          .select()
+          .from(npcs)
+          .where(and(eq(npcs.id, entityId), eq(npcs.campaignId, campaignId), notDeleted(npcs.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`NPC ${entityId} not found`);
+        const domain = npcToDomain(row);
+        if (!isVisibleTo(domain, role)) throw new NotFoundException(`NPC ${entityId} not found`);
+        return { ...domain };
       }
       case 'location': {
-        const [row] = await this.db.select().from(locations).where(eq(locations.id, entityId)).limit(1);
-        return row ? { ...locationToDomain(row) } : null;
+        const [row] = await this.db
+          .select()
+          .from(locations)
+          .where(and(eq(locations.id, entityId), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Location ${entityId} not found`);
+        // Unexplored locations are hidden prep for non-DM (same rule as LocationsService).
+        if (role !== 'dm' && row.status === 'unexplored') {
+          throw new NotFoundException(`Location ${entityId} not found`);
+        }
+        return { ...locationToDomain(row) };
       }
       case 'session': {
-        const [row] = await this.db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1);
-        return row ? { ...sessionToDomain(row) } : null;
+        const [row] = await this.db
+          .select()
+          .from(sessions)
+          .where(and(eq(sessions.id, entityId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Session ${entityId} not found`);
+        // Sessions are member-visible; dmSecret is stripped only at proposer projection.
+        return { ...sessionToDomain(row) };
       }
       case 'character': {
-        const [row] = await this.db.select().from(characters).where(eq(characters.id, entityId)).limit(1);
-        return row ? { ...characterToDomain(row) } : null;
+        const [row] = await this.db
+          .select()
+          .from(characters)
+          .where(and(eq(characters.id, entityId), eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Character ${entityId} not found`);
+        // Characters are member-visible; dmSecret is stripped only at proposer projection.
+        return { ...characterToDomain(row) };
       }
       // Co-DM (issue #313) files encounter/map proposals as CREATEs only (the payload is
       // seeded generator params, applied by re-running the generator on approve), so this
@@ -191,10 +241,12 @@ export class ProposalRecordsService {
    * List a campaign's proposals, newest first. `opts.proposerUserId` scopes the
    * result to a single submitter — the proposer self-view (issue #124): a non-DM
    * member sees only what they authored, while the DM (no filter) sees everyone's.
+   * `role` drives snapshot/payload projection (#817).
    */
   async listForCampaign(
     campaignId: number,
     status: string | undefined,
+    role: Role,
     opts?: { proposerUserId?: string },
   ): Promise<Proposal[]> {
     const rows = await this.db
@@ -206,17 +258,18 @@ export class ProposalRecordsService {
     if (opts?.proposerUserId !== undefined) {
       all = all.filter((p) => p.proposerUserId === opts.proposerUserId);
     }
-    return status ? all.filter((p) => p.status === status) : all;
+    const filtered = status ? all.filter((p) => p.status === status) : all;
+    return projectProposals(filtered, role);
   }
 
-  async latestForCampaign(campaignId: number, limit = 500): Promise<Proposal[]> {
+  async latestForCampaign(campaignId: number, limit = 500, role: Role = 'dm'): Promise<Proposal[]> {
     const rows = await this.db
       .select()
       .from(proposals)
       .where(eq(proposals.campaignId, campaignId))
       .orderBy(desc(proposals.id))
       .limit(limit);
-    return rows.map(toDomain);
+    return projectProposals(rows.map(toDomain), role);
   }
 
   async getRowOrThrow(id: number) {
@@ -244,14 +297,15 @@ export class ProposalRecordsService {
    * `status = 'pending'` so an already-resolved (or withdrawn) proposal isn't
    * rewritten. Returns the updated domain row, or null if it was no longer
    * pending (lost a race to a resolver). Ownership is checked by the caller.
+   * `role` projects the returned proposal for non-DM proposers (#817).
    */
-  async revisePayload(id: number, payload: Record<string, unknown>): Promise<Proposal | null> {
+  async revisePayload(id: number, payload: Record<string, unknown>, role: Role): Promise<Proposal | null> {
     const [row] = await this.db
       .update(proposals)
       .set({ payload: toJsonText(payload), updatedAt: nowIso() })
       .where(and(eq(proposals.id, id), eq(proposals.status, 'pending')))
       .returning();
-    return row ? toDomain(row) : null;
+    return row ? projectProposal(toDomain(row), role) : null;
   }
 
   /**
@@ -273,8 +327,9 @@ export class ProposalRecordsService {
    * proposer's own user id, so a member can only ever pull their own proposal and
    * only while it is still pending (a concurrent DM approve/reject wins the CAS).
    * Returns the withdrawn domain row, or null if the guard didn't match.
+   * `role` projects the returned proposal for non-DM proposers (#817).
    */
-  async markWithdrawn(id: number, proposerUserId: string): Promise<Proposal | null> {
+  async markWithdrawn(id: number, proposerUserId: string, role: Role): Promise<Proposal | null> {
     const [row] = await this.db
       .update(proposals)
       .set({ status: 'withdrawn', updatedAt: nowIso() })
@@ -286,7 +341,7 @@ export class ProposalRecordsService {
         ),
       )
       .returning();
-    return row ? toDomain(row) : null;
+    return row ? projectProposal(toDomain(row), role) : null;
   }
 
   /**
@@ -301,6 +356,7 @@ export class ProposalRecordsService {
    *
    * Returns the resolved domain row, or `null` if the proposal was not pending
    * (already resolved, or lost the race to a concurrent resolver).
+   * DM-only callers — full (unprojected) snapshot is returned.
    */
   async markResolved(
     id: number,
