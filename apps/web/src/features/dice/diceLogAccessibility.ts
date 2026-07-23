@@ -29,7 +29,7 @@ export function advanceDiceRollAnnouncements(
   const appendedRolls: DiceRoll[] = [];
 
   for (const roll of rolls) {
-    if (cursor && !seenRollIds.has(roll.id)) appendedRolls.push(roll);
+    if (cursor !== null && !seenRollIds.has(roll.id)) appendedRolls.push(roll);
     seenRollIds.add(roll.id);
   }
 

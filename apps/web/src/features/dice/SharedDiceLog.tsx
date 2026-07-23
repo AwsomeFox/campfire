@@ -63,9 +63,12 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   } | null>(null);
 
   // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
+  // Skip the pre-fetch empty render — otherwise the first poll would announce full history.
   useEffect(() => {
     const previous = rollAnnouncementRef.current;
     const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+    if (cursor === null && rolls.length === 0) return;
+
     const advanced = advanceDiceRollAnnouncements(rolls, cursor);
     rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
 
@@ -123,10 +126,22 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       setError(null);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
+        const batch = formatDiceRollAnnouncementBatch([result], t);
+        if (batch) {
+          announce(batch, {
+            dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+          });
+        }
         // Prepend own roll immediately (dedupe by id — the next poll returns it too).
-        setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
+        setRolls((prev) => {
+          const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
+          const previous = rollAnnouncementRef.current;
+          const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+          const advanced = advanceDiceRollAnnouncements(next, cursor);
+          rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+          return next;
+        });
         setJustRolledId(result.id); // triggers the tumble/crit/fumble animation (issue #67)
-        // Roll speech is owned by the ID cursor effect above (local + remote).
         return result;
       } catch (err) {
         const message = err instanceof ApiError ? err.message : t('dice.rollError');

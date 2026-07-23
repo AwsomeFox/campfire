@@ -70,6 +70,7 @@ import {
 import {
   followLatestAfterUserScroll,
   isFeedNearBottom,
+  shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from './feedScrollFollow';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
@@ -296,6 +297,11 @@ export default function AiTablePage() {
   const [followLatest, setFollowLatest] = useState(true);
   const [unreadBelow, setUnreadBelow] = useState(0);
   const prevEntryCountRef = useRef(transcript.entries.length);
+  const transcriptMountScrollDoneRef = useRef(false);
+
+  useEffect(() => {
+    transcriptMountScrollDoneRef.current = false;
+  }, [campaignId]);
 
   useEffect(() => {
     followLatestRef.current = followLatest;
@@ -327,6 +333,36 @@ export default function AiTablePage() {
     if (pin) setUnreadBelow(0);
   }, []);
 
+  useEffect(() => {
+    if (!isDriver) return;
+    const el = transcriptRef.current;
+    if (!el) return;
+
+    const syncAfterLayout = () => {
+      const node = transcriptRef.current;
+      if (!node || transcript.entries.length === 0) return;
+      if (!transcriptMountScrollDoneRef.current && node.scrollHeight > node.clientHeight) {
+        transcriptMountScrollDoneRef.current = true;
+        if (
+          shouldScrollTranscriptToTailOnMount(
+            transcript.entries.length,
+            node.scrollTop,
+            node.scrollHeight,
+            node.clientHeight,
+          )
+        ) {
+          node.scrollTop = node.scrollHeight - node.clientHeight;
+        }
+      }
+      handleTranscriptScroll();
+    };
+
+    syncAfterLayout();
+    const observer = new ResizeObserver(syncAfterLayout);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isDriver, transcript.entries.length, handleTranscriptScroll, campaignId]);
+
   const jumpToLatest = useCallback(() => {
     followLatestRef.current = true;
     setFollowLatest(true);
@@ -335,8 +371,26 @@ export default function AiTablePage() {
   }, []);
 
   useLayoutEffect(() => {
+    if (!isDriver) return;
     const el = transcriptRef.current;
-    if (!el) return;
+    if (!el || transcript.entries.length === 0) return;
+
+    if (!transcriptMountScrollDoneRef.current && el.scrollHeight > el.clientHeight) {
+      transcriptMountScrollDoneRef.current = true;
+      if (
+        shouldScrollTranscriptToTailOnMount(
+          transcript.entries.length,
+          el.scrollTop,
+          el.scrollHeight,
+          el.clientHeight,
+        )
+      ) {
+        el.scrollTop = el.scrollHeight - el.clientHeight;
+      }
+    }
+
+    if (el.scrollHeight <= el.clientHeight && transcript.entries.length > 1) return;
+
     const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
     if (near) {
       followLatestRef.current = true;
@@ -347,7 +401,7 @@ export default function AiTablePage() {
     }
     followLatestRef.current = false;
     setFollowLatest(false);
-  }, [transcriptRevision]);
+  }, [transcriptRevision, isDriver, transcript.entries.length]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
@@ -617,10 +671,12 @@ export default function AiTablePage() {
           )}
           <div ref={bottomRef} />
         </div>
-        {!followLatest && unreadBelow > 0 && (
+        {!followLatest && (
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
             <Btn type="button" onClick={jumpToLatest} data-testid="transcript-jump-latest">
-              {t('table.jumpToLatestUnread', { count: unreadBelow })}
+              {unreadBelow > 0
+                ? t('table.jumpToLatestUnread', { count: unreadBelow })
+                : t('table.jumpToLatest')}
             </Btn>
           </div>
         )}

@@ -34,3 +34,14 @@ export function unreadAfterFeedGrowth(
 export function followLatestAfterUserScroll(nearBottom: boolean): boolean {
   return nearBottom;
 }
+
+/** Hydrated transcripts start at scrollTop 0; pin to the tail on first layout when entries exist. */
+export function shouldScrollTranscriptToTailOnMount(
+  entryCount: number,
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+): boolean {
+  if (entryCount === 0) return false;
+  return !isFeedNearBottom(scrollTop, scrollHeight, clientHeight);
+}

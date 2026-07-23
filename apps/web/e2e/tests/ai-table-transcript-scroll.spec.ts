@@ -74,6 +74,32 @@ function seedLongTranscript(_campaignId: number): TranscriptEntry[] {
 }
 
 test.describe('AI table transcript scroll (#590)', () => {
+  test('opens at the latest line when the transcript is hydrated from storage', async ({ page }) => {
+    const { campaignId } = seed();
+    const entries = seedLongTranscript(campaignId);
+    await page.setViewportSize({ width: 800, height: 520 });
+    await mockDriverTable(page, campaignId);
+    await page.addInitScript(
+      ({ key, payload }) => {
+        localStorage.setItem(key, payload);
+      },
+      { key: transcriptStorageKey(campaignId), payload: JSON.stringify({ entries }) },
+    );
+
+    await page.goto(`/c/${campaignId}/table`);
+    const transcript = page.getByRole('log', { name: 'Table transcript' });
+    await expect(transcript).toBeVisible();
+    await expect.poll(async () => {
+      const jump = page.getByTestId('transcript-jump-latest');
+      if (await jump.isVisible()) return true;
+      return transcript.getByText('Earlier table line 80').evaluate((el) => {
+        const row = el.getBoundingClientRect();
+        const pane = el.closest('[role="log"]')!.getBoundingClientRect();
+        return row.top >= pane.top - 4 && row.bottom <= pane.bottom + 4;
+      });
+    }).toBe(true);
+  });
+
   test('stops tail follow when reading history and offers jump-to-latest with unread count', async ({ page }) => {
     const { campaignId } = seed();
     const entries = seedLongTranscript(campaignId);

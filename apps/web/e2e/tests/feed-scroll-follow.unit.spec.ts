@@ -3,6 +3,7 @@ import {
   FEED_NEAR_BOTTOM_PX,
   followLatestAfterUserScroll,
   isFeedNearBottom,
+  shouldScrollTranscriptToTailOnMount,
   unreadAfterFeedGrowth,
 } from '../../src/features/ai-dm/feedScrollFollow';
 
@@ -25,5 +26,11 @@ test.describe('transcript feed scroll follow (#590)', () => {
   test('user scroll at the tail re-enables follow mode', () => {
     expect(followLatestAfterUserScroll(true)).toBe(true);
     expect(followLatestAfterUserScroll(false)).toBe(false);
+  });
+
+  test('hydrated transcript at scrollTop 0 should pin to tail on mount', () => {
+    expect(shouldScrollTranscriptToTailOnMount(0, 0, 100, 48)).toBe(false);
+    expect(shouldScrollTranscriptToTailOnMount(40, 0, 2000, 400)).toBe(true);
+    expect(shouldScrollTranscriptToTailOnMount(40, 1600, 2000, 400)).toBe(false);
   });
 });
