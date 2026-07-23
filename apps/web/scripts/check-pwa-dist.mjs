@@ -61,6 +61,32 @@ if (existsSync(join(dist, "sw.js"))) {
     /precache/i.test(sw) || /workbox/i.test(sw),
     "sw.js should use workbox precaching",
   );
+  // Issue #879: streams / exports / backups stay NetworkOnly; JSON and image
+  // thumbs use separate bounded buckets (never the legacy single campfire-api).
+  check(
+    /NetworkOnly/i.test(sw) || /networkOnly/i.test(sw),
+    "sw.js should register NetworkOnly for SSE/export/backup exclusions",
+  );
+  check(
+    sw.includes("campfire-api-json"),
+    "sw.js should use the bounded campfire-api-json cache",
+  );
+  check(
+    sw.includes("campfire-api-images"),
+    "sw.js should use the bounded campfire-api-images cache",
+  );
+  check(
+    sw.includes("text/event-stream"),
+    "sw.js should exclude text/event-stream from runtime caching",
+  );
+  check(
+    sw.includes("/export") || sw.includes("export"),
+    "sw.js should exclude export downloads from runtime caching",
+  );
+  check(
+    sw.includes("/backup") || sw.includes("backup"),
+    "sw.js should exclude backup downloads from runtime caching",
+  );
 }
 
 // 4. index.html wires up the manifest, theme-color and apple-touch-icon.
