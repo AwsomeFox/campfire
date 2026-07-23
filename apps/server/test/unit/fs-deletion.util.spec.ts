@@ -1,12 +1,22 @@
 import { removePathVerified, errnoCode } from '../../src/modules/attachments/fs-deletion.util';
 
 describe('fs-deletion.util (issue #727)', () => {
-  it('treats ENOENT from rmSync as success', () => {
+  it('treats missing path as success (ENOENT from rmSync)', () => {
     const result = removePathVerified('/tmp/missing.png', {
       rmSync: () => {
         const err = new Error('ENOENT') as NodeJS.ErrnoException;
         err.code = 'ENOENT';
         throw err;
+      },
+      existsSync: () => false,
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it('skips pre-stat and treats absent path as success when rmSync is a no-op', () => {
+    const result = removePathVerified('/tmp/gone.png', {
+      rmSync: () => {
+        /* force rm on already-absent path — no throw */
       },
       existsSync: () => false,
     });

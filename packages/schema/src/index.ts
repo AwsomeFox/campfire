@@ -4819,11 +4819,11 @@ export type StorageOrphans = z.infer<typeof StorageOrphans>;
 export const FsCleanupPendingItem = z.object({
   id: z.number().int().positive(),
   relPath: z.string(),
-  scope: z.string(),
+  scope: z.enum(['attachment', 'campaign_purge']),
   status: z.enum(['pending', 'failed']),
   attempts: z.number().int().nonnegative(),
   lastError: z.string(),
-  updatedAt: z.string(),
+  updatedAt: IsoDate,
 });
 export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
 

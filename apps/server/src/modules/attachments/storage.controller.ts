@@ -97,7 +97,7 @@ export class StorageController {
     const cleared = await this.fsDeletion.drainQueue('manual');
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: 'admin',
       action: 'storage.fs_cleanup.retry',
       entityType: 'storage',
       detail: `cleared=${cleared}`,

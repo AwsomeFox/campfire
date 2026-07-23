@@ -28,9 +28,6 @@ export function removePathVerified(
   opts: { recursive?: boolean; rmSync: FsRmSync; existsSync: FsExistsSync },
 ): VerifiedRemoveResult {
   const { recursive = false, rmSync, existsSync } = opts;
-  if (!existsSync(target)) {
-    return { ok: true };
-  }
   try {
     rmSync(target, { force: true, recursive });
   } catch (err) {

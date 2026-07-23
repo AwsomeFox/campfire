@@ -83,18 +83,23 @@ export class FsDeletionService implements OnApplicationBootstrap {
     const pendingPaths: string[] = [];
     for (const abs of absolutePaths) {
       const rel = uploadsRelativePath(abs);
-      const exists = fs.existsSync(abs);
-      const isDir = exists && fs.statSync(abs).isDirectory();
       const result = removePathVerified(abs, {
-        recursive: isDir,
+        recursive: true,
         rmSync: fs.rmSync.bind(fs),
         existsSync: fs.existsSync.bind(fs),
       });
       if (result.ok) continue;
 
+      let kind: 'file' | 'directory' = 'file';
+      try {
+        if (fs.statSync(abs).isDirectory()) kind = 'directory';
+      } catch {
+        /* path may have disappeared between remove attempt and enqueue */
+      }
+
       pendingPaths.push(rel);
       await this.enqueue(rel, {
-        kind: isDir ? 'directory' : 'file',
+        kind,
         scope: ctx.scope,
         campaignId: ctx.campaignId,
         entityId: ctx.entityId,
@@ -136,7 +141,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
       items: rows.map((r) => ({
         id: r.id,
         relPath: r.relPath,
-        scope: r.scope,
+        scope: r.scope as FsDeletionScope,
         status: r.status as 'pending' | 'failed',
         attempts: r.attempts,
         lastError: r.lastError,
@@ -165,7 +170,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
       }
 
       const result = removePathVerified(abs, {
-        recursive: row.kind === 'directory',
+        recursive: true,
         rmSync: fs.rmSync.bind(fs),
         existsSync: fs.existsSync.bind(fs),
       });
@@ -237,6 +242,7 @@ export class FsDeletionService implements OnApplicationBootstrap {
           lastError: params.error,
           updatedAt: now,
           status: 'pending',
+          attempts: 0,
         },
       });
   }
