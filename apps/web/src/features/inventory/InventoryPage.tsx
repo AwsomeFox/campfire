@@ -31,7 +31,7 @@ const COINS = [
 type CoinKey = (typeof COINS)[number]['key'];
 
 /** Add-item quantity bounds (issue #459). Schema allows any non-negative int; the
- *  form spinbutton exposes a practical max so AT gets min/max/step. */
+ *  form exposes a practical max via help text + parseLocalizedInteger. */
 const ITEM_QTY_MIN = 0;
 const ITEM_QTY_MAX = 1_000_000;
 const ITEM_QTY_STEP = 1;
@@ -807,7 +807,7 @@ function AddItemForm({
     e.preventDefault();
     if (!name.trim()) return;
     // Issue #633: parse qty without silently defaulting to 1. Issue #459: enforce
-    // the same min/max the spinbutton exposes so out-of-range values announce.
+    // the same min/max the field help exposes so out-of-range values announce.
     const qtyParsed = parseLocalizedInteger(qty, formatLocale, {
       min: ITEM_QTY_MIN,
       max: ITEM_QTY_MAX,
@@ -843,21 +843,20 @@ function AddItemForm({
     <Card className="space-y-3" data-testid="inventory-add-item">
       <h2 className="font-bold text-white text-sm">Add item</h2>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
-      {/* noValidate: native number constraints stay for AT/min/max/step, but
-          submit uses parseLocalizedInteger so out-of-range values announce via
-          the Quantity field alert instead of a silent browser block (#459/#633). */}
-      <form onSubmit={submit} className="space-y-3" noValidate>
+      <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
           <TextInput placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          {/* Labeled spinbutton (issue #459): associated Quantity label, native
-              min/max/step, validation help, and contextual error announcement.
-              type="number" matches the audited control; parseLocalizedInteger
-              still rejects invalid/out-of-range values without silent coercion (#633). */}
+          {/* Labeled quantity (issue #459): associated Quantity label, constraint
+              help, and contextual error announcement. type="text" +
+              inputMode="numeric" (issue #633) keeps locale grouping / non-ASCII
+              digits intact for parseLocalizedInteger — type="number" would strip
+              or mis-handle them before submit parsing (same pattern as treasury). */}
           <div className="field">
             <label htmlFor={qtyId}>Quantity</label>
             <TextInput
               id={qtyId}
-              type="number"
+              type="text"
+              inputMode="numeric"
               min={ITEM_QTY_MIN}
               max={ITEM_QTY_MAX}
               step={ITEM_QTY_STEP}
