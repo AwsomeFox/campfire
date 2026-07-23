@@ -14,7 +14,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
-import { LocationStatusLabel } from '../../components/LocationStatusLabel';
+import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
@@ -25,7 +25,6 @@ import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
-import { LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
 

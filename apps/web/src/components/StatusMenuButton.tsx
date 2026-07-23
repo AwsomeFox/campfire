@@ -20,8 +20,9 @@
  *  - Home / End jump to the first / last option.
  *  - Enter / Space commits the focused option.
  *  - Escape closes and returns focus to the trigger.
- *  - Tab from an open popup commits the focused option and moves on; a click
- *    outside dismisses without committing.
+ *  - Tab from an open popup commits the focused option and moves on: the menu
+ *    closes immediately (without restoring focus) before the async save
+ *    settles; a click outside dismisses without committing.
  *
  * The popup is anchored to the trigger and clamped to the viewport so it stays
  * on screen at high zoom / on narrow viewports. Selection is preserved when a
@@ -47,7 +48,11 @@ export interface StatusMenuButtonProps<V extends string> {
   /** The currently-committed (server-acknowledged) value. */
   value: V;
   options: readonly StatusMenuOption<V>[];
-  /** Called when the user commits an option. The menu stays open until onClose. */
+  /**
+   * Called when the user commits an option. Enter/Space keep the menu open
+   * until this settles (then close with focus restored); Tab closes the menu
+   * immediately without restoring focus, then awaits this in the background.
+   */
   onSelect: (value: V) => void | Promise<void>;
   /** Disables the trigger (e.g. while a status save is in flight). */
   disabled?: boolean;
@@ -62,8 +67,6 @@ export interface StatusMenuButtonProps<V extends string> {
   announceFailure?: (message: string) => void;
   failureMessage?: string;
 }
-
-const FOCUSABLE_OPTION_SELECTOR = '[role="option"]:not([disabled])';
 
 export function StatusMenuButton<V extends string>({
   triggerLabel,
@@ -97,6 +100,11 @@ export function StatusMenuButton<V extends string>({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const listboxRef = useRef<HTMLUListElement>(null);
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
+  const commitInFlight = useRef(false);
+  // Latched when the menu closes without restoring focus (outside click, Tab,
+  // in-flight dismiss). An in-flight commit's completion must honor this so
+  // focus is not yanked back to the trigger after the user has moved on.
+  const suppressFocusRestore = useRef(false);
 
   // Keep the active index in sync with the committed selection while closed so
   // re-opening always starts the keyboard journey on the current value.
@@ -110,13 +118,25 @@ export function StatusMenuButton<V extends string>({
   }, []);
 
   const openMenu = useCallback(() => {
+    suppressFocusRestore.current = false;
     setOpen(true);
     setActiveIndex(selectedIndex);
   }, [selectedIndex]);
 
-  const closeAndReturn = useCallback(() => {
+  const closeMenu = useCallback((restoreFocus = true) => {
     setOpen(false);
+    if (!restoreFocus) {
+      suppressFocusRestore.current = true;
+      return;
+    }
+    if (suppressFocusRestore.current) return;
     buttonRef.current?.focus();
+    // Escape / trigger-click dismiss restores focus now, but if a save is still
+    // pending the later finish() must not restore again — the user may have
+    // already tabbed or clicked elsewhere after this dismiss.
+    if (commitInFlight.current) {
+      suppressFocusRestore.current = true;
+    }
   }, []);
 
   // Move the DOM focus to the active option whenever it changes while open.
@@ -134,12 +154,16 @@ export function StatusMenuButton<V extends string>({
     function onPointerDown(event: PointerEvent) {
       if (!root) return;
       if (event.target instanceof Node && root.contains(event.target)) return;
-      setOpen(false);
+      // Close without forcing focus back to the trigger: a forced refocus on
+      // pointerdown fights the user's click target (focus would briefly jump
+      // to the trigger and can disrupt clicking/focusing whatever they
+      // actually clicked outside the popup).
+      closeMenu(false);
     }
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape') {
         event.preventDefault();
-        closeAndReturn();
+        closeMenu(true);
       }
     }
     document.addEventListener('pointerdown', onPointerDown);
@@ -148,7 +172,7 @@ export function StatusMenuButton<V extends string>({
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKey);
     };
-  }, [open, closeAndReturn]);
+  }, [open, closeMenu]);
 
   // Clamp the popup to the viewport so it stays visible at high zoom / on small
   // screens. Recompute on open and on any viewport change while open.
@@ -167,12 +191,15 @@ export function StatusMenuButton<V extends string>({
       listbox.style.top = '';
       listbox.style.maxHeight = '';
 
+      // getBoundingClientRect() returns viewport-relative coordinates, which is
+      // exactly what's needed here because the listbox is rendered with
+      // `position: fixed` (see the inline style below) — no scrollX/scrollY
+      // offset is required. If that positioning ever changes to `absolute`,
+      // these left/top/right assignments would need document-relative offsets.
       const buttonRect = button.getBoundingClientRect();
       const listboxRect = listbox.getBoundingClientRect();
       const viewportWidth = document.documentElement.clientWidth;
       const viewportHeight = window.innerHeight;
-      const scrollY = window.scrollY;
-      const scrollX = window.scrollX;
 
       // Horizontal: prefer right-aligned under the trigger, but if it would
       // overflow the left edge, push it right; if it overflows the viewport
@@ -186,10 +213,10 @@ export function StatusMenuButton<V extends string>({
           Math.max(margin, buttonRect.left),
           Math.max(margin, viewportWidth - listboxRect.width - margin),
         );
-        listbox.style.left = `${clampedLeft + scrollX}px`;
+        listbox.style.left = `${clampedLeft}px`;
         listbox.style.right = 'auto';
       } else {
-        listbox.style.right = `${viewportWidth - rightEdge + scrollX}px`;
+        listbox.style.right = `${viewportWidth - rightEdge}px`;
         listbox.style.left = 'auto';
       }
 
@@ -200,9 +227,9 @@ export function StatusMenuButton<V extends string>({
       listbox.style.maxHeight = `${Math.max(120, Math.min(listboxRect.height, maxHeight))}px`;
       const placeBelow = spaceBelow >= listboxRect.height || spaceBelow >= spaceAbove;
       if (placeBelow) {
-        listbox.style.top = `${buttonRect.bottom + scrollY}px`;
+        listbox.style.top = `${buttonRect.bottom}px`;
       } else {
-        listbox.style.top = `${buttonRect.top - Math.min(listboxRect.height, maxHeight) + scrollY}px`;
+        listbox.style.top = `${buttonRect.top - Math.min(listboxRect.height, maxHeight)}px`;
       }
     };
 
@@ -271,14 +298,14 @@ export function StatusMenuButton<V extends string>({
         break;
       case 'Tab':
         // Tab commits the focused option and lets the user keep moving —
-        // matches native <select> behavior on Windows/Linux.
-        event.preventDefault();
-        void commit(options[index]);
-        closeAndReturn();
+        // matches native <select> behavior on Windows/Linux. Close happens
+        // immediately inside commit (restoreFocus: false) so aria-expanded
+        // flips and Escape/outside listeners detach while focus moves on.
+        void commit(options[index], { restoreFocus: false });
         break;
       case 'Escape':
         event.preventDefault();
-        closeAndReturn();
+        closeMenu(true);
         break;
       default:
         // Type-ahead: jump to the first option whose label starts with the key.
@@ -291,22 +318,47 @@ export function StatusMenuButton<V extends string>({
     }
   }
 
-  async function commit(option: StatusMenuOption<V>) {
+  async function commit(option: StatusMenuOption<V>, opts?: { restoreFocus?: boolean }) {
+    const restoreFocus = opts?.restoreFocus ?? true;
+    const finish = () => {
+      const shouldRestore = restoreFocus && !suppressFocusRestore.current;
+      closeMenu(shouldRestore);
+    };
     if (option.value === value) {
       // Selecting the already-selected option is a no-op apart from closing.
-      closeAndReturn();
+      // This must run before the in-flight guard below: dismissing on the
+      // current value (Escape-style) should always close the menu, even
+      // while an earlier save for a different option is still pending.
+      finish();
       return;
     }
+    if (commitInFlight.current) {
+      // Duplicate activation while a save is pending: close without focus so
+      // the menu doesn't hang open looking unresponsive.
+      closeMenu(false);
+      return;
+    }
+    commitInFlight.current = true;
     try {
+      // Tab (restoreFocus: false): close immediately so aria-expanded flips and
+      // Escape/outside listeners detach while focus continues to the next
+      // control. Enter/Space keep the menu open until onSelect settles
+      // (unless the user dismisses in the meantime, which latches
+      // suppressFocusRestore so finish() does not yank focus back).
+      if (!restoreFocus) {
+        closeMenu(false);
+      }
       await onSelect(option.value);
-      closeAndReturn();
+      finish();
     } catch {
       // The caller's onSelect is expected to surface its own failure UI. The
       // selection is preserved (value is unchanged), and we surface a spoken
       // failure when an announcer was supplied so screen reader users learn
       // the save did not stick.
       if (announceFailure && failureMessage) announceFailure(failureMessage);
-      closeAndReturn();
+      finish();
+    } finally {
+      commitInFlight.current = false;
     }
   }
 
@@ -324,7 +376,7 @@ export function StatusMenuButton<V extends string>({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
-        onClick={() => (open ? closeAndReturn() : openMenu())}
+        onClick={() => (open ? closeMenu(true) : openMenu())}
         onKeyDown={handleTriggerKeyDown}
         aria-label={triggerLabel}
         aria-describedby={triggerDescription ? `${baseId}-desc` : undefined}
