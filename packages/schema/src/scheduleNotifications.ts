@@ -159,16 +159,16 @@ export function scheduleNotificationFallbackBody(data: ScheduleNotificationData)
   const when = formatScheduleNotificationInstant(data.scheduledAt, 'en-US', 'UTC');
   switch (data.changeType) {
     case 'created':
-      return `Starts ${when}.`;
+      return `Starts at ${when}.`;
     case 'cancelled':
       return `Was planned for ${when}.`;
     case 'rescheduled':
     case 'updated': {
       const summary = summarizeScheduleChangedFields(data.changedFields);
-      return summary ? `Updated: ${summary}. Starts ${when}.` : `Starts ${when}.`;
+      return summary ? `Updated: ${summary}. Starts at ${when}.` : `Starts at ${when}.`;
     }
     default:
-      return `Starts ${when}.`;
+      return `Starts at ${when}.`;
   }
 }
 

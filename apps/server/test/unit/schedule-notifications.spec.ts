@@ -127,6 +127,15 @@ describe('schedule notification helpers (issue #820)', () => {
     expect(body).not.toMatch(/bring snacks/i);
   });
 
+  it('uses "Starts at …" so unknown instants stay grammatical', () => {
+    expect(scheduleNotificationFallbackBody(data({ changeType: 'created' }))).toMatch(/^Starts at /);
+    expect(
+      scheduleNotificationFallbackBody(
+        data({ changeType: 'created', scheduledAt: 'not-a-date' }),
+      ),
+    ).toBe('Starts at an unknown time.');
+  });
+
   it('renders viewer-local titles for create/reschedule/update/cancel', () => {
     const locale = 'en-US';
     const tz = 'America/New_York';
