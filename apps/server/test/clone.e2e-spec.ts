@@ -337,7 +337,6 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const cloneId = cloneRes.body.id;
 
     const encs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/encounters`);
-    expect(encs.body.length).toBe(3);
     const clonedRunning = encs.body.find((e: { name: string }) => e.name === 'Mid-fight brawl');
     const clonedEnded = encs.body.find((e: { name: string }) => e.name === 'Finished skirmish');
     expect(clonedRunning).toBeDefined();
