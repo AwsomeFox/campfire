@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { SeedData } from '../global-setup';
+import type { APIRequestContext } from '@playwright/test';
+import { CREDS, type SeedData } from '../global-setup';
 
 // __dirname is provided by Playwright's CJS transform — avoid import.meta here.
 const AUTH_DIR = resolve(__dirname, '..', '.auth');
@@ -21,10 +22,8 @@ export const PNG_16_9 = Buffer.from(
   'base64',
 );
 
-import { CREDS } from '../global-setup';
-
 /** Reopens and resets the main seeded encounter using captured DM authentication. */
-export async function restoreSeedEncounter(page: { request: any }): Promise<void> {
+export async function restoreSeedEncounter(page: { request: APIRequestContext }): Promise<void> {
   try {
     const { encounterId, endedEncounterId, bossId, skirmisherId } = seed();
     await page.request

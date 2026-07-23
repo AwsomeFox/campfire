@@ -41,7 +41,7 @@ async function setupPage(page: Page) {
     route.fulfill({ status: 200, json: ME_BODY }),
   );
   await page.route(`**/api/v1/campaigns`, (route) => {
-    if (route.request().method() !== 'GET') return route.continue();
+    if (route.request().method() !== 'GET') return route.fallback();
     return route.fulfill({
       status: 200,
       json: [

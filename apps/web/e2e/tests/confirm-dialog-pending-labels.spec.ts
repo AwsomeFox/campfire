@@ -73,6 +73,10 @@ async function expectBusyConfirm(
     await expect(page.getByRole('dialog', { name: dialogName })).toBeHidden();
   } else {
     await expect(dialog).not.toHaveAttribute('aria-busy', 'true');
+    const idleConfirm = dialog.getByRole('button', { name: idleLabel });
+    await expect(idleConfirm).toBeEnabled();
+    await expect(idleConfirm).toHaveText(idleLabel);
+    await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveText('');
   }
 }
 

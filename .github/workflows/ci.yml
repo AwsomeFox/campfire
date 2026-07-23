@@ -246,7 +246,7 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - name: Run Playwright tests (shard ${{ matrix.shard }}/4)
         run: |
-          npx playwright test --config playwright.first-run.config.ts -w apps/web
+          if [ "${{ matrix.shard }}" = "1" ]; then npx playwright test --config playwright.first-run.config.ts -w apps/web; fi
           npx playwright test --shard=${{ matrix.shard }}/4 -w apps/web
       - name: Upload Playwright report
         if: always()
