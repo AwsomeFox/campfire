@@ -168,8 +168,10 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           const consume = (signals: SseParseSignal[]) => {
             for (const signal of signals) {
               if (signal.kind === 'recovered') {
-                // Buffer was reset after a runaway/malformed frame — keep reading;
-                // the reconnect path below still heals a hard stream drop.
+                // Parser discarded mid-stream bytes — connection stays up, but
+                // UI may have missed events; mark catch-up and refetch now.
+                needsCatchUp = true;
+                if (!disposed) handlersRef.current.onReconnect?.();
                 continue;
               }
               const data = signal.message.data;

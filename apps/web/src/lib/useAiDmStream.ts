@@ -228,6 +228,12 @@ export function useAiDmStream(
           const parser = new SseParser();
           const consume = (signals: SseParseSignal[]) => {
             for (const signal of signals) {
+              if (signal.kind === 'recovered') {
+                // Parser discarded mid-stream bytes — stay connected but refetch
+                // session/transcript state that may have been skipped.
+                if (!disposed) handlersRef.current.onReconnect?.();
+                continue;
+              }
               if (signal.kind !== 'message') continue;
               const data = signal.message.data;
               if (!data) continue;

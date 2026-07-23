@@ -21,15 +21,27 @@ export type SseParseSignal =
   | { kind: 'recovered'; discardedBytes: number };
 
 export interface SseParserOptions {
-  /** Max pending decoded text + field buffers before recovery. Default 256 KiB. */
+  /**
+   * Max unfinished decoded text (incomplete line / frame overhead) before
+   * recovery. Does **not** include an in-progress message's assembled `data`
+   * fields — those use {@link maxMessageBytes}. Default 256 KiB.
+   */
   maxBufferedBytes?: number;
+  /**
+   * Max bytes for in-progress message field buffers (`data` + `event` + `id`)
+   * before recovery. Allows a single legitimate large SSE payload while still
+   * bounding runaway streams that never send a blank-line delimiter. Default 1 MiB.
+   */
+  maxMessageBytes?: number;
 }
 
 const DEFAULT_MAX_BUFFERED_BYTES = 256 * 1024;
+const DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024;
 
 export class SseParser {
   private decoder = new TextDecoder('utf-8');
   private readonly maxBufferedBytes: number;
+  private readonly maxMessageBytes: number;
   private text = '';
   private dataBuffer = '';
   private eventTypeBuffer = '';
@@ -38,16 +50,26 @@ export class SseParser {
 
   constructor(options?: SseParserOptions) {
     this.maxBufferedBytes = options?.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+    this.maxMessageBytes = options?.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
   }
 
-  /** Approximate pending buffered size (UTF-16 code units ≈ bytes for ASCII SSE). */
-  get bufferedBytes(): number {
+  /** Unfinished frame text waiting for a line terminator (recovery overhead). */
+  get unfinishedBytes(): number {
+    return this.text.length;
+  }
+
+  /** Assembled field buffers for the in-progress (not yet dispatched) message. */
+  get messageBytes(): number {
     return (
-      this.text.length +
       this.dataBuffer.length +
       this.eventTypeBuffer.length +
       (this.lastEventId?.length ?? 0)
     );
+  }
+
+  /** Total pending buffered size (unfinished text + in-progress message fields). */
+  get bufferedBytes(): number {
+    return this.unfinishedBytes + this.messageBytes;
   }
 
   /** Feed a raw byte chunk from the ReadableStream. */
@@ -89,7 +111,9 @@ export class SseParser {
   private drain(flushing: boolean): SseParseSignal[] {
     const out: SseParseSignal[] = [];
     this.processLines(flushing, out);
-    if (this.bufferedBytes > this.maxBufferedBytes) {
+    // Two separate caps: unfinished line text (malformed never-ending line) vs
+    // in-progress message fields (legitimate large payloads use the higher cap).
+    if (this.unfinishedBytes > this.maxBufferedBytes || this.messageBytes > this.maxMessageBytes) {
       const discardedBytes = this.bufferedBytes;
       this.reset();
       // Fresh decoder so a partial UTF-8 sequence can't leak into the next frame.

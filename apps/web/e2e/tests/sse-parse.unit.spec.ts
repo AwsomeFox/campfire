@@ -125,7 +125,7 @@ test.describe('SseParser (#748)', () => {
 
   test('bounds malformed-frame buffer growth and exposes recovery', () => {
     const parser = new SseParser({ maxBufferedBytes: 64 });
-    // Never send a blank line — buffer must not grow without bound.
+    // Never send a blank line — unfinished text must not grow without bound.
     const signals = parser.pushText(`data: ${'x'.repeat(200)}`);
     expect(recoveries(signals).length).toBe(1);
     expect(recoveries(signals)[0]).toBeGreaterThan(64);
@@ -140,6 +140,32 @@ test.describe('SseParser (#748)', () => {
     const signals = parser.pushText('data: ' + 'y'.repeat(100));
     expect(recoveries(signals).length).toBe(1);
     expect(messages(signals)).toEqual([]);
+  });
+
+  test('a large in-progress message does not trip unfinished-frame recovery', () => {
+    // Old policy counted assembled `data` against maxBufferedBytes, so a single
+    // legitimate payload larger than that limit was discarded mid-frame.
+    const parser = new SseParser({ maxBufferedBytes: 64, maxMessageBytes: 8_192 });
+    const payload = 'z'.repeat(500);
+    const mid = parser.pushText(`data: ${payload}\n`);
+    expect(recoveries(mid)).toEqual([]);
+    expect(messages(mid)).toEqual([]);
+    expect(parser.messageBytes).toBeGreaterThan(64);
+    expect(parser.unfinishedBytes).toBe(0);
+
+    const done = parser.pushText('\n');
+    expect(recoveries(done)).toEqual([]);
+    expect(messages(done)).toEqual([payload]);
+  });
+
+  test('in-progress message fields are still bounded by maxMessageBytes', () => {
+    const parser = new SseParser({ maxBufferedBytes: 256, maxMessageBytes: 80 });
+    // Terminated field lines accumulate in dataBuffer (not unfinished text).
+    const signals = parser.pushText(`data: ${'w'.repeat(200)}\n`);
+    expect(recoveries(signals).length).toBe(1);
+    expect(recoveries(signals)[0]).toBeGreaterThan(80);
+    expect(parser.bufferedBytes).toBe(0);
+    expect(messages(parser.pushText(`data: ${EVENT}\n\n`))).toEqual([EVENT]);
   });
 
   test('strips one leading space after the field colon (WHATWG)', () => {
