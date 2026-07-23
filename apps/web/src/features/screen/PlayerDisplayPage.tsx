@@ -22,8 +22,8 @@ import type {
   EncounterWithCombatants,
   HpBand,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { api, API } from '../../lib/api';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
   fingerprintDedupeParts,
   formatGroupedAnnouncement,
@@ -42,6 +42,14 @@ import {
   safeQuests,
   type SafeCombatant,
 } from './playerSafe';
+import {
+  PlayerDisplayLoadSequencer,
+  playerDisplaySyncMessage,
+  playerDisplaySyncState,
+  runPlayerDisplayLoad,
+  type PlayerDisplayFetchers,
+  type PlayerDisplayProjection,
+} from './playerDisplayLoad';
 
 const POLL_MS = 12_000;
 const CONTROLS_HIDE_MS = 3_500;
@@ -94,12 +102,21 @@ function fullscreenFailure(action: 'enter' | 'exit', error: unknown): string {
   return `Fullscreen couldn't start${detail}. Keep this tab active, allow fullscreen for this site, then try again.`;
 }
 
+const displayFetchers: PlayerDisplayFetchers = {
+  getSummary: (campaignId, signal) =>
+    api.get<CampaignSummary>(`${API}/campaigns/${campaignId}/summary`, { signal }),
+  getRunningEncounters: (campaignId, signal) =>
+    api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters?status=running`, { signal }),
+  getEncounter: (encounterId, signal) =>
+    api.get<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { signal }),
+};
+
 export default function PlayerDisplayPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
   const announce = useAnnounce();
-  const { roleIn } = useAuth();
+  const { roleIn, staleIdentity } = useAuth();
   const role = roleIn(cid);
 
   // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
@@ -109,9 +126,14 @@ export default function PlayerDisplayPage() {
   // never both mounted in the same tab — this never creates a second live connection.
   const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) ? cid : undefined);
 
-  const [summary, setSummary] = useState<CampaignSummary | null>(null);
-  const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Key projection/failure by campaignId so a client-side :campaignId swap cannot
+  // flash the prior campaign's (secret-free but still wrong) cast state.
+  const [projection, setProjection] = useState<PlayerDisplayProjection | null>(null);
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
+  const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
+  const [displayStale, setDisplayStale] = useState(false);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const [loading, setLoading] = useState(true);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [fullscreenSupported, setFullscreenSupported] = useState(fullscreenAvailable);
@@ -120,35 +142,52 @@ export default function PlayerDisplayPage() {
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
+
+  const summary = projection?.campaignId === cid ? projection.summary : null;
+  const encounter = projection?.campaignId === cid ? projection.encounter : null;
+  const error = failure?.campaignId === cid ? failure.message : null;
 
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
-    try {
-      const data = await api.get<CampaignSummary>(`${API}/campaigns/${cid}/summary`);
-      setSummary(data);
-      setError(null);
-      // Find the live encounter (if any) and pull its combatants for the initiative rail.
-      try {
-        const running = await api.get<Encounter[]>(`${API}/campaigns/${cid}/encounters?status=running`);
-        const live = running[0];
-        if (live) {
-          const full = await api.get<EncounterWithCombatants>(`${API}/encounters/${live.id}`);
-          setEncounter(full);
-        } else {
-          setEncounter(null);
-        }
-      } catch {
-        setEncounter(null);
-      }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the display.");
-    } finally {
+    const hadProjection = projectionRef.current?.campaignId === cid;
+    const result = await runPlayerDisplayLoad(loadSequencerRef.current, cid, displayFetchers, {
+      hadProjection,
+    });
+    if (result.kind === 'ignored') return;
+    if (result.kind === 'ok') {
+      setProjection(result.projection);
+      setFailure((current) => (current?.campaignId === cid ? null : current));
+      setDisplayStale(false);
       setLoading(false);
+      return;
     }
+    // Transient blip with last-known paint: keep the rail, surface stale/reconnect.
+    if (result.keepLastKnown) {
+      setDisplayStale(true);
+      setLoading(false);
+      return;
+    }
+    setFailure({ campaignId: cid, message: result.message });
+    setLoading(false);
   }, [cid]);
 
   useEffect(() => {
-    if (Number.isFinite(cid)) void load();
+    const sequencer = loadSequencerRef.current;
+    if (!Number.isFinite(cid)) {
+      sequencer.invalidate('campaign-changed');
+      return;
+    }
+    // Campaign identity changed: drop prior in-flight work and reset sync chrome
+    // before the first load for the new id.
+    sequencer.invalidate('campaign-changed');
+    setEventStatus('connecting');
+    setDisplayStale(false);
+    setLoading(true);
+    void load();
+    return () => {
+      sequencer.invalidate('unmount');
+    };
   }, [cid, load]);
 
   // Slow poll — catches location/quest/party edits (no SSE event) without hammering.
@@ -159,10 +198,15 @@ export default function PlayerDisplayPage() {
   }, [cid, load]);
 
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
+  // Poll + SSE share the same sequencer, so overlapping bursts cannot reorder commits.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(() => void load(), [load]),
     onReconnect: useCallback(() => void load(), [load]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
+
+  const syncState = playerDisplaySyncState({ staleIdentity, displayStale, eventStatus });
+  const syncMessage = summary ? playerDisplaySyncMessage(syncState) : null;
 
   // The ARIA live region is a single node mounted at the app root (Announcer),
   // so it survives client-side navigation. The DM's run-session tracker announces
@@ -497,6 +541,15 @@ export default function PlayerDisplayPage() {
           )}
           <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
         </div>
+        {syncMessage && (
+          <p
+            role="status"
+            aria-live="polite"
+            className={`cf-screen-sync ${syncState === 'offline' ? 'offline' : ''}`}
+          >
+            {syncMessage}
+          </p>
+        )}
         {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
           <p className="cf-ai-ticker"><GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />{liveActivity.lastNarration}</p>
         )}
@@ -776,6 +829,21 @@ const SCREEN_CSS = `
   color: var(--color-accent-2);
 }
 .cf-chip-sub { opacity: 0.7; }
+.cf-screen-sync {
+  margin: 10px 0 0;
+  width: fit-content;
+  max-width: 48ch;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  color: var(--color-neutral-200);
+  padding: 7px 12px;
+  font-size: clamp(12px, 1.1vw, 16px);
+  line-height: 1.35;
+}
+.cf-screen-sync.offline {
+  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 45%, transparent);
+}
 .cf-ai-ticker {
   margin: 10px 0 0;
   font-size: clamp(13px, 1.3vw, 18px);
