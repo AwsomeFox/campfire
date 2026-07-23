@@ -115,7 +115,16 @@ export function clearOfflineManifestMeta(campaignId: number): void {
 }
 
 /** Drop every campaign's offline-pack bookkeeping (logout / account switch). */
+/** Bumped on logout / clear so in-flight pack downloads stop writing. */
+let offlinePackGeneration = 0;
+
+/** Cancel in-flight offline pack downloads (call from logout / cache clear). */
+export function cancelOfflinePackDownloads(): void {
+  offlinePackGeneration += 1;
+}
+
 export function clearAllOfflineManifestMeta(): void {
+  cancelOfflinePackDownloads();
   if (typeof localStorage === 'undefined') return;
   try {
     const keys: string[] = [];
@@ -133,13 +142,18 @@ export function clearAllOfflineManifestMeta(): void {
 export type OfflinePackIndicator = 'ready' | 'stale' | 'incomplete' | 'missing';
 
 export function offlinePackIndicator(inspection: OfflineManifestInspection): OfflinePackIndicator {
-  if (inspection.complete && inspection.staleCount === 0 && inspection.missingCount === 0) {
-    return 'ready';
-  }
-  if (inspection.entries.every((e) => e.status === 'missing')) return 'missing';
-  // Missing required (or any) entries outrank staleness — incomplete is more actionable.
-  if (inspection.missingCount > 0 || !inspection.complete) return 'incomplete';
-  if (inspection.staleCount > 0) return 'stale';
+  const required = inspection.entries.filter((e) => e.required);
+  const requiredMissing = required.some((e) => e.status === 'missing');
+  const requiredStale = required.some((e) => e.status === 'stale');
+  const allMissing = inspection.entries.length > 0 && inspection.entries.every((e) => e.status === 'missing');
+
+  if (allMissing && inspection.downloadedAt == null) return 'missing';
+  // True gaps on required entries beat staleness for the banner.
+  if (requiredMissing) return 'incomplete';
+  // Stale required (or optional) entries surface as stale — not incomplete.
+  if (requiredStale || inspection.staleCount > 0) return 'stale';
+  if (required.every((e) => e.status === 'present')) return 'ready';
+  if (allMissing) return 'missing';
   return 'incomplete';
 }
 
@@ -249,8 +263,7 @@ export interface OfflineDownloadResult {
 }
 
 async function measureBytes(response: Response): Promise<number> {
-  const cl = response.headers.get('content-length');
-  if (cl != null && cl !== '' && Number.isFinite(Number(cl))) return Number(cl);
+  // Always measure the body — Content-Length can understate the payload.
   const buf = await response.clone().arrayBuffer();
   return buf.byteLength;
 }
@@ -336,6 +349,7 @@ async function putWithQuotaRetry(
   response: Response,
   maxEntries: number,
   metaEntries: Record<string, StoredEntryMeta>,
+  now: number = Date.now(),
 ): Promise<{ ok: boolean; quotaExceeded: boolean; evicted: number; reason?: string }> {
   if (typeof globalThis.caches === 'undefined') {
     return { ok: false, quotaExceeded: false, evicted: 0, reason: 'no-cache-storage' };
@@ -347,7 +361,7 @@ async function putWithQuotaRetry(
     // Rank the fresh write as newest before LRU eviction so a full bucket
     // cannot immediately drop the entry we just stored (cachedAt default 0).
     metaEntries[requestUrl] = {
-      cachedAt: Date.now(),
+      cachedAt: now,
       bytes: metaEntries[requestUrl]?.bytes ?? 0,
       cacheName,
     };
@@ -376,7 +390,7 @@ async function putWithQuotaRetry(
     try {
       await cache.put(requestUrl, response.clone());
       metaEntries[requestUrl] = {
-        cachedAt: Date.now(),
+        cachedAt: now,
         bytes: metaEntries[requestUrl]?.bytes ?? 0,
         cacheName,
       };
@@ -409,6 +423,7 @@ export async function downloadCampaignOfflinePack(
 ): Promise<OfflineDownloadResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const now = opts.now ?? Date.now();
+  const generation = offlinePackGeneration;
   const manifest = campaignOfflineManifest(campaignId);
   const extras: OfflineManifestEntry[] = (opts.extraImageUrls ?? []).map((url) => ({
     url,
@@ -427,6 +442,16 @@ export async function downloadCampaignOfflinePack(
 
   let completed = 0;
   for (const entry of all) {
+    if (generation !== offlinePackGeneration) {
+      return {
+        ok: false,
+        downloadedAt: now,
+        stored,
+        failed: [...failed, { url: entry.url, reason: 'cancelled' }],
+        quotaExceeded,
+        evicted,
+      };
+    }
     try {
       const headers: Record<string, string> = {
         accept: entry.kind === 'image' ? 'image/*' : 'application/json',
@@ -468,7 +493,7 @@ export async function downloadCampaignOfflinePack(
 
       const cacheName = entry.kind === 'image' ? API_IMAGE_CACHE_NAME : API_JSON_CACHE_NAME;
       const maxEntries = entry.kind === 'image' ? API_IMAGE_MAX_ENTRIES : API_JSON_MAX_ENTRIES;
-      const put = await putWithQuotaRetry(cacheName, entry.url, allowed, maxEntries, entryMeta);
+      const put = await putWithQuotaRetry(cacheName, entry.url, allowed, maxEntries, entryMeta, now);
       evicted += put.evicted;
       if (put.quotaExceeded) quotaExceeded = true;
       if (!put.ok) {
@@ -488,10 +513,18 @@ export async function downloadCampaignOfflinePack(
   }
 
   const downloadedAt = now;
-  writeOfflineManifestMeta({ campaignId, downloadedAt, entries: entryMeta });
+  // Skip writing an empty shell after a total failure (keeps banner at "missing").
+  // Also skip if logout/clear bumped the generation mid-download.
+  if (generation === offlinePackGeneration && (stored > 0 || Object.keys(entryMeta).length > 0)) {
+    // If nothing new was stored and we only carried prior meta, still refresh only when stored>0
+    // or we had successful puts this run.
+    if (stored > 0) {
+      writeOfflineManifestMeta({ campaignId, downloadedAt, entries: entryMeta });
+    }
+  }
 
   return {
-    ok: failed.length === 0,
+    ok: failed.length === 0 && generation === offlinePackGeneration,
     downloadedAt,
     stored,
     failed,

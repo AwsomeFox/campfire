@@ -167,35 +167,29 @@ export async function cacheWillUpdateJson({
   if (ct.includes('text/event-stream')) return null;
   if (!ct.includes('application/json') && !ct.includes('+json')) return null;
 
-  const rawLen = response.headers.get('content-length');
-  if (rawLen != null && rawLen !== '') {
-    const n = Number(rawLen);
-    if (Number.isFinite(n) && n > 512 * 1024) return null;
-  } else {
-    // No Content-Length: stream a clone and stop once over the cap so we never
-    // fully buffer a huge/chunked body just to reject it.
-    try {
-      const body = response.clone().body;
-      if (!body) return null;
-      const reader = body.getReader();
-      let total = 0;
-      const limit = 512 * 1024;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value?.byteLength ?? 0;
-        if (total > limit) {
-          try {
-            await reader.cancel();
-          } catch {
-            /* ignore */
-          }
-          return null;
+  // Always measure the body — Content-Length can understate the payload.
+  // Stream a clone and stop once over the cap so we never fully buffer a huge body.
+  const jsonMaxBytes = 512 * 1024;
+  try {
+    const body = response.clone().body;
+    if (!body) return null;
+    const reader = body.getReader();
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value?.byteLength ?? 0;
+      if (total > jsonMaxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
         }
+        return null;
       }
-    } catch {
-      return null;
     }
+  } catch {
+    return null;
   }
 
   return response;
@@ -221,33 +215,28 @@ export async function cacheWillUpdateImage({
   if (ct.includes('text/event-stream')) return null;
   if (!ct.startsWith('image/')) return null;
 
-  const rawLen = response.headers.get('content-length');
-  if (rawLen != null && rawLen !== '') {
-    const n = Number(rawLen);
-    if (Number.isFinite(n) && n > 256 * 1024) return null;
-  } else {
-    try {
-      const body = response.clone().body;
-      if (!body) return null;
-      const reader = body.getReader();
-      let total = 0;
-      const limit = 256 * 1024;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value?.byteLength ?? 0;
-        if (total > limit) {
-          try {
-            await reader.cancel();
-          } catch {
-            /* ignore */
-          }
-          return null;
+  // Always measure the body — Content-Length can understate the payload.
+  const imageMaxBytes = 256 * 1024;
+  try {
+    const body = response.clone().body;
+    if (!body) return null;
+    const reader = body.getReader();
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value?.byteLength ?? 0;
+      if (total > imageMaxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* ignore */
         }
+        return null;
       }
-    } catch {
-      return null;
     }
+  } catch {
+    return null;
   }
 
   return response;
