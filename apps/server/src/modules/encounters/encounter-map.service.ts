@@ -92,7 +92,9 @@ export class EncounterMapService {
     // role/fog revision is not already in the render LRU.
     const original = this.attachments.resolveFile(row, 'original');
     const normalizedRevealed = normalizeRevealedForCache(revealedForRender);
-    const key = `${original.etag}:${variant}:${JSON.stringify(normalizedRevealed)}`;
+    // Include attachment id so two different maps with identical bytes cannot
+    // share a fog-rendered cache entry (filename/etag alone are not unique).
+    const key = `${row.id}:${original.etag}:${variant}:${JSON.stringify(normalizedRevealed)}`;
     const cached = this.cache.get(key);
     if (cached) {
       this.cache.delete(key);

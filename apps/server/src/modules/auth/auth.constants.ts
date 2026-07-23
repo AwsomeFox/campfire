@@ -15,4 +15,9 @@ export const RESET_CODE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
 /** Holds `state:codeVerifier` for the duration of the OIDC redirect round-trip. */
 export const OIDC_FLOW_COOKIE_NAME = 'campfire_oidc_flow';
+/**
+ * Optional post-SSO return path (issue #478). Set alongside the flow cookie when
+ * `/oidc/login?redirect=` carries a validated in-app path; cleared on callback.
+ */
+export const OIDC_RETURN_COOKIE_NAME = 'campfire_oidc_return';
 export const OIDC_FLOW_COOKIE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes — login -> callback should be fast

@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 're
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { safeInternalPath } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { GameIcon } from '../../components/GameIcon';
@@ -185,19 +186,6 @@ function LocalLoginForm({
   );
 }
 
-/**
- * Open-redirect guard: only honor same-origin, in-app absolute paths. Rejects
- * protocol-relative (`//evil.com`), backslash tricks (`/\evil.com`), and
- * anything not rooted at a single `/`. Returns null when unsafe.
- */
-function safeInternalPath(raw: string | null | undefined): string | null {
-  if (!raw || !raw.startsWith('/')) return null;
-  if (raw.startsWith('//') || raw.startsWith('/\\')) return null;
-  // Never bounce back into an auth screen (would loop or hide the target).
-  if (/^\/(login|setup|signup|reset-password)(\/|\?|#|$)/.test(raw)) return null;
-  return raw;
-}
-
 export function LoginPage() {
   const { status, loading } = useAuthStatus();
   const { me, ready, refresh } = useAuth();
@@ -281,9 +269,8 @@ export function LoginPage() {
   const oidcEnabled = Boolean(status?.oidcEnabled);
   const localLoginEnabled = Boolean(status?.localLoginEnabled);
   const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
-  // Forward the intended target through SSO. The OIDC flow is a full-page server
-  // round-trip (callback currently always redirects to `/`), so honoring this
-  // needs matching backend support; the local form already returns to it.
+  // Forward the intended target through SSO. The OIDC login endpoint stashes a
+  // validated relative path and the callback returns there (issue #478).
   const oidcLoginHref =
     redirectTo === '/'
       ? '/api/v1/auth/oidc/login'

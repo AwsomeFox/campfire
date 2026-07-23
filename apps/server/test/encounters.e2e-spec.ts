@@ -3193,6 +3193,8 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.multiplier).toBe(1);
     expect(diff.body.adjustedXp).toBe(5900);
     expect(diff.body.band).toBe('deadly');
+    expect(diff.body.status).toBe('ok');
+    expect(diff.body.label).toBe('Deadly');
   });
 
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,

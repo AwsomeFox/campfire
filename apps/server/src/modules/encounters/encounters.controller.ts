@@ -170,7 +170,9 @@ export class EncountersController {
           'Accept-Ranges': 'none',
           'Cache-Control': 'private, no-store',
           'Content-Range': 'bytes */0',
-          Vary: 'Authorization, Cookie',
+          // Keep Vary identical to the 200 map response so intermediaries cannot
+          // key 416/200 differently across auth/cookie/dev-role variants.
+          Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
         })
         .end();
       return;

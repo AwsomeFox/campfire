@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import sharp from 'sharp';
 import type { FogRect } from '@campfire/schema';
 
-export const FOG_BACKGROUND = { r: 11, g: 17, b: 32, alpha: 1 } as const;
+/** Opaque fog fill in 0–255 channel units (matches sharp/raw RGBA buffers). */
+export const FOG_BACKGROUND = { r: 11, g: 17, b: 32, alpha: 255 } as const;
 /**
  * Align with practical VTT upload dimensions (≈4096²). Decoding to RGBA at the old
  * 40MP ceiling could allocate hundreds of MB per request once sharp's internal

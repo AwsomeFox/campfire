@@ -59,6 +59,12 @@ import {
   formatCombatLogEventSummary,
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
+import { makeActionError, type ActionErrorState } from './encounterActionError';
+import {
+  deleteConfirmCopy,
+  dmLifecycleActions,
+  isLifecycleConfirmValid,
+} from './encounterLifecycleActions';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -101,14 +107,6 @@ function gridDefaultAttemptKey(encounterId: number, patch: EncounterGridPatch): 
   return `${encounterId}:${Object.keys(patch).sort().join(',')}`;
 }
 
-// 5e difficulty band badge (issue #58) — party XP thresholds vs adjusted monster XP.
-const DIFFICULTY_LABEL: Record<DifficultyBand, string> = {
-  trivial: 'Trivial',
-  easy: 'Easy',
-  medium: 'Medium',
-  hard: 'Hard',
-  deadly: 'Deadly',
-};
 // Band colors live as --cf-difficulty-* tokens in index.css (issue #668) so a
 // theme or dark/light swap can reach them; difficulty wants a green→red ramp
 // distinct from the accent-colored status chips and from the destructive family.
@@ -119,24 +117,51 @@ const DIFFICULTY_STYLE: Record<DifficultyBand, { background: string; color: stri
   hard: { background: 'var(--cf-difficulty-hard-bg)', color: 'var(--cf-difficulty-hard-fg)' },
   deadly: { background: 'var(--cf-difficulty-deadly-bg)', color: 'var(--cf-difficulty-deadly-fg)' },
 };
+const DIFFICULTY_NEUTRAL_STYLE = {
+  background: 'var(--color-neutral-800)',
+  color: 'var(--color-neutral-200)',
+};
 
 /**
- * Difficulty badge shown in the encounter header (issue #58). Reads the computed
- * Easy/Medium/Hard/Deadly band from GET /encounters/:id/difficulty. Hidden when there
- * are no monsters to score (band trivial + no monster XP) so a prep-only party list
- * doesn't show a misleading "Trivial" chip. `title` surfaces the underlying XP math.
+ * Difficulty badge shown in the encounter header (issues #58 + #429). Reads
+ * GET /encounters/:id/difficulty. Hidden when there are no monsters. Zero-data
+ * fights show the adapter's "Unknown—add XP/CR" label (never a fake Trivial);
+ * unsupported rulesets explain the limitation. `title` surfaces XP math + warnings.
  */
 function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
   if (!difficulty) return null;
   if (difficulty.monsterCount === 0) return null;
-  const title =
+
+  if (difficulty.status === 'unsupported') {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  if (difficulty.status === 'unknown' || difficulty.band === null) {
+    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
+    return (
+      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
+        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+        {difficulty.label}
+      </span>
+    );
+  }
+
+  const breakdown =
     `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
     `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
     `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
     `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
+  const title = [breakdown, ...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' · ');
   return (
     <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
-      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />{DIFFICULTY_LABEL[difficulty.band]}
+      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+      {difficulty.label}
     </span>
   );
 }
@@ -497,7 +522,9 @@ export default function RunSessionPage() {
     return () => clearTimeout(timer);
   }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
 
-  const [actionError, setActionError] = useState<string | null>(null);
+  // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
+  // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
+  const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
@@ -578,6 +605,16 @@ export default function RunSessionPage() {
         : "Couldn't load this encounter."
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
+  // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
+  // poll/SSE invalidation, which must leave an actionable failure visible.
+  const refreshEncounter = useCallback(() => {
+    setActionError(null);
+    refetchEncounter();
+  }, [refetchEncounter]);
+  // Drop action errors when navigating to a different encounter.
+  useEffect(() => {
+    setActionError(null);
+  }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
   // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
@@ -684,10 +721,13 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
-  const reportError = useCallback(
-    (err: unknown) => setActionError(err instanceof ApiError ? err.message : 'That action failed.'),
-    [],
-  );
+  const reportError = useCallback((err: unknown) => {
+    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
+  }, []);
+  /** BattleMap / card rollers pass a plain string (or null to clear). */
+  const surfaceActionError = useCallback((message: string | null) => {
+    setActionError(message ? makeActionError(message) : null);
+  }, []);
 
   // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
   // These are mutually exclusive DM header actions, so one shared pending flag gating
@@ -790,8 +830,18 @@ export default function RunSessionPage() {
   const rollInitiative = () => runControl.mutate('roll-initiative');
   const startEncounter = () => runControl.mutate('start');
   const nextTurn = () => runControl.mutate('next-turn');
-  const endEncounter = () => runControl.mutate('end', { onSuccess: () => setConfirmEnd(false) });
-  const reopenEncounter = () => runControl.mutate('reopen', { onSuccess: () => setConfirmReopen(false) });
+  // Close the confirm on success *or* failure so a rejected End (e.g. stale
+  // preparing status) does not leave the modal parked over the error banner (#420).
+  const endEncounter = () =>
+    runControl.mutate('end', {
+      onSuccess: () => setConfirmEnd(false),
+      onError: () => setConfirmEnd(false),
+    });
+  const reopenEncounter = () =>
+    runControl.mutate('reopen', {
+      onSuccess: () => setConfirmReopen(false),
+      onError: () => setConfirmReopen(false),
+    });
   const deleteEncounter = () => deleteEncounterMut.mutate();
 
   // Issue #702: how many combatants still need an initiative roll. Used to keep the
@@ -806,6 +856,16 @@ export default function RunSessionPage() {
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
   const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
+  // Issue #420: drop confirm dialogs that the current status no longer allows
+  // (e.g. End left open after a peer/SSE transition out of running).
+  const encounterStatus = encounter?.status;
+  useEffect(() => {
+    if (!encounterStatus) return;
+    if (!isLifecycleConfirmValid('end', encounterStatus)) setConfirmEnd(false);
+    if (!isLifecycleConfirmValid('reopen', encounterStatus)) setConfirmReopen(false);
+    if (!isLifecycleConfirmValid('delete', encounterStatus)) setConfirmDelete(false);
+  }, [encounterStatus]);
 
   const removeCombatant = (combatantId: number) => {
     setActionError(null);
@@ -959,22 +1019,39 @@ export default function RunSessionPage() {
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
   const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+  // Issue #420: DM header actions come from an explicit lifecycle matrix (not
+  // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
+  const lifecycle = dmLifecycleActions(encounter.status);
+  const deleteCopy = deleteConfirmCopy(encounter.status);
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
+        <Btn
+          ghost
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={() => {
+            setActionError(null);
+            navigate(`/c/${cid}/encounters`);
+          }}
+        >
           ← Back
         </Btn>
       </div>
 
       {(loadError || actionError) && (
         <ErrorNote
-          message={actionError ?? loadError ?? ''}
+          message={actionError?.message ?? loadError ?? ''}
+          context={
+            actionError
+              ? `at ${new Date(actionError.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+              : undefined
+          }
           onRetry={() => {
             setActionError(null);
             refetchEncounter();
           }}
+          onDismiss={actionError ? () => setActionError(null) : undefined}
         />
       )}
 
@@ -996,7 +1073,7 @@ export default function RunSessionPage() {
           type="button"
           className="btn btn-ghost"
           style={{ fontSize: 11.5 }}
-          onClick={refetchEncounter}
+          onClick={refreshEncounter}
           title="Refresh"
         >
           ↻ Refresh
@@ -1013,7 +1090,7 @@ export default function RunSessionPage() {
             >
               <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
             </Btn>
-            {encounter.status === 'preparing' && (
+            {lifecycle.rollInitiative && lifecycle.start && (
               <>
                 {/* Issue #702: the server treats a fully-rolled roster as a no-op (no
                     write, no audit), so the button must reflect that — disabled when
@@ -1044,7 +1121,7 @@ export default function RunSessionPage() {
                 </div>
               </>
             )}
-            {encounter.status === 'running' && (
+            {lifecycle.rollInitiative && lifecycle.nextTurn && (
               <>
                 {/* Reinforcements added mid-fight land at null initiative and sort last —
                     keep Roll initiative reachable so the DM can fill them (issue #54).
@@ -1064,19 +1141,19 @@ export default function RunSessionPage() {
                 </Btn>
               </>
             )}
-            {encounter.status !== 'ended' && (
+            {lifecycle.end && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
-            {encounter.status === 'ended' && (
+            {lifecycle.reopen && (
               <Btn ghost disabled={headerBusy} onClick={() => setConfirmReopen(true)}>
                 Reopen
               </Btn>
             )}
-            {(encounter.status === 'ended' || encounter.status === 'preparing') && (
+            {lifecycle.delete && (
               <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
-                Delete
+                {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
           </div>
@@ -1134,7 +1211,7 @@ export default function RunSessionPage() {
           onSetAoe={setEncounterAoe}
           onPing={sendPing}
           pings={pings}
-          onError={setActionError}
+          onError={surfaceActionError}
         />
       )}
 
@@ -1171,7 +1248,7 @@ export default function RunSessionPage() {
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
               campaignId={cid}
-              onRollError={setActionError}
+              onRollError={surfaceActionError}
               onApplyDamage={onApplyDamageRolled}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
@@ -1221,7 +1298,7 @@ export default function RunSessionPage() {
       {confirmReopen && (
         <ConfirmDialog
           title="Reopen this encounter?"
-          body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
+          body="It returns to Running where combat left off. HP was written back to character sheets when it ended. Healing, rest, or other sheet HP changes you make before the next End will be silently overwritten — that End writes combatant HP back onto the sheets again (resync direction tracked in #466)."
           confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
           busy={runControl.isPending}
           onConfirm={reopenEncounter}
@@ -1230,9 +1307,17 @@ export default function RunSessionPage() {
       )}
       {confirmDelete && (
         <ConfirmDialog
-          title="Delete this encounter?"
-          body="This cannot be undone."
-          confirmLabel={deleteEncounterMut.isPending ? 'Deleting…' : 'Delete encounter'}
+          title={deleteCopy.title}
+          body={deleteCopy.body}
+          confirmLabel={
+            deleteEncounterMut.isPending
+              ? encounter.status === 'preparing'
+                ? 'Canceling…'
+                : 'Deleting…'
+              : encounter.status === 'preparing'
+                ? 'Cancel preparation'
+                : 'Delete encounter'
+          }
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
