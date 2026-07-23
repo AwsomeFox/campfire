@@ -689,22 +689,32 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       const previousMode = fs.statSync(campaignDir).mode & 0o7777;
       try {
         fs.chmodSync(campaignDir, 0);
-      } catch {
-        // Restricted filesystems may refuse chmod — skip rather than fail the suite.
-        // Still clean up the isolated campaign so later tests don't see residual
-        // rows/files, but treat each cleanup step as independently best-effort
-        // (in its own try/catch) so a failure in one step can't prevent the
-        // other from running, and neither can turn an intentional skip into a
-        // test failure.
+      } catch (chmodErr) {
+        // Restricted filesystems may refuse chmod — early-return (still a pass)
+        // rather than fail the suite. Best-effort cleanup so later tests don't
+        // see residual rows/files; log quietly for CI diagnosis.
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[attachment-diagnostics] chmod unavailable; bailing early:',
+          chmodErr instanceof Error ? chmodErr.message : chmodErr,
+        );
         try {
           await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
-        } catch {
-          // Ignore — this path only runs when chmod already failed.
+        } catch (deleteErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[attachment-diagnostics] best-effort campaign delete failed:',
+            deleteErr instanceof Error ? deleteErr.message : deleteErr,
+          );
         }
         try {
           fs.rmSync(campaignDir, { recursive: true, force: true });
-        } catch {
-          // Ignore — this path only runs when chmod already failed.
+        } catch (rmErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[attachment-diagnostics] best-effort rm failed:',
+            rmErr instanceof Error ? rmErr.message : rmErr,
+          );
         }
         return;
       }
