@@ -36,8 +36,34 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleString();
 }
 
-function revisionAuthor(revision: EntityRevision): string {
-  return revision.authorName.trim() || 'Unknown author';
+/**
+ * Honest provenance label for a historical version (issue #813).
+ * Legacy rows (authorshipKnown=false) must NOT imply the replacer wrote the prose —
+ * they are labeled "Replaced by … at …" instead.
+ */
+function revisionAttribution(revision: EntityRevision): { primary: string; authorForAria: string } {
+  if (!revision.authorshipKnown) {
+    const replacer = revision.replacedByName.trim() || 'Unknown';
+    const when = revision.replacedAt ? formatDate(revision.replacedAt) : 'unknown time';
+    return {
+      primary: `Replaced by ${replacer} at ${when}`,
+      authorForAria: `unknown author (replaced by ${replacer})`,
+    };
+  }
+  const author = revision.authorName.trim() || 'Unknown author';
+  const source =
+    revision.authorSource === 'ai'
+      ? ' (AI)'
+      : revision.authorSource === 'tool'
+        ? revision.authorSourceDetail
+          ? ` (via ${revision.authorSourceDetail})`
+          : ' (tool)'
+        : '';
+  const timestamp = revision.createdAt ? formatDate(revision.createdAt) : 'Unknown date';
+  return {
+    primary: `${author}${source} · ${timestamp}`,
+    authorForAria: `${author}${source}`,
+  };
 }
 
 function snapshotFields(selected: Snapshot, current: Snapshot): string[] {
@@ -100,10 +126,11 @@ function RevisionDialog({
     () => snapshotFields(revision.snapshot, currentSnapshot),
     [revision.snapshot, currentSnapshot],
   );
-  const author = revisionAuthor(revision);
-  const timestamp = formatDate(revision.createdAt);
+  const attribution = revisionAttribution(revision);
   const restoreField = restorableField(entityType);
   const canRestore = restoreField in revision.snapshot;
+  const restoredFrom =
+    revision.restoredFromRevisionId != null ? ` Restored from version #${revision.restoredFromRevisionId}.` : '';
 
   useEffect(() => {
     if (step === 'confirm') cancelRestoreRef.current?.focus();
@@ -130,7 +157,12 @@ function RevisionDialog({
             {step === 'confirm' ? 'Restore this version?' : 'Inspect historical version'}
           </h2>
           <p id={descriptionId} className="text-sm text-slate-400">
-            Saved {timestamp} by {author}.
+            {revision.authorshipKnown
+              ? `Version by ${attribution.authorForAria}${revision.createdAt ? `, ${formatDate(revision.createdAt)}` : ''}.${restoredFrom}`
+              : `${attribution.primary}.${restoredFrom}`}
+            {revision.authorshipKnown && revision.replacedAt
+              ? ` Replaced by ${revision.replacedByName.trim() || 'Unknown'} at ${formatDate(revision.replacedAt)}.`
+              : ''}
           </p>
         </div>
 
@@ -203,7 +235,7 @@ function RevisionDialog({
           <>
             <div className="space-y-3 text-sm text-slate-300">
               <p>
-                You’re restoring the version saved <strong>{timestamp}</strong> by <strong>{author}</strong>.
+                You’re restoring this historical version: <strong>{attribution.primary}</strong>.
               </p>
               <p className="cf-inset p-3">
                 Restore creates a new revision from the current content before applying this version. Nothing in the history is erased, so this change can be reversed later.
@@ -309,7 +341,11 @@ export function RevisionHistoryPanel({
         `${API}/revisions/${entityType}/${entityId}/${selected.id}/restore`,
       );
       if (res?.revisions) setRevisions(res.revisions);
-      const restoredLabel = formatDate(selected.createdAt);
+      const restoredLabel = selected.authorshipKnown && selected.createdAt
+        ? formatDate(selected.createdAt)
+        : selected.replacedAt
+          ? formatDate(selected.replacedAt)
+          : 'the selected version';
       setSelected(null);
       setDialogStep('inspect');
       setRestoreError(null);
@@ -362,17 +398,29 @@ export function RevisionHistoryPanel({
                 const previewField = fields.find((field) => field in revision.snapshot);
                 const prior = previewField ? revision.snapshot[previewField] ?? '' : '';
                 const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
-                const author = revisionAuthor(revision);
-                const timestamp = formatDate(revision.createdAt);
+                const attribution = revisionAttribution(revision);
                 const restoreField = restorableField(entityType);
                 const restoreLabel = fieldLabel(entityType, restoreField);
                 const restoreFieldRecorded = restoreField in revision.snapshot;
                 const unchanged = valuesMatch(entityType, revision.snapshot, currentSnapshot);
+                const timeValue = revision.authorshipKnown ? revision.createdAt : revision.replacedAt ?? undefined;
                 return (
                   <li key={revision.id} className="flex flex-col gap-2 py-3 first:pt-0 sm:flex-row sm:items-start">
                     <div className="min-w-0 flex-1">
                       <p className="text-xs text-muted">
-                        <span>{author}</span> · <time dateTime={revision.createdAt}>{timestamp}</time>
+                        {revision.authorshipKnown ? (
+                          <>
+                            <span>{attribution.authorForAria}</span>
+                            {timeValue ? (
+                              <>
+                                {' · '}
+                                <time dateTime={timeValue}>{formatDate(timeValue)}</time>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <span>{attribution.primary}</span>
+                        )}
                       </p>
                       <p className="mt-0.5 line-clamp-2 break-words text-[13px] text-slate-400">{preview || '(empty)'}</p>
                       <p
@@ -389,7 +437,7 @@ export function RevisionHistoryPanel({
                       ghost
                       className="!min-h-0 w-full shrink-0 !py-1 text-xs sm:w-auto"
                       onClick={() => inspect(revision)}
-                      aria-label={`Preview version from ${timestamp} by ${author}`}
+                      aria-label={`Preview version by ${attribution.authorForAria}`}
                     >
                       Preview
                     </Btn>

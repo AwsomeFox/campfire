@@ -1652,6 +1652,77 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #813: entity_revisions historically snapshotted prior prose while stamping
+ * the REPLACING editor as `author_*` / `created_at`, so the archive attributed old
+ * canon to the person who overwrote it. Add version-vs-replacer columns and migrate
+ * existing rows into the honest legacy shape: author fields cleared, authorship_known=0,
+ * and the old author/time moved onto replaced_by_* / replaced_at so the UI can label
+ * them "Replaced by Bob at…" rather than inventing an author. Fresh DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the modern columns.
+ */
+function migrateEntityRevisionsForVersionAuthorship(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='entity_revisions'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(entity_revisions)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Only backfill when this run is the one that introduces the replacer columns —
+  // every row present at that moment is pre-#813. Re-running later must not touch
+  // current tips (replaced_at IS NULL with real authorship).
+  const needsLegacyBackfill = !has('replaced_at') || !has('authorship_known');
+
+  if (!has('author_source')) sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source TEXT NOT NULL DEFAULT 'human'");
+  if (!has('author_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_user_id')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_user_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_name')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_name TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_source')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source TEXT NOT NULL DEFAULT 'human'");
+  }
+  if (!has('replaced_by_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_at')) sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN replaced_at TEXT');
+  if (!has('restored_from_revision_id')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN restored_from_revision_id INTEGER');
+  }
+  if (!has('authorship_known')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN authorship_known INTEGER NOT NULL DEFAULT 1');
+  }
+
+  if (!needsLegacyBackfill) return;
+
+  // Pre-#813 rows stamped the replacing editor as author/created_at. Move those
+  // onto the replacer fields and clear version authorship so the UI can say
+  // "Replaced by …" instead of inventing an author.
+  sqlite.exec(`
+    UPDATE entity_revisions
+    SET
+      replaced_by_user_id = author_user_id,
+      replaced_by_name = author_name,
+      replaced_by_source = CASE
+        WHEN author_source IS NULL OR author_source = '' THEN 'human'
+        ELSE author_source
+      END,
+      replaced_by_source_detail = COALESCE(author_source_detail, ''),
+      replaced_at = created_at,
+      author_user_id = '',
+      author_name = '',
+      author_source = 'human',
+      author_source_detail = '',
+      created_at = '',
+      authorship_known = 0
+  `);
+}
+
+/**
 
  * Issue #679: retain consumed refresh-token generations as replay sentinels and
  * link rotations into a revocable family. Existing live rows each become the
@@ -1867,6 +1938,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
   { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
+  { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
 ];
 
 /**

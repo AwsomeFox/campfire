@@ -151,6 +151,17 @@ export class NpcsService {
       entityId: row.id,
       campaignId,
     });
+    // Initial prose tip so the first overwrite keeps real authorship (#813).
+    if (row.body !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'npc',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.body,
+        user,
+      });
+    }
     return redactSecret(toDomain(row), role);
   }
 
@@ -166,13 +177,14 @@ export class NpcsService {
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     await this.validateLocationRef(input.locationId, existing.campaignId);
     await this.validateFactionRef(input.factionId, existing.campaignId);
-    // Snapshot the PRIOR body into revision history when it changes (#157).
+    // Commit an immutable prose version when the body changes (#157/#813).
     if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'npc',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.body,
+        nextProse: input.body,
         user,
       });
     }
