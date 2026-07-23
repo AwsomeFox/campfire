@@ -86,6 +86,43 @@ describe('encounters (e2e)', () => {
     expect(aria.initiative).toBeNull();
   });
 
+  // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),
+  // not the bare 5e-style WIS (or DEX) modifier. A level-5 WIS 16 PC with no stored
+  // Perception must seed initMod = +3 + (5+2) = +10 so roll_initiative matches a by-hand roll.
+  it('PF2e create seeds character initMod with WIS + trained proficiency (issue #491)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    // Campaign create requires an installed pack slug (validateRuleSystem).
+    await db
+      .insert(rulePacks)
+      .values({ slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+      .onConflictDoNothing();
+
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'PF2e Init Campaign', ruleSystem: 'pf2e-srd' });
+    expect(camp.status).toBe(201);
+
+    const hero = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Scout', stats: { WIS: 16, DEX: 20 }, level: 5, hpCurrent: 40, hpMax: 40 });
+    expect(hero.status).toBe(201);
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Forest Ambush' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatants).toHaveLength(1);
+    const scout = res.body.combatants[0];
+    expect(scout.characterId).toBe(hero.body.id);
+    // DEX 20 must NOT win (that would be 5e); Perception is Wisdom-based.
+    expect(scout.initMod).toBe(10);
+  });
+
   it('player without dm role cannot create an encounter', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope' });
