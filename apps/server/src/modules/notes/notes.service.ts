@@ -694,7 +694,9 @@ export class NotesService {
       entityId: row.id,
       campaignId,
     });
-    await this.notifyDmsOfInboxSubmission(row, user);
+    // Out-of-band: inbox create must not wait on DM fan-out latency (issue #832).
+    // Errors are swallowed inside notifyDmsOfInboxSubmission.
+    void this.notifyDmsOfInboxSubmission(row, user);
     return toDomain(row);
   }
 

@@ -681,6 +681,9 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
 
   const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
 
+  /** Inbox create fans out inbox_submitted off the request path; let that settle before asserts. */
+  const settleInboxNotify = () => new Promise<void>((resolve) => setImmediate(resolve));
+
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
     const server = ctx.app.getHttpServer();
@@ -718,6 +721,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
       .send({ body: 'Can we explore the catacombs next session?' });
     expect(inbox.status).toBe(201);
     const inboxId = inbox.body.id as number;
+    await settleInboxNotify();
 
     const creatorNotifs = ofType(await listFor(creatorDm), 'inbox_submitted');
     expect(creatorNotifs).toHaveLength(1);
@@ -740,6 +744,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
 
     const inbox = await creatorDm.post(`/api/v1/campaigns/${campaignId}/inbox`).send({ body: 'DM self-capture' });
     expect(inbox.status).toBe(201);
+    await settleInboxNotify();
 
     expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(beforeCreator);
     expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo + 1);
@@ -757,6 +762,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
     const before = ofType(await listFor(creatorDm), 'inbox_submitted').length;
     const post = await creatorDm.post(`/api/v1/campaigns/${loneId}/inbox`).send({ body: 'Solo note' });
     expect(post.status).toBe(201);
+    await settleInboxNotify();
     expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(before);
   });
 
@@ -777,6 +783,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
         .send({ body: 'Notify failure must not block inbox create' });
       expect(inbox.status).toBe(201);
       expect(inbox.body.body).toContain('Notify failure');
+      await settleInboxNotify();
       expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo);
     } finally {
       await db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
