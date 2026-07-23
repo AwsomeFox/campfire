@@ -1115,7 +1115,10 @@ export class EncountersService {
           // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
           // intervening sheet edits made while the encounter was ended.
           sheetSyncedUpdatedAt: character.updatedAt,
-          conditions: '[]',
+          // Issue #486: seed tracker conditions from the sheet so Poisoned (etc.)
+          // applied before combat is already visible in the run-session roster.
+          // Merge semantics for the overlap window: see sync comment on updateCombatant.
+          conditions: character.conditions,
           ruleEntryId: null,
           sortOrder: index,
         };
@@ -1441,6 +1444,8 @@ export class EncountersService {
     let characterDeathSaveSuccesses = 0;
     let characterDeathSaveFailures = 0;
     let characterSheetUpdatedAt: string | null = null;
+    // Issue #486: sheet conditions carried into a late-join character combatant.
+    let characterConditions = '[]';
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -1528,6 +1533,8 @@ export class EncountersService {
       characterDeathSaveSuccesses = character.deathSaveSuccesses;
       characterDeathSaveFailures = character.deathSaveFailures;
       characterSheetUpdatedAt = character.updatedAt;
+      // Issue #486: seed from the sheet (same contract as create() auto-add).
+      characterConditions = character.conditions;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         // Character level feeds PF2e trained-Perception proficiency (issue #491).
@@ -1619,7 +1626,8 @@ export class EncountersService {
                   sheetSyncedUpdatedAt: characterSheetUpdatedAt,
                 }
               : {}),
-            conditions: '[]',
+            // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
+            conditions: characterId !== null ? characterConditions : '[]',
             ruleEntryId,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
@@ -1776,18 +1784,33 @@ export class EncountersService {
       return combatantToDomain(existing);
     }
 
-    // Combatant write + linked-character HP mirror run in ONE synchronous
+    // Combatant write + linked-character HP/conditions mirror run in ONE synchronous
     // better-sqlite3 transaction (issue #86): the HP math reads the row's CURRENT
     // committed values inside the transaction (never a stale pre-await read), so two
     // authorized deltas landing near-simultaneously compose instead of clobbering —
     // better-sqlite3 serializes the whole synchronous callback. The mirror then reads
     // the transaction's own result.
     //
-    // The character HP mirror is additionally gated on a still-live (non-'ended')
+    // The character mirror is additionally gated on a still-live (non-'ended')
     // encounter (issue #163). assertMutable() above already rejects an ended encounter
     // outright, so this is defense-in-depth: post-combat combatant rows must never leak
     // back onto the live character sheet even if that guard is ever relaxed.
-    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && recomputeHp && encounterRow.status !== 'ended';
+    //
+    // Issue #486 — sheet↔combatant condition merge semantics (overlap window):
+    //   • create/addCombatant seeds the combatant from the sheet.
+    //   • A tracker write (addConditions/removeConditions) applies set deltas on the
+    //     combatant (#747) then overwrites the linked sheet's conditions array.
+    //   • A sheet write (CharactersService.patchConditions / PATCH conditions) overwrites
+    //     the linked live combatant's conditions array (and stamps the CAS token).
+    //   • Last cross-surface write wins as a whole array — there is no 3-way merge.
+    //     Concurrent tracker deltas still compose via the in-tx set rebase (#747).
+    //   • /end writes combatant conditions back onto the sheet alongside HP.
+    //   • MCP `update_combatant` and `set_character_conditions` share these paths.
+    const mirrorSheet =
+      existing.kind === 'character' &&
+      existing.characterId !== null &&
+      encounterRow.status !== 'ended' &&
+      (recomputeHp || conditionsTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -1864,24 +1887,30 @@ export class EncountersService {
       if (conditionsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
-      if (mirrorHp) {
+      if (mirrorSheet) {
         // Issue #711: live-mirror the full combat death/temp-HP slice, not just
         // hpCurrent, so a downed/dead character is reflected on the sheet the
         // moment it happens mid-fight (the same authoritative write-through
         // contract the HP path already uses). The post-/end reconciliation below
         // does the same write once more for the final state; both are idempotent.
-        // Issue #466: stamp the sheet CAS token on the combatant so a later re-end
-        // knows this write-through was the last acknowledged sync.
+        // Issue #486: likewise mirror conditions so a tracker-applied Poisoned
+        // lands on the sheet immediately (and survives /end even if that path
+        // were skipped). Issue #466: stamp the sheet CAS token on the combatant
+        // so a later re-end knows this write-through was the last acknowledged sync.
         const mirroredAt = nowIso();
+        const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
+        if (recomputeHp) {
+          sheetSet.hpCurrent = updated.hpCurrent;
+          sheetSet.hpTemp = updated.hpTemp;
+          sheetSet.deathState = updated.deathState;
+          sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
+          sheetSet.deathSaveFailures = updated.deathSaveFailures;
+        }
+        if (conditionsTouched) {
+          sheetSet.conditions = updated.conditions;
+        }
         tx.update(characters)
-          .set({
-            hpCurrent: updated.hpCurrent,
-            hpTemp: updated.hpTemp,
-            deathState: updated.deathState,
-            deathSaveSuccesses: updated.deathSaveSuccesses,
-            deathSaveFailures: updated.deathSaveFailures,
-            updatedAt: mirroredAt,
-          })
+          .set(sheetSet)
           .where(eq(characters.id, existing.characterId!))
           .run();
         tx.update(combatants)
@@ -2346,6 +2375,8 @@ export class EncountersService {
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
+      // Issue #486: conditions travel back with the HP slice on /end.
+      conditions: string;
       status: 'active' | 'dead';
       sheetSyncedUpdatedAt: string | null;
     }> = [];
@@ -2368,6 +2399,7 @@ export class EncountersService {
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
+        conditions: row.conditions,
         status: nextStatus ?? 'active',
         sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
       });
@@ -2465,12 +2497,14 @@ export class EncountersService {
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
         // whose status was already 'active' doesn't get a spurious write.
+        // Issue #486: also persist tracker conditions back onto the sheet.
         const set: Partial<typeof characters.$inferInsert> = {
           hpCurrent: w.hpCurrent,
           hpTemp: w.hpTemp,
           deathState: w.deathState,
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
+          conditions: w.conditions,
           updatedAt: ts,
         };
         if (prior !== undefined && prior.status !== w.status) {
