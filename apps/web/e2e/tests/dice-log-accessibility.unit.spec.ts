@@ -55,6 +55,16 @@ test.describe('shared dice log accessibility (#590)', () => {
     expect(third.appendedRolls).toEqual([]);
   });
 
+  test('establishes baseline after first fetch returns an empty feed', () => {
+    const history = [
+      roll({ id: 10, expr: '1d20', total: 15, rolls: [15] }),
+      roll({ id: 11, expr: '2d6', total: 7, rolls: [3, 4] }),
+    ];
+    const afterEmptyFetch = advanceDiceRollAnnouncements([], null);
+    const firstPoll = advanceDiceRollAnnouncements(history, afterEmptyFetch.cursor);
+    expect(firstPoll.appendedRolls).toEqual([]);
+  });
+
   test('priming cursor from an empty snapshot would announce full history on first poll', () => {
     const history = [
       roll({ id: 10, expr: '1d20', total: 15, rolls: [15] }),
