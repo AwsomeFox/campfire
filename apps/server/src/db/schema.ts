@@ -24,6 +24,11 @@ export const campaigns = sqliteTable('campaigns', {
   // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
   publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
   sessionCount: integer('session_count').notNull().default(0),
+  // Highest session.number among live (non-trashed) sessions for this campaign.
+  // Used to display "Session N" in the UI, distinct from sessionCount (which is a
+  // COUNT that may differ when sessions have gaps or non-contiguous numbering).
+  // Zero when no sessions exist. Added for issue #841.
+  latestSessionNumber: integer('latest_session_number').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
   ruleSystem: text('rule_system').notNull().default(''),

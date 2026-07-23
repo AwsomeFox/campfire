@@ -239,7 +239,7 @@ function CampaignTile({
             </p>
           )}
           <div className="text-muted" style={{ fontSize: 11.5 }}>
-            {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
+            {campaign.latestSessionNumber > 0 ? `Session ${campaign.latestSessionNumber}` : campaign.sessionCount > 0 ? `${campaign.sessionCount} sessions` : 'No sessions yet'}
           </div>
         </div>
       </Link>

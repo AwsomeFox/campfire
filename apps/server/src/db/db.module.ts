@@ -1919,6 +1919,33 @@ function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): vo
 }
 
 /**
+ * Migration for issue #841: add `latest_session_number` to campaigns so the UI
+ * can display "Session N" using the highest session number (not a count that
+ * differs when session numbering has gaps). The column is backfilled from live
+ * sessions at migration time. New DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the column.
+ */
+function migrateCampaignsTableForLatestSessionNumber(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'latest_session_number')) return;
+
+  sqlite.exec("ALTER TABLE campaigns ADD COLUMN latest_session_number INTEGER NOT NULL DEFAULT 0");
+
+  // Backfill from existing sessions: set latest_session_number = MAX(number) per campaign.
+  sqlite.exec(`
+    UPDATE campaigns SET latest_session_number = COALESCE(
+      (SELECT MAX(s.number) FROM sessions s WHERE s.campaign_id = campaigns.id AND s.deleted_at IS NULL),
+      0
+    )
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1999,6 +2026,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
+  { name: '0068_campaigns_latest_session_number', run: migrateCampaignsTableForLatestSessionNumber },
 ];
 
 /**

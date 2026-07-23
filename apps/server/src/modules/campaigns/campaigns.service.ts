@@ -236,6 +236,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
     sessionCount: row.sessionCount,
+    latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,

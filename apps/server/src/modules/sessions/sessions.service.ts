@@ -195,12 +195,17 @@ export class SessionsService {
    * recomputed (never bumped/guessed) on every create/delete so it stays accurate
    * regardless of session numbering (which may have gaps or be renumbered) or deletes
    * (which previously never decremented it at all).
+   *
+   * campaign.latestSessionNumber is the MAX(number) of live sessions — the highest
+   * canonical session number. Used for "Session N" display so it reflects the actual
+   * session number, not a count that differs when numbering has gaps (#841).
    */
   private async recomputeSessionCount(campaignId: number): Promise<void> {
     // Trashed sessions (soft-deleted, #116) don't count toward the campaign's session
     // tally — the count reflects live sessions only, and rises again on restore.
-    const rows = await this.db.select({ id: sessions.id }).from(sessions).where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
-    await this.db.update(campaigns).set({ sessionCount: rows.length, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
+    const rows = await this.db.select({ id: sessions.id, number: sessions.number }).from(sessions).where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
+    const latestNumber = rows.length > 0 ? Math.max(...rows.map(r => r.number)) : 0;
+    await this.db.update(campaigns).set({ sessionCount: rows.length, latestSessionNumber: latestNumber, updatedAt: nowIso() }).where(eq(campaigns.id, campaignId));
   }
 
   /**

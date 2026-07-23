@@ -599,7 +599,7 @@ export default function PlayerDisplayPage() {
           ) : (
             <span className="cf-chip">Location unset</span>
           )}
-          <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
+          <span className="cf-chip">Session {summary.campaign.latestSessionNumber || summary.campaign.sessionCount}</span>
         </div>
         {syncMessage && (
           <p
