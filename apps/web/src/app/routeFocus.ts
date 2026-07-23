@@ -114,7 +114,7 @@ export function formatDocumentTitle(opts: { page: string; campaignName?: string 
   const page = normalizePageTitle(opts.page) || APP_DOCUMENT_TITLE;
   const parts = [page];
   if (opts.campaignName) parts.push(normalizePageTitle(opts.campaignName));
-  parts.push(APP_DOCUMENT_TITLE);
+  if (page !== APP_DOCUMENT_TITLE) parts.push(APP_DOCUMENT_TITLE);
   return parts.join(' · ');
 }
 
@@ -125,8 +125,9 @@ export function focusProgrammatically(el: HTMLElement): void {
   el.focus({ preventScroll: true });
 }
 
+/** Skip link href targets #main-content — focus that landmark, not the page h1. */
 export function focusSkipDestination(main: HTMLElement): void {
-  focusProgrammatically(mainFocusTarget(main));
+  focusProgrammatically(main);
 }
 
 export type FocusMainOptions = {

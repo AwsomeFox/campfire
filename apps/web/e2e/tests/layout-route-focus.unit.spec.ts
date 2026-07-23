@@ -1,7 +1,9 @@
 import { expect, test } from '@playwright/test';
 import {
   ENTITY_DEEP_LINK_HASH,
+  APP_DOCUMENT_TITLE,
   fallbackPageTitle,
+  focusSkipDestination,
   formatDocumentTitle,
   isEntityDeepLinkHash,
   shouldMoveFocusOnNavigation,
@@ -45,5 +47,37 @@ test.describe('route focus helpers (#591)', () => {
       'Party · Cinderhaven · Campfire',
     );
     expect(formatDocumentTitle({ page: 'Campaigns' })).toBe('Campaigns · Campfire');
+  });
+
+  test('formatDocumentTitle avoids duplicating the app title when page is already Campfire', () => {
+    expect(formatDocumentTitle({ page: APP_DOCUMENT_TITLE })).toBe(APP_DOCUMENT_TITLE);
+    expect(formatDocumentTitle({ page: APP_DOCUMENT_TITLE, campaignName: 'Cinderhaven' })).toBe(
+      `${APP_DOCUMENT_TITLE} · Cinderhaven`,
+    );
+  });
+
+  test('focusSkipDestination focuses the main landmark even when an h1 is present', () => {
+    let focused: HTMLElement | null = null;
+    const h1 = {
+      tagName: 'H1',
+      tabIndex: 0,
+      focus() {
+        focused = h1 as unknown as HTMLElement;
+      },
+    };
+    const main = {
+      tagName: 'MAIN',
+      tabIndex: -1,
+      querySelector(sel: string) {
+        if (sel === 'h1') return h1;
+        return null;
+      },
+      focus() {
+        focused = main as unknown as HTMLElement;
+      },
+    } as unknown as HTMLElement;
+
+    focusSkipDestination(main);
+    expect(focused).toBe(main);
   });
 });
