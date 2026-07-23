@@ -688,6 +688,25 @@ export const oauthAccessTokens = sqliteTable('oauth_access_tokens', {
   createdAt: text('created_at').notNull(),
 });
 
+/** Persistent rule-pack import jobs (issue #737). */
+export const importJobs = sqliteTable('import_jobs', {
+  id: text('id').primaryKey(),
+  source: text('source').notNull(),
+  sourceHash: text('source_hash').notNull().default(''),
+  input: text('input').notNull().default('{}'),
+  status: text('status').notNull().default('queued'),
+  progress: text('progress').notNull().default('{}'),
+  cursor: text('cursor'),
+  actorId: text('actor_id').notNull().default(''),
+  startedAt: text('started_at'),
+  updatedAt: text('updated_at').notNull(),
+  completedAt: text('completed_at'),
+  outcome: text('outcome'),
+  errors: text('errors').notNull().default('[]'),
+  createdAt: text('created_at').notNull(),
+});
+
+
 export const rulePacks = sqliteTable('rule_packs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   slug: text('slug').notNull().unique(),

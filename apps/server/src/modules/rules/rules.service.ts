@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { randomUUID, createHash } from 'node:crypto';
+import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
@@ -16,7 +16,7 @@ import {
   type RulePackUpload,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
-import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
+import { rulePacks, ruleEntries, combatants, campaigns, importJobs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
@@ -83,6 +83,14 @@ import {
   osrSource,
   type OsrSection,
 } from './osr-importer';
+
+/** Internal progress shape persisted as JSON in import_jobs.progress. */
+interface ImportJobProgress {
+  committed: number;
+  skipped: number;
+  failed: number;
+  sections: Array<{ section: string; status: string; imported: number }>;
+}
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -192,17 +200,8 @@ function toFtsQuery(q: string): string {
 }
 
 @Injectable()
-export class RulesService {
-  /**
-   * In-memory registry of background install jobs (issue #20). Campfire is a
-   * single-node SQLite app, so an in-process map is sufficient — job state is
-   * ephemeral progress, not durable data, and a restart simply drops in-flight
-   * jobs (their DB writes are transactional and already committed by section).
-   * Completed/failed jobs are pruned lazily once past PRUNE_AFTER_MS so the map
-   * can't grow without bound over a long-lived server.
-   */
-  private readonly jobs = new Map<string, RulePackInstallJob>();
-  private static readonly PRUNE_AFTER_MS = 60 * 60 * 1000; // 1h
+export class RulesService implements OnModuleInit {
+  private readonly runningJobs = new Map<string, { cancelled: boolean }>();
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -210,101 +209,136 @@ export class RulesService {
     private readonly audit: AuditService,
   ) {}
 
-  // ---------- background install jobs (issue #20) ----------
-
-  getJobOrThrow(id: string): RulePackInstallJob {
-    const job = this.jobs.get(id);
-    if (!job) throw new NotFoundException(`Install job ${id} not found`);
-    return { ...job, progress: job.progress.map((p) => ({ ...p })) };
+  async onModuleInit(): Promise<void> {
+    const interrupted = this.db.select().from(importJobs).where(eq(importJobs.status, 'running')).all();
+    for (const job of interrupted) {
+      const ts = nowIso();
+      const errors = JSON.parse(job.errors || '[]') as string[];
+      errors.push('Job interrupted by server restart');
+      this.db.update(importJobs).set({ status: 'failed', updatedAt: ts, completedAt: ts, errors: JSON.stringify(errors) }).where(eq(importJobs.id, job.id)).run();
+    }
   }
 
-  private newJob(source: RulePackInstallJob['source'], sections: string[]): RulePackInstallJob {
-    this.pruneOldJobs();
-    const ts = nowIso();
-    const job: RulePackInstallJob = {
-      id: randomUUID(),
-      source,
-      status: 'pending',
-      progress: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })),
-      totalSections: sections.length,
-      completedSections: 0,
-      outcome: null,
-      pack: null,
-      added: null,
-      skippedExisting: null,
-      error: null,
-      createdAt: ts,
-      updatedAt: ts,
+  // ---------- persistent import jobs (issue #737) ----------
+
+  private static parseProgress(json: string): ImportJobProgress {
+    try { return JSON.parse(json) as ImportJobProgress; }
+    catch { return { committed: 0, skipped: 0, failed: 0, sections: [] }; }
+  }
+
+  getJobOrThrow(id: string): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, id)).all();
+    if (!row) throw new NotFoundException(`Install job ${id} not found`);
+    return this.rowToJob(row);
+  }
+
+  listJobs(limit = 50): RulePackInstallJob[] {
+    const rows = this.db.select().from(importJobs).orderBy(sql`${importJobs.createdAt} DESC`).limit(limit).all();
+    return rows.map((r) => this.rowToJob(r));
+  }
+
+  private rowToJob(row: typeof importJobs.$inferSelect): RulePackInstallJob {
+    const progress = RulesService.parseProgress(row.progress);
+    const packSlug = (progress as unknown as Record<string, unknown>).packSlug as string | undefined;
+    let pack: RulePack | null = null;
+    if (packSlug && row.status === 'completed') {
+      const [packRow] = this.db.select().from(rulePacks).where(eq(rulePacks.slug, packSlug)).all();
+      if (packRow) pack = { id: packRow.id, slug: packRow.slug, name: packRow.name, version: packRow.version, license: packRow.license, sourceUrl: packRow.sourceUrl, installedAt: packRow.installedAt, entryCount: packRow.entryCount };
+    }
+    return {
+      id: row.id,
+      source: row.source as RulePackInstallJob['source'],
+      status: row.status === 'queued' ? 'pending' : row.status === 'cancelled' ? 'failed' : row.status as RulePackInstallJob['status'],
+      progress: progress.sections.map((s) => ({ section: s.section, status: s.status as 'pending' | 'running' | 'done' | 'failed', imported: s.imported })),
+      totalSections: progress.sections.length,
+      completedSections: progress.sections.filter((s) => s.status === 'done').length,
+      outcome: row.outcome as RulePackInstallJob['outcome'],
+      pack,
+      added: row.status === 'completed' ? progress.committed : null,
+      skippedExisting: row.status === 'completed' ? progress.skipped : null,
+      error: JSON.parse(row.errors || '[]')[0] ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
     };
-    this.jobs.set(job.id, job);
-    return job;
+  }
+
+  private newJob(source: RulePackInstallJob['source'], sections: string[], user: RequestUser, input: Record<string, unknown> = {}): RulePackInstallJob {
+    const ts = nowIso();
+    const id = randomUUID();
+    const progress: ImportJobProgress = { committed: 0, skipped: 0, failed: 0, sections: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })) };
+    const payload = JSON.stringify({ source, ...input });
+    const sourceHash = createHash('sha256').update(payload).digest('hex').slice(0, 16);
+    this.db.insert(importJobs).values({ id, source, sourceHash, input: JSON.stringify(input), status: 'queued', progress: JSON.stringify(progress), cursor: null, actorId: user.id, startedAt: null, updatedAt: ts, completedAt: null, outcome: null, errors: '[]', createdAt: ts }).run();
+    return this.getJobOrThrow(id);
   }
 
   private markSectionDone(jobId: string, section: string, imported: number): void {
-    const job = this.jobs.get(jobId);
-    if (!job) return;
-    const row = job.progress.find((p) => p.section === section);
-    if (row) {
-      row.status = 'done';
-      row.imported = imported;
-    }
-    job.completedSections = job.progress.filter((p) => p.status === 'done').length;
-    job.updatedAt = nowIso();
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) return;
+    const progress = RulesService.parseProgress(row.progress);
+    const entry = progress.sections.find((s) => s.section === section);
+    if (entry) { entry.status = 'done'; entry.imported = imported; }
+    progress.committed += imported;
+    const cursor = entry ? JSON.stringify({ lastSection: section, index: progress.sections.indexOf(entry) }) : null;
+    this.db.update(importJobs).set({ progress: JSON.stringify(progress), cursor, updatedAt: nowIso() }).where(eq(importJobs.id, jobId)).run();
   }
 
-  /**
-   * Runs one enqueued install in the background. `work` performs the actual
-   * fetch+persist (installFromOpen5e / installFromUpload) and returns the
-   * resulting pack, incremental installs additionally carrying added/skipped.
-   * All progress is reflected on the job so the UI can poll it — the request
-   * that enqueued the job has already returned 202 by the time this runs.
-   */
-  private async runJob(
-    jobId: string,
-    work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>,
-  ): Promise<void> {
-    const job = this.jobs.get(jobId);
-    if (!job) return;
-    job.status = 'running';
-    job.progress.forEach((p) => {
-      if (p.status === 'pending') p.status = 'running';
-    });
-    job.updatedAt = nowIso();
+  private markJobCompleted(jobId: string, outcome: 'created' | 'updated', added: number, skipped: number, pack?: RulePack): void {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) return;
+    const progress = RulesService.parseProgress(row.progress);
+    progress.committed = added; progress.skipped = skipped;
+    if (pack) (progress as unknown as Record<string, unknown>).packSlug = pack.slug;
+    progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'done'; });
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'completed', outcome, progress: JSON.stringify(progress), updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.delete(jobId);
+  }
 
+  private markJobFailed(jobId: string, error: string): void {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) return;
+    const errors = JSON.parse(row.errors || '[]') as string[]; errors.push(error);
+    const progress = RulesService.parseProgress(row.progress);
+    progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'failed'; });
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'failed', progress: JSON.stringify(progress), errors: JSON.stringify(errors), updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.delete(jobId);
+  }
+
+  cancelJob(jobId: string): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) throw new NotFoundException(`Install job ${jobId} not found`);
+    if (row.status !== 'queued' && row.status !== 'running') throw new BadRequestException(`Job ${jobId} is already in terminal state: ${row.status}`);
+    const ts = nowIso();
+    const running = this.runningJobs.get(jobId);
+    if (running) running.cancelled = true;
+    this.db.update(importJobs).set({ status: 'cancelled', updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.delete(jobId);
+    return this.getJobOrThrow(jobId);
+  }
+
+  retryJob(jobId: string, user: RequestUser): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) throw new NotFoundException(`Install job ${jobId} not found`);
+    if (row.status !== 'failed' && row.status !== 'cancelled') throw new BadRequestException(`Job ${jobId} cannot be retried (status: ${row.status})`);
+    const input = JSON.parse(row.input) as RulePackInstall;
+    return this.enqueueInstall(input, user);
+  }
+
+  private async runJob(jobId: string, work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>): Promise<void> {
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'running', startedAt: ts, updatedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.set(jobId, { cancelled: false });
     try {
       const result = await work();
+      if (this.runningJobs.get(jobId)?.cancelled) return;
       const isIncremental = 'added' in result;
       const { added, skippedExisting, ...pack } = result as RulePack & { added?: number; skippedExisting?: number };
-      const current = this.jobs.get(jobId);
-      if (!current) return;
-      current.status = 'completed';
-      current.outcome = isIncremental ? 'updated' : 'created';
-      current.pack = pack;
-      current.added = added ?? null;
-      current.skippedExisting = skippedExisting ?? null;
-      current.progress.forEach((p) => {
-        if (p.status !== 'done') p.status = 'done';
-      });
-      current.completedSections = current.progress.length;
-      current.updatedAt = nowIso();
+      this.markJobCompleted(jobId, isIncremental ? 'updated' : 'created', added ?? 0, skippedExisting ?? 0, pack);
     } catch (err) {
-      const current = this.jobs.get(jobId);
-      if (!current) return;
-      current.status = 'failed';
-      current.error = err instanceof Error ? err.message : String(err);
-      current.progress.forEach((p) => {
-        if (p.status !== 'done') p.status = 'failed';
-      });
-      current.updatedAt = nowIso();
-    }
-  }
-
-  private pruneOldJobs(): void {
-    const cutoff = Date.now() - RulesService.PRUNE_AFTER_MS;
-    for (const [id, job] of this.jobs) {
-      if ((job.status === 'completed' || job.status === 'failed') && new Date(job.updatedAt).getTime() < cutoff) {
-        this.jobs.delete(id);
-      }
+      if (this.runningJobs.get(jobId)?.cancelled) return;
+      this.markJobFailed(jobId, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -452,9 +486,7 @@ export class RulesService {
    */
   enqueueOpen5eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
-    const job = this.newJob('open5e', sections);
-    // Defer to a microtask so this method returns the 'pending' snapshot before any
-    // work (or DB writes) begin — the POST is truly non-blocking (issue #20).
+    const job = this.newJob('open5e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOpen5e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -473,7 +505,7 @@ export class RulesService {
     // The shared RulePackInstall.sections enum is Open5e-shaped (spells/monsters/…); PF2e
     // has its own section vocabulary (creatures/equipment/ancestries/…), so a PF2e install
     // always imports all PF2e sections rather than honouring the 5e-named filter.
-    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS);
+    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -483,7 +515,7 @@ export class RulesService {
   }
 
   enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -500,7 +532,7 @@ export class RulesService {
    */
   enqueuePf1eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
-    const job = this.newJob('pf1e', sections);
+    const job = this.newJob('pf1e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf1e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -519,7 +551,7 @@ export class RulesService {
     const sections: StarfinderSection[] = input.sections?.length
       ? (input.sections as StarfinderSection[])
       : ALL_STARFINDER_SECTIONS;
-    const job = this.newJob('starfinder', sections);
+    const job = this.newJob('starfinder', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromStarfinder(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -538,7 +570,7 @@ export class RulesService {
     const sections: ArchmageSection[] = input.sections?.length
       ? (input.sections as ArchmageSection[])
       : ALL_ARCHMAGE_SECTIONS;
-    const job = this.newJob('archmage', sections);
+    const job = this.newJob('archmage', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromArchmage(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -556,7 +588,7 @@ export class RulesService {
     const sections: OpenLegendSection[] = input.sections?.length
       ? (input.sections as OpenLegendSection[])
       : ALL_OPEN_LEGEND_SECTIONS;
-    const job = this.newJob('open-legend', sections);
+    const job = this.newJob('open-legend', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOpenLegend(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -573,7 +605,7 @@ export class RulesService {
    */
   enqueueOsrInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: OsrSection[] = input.sections?.length ? (input.sections as OsrSection[]) : ALL_OSR_SECTIONS;
-    const job = this.newJob('osr', sections);
+    const job = this.newJob('osr', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOsr(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -596,7 +628,7 @@ export class RulesService {
     this.assertOpenLicense(input.pack.license);
     this.assertEntriesOpenLicensed(input);
     const types = [...new Set(input.entries.map((e) => e.type))];
-    const job = this.newJob('upload', types);
+    const job = this.newJob('upload', types, user, { pack: input.pack } as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromUpload(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),

@@ -549,6 +549,26 @@ CREATE TABLE IF NOT EXISTS oauth_access_tokens (
   created_at TEXT NOT NULL
 );
 
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  source_hash TEXT NOT NULL DEFAULT '',
+  input TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued',
+  progress TEXT NOT NULL DEFAULT '{}',
+  cursor TEXT,
+  actor_id TEXT NOT NULL DEFAULT '',
+  started_at TEXT,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  outcome TEXT,
+  errors TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_created_at ON import_jobs(created_at);
+
 CREATE TABLE IF NOT EXISTS rule_packs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   slug TEXT NOT NULL UNIQUE,

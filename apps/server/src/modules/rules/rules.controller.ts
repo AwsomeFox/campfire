@@ -95,12 +95,40 @@ export class RulesController {
     return this.rules.enqueueUploadInstall(body, user);
   }
 
+  @Get('packs/install-jobs')
+  @ApiOperation({ summary: 'List install-job history', description: 'Any authenticated user. Returns all persisted import jobs, newest first.' })
+  @ApiResponse({ status: 200, description: 'Import job history.' })
+  listJobs() {
+    return this.rules.listJobs();
+  }
+
   @Get('packs/install-jobs/:id')
   @ApiOperation({ summary: 'Get install-job status', description: 'Any authenticated user. Poll for per-section progress and the final result of an install/upload.' })
   @ApiResponse({ status: 200, description: 'Install job status.' })
   @ApiResponse({ status: 404, description: 'No such job (or it was pruned after completion).' })
   getJob(@Param('id') id: string) {
     return this.rules.getJobOrThrow(id);
+  }
+
+  @Post('packs/install-jobs/:id/cancel')
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'Cancel a running or queued install job', description: 'Server admin only.' })
+  @ApiResponse({ status: 200, description: 'Job cancelled.' })
+  @ApiResponse({ status: 400, description: 'Job is already in a terminal state.' })
+  @ApiResponse({ status: 404, description: 'No such job.' })
+  cancelJob(@Param('id') id: string) {
+    return this.rules.cancelJob(id);
+  }
+
+  @Post('packs/install-jobs/:id/retry')
+  @ServerRoles('admin')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Retry a failed or cancelled install job', description: 'Server admin only. Creates a new job with the same input.' })
+  @ApiResponse({ status: 202, description: 'Retry job accepted.' })
+  @ApiResponse({ status: 400, description: 'Job cannot be retried.' })
+  @ApiResponse({ status: 404, description: 'No such job.' })
+  retryJob(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return this.rules.retryJob(id, user);
   }
 
   @Delete('packs/:id')
