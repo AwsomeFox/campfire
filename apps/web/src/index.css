@@ -1132,6 +1132,13 @@ h1, h2, h3, h4, h5, h6 {
   }
 }
 
+/* On desktop the tab bar is hidden; lower the undo snackbar closer to the viewport bottom */
+@media (min-width: 768px) {
+  .undo-snackbar {
+    bottom: 24px !important;
+  }
+}
+
 /* ---------------------------------------------------------------------------
    Motion & feedback (issue #67) — the firelit table finally moves: dice tumble
    in on a roll (gold flourish on a natural 20), the HP bar shakes + flashes red

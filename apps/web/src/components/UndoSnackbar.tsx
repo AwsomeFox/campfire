@@ -173,10 +173,12 @@ export function UndoSnackbar({
       role="status"
       aria-live="polite"
       aria-atomic="true"
+      className="undo-snackbar"
       style={{
         position: 'fixed',
         left: '50%',
-        bottom: 24,
+        /* Mobile: clear the tab bar (48px min-height + safe-area padding) + 16px breathing room */
+        bottom: 'calc(env(safe-area-inset-bottom, 0px) + 64px + 16px)',
         transform: 'translateX(-50%)',
         zIndex: 1000,
         display: 'flex',
@@ -203,7 +205,7 @@ export function UndoSnackbar({
       <span className="sr-only">{announcement}</span>
       <button
         className="btn btn-secondary"
-        style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
+        style={{ fontSize: 12.5, minHeight: 44, minWidth: 44, padding: '4px 12px' }}
         onClick={() => void undo()}
         disabled={busy}
       >
@@ -221,6 +223,11 @@ export function UndoSnackbar({
           fontSize: 16,
           lineHeight: 1,
           padding: '2px 4px',
+          minHeight: 44,
+          minWidth: 44,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
       >
         ✕
