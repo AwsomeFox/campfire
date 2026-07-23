@@ -10,12 +10,19 @@ import { useNavigate, useParams } from 'react-router-dom';
 import type { FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
+import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  DmPrivacyGroup,
+  FACTION_EDITOR_ID_PREFIX,
+  FACTION_FIELD_NAMES,
+  LabeledField,
+  labeledFieldIds,
+} from '../../components/LabeledField';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { initials } from '../../lib/avatarText';
 import {
@@ -45,6 +52,7 @@ export default function FactionPage() {
   const [form, setForm] = useState({ name: '', kind: '', body: '', goals: '', dmSecret: '', hidden: false, standing: 'neutral' as FactionStanding, reputation: 0 });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
@@ -85,6 +93,7 @@ export default function FactionPage() {
       reputation: faction.reputation,
     });
     setSaveError(null);
+    setFieldErrors({});
     setEditing(true);
   }
 
@@ -117,9 +126,14 @@ export default function FactionPage() {
   }
 
   async function save() {
-    if (!form.name.trim()) return;
+    if (!form.name.trim()) {
+      setFieldErrors({ name: 'Name is required.' });
+      document.getElementById(labeledFieldIds(FACTION_EDITOR_ID_PREFIX, FACTION_FIELD_NAMES.name).controlId)?.focus();
+      return;
+    }
     setSaving(true);
     setSaveError(null);
+    setFieldErrors({});
     try {
       await api.patch(`${API}/factions/${id}`, {
         name: form.name.trim(),
@@ -134,7 +148,12 @@ export default function FactionPage() {
       await load();
       setEditing(false);
     } catch (err) {
-      setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+      if (err instanceof ApiError) {
+        setFieldErrors(err.fieldMessages());
+        setSaveError(err.message);
+      } else {
+        setSaveError("Couldn't save changes.");
+      }
     } finally {
       setSaving(false);
     }
@@ -317,59 +336,116 @@ export default function FactionPage() {
       )}
 
       {editing && (
-        <Card className="space-y-3">
-          {saveError && <ErrorNote message={saveError} />}
+        <Card
+          className="space-y-3"
+          role="region"
+          aria-label="Edit faction"
+          aria-describedby={saveError ? `${FACTION_EDITOR_ID_PREFIX}-form-error` : undefined}
+        >
+          {saveError && (
+            <div id={`${FACTION_EDITOR_ID_PREFIX}-form-error`}>
+              <ErrorNote message={saveError} />
+            </div>
+          )}
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Kind</label>
-              <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} placeholder="guild, cult, government…" />
-            </div>
-            <div className="space-y-1">
-              <label htmlFor="faction-standing" className="text-[10px] text-slate-500 font-bold uppercase">
-                Standing
-              </label>
-              <select
-                id="faction-standing"
-                className="cf-select"
-                value={form.standing}
-                onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
-              >
-                {standingOptions.map(({ value, label }) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Reputation (−100…100)</label>
-              <TextInput
-                type="number"
-                value={String(form.reputation)}
-                onChange={(e) => setForm({ ...form, reputation: Math.max(-100, Math.min(100, Number(e.target.value) || 0)) })}
-              />
-            </div>
+            <LabeledField
+              idPrefix={FACTION_EDITOR_ID_PREFIX}
+              name={FACTION_FIELD_NAMES.name}
+              label="Name"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setFieldErrors((current) => {
+                  if (!current.name) return current;
+                  const next = { ...current };
+                  delete next.name;
+                  return next;
+                });
+              }}
+              error={fieldErrors.name}
+              disabled={saving}
+              describedBy={saveError ? `${FACTION_EDITOR_ID_PREFIX}-form-error` : undefined}
+            />
+            <LabeledField
+              idPrefix={FACTION_EDITOR_ID_PREFIX}
+              name={FACTION_FIELD_NAMES.kind}
+              label="Kind"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+              placeholder="guild, cult, government…"
+              error={fieldErrors.kind}
+              disabled={saving}
+            />
+            <LabeledField
+              idPrefix={FACTION_EDITOR_ID_PREFIX}
+              name={FACTION_FIELD_NAMES.standing}
+              as="select"
+              label="Standing"
+              value={form.standing}
+              onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
+              error={fieldErrors.standing}
+              disabled={saving}
+            >
+              {standingOptions().map(({ value, label }) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </LabeledField>
+            <LabeledField
+              idPrefix={FACTION_EDITOR_ID_PREFIX}
+              name={FACTION_FIELD_NAMES.reputation}
+              type="number"
+              label="Reputation (−100…100)"
+              value={String(form.reputation)}
+              onChange={(e) =>
+                setForm({ ...form, reputation: Math.max(-100, Math.min(100, Number(e.target.value) || 0)) })
+              }
+              min={-100}
+              max={100}
+              help="Numeric standing score from −100 to 100."
+              error={fieldErrors.reputation}
+              disabled={saving}
+            />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-          </div>
-          <div className="space-y-1">
-            <label className="flex items-center gap-1 text-[10px] text-slate-500 font-bold uppercase"><GameIcon slug="target-arrows" size={11} /> Goals (markdown)</label>
-            <TextArea style={{ minHeight: 90 }} value={form.goals} onChange={(e) => setForm({ ...form, goals: e.target.value })} />
-          </div>
-          <div className="space-y-1">
-            <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
-            <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-          </div>
-          <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-            <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
-            <span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole faction, not just the secret)</span>
-          </label>
+          <LabeledField
+            idPrefix={FACTION_EDITOR_ID_PREFIX}
+            name={FACTION_FIELD_NAMES.body}
+            as="textarea"
+            label="Description (markdown)"
+            value={form.body}
+            onChange={(e) => setForm({ ...form, body: e.target.value })}
+            error={fieldErrors.body}
+            disabled={saving}
+            minHeight={140}
+          />
+          <LabeledField
+            idPrefix={FACTION_EDITOR_ID_PREFIX}
+            name={FACTION_FIELD_NAMES.goals}
+            as="textarea"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="target-arrows" size={11} /> Goals (markdown)
+              </span>
+            }
+            value={form.goals}
+            onChange={(e) => setForm({ ...form, goals: e.target.value })}
+            error={fieldErrors.goals}
+            disabled={saving}
+            minHeight={90}
+          />
+          <DmPrivacyGroup
+            idPrefix={FACTION_EDITOR_ID_PREFIX}
+            entityLabel="faction"
+            dmSecret={form.dmSecret}
+            onDmSecretChange={(e) => setForm({ ...form, dmSecret: e.target.value })}
+            hidden={form.hidden}
+            onHiddenChange={(e) => setForm({ ...form, hidden: e.target.checked })}
+            dmSecretError={fieldErrors.dmSecret}
+            hiddenError={fieldErrors.hidden}
+            disabled={saving}
+            describedBy={saveError ? `${FACTION_EDITOR_ID_PREFIX}-form-error` : undefined}
+          />
           <div className="flex items-center justify-between gap-2">
             <Btn danger className="!min-h-0 !py-1.5 text-xs" busy={deleting} onClick={() => setConfirmingDelete(true)}>
               {deleting ? 'Deleting…' : 'Delete faction'}
