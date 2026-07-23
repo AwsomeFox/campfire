@@ -54,6 +54,8 @@
     "systemRecovered": "The AI DM recovered.",
     "systemTakeover": "A human took over the DM seat.",
     "systemVote": "Table vote: {{action}}",
+    "systemRules": "Rules answer: {{text}}",
+    "systemRulesEmpty": "Rules answer",
     "systemInfo": "State: {{state}}",
 
     "offTitle": "The AI DM is off",
