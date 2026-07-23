@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
@@ -22,6 +22,7 @@ import {
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -310,11 +311,12 @@ export class NotesService {
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
-    // Free-text search over note bodies (issue #65) — case-insensitive substring match,
-    // pushed into SQL so it composes correctly with limit/offset paging (#71) rather than
-    // filtering only the current page. Scoped to NOTES only (campaign-wide search is #64).
-    const search = filters.q?.trim().toLowerCase();
-    if (search) conds.push(sql`lower(${notes.body}) like ${'%' + search + '%'}`);
+    // Free-text search over note bodies (issue #65 / #624). Needle is folded with the
+    // shared helper (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and
+    // cannot see ß→ss / İ / accent case folds, so when `q` is set we fold-match in JS
+    // then apply limit/offset — paging stays correct (#71) without relying on SQL lower().
+    // Campaign-wide search (#64) loads notes without `q` and matches in memory the same way.
+    const search = filters.q?.trim() ? foldForSearch(filters.q.trim()) : '';
 
     const page: PageParams = { limit: filters.limit, offset: filters.offset };
     let query = this.db
@@ -323,8 +325,17 @@ export class NotesService {
       .where(and(...conds))
       .orderBy(asc(notes.id)) // deterministic order for stable paging (insertion order)
       .$dynamic();
-    query = applyPage(query, page);
-    const visible = await query;
+
+    let visible: Array<typeof notes.$inferSelect>;
+    if (search) {
+      const all = await query;
+      const matched = all.filter((r) => foldedIncludes(r.body, search));
+      const offset = page.offset ?? 0;
+      visible = page.limit !== undefined ? matched.slice(offset, offset + page.limit) : matched.slice(offset);
+    } else {
+      query = applyPage(query, page);
+      visible = await query;
+    }
 
     const names = await this.resolveEntityNames(campaignId, visible);
     const recipientNames = await this.resolveRecipientNames(visible);

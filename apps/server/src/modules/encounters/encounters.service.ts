@@ -13,6 +13,7 @@ import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -660,8 +661,9 @@ export class EncountersService {
 
   async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    needle = needle.trim().toLowerCase();
-    if (!needle) return [];
+    // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
+    const folded = foldForSearch(needle.trim());
+    if (!folded) return [];
     const questLabel = role === 'dm'
       ? sql<string>`coalesce(${quests.title}, '')`
       : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;
@@ -674,6 +676,8 @@ export class EncountersService {
       else 'Session ' || ${sessions.number}
     end`;
 
+    // Load role-visible rows, then fold-match in JS. SQLite lower()/instr is ASCII-only
+    // and would miss ß→ss / accent / İ haystacks even for ASCII needles (#624).
     const rows = await this.db
       .select({
         id: encounters.id,
@@ -703,17 +707,18 @@ export class EncountersService {
       .where(and(
         eq(encounters.campaignId, campaignId),
         role === 'dm' ? undefined : eq(encounters.hidden, false),
-        or(
-          sql`instr(lower(${encounters.name}), ${needle}) > 0`,
-          sql`instr(lower(${locationLabel}), ${needle}) > 0`,
-          sql`instr(lower(${questLabel}), ${needle}) > 0`,
-          sql`instr(lower(${sessionLabel}), ${needle}) > 0`,
-        ),
       ))
-      .orderBy(encounters.id)
-      .limit(boundedLimit);
+      .orderBy(encounters.id);
 
-    return rows;
+    return rows
+      .filter(
+        (r) =>
+          foldedIncludes(r.name, folded)
+          || foldedIncludes(r.locationLabel ?? '', folded)
+          || foldedIncludes(r.questLabel ?? '', folded)
+          || foldedIncludes(r.sessionLabel ?? '', folded),
+      )
+      .slice(0, boundedLimit);
   }
 
 

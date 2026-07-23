@@ -18,6 +18,7 @@ import {
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -170,9 +171,10 @@ function effectiveEntryProvenance(
  */
 function nameMatchRank(q: string) {
   // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
-  // sanitisation in the LIKE fallback below); lower() both sides for
-  // case-insensitive comparison independent of the column's collation.
-  const needle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  // sanitisation in the LIKE fallback below). Fold the needle with the shared
+  // helper (#624); SQL lower() on the column remains ASCII-limited on SQLite —
+  // FTS path is preferred when available; LIKE fallback is best-effort for ASCII.
+  const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
   return sql`CASE
     WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
     WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
