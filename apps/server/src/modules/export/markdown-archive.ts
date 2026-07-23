@@ -31,6 +31,7 @@ function truncateStemByCodePoints(stem: string, max: number): string {
  * Characters that are unsafe in zip entry names across common unzip tools /
  * filesystems (Windows reserved, path separators, ASCII controls).
  */
+// eslint-disable-next-line no-control-regex -- intentionally match ASCII controls + DEL
 const UNSAFE_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f\u007f]/g;
 
 /**
