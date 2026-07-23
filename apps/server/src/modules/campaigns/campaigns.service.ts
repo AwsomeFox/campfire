@@ -600,7 +600,9 @@ export class CampaignsService {
    *    (+combatants), and discussion threads, with every intra-campaign
    *    reference (quest parent/giver, npc location/faction, combatant
    *    character, note/comment entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids.
+   *    remapped to the cloned rows' new ids. Encounter runtime combat state
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
+   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
    *  - 'template': prep only — quests/npcs/locations/factions copied but play
    *    state stripped: quest statuses reset to 'available', objectives
    *    unchecked, locations back to 'unexplored', and sessions/notes/
@@ -878,16 +880,19 @@ export class CampaignsService {
             .values({
               campaignId: cloneId,
               name: e.name,
-              status: e.status,
-              round: e.round,
-              turnIndex: e.turnIndex,
+              // Fresh fights only — never copy live/ended combat runtime (issue #548).
+              status: 'preparing',
+              round: 0,
+              turnIndex: 0,
+              currentCombatantId: null,
               // Where/why/when links (issue #126/#864): remap through the clone maps.
               // A dangling/cross-campaign source link drops to null rather than copying
               // a stale foreign id into the new campaign.
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
-              endedAt: e.endedAt,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              endedAt: null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -896,20 +901,23 @@ export class CampaignsService {
           encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
-                initiative: c.initiative,
+                initiative: null,
                 initMod: c.initMod,
-                hpCurrent: c.hpCurrent,
+                hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
-                conditions: c.conditions,
+                conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
