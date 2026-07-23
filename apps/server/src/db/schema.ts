@@ -986,6 +986,11 @@ export const combatants = sqliteTable('combatants', {
   // Token footprint size category (issue #40, phase 2). NOT NULL DEFAULT 'medium'; added by
   // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTokenSize.
   tokenSize: text('token_size').notNull().default('medium'),
+  // Issue #466: character.updatedAt at the last acknowledged sheet↔combatant HP sync
+  // (create/add seed, live mirror, /end write-back, or reopen resync decision). Used as
+  // the compare-and-set token so a re-end cannot silently overwrite intervening sheet HP.
+  // Nullable for legacy rows; first sync after upgrade stamps it.
+  sheetSyncedUpdatedAt: text('sheet_synced_updated_at'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

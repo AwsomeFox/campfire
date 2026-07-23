@@ -4093,7 +4093,50 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
 });
 
-export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+/**
+ * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
+ * When the sheet advanced after /end, the DM must choose a resync direction before
+ * reopening — never silently overwrite intervening healing/rest.
+ */
+export const HpSyncSlice = z.object({
+  hpCurrent: z.number().int(),
+  hpTemp: z.number().int().min(0),
+  deathState: DeathState,
+  deathSaveSuccesses: z.number().int().min(0).max(3),
+  deathSaveFailures: z.number().int().min(0).max(3),
+});
+export type HpSyncSlice = z.infer<typeof HpSyncSlice>;
+
+export const HpSyncConflict = z.object({
+  combatantId: Id,
+  characterId: Id,
+  name: z.string(),
+  combatant: HpSyncSlice,
+  sheet: HpSyncSlice.extend({ updatedAt: IsoDate }),
+});
+export type HpSyncConflict = z.infer<typeof HpSyncConflict>;
+
+export const HpResyncDirection = z.enum(['keep_combatant', 'pull_sheet']);
+export type HpResyncDirection = z.infer<typeof HpResyncDirection>;
+
+/** Body for POST /encounters/:id/reopen — required when hpSyncConflicts is non-empty. */
+export const EncounterReopen = z.object({
+  hpResync: z
+    .array(
+      z.object({
+        combatantId: Id,
+        direction: HpResyncDirection,
+      }),
+    )
+    .optional(),
+});
+export type EncounterReopen = z.infer<typeof EncounterReopen>;
+
+export const EncounterWithCombatants = Encounter.extend({
+  combatants: z.array(Combatant),
+  /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
+  hpSyncConflicts: z.array(HpSyncConflict).optional(),
+});
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
 // roll-initiative response (issue #702). The encounter (with combatants) is returned as

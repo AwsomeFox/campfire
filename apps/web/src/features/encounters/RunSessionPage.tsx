@@ -26,6 +26,8 @@ import type {
   EncounterWithCombatants,
   FogState,
   GridType,
+  HpResyncDirection,
+  HpSyncConflict,
   MapPing,
   Npc,
   RuleEntry,
@@ -562,6 +564,8 @@ export default function RunSessionPage() {
 
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmReopen, setConfirmReopen] = useState(false);
+  /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
+  const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
@@ -769,9 +773,15 @@ export default function RunSessionPage() {
   // These are mutually exclusive DM header actions, so one shared pending flag gating
   // just the header group is correct — unlike the old global lock, it never touches the
   // combatant rows. Each settles by invalidating the encounter's reads.
+  // Issue #466: reopen may carry `hpResync` decisions when sheets diverged after End.
   const runControl = useMutation({
-    mutationFn: (action: 'roll-initiative' | 'start' | 'next-turn' | 'end' | 'reopen') =>
-      api.post(`${API}/encounters/${eid}/${action}`),
+    mutationFn: ({
+      action,
+      body,
+    }: {
+      action: 'roll-initiative' | 'start' | 'next-turn' | 'end' | 'reopen';
+      body?: { hpResync?: Array<{ combatantId: number; direction: HpResyncDirection }> };
+    }) => api.post(`${API}/encounters/${eid}/${action}`, body),
     onMutate: () => setActionError(null),
     onError: reportError,
     onSettled: () => invalidateEncounter(queryClient, eid),
@@ -863,22 +873,42 @@ export default function RunSessionPage() {
     [cid, patchCombatant],
   );
 
-  const rollInitiative = () => runControl.mutate('roll-initiative');
-  const startEncounter = () => runControl.mutate('start');
-  const nextTurn = () => runControl.mutate('next-turn');
+  const rollInitiative = () => runControl.mutate({ action: 'roll-initiative' });
+  const startEncounter = () => runControl.mutate({ action: 'start' });
+  const nextTurn = () => runControl.mutate({ action: 'next-turn' });
   // Close the confirm on success *or* failure so a rejected End (e.g. stale
   // preparing status) does not leave the modal parked over the error banner (#420).
   const endEncounter = () =>
-    runControl.mutate('end', {
-      onSuccess: () => setConfirmEnd(false),
-      onError: () => setConfirmEnd(false),
-    });
-  const reopenEncounter = () =>
-    runControl.mutate('reopen', {
-      onSuccess: () => setConfirmReopen(false),
-      onError: () => setConfirmReopen(false),
-    });
+    runControl.mutate(
+      { action: 'end' },
+      {
+        onSuccess: () => setConfirmEnd(false),
+        onError: () => setConfirmEnd(false),
+      },
+    );
+  const hpSyncConflicts: HpSyncConflict[] = encounter?.hpSyncConflicts ?? [];
+  const reopenEncounter = () => {
+    const hpResync =
+      hpSyncConflicts.length > 0
+        ? hpSyncConflicts.map((c) => ({
+            combatantId: c.combatantId,
+            direction: hpResyncChoices[c.combatantId] ?? ('pull_sheet' as HpResyncDirection),
+          }))
+        : undefined;
+    runControl.mutate(
+      { action: 'reopen', body: hpResync ? { hpResync } : undefined },
+      {
+        onSuccess: () => {
+          setConfirmReopen(false);
+          setHpResyncChoices({});
+        },
+        onError: () => setConfirmReopen(false),
+      },
+    );
+  };
   const deleteEncounter = () => deleteEncounterMut.mutate();
+  const reopenChoicesComplete =
+    hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);
 
   // Issue #702: how many combatants still need an initiative roll. Used to keep the
   // Roll-initiative button honest — disabled (rather than a silent no-op server call)
@@ -1195,7 +1225,17 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.reopen && (
-              <Btn ghost disabled={headerBusy} onClick={() => setConfirmReopen(true)}>
+              <Btn
+                ghost
+                disabled={headerBusy}
+                onClick={() => {
+                  // Default each conflict to pull_sheet (preserve intervening healing/rest).
+                  const initial: Record<number, HpResyncDirection> = {};
+                  for (const c of encounter?.hpSyncConflicts ?? []) initial[c.combatantId] = 'pull_sheet';
+                  setHpResyncChoices(initial);
+                  setConfirmReopen(true);
+                }}
+              >
                 Reopen
               </Btn>
             )}
@@ -1386,7 +1426,7 @@ export default function RunSessionPage() {
       {confirmEnd && (
         <ConfirmDialog
           title="End this encounter?"
-          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets change after this End, ending again after a Reopen can overwrite those intervening changes."
+          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets heal or rest after this End, Reopen will show the conflict and ask which HP to keep — it will not silently overwrite."
           confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
           busy={runControl.isPending}
           onConfirm={endEncounter}
@@ -1396,11 +1436,74 @@ export default function RunSessionPage() {
       {confirmReopen && (
         <ConfirmDialog
           title="Reopen this encounter?"
-          body="It returns to Running where combat left off. HP was written back to character sheets when it ended. Healing, rest, or other sheet HP changes you make before the next End will be silently overwritten — that End writes combatant HP back onto the sheets again (resync direction tracked in #466)."
+          body={
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <p style={{ margin: 0 }}>
+                It returns to Running where combat left off. Character sheets were synced when it
+                ended — if a sheet has healed, rested, or otherwise changed since then, choose which
+                HP to keep before reopening.
+              </p>
+              {hpSyncConflicts.length === 0 ? (
+                <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                  No sheet HP conflicts — combatant snapshots still match the sheets.
+                </p>
+              ) : (
+                <div data-testid="hp-resync-conflicts" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {hpSyncConflicts.map((c) => (
+                    <fieldset
+                      key={c.combatantId}
+                      style={{
+                        margin: 0,
+                        padding: '10px 12px',
+                        border: '1px solid var(--color-divider)',
+                        borderRadius: 'var(--radius-md)',
+                      }}
+                    >
+                      <legend style={{ fontWeight: 600, padding: '0 4px' }}>{c.name}</legend>
+                      <p className="text-muted" style={{ margin: '0 0 8px', fontSize: 12.5 }}>
+                        Combat snapshot {c.combatant.hpCurrent} HP
+                        {c.combatant.hpTemp > 0 ? ` (+${c.combatant.hpTemp} temp)` : ''} · sheet{' '}
+                        {c.sheet.hpCurrent} HP
+                        {c.sheet.hpTemp > 0 ? ` (+${c.sheet.hpTemp} temp)` : ''}
+                      </p>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {(
+                          [
+                            ['pull_sheet', 'Keep sheet HP (pull into combat)'],
+                            ['keep_combatant', 'Keep combat snapshot (overwrite sheet on next End)'],
+                          ] as const
+                        ).map(([value, label]) => (
+                          <label
+                            key={value}
+                            style={{ display: 'flex', gap: 8, alignItems: 'center', minHeight: 44, cursor: 'pointer' }}
+                          >
+                            <input
+                              type="radio"
+                              name={`hp-resync-${c.combatantId}`}
+                              value={value}
+                              checked={hpResyncChoices[c.combatantId] === value}
+                              onChange={() =>
+                                setHpResyncChoices((prev) => ({ ...prev, [c.combatantId]: value }))
+                              }
+                            />
+                            <span style={{ fontSize: 13 }}>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  ))}
+                </div>
+              )}
+            </div>
+          }
           confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
           busy={runControl.isPending}
+          confirmDisabled={!reopenChoicesComplete}
           onConfirm={reopenEncounter}
-          onCancel={() => setConfirmReopen(false)}
+          onCancel={() => {
+            setConfirmReopen(false);
+            setHpResyncChoices({});
+          }}
         />
       )}
       {confirmDelete && (
