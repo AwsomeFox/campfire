@@ -118,7 +118,7 @@ test.describe('revision restore preview and confirmation', () => {
 
     await page.goto(`/c/${campaignId}/quests/${navigation.questId}`);
     const panelTrigger = await openHistory(page);
-    await expect(page.getByRole('status')).toContainText('Loading revision history');
+    await expect(page.getByRole('status').filter({ hasText: 'Loading revision history' })).toContainText('Loading revision history');
     await expect(page.getByText('Quest description differs from current content').first()).toBeVisible();
     await expect(page.getByText('Quest description matches current content')).toBeVisible();
     await expect(page.getByText('Quest description was not recorded in this version')).toBeVisible();

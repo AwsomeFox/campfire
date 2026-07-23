@@ -29,6 +29,7 @@ import { EntityPicker, type EntityLink } from './EntityPicker';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON, NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 import { noteTargetHref, entityTargetProps } from '../../lib/entityLinks';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   NOTE_EDIT_ANCHOR_LABEL,
   NOTE_EDIT_AUDIENCE_LABEL,
@@ -296,7 +297,7 @@ export default function MyNotesPage() {
         <div className="flex-1" />
         <Btn
           className="!min-h-0 !py-1.5 text-xs"
-          onClick={() => document.getElementById('note-quick-capture')?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+          onClick={() => document.getElementById('note-quick-capture')?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })}
         >
           + New note
         </Btn>
