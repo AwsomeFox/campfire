@@ -3434,7 +3434,7 @@ export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
