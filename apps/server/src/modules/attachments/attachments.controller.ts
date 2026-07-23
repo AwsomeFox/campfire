@@ -25,6 +25,7 @@ import { filterHidden } from '../../common/redact';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { AttachmentsService, ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES } from './attachments.service';
 import { AttachmentUploadDto } from './attachments.dto';
+import { contentDispositionHeader } from './filename';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
@@ -226,7 +227,9 @@ export class AttachmentsController {
     res.set({
       'Content-Type': file.mime,
       'Content-Length': String(file.size),
-      'Content-Disposition': `inline; filename="${encodeURIComponent(row.filename)}"`,
+      // Issue #630: ASCII fallback + RFC 5987 filename* (not percent-encoding
+      // the Unicode name into the legacy filename= slot).
+      'Content-Disposition': contentDispositionHeader(row.filename, 'inline'),
     });
 
     const stream = fs.createReadStream(file.path);
