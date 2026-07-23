@@ -10,7 +10,7 @@ import {
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { and, desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
@@ -24,6 +24,7 @@ import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { persistedFogConcealsPixels } from '../../common/fog';
 import { generatePngThumbnail } from './thumbnail';
 import { sanitizeAttachmentFilename } from './filename';
 
@@ -241,33 +242,82 @@ export class AttachmentsService {
   }
 
   /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259). A fogged encounter map stays hidden (DM-only) as a handout
-   * so it never appears raw on the player Handouts card, but the fogged encounter canvas
-   * Returns encounter map fog information for `attachmentId` in `campaignId` (issue #259, #523).
-   * If `attachmentId` is an encounter's battle map, returns `{ isMap: true, fog: string | null }`.
-   * Otherwise returns `{ isMap: false, fog: null }`.
+   * Whether an attachment backs an encounter whose active fog still conceals source
+   * pixels. This is independent of attachment.hidden: a legacy/reused map may already
+   * be a revealed handout, but enabling fog must close every raw-byte shortcut.
    */
-  async getEncounterMapFog(
-    attachmentId: number,
-    campaignId: number,
-  ): Promise<{ isMap: boolean; fog: string | null }> {
-    const [row] = await this.db
+  async isFogProtectedEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+    const rows = await this.db
       .select({ fog: encounters.fog })
       .from(encounters)
-      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)))
-      .limit(1);
-    if (!row) return { isMap: false, fog: null };
-    return { isMap: true, fog: row.fog };
+      .where(
+        and(
+          eq(encounters.mapAttachmentId, attachmentId),
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.fog),
+        ),
+      );
+    return rows.some((row) => persistedFogConcealsPixels(row.fog));
+  }
+
+  /** Set of raw attachments currently protected by at least one fogged encounter. */
+  async fogProtectedMapIdsForCampaign(campaignId: number): Promise<Set<number>> {
+    // persistedFogConcealsPixels is always false when fog/mapAttachmentId is null, so
+    // push those predicates into SQL and skip loading map-less / fog-less encounters.
+    const rows = await this.db
+      .select({ mapAttachmentId: encounters.mapAttachmentId, fog: encounters.fog })
+      .from(encounters)
+      .where(
+        and(
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.mapAttachmentId),
+          isNotNull(encounters.fog),
+        ),
+      );
+    const ids = new Set<number>();
+    for (const row of rows) {
+      if (row.mapAttachmentId == null) continue;
+      if (persistedFogConcealsPixels(row.fog)) ids.add(row.mapAttachmentId);
+    }
+    return ids;
   }
 
   /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259).
+   * Byte-copy an attachment into a new row in the same campaign (issue #463).
+   * Used when fog-protecting a battle map that is also the shared campaign region
+   * map — the encounter retargets to the clone so the region map stays player-visible.
    */
-  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
-    const { isMap } = await this.getEncounterMapFog(attachmentId, campaignId);
-    return isMap;
+  async duplicate(
+    id: number,
+    user: RequestUser,
+    role: Role,
+    opts?: { filenamePrefix?: string },
+  ): Promise<Attachment> {
+    const row = await this.getRowOrThrow(id);
+    const bytes = this.readBytesIfPresent(row);
+    if (!bytes) throw new NotFoundException(`Attachment ${id} file is missing`);
+    const prefix = opts?.filenamePrefix ?? '';
+    if (row.mime === 'image/svg+xml') {
+      return this.createGenerated(
+        row.campaignId,
+        row.kind as AttachmentKind,
+        { filename: `${prefix}${row.filename}`, mime: row.mime, bytes },
+        user,
+        role,
+      );
+    }
+    return this.create(
+      row.campaignId,
+      row.kind as AttachmentKind,
+      {
+        originalname: `${prefix}${row.filename}`,
+        mimetype: row.mime,
+        size: bytes.length,
+        buffer: bytes,
+      },
+      user,
+      role,
+    );
   }
 
   /**

@@ -7,12 +7,22 @@
  *  - signed in: one-click join -> POST /invites/:code/join,
  * and lands in the campaign.
  */
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { InvitePreview } from '@campfire/schema';
 import { api, ApiError, API, isTransientError } from '../../lib/api';
+import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
-
+import {
+  AUTH_ERROR_IDS,
+  AUTH_FIELD_IDS,
+  AUTH_GENERIC_ERROR,
+  AUTH_LOCAL_DISABLED_ERROR,
+  type AuthErrorState,
+  describedBy,
+  focusAuthError,
+  validateNewAccountFields,
+} from './authFormA11y';
 function FlameMark() {
   return (
     <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
@@ -51,8 +61,12 @@ export function JoinPage() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useLayoutEffect(() => {
+    if (error) focusAuthError(error);
+  }, [error]);
 
   // Resolve the invite code via the public preview endpoint. Kept as a stable
   // callback so the Retry button can re-run the SAME fetch (preserving the join
@@ -108,6 +122,9 @@ export function JoinPage() {
   }, [loadPreview]);
 
   const alreadyMember = Boolean(preview && me?.memberships.some((m) => m.campaignId === preview.campaignId));
+  // Carry `/join/:code` through local/OIDC login so existing users resume the
+  // invite preview instead of losing the link (issue #478).
+  const loginHref = loginHrefWithReturn(`/join/${code}`);
 
   async function joinAsCurrentUser() {
     if (!preview) return;
@@ -121,7 +138,10 @@ export function JoinPage() {
       if (err instanceof ApiError && err.status === 409) {
         navigate(`/c/${preview.campaignId}`, { replace: true });
       } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setSubmitting(false);
@@ -133,16 +153,9 @@ export function JoinPage() {
     if (!preview) return;
     setError(null);
 
-    if (!/^[a-z0-9_.-]+$/i.test(username)) {
-      setError('Username may only contain letters, numbers, and _ . -');
-      return;
-    }
-    if (password.length < 8) {
-      setError('Password must be at least 8 characters.');
-      return;
-    }
-    if (password !== confirm) {
-      setError('Passwords do not match.');
+    const clientError = validateNewAccountFields({ username, password, confirm });
+    if (clientError) {
+      setError(clientError);
       return;
     }
 
@@ -157,17 +170,28 @@ export function JoinPage() {
       navigate(`/c/${preview.campaignId}`, { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setError('That username is taken — pick another, or sign in with it instead.');
+        setError({
+          kind: 'fields',
+          fields: {
+            username: 'That username is taken — pick another, or sign in with it instead.',
+          },
+          focus: 'username',
+        });
       } else if (err instanceof ApiError && err.status === 403) {
-        setError('Local sign-in is disabled on this server — ask the admin for an account.');
+        setError({ kind: 'form', message: AUTH_LOCAL_DISABLED_ERROR });
       } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setSubmitting(false);
     }
   }
 
+  const fieldErrors = error?.kind === 'fields' ? error.fields : {};
+  const formError = error?.kind === 'form' ? error.message : null;
   return (
     <div
       className="min-h-screen grid place-items-center p-6"
@@ -208,7 +232,7 @@ export function JoinPage() {
                     Retry
                   </button>
                   <Link
-                    to="/login"
+                    to={loginHref}
                     className="btn btn-secondary btn-block"
                     style={{ minHeight: 44 }}
                   >
@@ -216,7 +240,7 @@ export function JoinPage() {
                   </Link>
                 </div>
               ) : (
-                <Link to="/login" className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
+                <Link to={loginHref} className="btn btn-secondary btn-block" style={{ minHeight: 44 }}>
                   Go to sign in
                 </Link>
               )}
@@ -234,7 +258,16 @@ export function JoinPage() {
 
               {me ? (
                 <div className="w-full flex flex-col gap-3">
-                  {error && <p className="text-sm text-rose-400 m-0">{error}</p>}
+                  {formError && (
+                    <p
+                      id={AUTH_ERROR_IDS.form}
+                      role="alert"
+                      tabIndex={-1}
+                      className="text-sm text-rose-400 m-0"
+                    >
+                      {formError}
+                    </p>
+                  )}
                   {alreadyMember ? (
                     <button
                       type="button"
@@ -259,25 +292,35 @@ export function JoinPage() {
                   )}
                 </div>
               ) : (
-                <form onSubmit={onSubmit} className="w-full flex flex-col gap-3">
+                <form onSubmit={onSubmit} className="w-full flex flex-col gap-3" noValidate>
                   <div className="field">
-                    <label htmlFor="username">Username</label>
+                    <label htmlFor={AUTH_FIELD_IDS.username}>Username</label>
                     <input
-                      id="username"
+                      id={AUTH_FIELD_IDS.username}
                       className="input"
                       value={username}
-                      onChange={(e) => setUsername(e.target.value)}
+                      onChange={(e) => {
+                        setUsername(e.target.value);
+                        if (fieldErrors.username) setError(null);
+                      }}
                       autoComplete="username"
                       autoFocus
                       required
+                      aria-invalid={fieldErrors.username ? true : undefined}
+                      aria-describedby={describedBy(fieldErrors.username && AUTH_ERROR_IDS.username)}
                     />
+                    {fieldErrors.username && (
+                      <p id={AUTH_ERROR_IDS.username} role="alert" className="text-sm text-rose-400 m-0">
+                        {fieldErrors.username}
+                      </p>
+                    )}
                   </div>
                   <div className="field">
-                    <label htmlFor="displayName">
+                    <label htmlFor={AUTH_FIELD_IDS.displayName}>
                       Display name <span className="text-muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· optional</span>
                     </label>
                     <input
-                      id="displayName"
+                      id={AUTH_FIELD_IDS.displayName}
                       className="input"
                       value={displayName}
                       onChange={(e) => setDisplayName(e.target.value)}
@@ -285,37 +328,66 @@ export function JoinPage() {
                     />
                   </div>
                   <div className="field">
-                    <label htmlFor="password">Password</label>
+                    <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
                     <input
-                      id="password"
+                      id={AUTH_FIELD_IDS.password}
                       type="password"
                       className="input"
                       value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      onChange={(e) => {
+                        setPassword(e.target.value);
+                        if (fieldErrors.password) setError(null);
+                      }}
                       autoComplete="new-password"
                       required
+                      aria-invalid={fieldErrors.password ? true : undefined}
+                      aria-describedby={describedBy(fieldErrors.password && AUTH_ERROR_IDS.password)}
                     />
+                    {fieldErrors.password && (
+                      <p id={AUTH_ERROR_IDS.password} role="alert" className="text-sm text-rose-400 m-0">
+                        {fieldErrors.password}
+                      </p>
+                    )}
                   </div>
                   <div className="field">
-                    <label htmlFor="confirm">Confirm password</label>
+                    <label htmlFor={AUTH_FIELD_IDS.confirm}>Confirm password</label>
                     <input
-                      id="confirm"
+                      id={AUTH_FIELD_IDS.confirm}
                       type="password"
                       className="input"
                       value={confirm}
-                      onChange={(e) => setConfirm(e.target.value)}
+                      onChange={(e) => {
+                        setConfirm(e.target.value);
+                        if (fieldErrors.confirm) setError(null);
+                      }}
                       autoComplete="new-password"
                       required
+                      aria-invalid={fieldErrors.confirm ? true : undefined}
+                      aria-describedby={describedBy(fieldErrors.confirm && AUTH_ERROR_IDS.confirm)}
                     />
+                    {fieldErrors.confirm && (
+                      <p id={AUTH_ERROR_IDS.confirm} role="alert" className="text-sm text-rose-400 m-0">
+                        {fieldErrors.confirm}
+                      </p>
+                    )}
                   </div>
 
-                  {error && <p className="text-sm text-rose-400 m-0">{error}</p>}
+                  {formError && (
+                    <p
+                      id={AUTH_ERROR_IDS.form}
+                      role="alert"
+                      tabIndex={-1}
+                      className="text-sm text-rose-400 m-0"
+                    >
+                      {formError}
+                    </p>
+                  )}
 
                   <button type="submit" className="btn btn-primary btn-block" style={{ minHeight: 44 }} disabled={submitting}>
                     {submitting ? 'Pulling up a chair…' : 'Create account & join'}
                   </button>
                   <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-                    Already have an account? <Link to="/login">Sign in</Link> first, then open this link again.
+                    Already have an account? <Link to={loginHref}>Sign in</Link> — you&rsquo;ll return here to join.
                   </p>
                 </form>
               )}

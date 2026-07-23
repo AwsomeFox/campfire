@@ -111,7 +111,10 @@ export default defineConfig({
             // by the NetworkOnly rule above. cacheWillUpdateJson additionally
             // rejects text/event-stream, Content-Disposition: attachment, and
             // bodies over API_JSON_MAX_BYTES so a mis-routed download can never
-            // poison the offline JSON set (issue #879).
+            // poison the offline JSON set (issue #879). Attachment bytes and
+            // role/fog-specific VTT map renders stay out of this matcher too
+            // (secrecy leak #463 — a previously revealed map must not be served
+            // offline after the DM re-hides it).
             urlPattern: matchApiJsonCache,
             handler: "NetworkFirst",
             options: {

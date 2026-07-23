@@ -88,6 +88,9 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
     return url.searchParams.get('size') !== 'thumb';
   }
 
+  // Role/fog-specific VTT map renders — never Cache Storage (#463).
+  if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return true;
+
   return false;
 }
 
@@ -125,6 +128,7 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
   if (path.startsWith('/api/v1/admin/')) return false;
   if (path.startsWith('/api/v1/tokens')) return false;
   if (path.startsWith('/api/v1/attachments/')) return false;
+  if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return false;
 
   return true;
 }
