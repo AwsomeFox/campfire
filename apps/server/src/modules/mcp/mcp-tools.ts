@@ -46,7 +46,6 @@ import {
   StoryArcUpdate,
   StoryBeatCreate,
   StoryBeatUpdate,
-  Role,
   RollRequest,
   RulePackInstall,
   RuleEntryType,

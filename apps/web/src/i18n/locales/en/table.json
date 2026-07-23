@@ -22,6 +22,8 @@
 
     "emptyTitle": "The table is quiet",
     "emptyHint": "Type an action below to begin the scene.",
+    "transcriptLabel": "Table transcript",
+    "narrationLogLabel": "Narration announcements",
 
     "composerPlaceholder": "Describe what you do…",
     "composerPlaceholderCombat": "Combat is live — describe your action…",
@@ -30,6 +32,8 @@
     "composerLockedPaused": "The AI DM is paused.",
     "composerLockedHuman": "A human has taken the DM seat.",
     "composerLockedAwaiting": "Waiting on the rest of the table…",
+    "composerUnlocked": "Composer unlocked. You can send an action.",
+    "narrationReady": "The table is ready.",
     "sceneFieldPlaceholder": "Set the scene (optional)",
     "send": "Send",
     "sending": "Sending…",
@@ -50,6 +54,8 @@
     "systemRecovered": "The AI DM recovered.",
     "systemTakeover": "A human took over the DM seat.",
     "systemVote": "Table vote: {{action}}",
+    "systemRules": "Rules answer: {{text}}",
+    "systemRulesEmpty": "Rules answer",
     "systemInfo": "State: {{state}}",
 
     "offTitle": "The AI DM is off",
