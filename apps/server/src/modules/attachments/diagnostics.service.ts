@@ -180,7 +180,15 @@ export class DiagnosticsService {
 
     // Walk the uploads tree: uploads/<campaignDir>/<file>
     if (fs.existsSync(root)) {
-      const campaignDirs = fs.readdirSync(root, { withFileTypes: true });
+      let campaignDirs: fs.Dirent[];
+      try {
+        campaignDirs = fs.readdirSync(root, { withFileTypes: true });
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        throw new ServiceUnavailableException(
+          `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot run diagnostics.`,
+        );
+      }
       for (const dir of campaignDirs) {
         if (!dir.isDirectory()) continue;
         const dirCampaignId = Number.parseInt(dir.name, 10);
