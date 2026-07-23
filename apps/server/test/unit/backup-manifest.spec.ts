@@ -3,7 +3,7 @@ import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
-  EXPECTED_DB_ENTRY_V1,
+  DB_ENTRY_V1,
   manifestToInspectView,
   parseBackupManifest,
 } from '../../src/modules/backup/backup-manifest';
@@ -71,7 +71,7 @@ describe('parseBackupManifest (issue #514)', () => {
       try {
         parseBackupManifest({ ...baseV1, db: 'malicious/path.db' });
       } catch (err) {
-        expect((err as BadRequestException).message).toContain(EXPECTED_DB_ENTRY_V1);
+        expect((err as BadRequestException).message).toContain(DB_ENTRY_V1);
         expect((err as BadRequestException).message).toContain('malicious/path.db');
       }
     });
@@ -84,7 +84,7 @@ describe('parseBackupManifest (issue #514)', () => {
     });
 
     it('accepts a manifest with the canonical db entry', () => {
-      expect(parseBackupManifest(baseV1).db).toBe(EXPECTED_DB_ENTRY_V1);
+      expect(parseBackupManifest(baseV1).db).toBe(DB_ENTRY_V1);
     });
   });
 });

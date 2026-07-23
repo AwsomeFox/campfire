@@ -29,6 +29,7 @@ import {
   BACKUP_KIND,
   BACKUP_VERSION,
   CURRENT_SCHEMA_REVISION,
+  DB_ENTRY_V1,
   manifestToInspectView,
   parseBackupManifest,
   serverAppVersion,
@@ -39,9 +40,12 @@ import {
 export { BACKUP_APP, BACKUP_KIND, BACKUP_VERSION, BACKUP_FORMAT_VERSION };
 export type { BackupManifest, BackupInspectResult };
 
+/** Canonical zip entry name for the database in format-1 archives. */
+const DB_ENTRY = DB_ENTRY_V1;
+export { DB_ENTRY };
+
 /** Zip entry names inside a backup archive. */
 export const MANIFEST_ENTRY = 'manifest.json';
-export const DB_ENTRY = 'db/campfire.db';
 const UPLOADS_PREFIX = 'uploads/';
 
 /**

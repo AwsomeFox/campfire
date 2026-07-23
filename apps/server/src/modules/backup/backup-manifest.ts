@@ -66,7 +66,7 @@ function asNonEmptyString(value: unknown): string | null {
 }
 
 /** Expected db entry path for format version 1 archives (issue #997 fix 2). */
-export const EXPECTED_DB_ENTRY_V1 = 'db/campfire.db';
+export const DB_ENTRY_V1 = 'db/campfire.db';
 
 function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
@@ -77,9 +77,11 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
     throw new BadRequestException('Invalid backup archive — manifest is missing required fields');
   }
   // Validate that db points to the canonical entry for this format (issue #997 fix 2).
-  if (db !== EXPECTED_DB_ENTRY_V1) {
+  if (db !== DB_ENTRY_V1) {
+    // Truncate user-controlled value to avoid log/response inflation.
+    const truncated = db.length > 60 ? db.slice(0, 60) + '…' : db;
     throw new BadRequestException(
-      `Invalid backup archive — manifest.db must be "${EXPECTED_DB_ENTRY_V1}" for format version 1, got "${db}"`,
+      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version 1, got "${truncated}"`,
     );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
