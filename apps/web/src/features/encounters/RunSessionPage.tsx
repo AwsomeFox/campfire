@@ -29,6 +29,7 @@ import type {
   MapPing,
   Npc,
   RuleEntry,
+  RulePack,
   TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
@@ -65,6 +66,7 @@ import {
   dmLifecycleActions,
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
+import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -597,6 +599,15 @@ export default function RunSessionPage() {
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
 
+  // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
+  const packsQuery = useQuery({
+    queryKey: ['rules', 'packs'],
+    queryFn: () => api.get<RulePack[]>(`${API}/rules/packs`),
+    enabled: Number.isFinite(cid) && isDm,
+    staleTime: 60_000,
+  });
+  const campaignHasCompendium = (packsQuery.data?.length ?? 0) > 0;
+
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
     encounterQuery.error && !notFound
@@ -856,6 +867,18 @@ export default function RunSessionPage() {
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
   const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
+  // Issue #431: preparing banner tailored to auto-added party / enemies / map / packs.
+  const preparingSetupGuidance = useMemo(() => {
+    if (!encounter || encounter.status !== 'preparing') return null;
+    return preparingGuidance({
+      partyCombatantCount: encounter.combatants.filter((c) => c.kind === 'character').length,
+      enemyCombatantCount: encounter.combatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length,
+      hasMap: encounter.mapAttachmentId != null,
+      campaignHasActiveParty: characters.some((c) => c.status === 'active'),
+      campaignHasCompendium,
+    });
+  }, [encounter, characters, campaignHasCompendium]);
 
   // Issue #420: drop confirm dialogs that the current status no longer allows
   // (e.g. End left open after a peer/SSE transition out of running).
@@ -1187,10 +1210,38 @@ export default function RunSessionPage() {
         }
       />
 
-      {isDm && encounter.status === 'preparing' && (
-        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-          Add the party &amp; monsters below, roll initiative, then hit Start.
-        </p>
+      {isDm && preparingSetupGuidance && (
+        <div
+          data-testid="encounter-preparing-guidance"
+          className="text-muted"
+          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
+        >
+          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {preparingSetupGuidance.nextSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <ol
+            aria-label="Encounter lifecycle"
+            data-testid="encounter-lifecycle-checklist"
+            style={{
+              margin: 0,
+              padding: 0,
+              listStyle: 'none',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 6,
+              alignItems: 'center',
+            }}
+          >
+            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
+              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
+                {i + 1}. {step.label}
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
@@ -1231,7 +1282,17 @@ export default function RunSessionPage() {
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
-            <EmptyState icon="crossed-swords" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+            <EmptyState
+              icon="crossed-swords"
+              title="No combatants yet"
+              hint={
+                isDm
+                  ? characters.some((c) => c.status === 'active')
+                    ? 'Add the party from the Party tab, then enemies.'
+                    : 'Add combatants below — this campaign has no active party to auto-add.'
+                  : 'Waiting on the DM.'
+              }
+            />
           </div>
         ) : (
           orderedCombatants.map((c) => (
