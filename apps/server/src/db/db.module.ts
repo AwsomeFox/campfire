@@ -1919,6 +1919,29 @@ function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): vo
 }
 
 /**
+ * Issue #782: per-action idempotency for inventory quantity writes. CREATE TABLE
+ * IF NOT EXISTS is fully idempotent; fresh DBs never hit this path because
+ * BOOTSTRAP_SQL already declares the table. Same shape as other new-table
+ * migrations (e.g. 0051 server_meta).
+ */
+function migrateInventoryQtyIdempotencyTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
+      key TEXT PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item
+      ON inventory_qty_idempotency(item_id);
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1999,6 +2022,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
+  { name: '0068_inventory_qty_idempotency', run: migrateInventoryQtyIdempotencyTable },
 ];
 
 /**

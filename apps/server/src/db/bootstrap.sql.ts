@@ -697,6 +697,16 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #782: per-action idempotency for inventory quantity deltas / CAS sets.
+CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
+  key TEXT PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS party_treasury (
   campaign_id INTEGER PRIMARY KEY REFERENCES campaigns(id) ON DELETE CASCADE,
   cp INTEGER NOT NULL DEFAULT 0,
@@ -909,6 +919,7 @@ CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);
 `;
 
 /**

@@ -904,6 +904,19 @@ export const inventoryItems = sqliteTable('inventory_items', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Issue #782: per-action idempotency for inventory quantity writes. A client-generated
+// key records the committed item JSON so a lost-response retry returns the same
+// result without re-applying a qtyDelta. Fingerprint binds the key to one operation
+// (delta:+1 / set:5@…) — reuse with a different payload is a 409.
+export const inventoryQtyIdempotency = sqliteTable('inventory_qty_idempotency', {
+  key: text('key').primaryKey(),
+  itemId: integer('item_id').notNull(),
+  userId: text('user_id').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  responseJson: text('response_json').notNull(),
+  createdAt: text('created_at').notNull(),
+});
+
 // Party treasury — one coin-totals row per campaign, created lazily on first read/write.
 export const partyTreasury = sqliteTable('party_treasury', {
   campaignId: integer('campaign_id').primaryKey(),
