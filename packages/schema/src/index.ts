@@ -1485,6 +1485,15 @@ export function listRulePackSources(): RulePackSourceMeta[] {
 // rule-pack slug — resolves to the exact same behavior it has today. A future system is
 // one adapter object registered in ADAPTERS, not a sweep across the combat code.
 
+/**
+ * How values in a monster `abilityScores` map (or a character ability map) should be
+ * interpreted before rolling or rendering (issue #767):
+ * - `score` — classic 3–18 ability scores; convert with `abilityModifier` (5e/PF1e/…).
+ * - `modifier` — already signed modifiers as listed on PF2e creature statblocks; use as-is.
+ * - `native` — system-native values used directly (Open Legend attributes).
+ */
+export type AbilityRepresentation = 'score' | 'modifier' | 'native';
+
 /** Raw statblock fields picked out of a monster rule-entry's `dataJson` (pre-formatting). */
 export interface MonsterStatblockData {
   size: unknown;
@@ -1495,6 +1504,11 @@ export interface MonsterStatblockData {
   speed: unknown;
   /** The ability-score sub-object (5e: `{ strength, dexterity, … }`), or undefined. */
   abilityScores: Record<string, unknown> | undefined;
+  /**
+   * How to interpret `abilityScores` for this mapped monster. Defaults are applied by each
+   * adapter's `mapStatblock` (5e → score, PF2e creatures → modifier, Open Legend → native).
+   */
+  abilityRepresentation: AbilityRepresentation;
   specialAbilities: unknown;
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
@@ -1507,7 +1521,7 @@ export interface RuleSystemAdapter {
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
-  /** Ability-score → modifier (5e: floor((score - 10) / 2)). */
+  /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
@@ -1520,12 +1534,16 @@ export interface RuleSystemAdapter {
    */
   readonly maxLevel: number;
   /**
-   * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
-   * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
-   * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
-   * absent or non-numeric.
+   * Derive a combatant's initiative modifier from an ability map (5e: the DEX modifier).
+   * Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster `abilityScores`
+   * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
+   * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
+   * already-modifier / native values are not converted a second time (issue #767).
    */
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number;
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+  ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
@@ -1568,6 +1586,22 @@ export interface AttributeDicePool {
   disadvantage: boolean;
 }
 
+/**
+ * Convert a stored ability value into the modifier used for rolls/display (issue #767).
+ * Character sheets always pass `score` (or omit representation) so PF2e/5e keep
+ * `floor((score-10)/2)`. Monster statblocks pass the representation from `mapStatblock`
+ * so PF2e creature modifiers and Open Legend attributes are consumed exactly once.
+ */
+export function resolveAbilityModifier(
+  adapter: Pick<RuleSystemAdapter, 'abilityModifier'>,
+  value: number,
+  representation: AbilityRepresentation = 'score',
+): number {
+  if (!Number.isFinite(value)) return 0;
+  if (representation === 'score') return adapter.abilityModifier(value);
+  return Math.trunc(value);
+}
+
 /** Read the governing (DEX) score from either a canonical or raw ability map, if numeric. */
 function dnd5eDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
   if (!abilities) return null;
@@ -1595,9 +1629,12 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = dnd5eDexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    return dex === null ? 0 : resolveAbilityModifier(this, dex, representation);
   },
   // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
   // source of truth), not a separate hand-maintained subset. This is what every 5e
@@ -1613,6 +1650,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       legendaryActions: d.legendaryActions ?? d.legendary_actions,
@@ -1780,7 +1818,11 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
   // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
   maxLevel: Infinity,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    _representation: AbilityRepresentation = 'native',
+  ): number {
+    // Agility is already the native attribute value (no score→mod conversion).
     return openLegendAgility(abilities);
   },
   conditions: OPEN_LEGEND_BANES_BOONS,
@@ -1799,6 +1841,7 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed,
       abilityScores: attributes && typeof attributes === 'object' ? attributes : undefined,
+      abilityRepresentation: 'native',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.actions,
       actions: d.actions,
     };
@@ -2027,7 +2070,8 @@ export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
 export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
-  // PF2e ability modifiers use the same floor((score-10)/2) mapping as 5e.
+  // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
+  // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -2038,20 +2082,25 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
   // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
   // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. Returns 0 when neither is present/numeric.
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  // back to the WIS modifier. When `representation` is `modifier` (mapped creatures), WIS
+  // is already a modifier and must not be converted again (issue #767).
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return this.abilityModifier(wisScore);
+    if (typeof wisScore === 'number') return resolveAbilityModifier(this, wisScore, representation);
     return 0;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
-    // under `abilityMods`. Surface those under the seam's `abilityScores` field, and fold in
-    // the flat Perception modifier so initiativeModifier (above) can read it back out.
+    // under `abilityMods`. Surface those under the seam's `abilityScores` field with
+    // `abilityRepresentation: 'modifier'`, and fold in the flat Perception modifier so
+    // initiativeModifier (above) can read it back out without a second conversion.
     const mods = (d.abilityMods ?? d.ability_mods ?? d.abilityScores ?? d.abilities) as
       | Record<string, unknown>
       | undefined;
@@ -2074,6 +2123,7 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed ?? d.speeds,
       abilityScores,
+      abilityRepresentation: 'modifier',
       specialAbilities: d.specialAbilities ?? d.special ?? d.abilities_special,
       actions: d.actions ?? d.attacks,
     };

@@ -1363,7 +1363,10 @@ export class EncountersService {
         if (hp !== null) hpMax = hp;
       }
       if (input.initMod === undefined) {
-        initMod = adapter.initiativeModifier(adapter.mapStatblock(data).abilityScores);
+        // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
+        // attributes) are not score-converted a second time (issue #767).
+        const mapped = adapter.mapStatblock(data);
+        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
       }
     }
 
