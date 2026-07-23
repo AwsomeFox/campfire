@@ -319,7 +319,7 @@ export function RegionMap({
           <ErrorNote
             message={error}
             pending={retryPending || busy || kbSaving}
-            onRetry={canRetry ? () => void handleRetry() : undefined}
+            onRetry={canRetry ? handleRetry : undefined}
           />
         </div>
       )}

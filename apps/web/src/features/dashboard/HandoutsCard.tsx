@@ -32,25 +32,37 @@ export function HandoutsCard({
   // Concurrent load()/Retry callers share one promise so `await load()` never
   // resolves before the in-flight attachments fetch settles (#691).
   const loadInFlight = useRef<Promise<void> | null>(null);
+  // Tracks which campaign the card is currently bound to so a late response
+  // from a previous campaignId cannot overwrite items/error/loading.
+  const activeCampaignIdRef = useRef(campaignId);
 
   const load = useCallback(() => {
     return shareInFlightRef(loadInFlight, async () => {
+      const forCampaignId = campaignId;
       setLoading(true);
       try {
-        const list = await api.get<Attachment[]>(`${API}/campaigns/${campaignId}/attachments`);
+        const list = await api.get<Attachment[]>(`${API}/campaigns/${forCampaignId}/attachments`);
+        if (activeCampaignIdRef.current !== forCampaignId) return;
         setItems(list);
         setError(null);
       } catch (err) {
+        if (activeCampaignIdRef.current !== forCampaignId) return;
         setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
       } finally {
-        setLoading(false);
+        if (activeCampaignIdRef.current === forCampaignId) {
+          setLoading(false);
+        }
       }
     });
   }, [campaignId]);
 
   useEffect(() => {
+    activeCampaignIdRef.current = campaignId;
+    // Drop any prior campaign's shared promise so the new campaign never awaits
+    // (or applies) the wrong in-flight fetch.
+    loadInFlight.current = null;
     void load();
-  }, [load]);
+  }, [load, campaignId]);
 
   async function toggleReveal(a: Attachment) {
     setBusyId(a.id);
@@ -78,7 +90,7 @@ export function HandoutsCard({
 
       {error && (
         <div style={{ padding: '0 14px 8px' }}>
-          <ErrorNote message={error} pending={loading} onRetry={() => void load()} />
+          <ErrorNote message={error} pending={loading} onRetry={load} />
         </div>
       )}
 

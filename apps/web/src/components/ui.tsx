@@ -146,7 +146,7 @@ export function ErrorNote({
   pending = false,
 }: {
   message: string;
-  onRetry?: () => void;
+  onRetry?: () => void | Promise<void>;
   /** Keeps Retry visible but disabled while the loader/mutation is in flight. */
   pending?: boolean;
 }) {
@@ -156,7 +156,11 @@ export function ErrorNote({
       {onRetry && (
         <button
           type="button"
-          onClick={onRetry}
+          onClick={() => {
+            // Support async retries without forcing callers to wrap in `void`.
+            // Rejections are owned by the loader's error UI — don't surface as unhandled.
+            void Promise.resolve(onRetry()).catch(() => {});
+          }}
           disabled={pending}
           aria-busy={pending || undefined}
           className="font-semibold text-[var(--cf-accent)] hover:underline disabled:opacity-60 disabled:no-underline"
