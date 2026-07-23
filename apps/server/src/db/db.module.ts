@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { APP_VERSION } from '../common/build-metadata';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
@@ -27,14 +28,12 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 const dbLog = new Logger('Database');
 
 /**
- * The version of THIS running binary, single-sourced from apps/server/package.json (the same
- * source /healthz and /readyz report — see health.controller.ts). Recorded alongside the
- * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary can detect
- * that the DB was last touched by a newer app version and refuse to start against a schema it
- * does not understand, rather than silently writing into it.
+ * APP_VERSION (from common/build-metadata, issue #432) is recorded alongside the
+ * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary
+ * can detect that the DB was last touched by a newer app version and refuse to
+ * start against a schema it does not understand, rather than silently writing
+ * into it.
  */
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const APP_VERSION: string = require('../../package.json').version;
 
 /**
  * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
