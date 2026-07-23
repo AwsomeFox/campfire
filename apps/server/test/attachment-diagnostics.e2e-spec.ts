@@ -666,6 +666,9 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
 
   describe('unreadable campaign subdirectory during fix', () => {
     it('maps an unreadable campaign dir to 503 for relink (not a false not-found)', async () => {
+      // chmod-based permission revocation is unreliable on Windows.
+      if (process.platform === 'win32') return;
+
       const up = await adminAgent
         .post(`/api/v1/campaigns/${campaignId}/attachments`)
         .field('kind', 'map')
@@ -677,8 +680,13 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       // fail-closed lookup, readdir would skip it and report a false not-found;
       // with the fix it must map to 503 when EACCES is observable.
       const campaignDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
-      const previousMode = fs.statSync(campaignDir).mode & 0o777;
-      fs.chmodSync(campaignDir, 0);
+      const previousMode = fs.statSync(campaignDir).mode & 0o7777;
+      try {
+        fs.chmodSync(campaignDir, 0);
+      } catch {
+        // Restricted filesystems may refuse chmod — skip rather than fail the suite.
+        return;
+      }
 
       try {
         const fixRes = await adminAgent

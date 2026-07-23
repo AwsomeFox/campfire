@@ -220,8 +220,9 @@ function findPrimaryAttachmentFilesOnDisk(
     // `existsSync` would also mask EACCES/EPERM (existing-but-unreadable root) as
     // "missing", so check the readdir error code directly instead.
     if (code === 'ENOENT') return [];
+    // Avoid leaking absolute host paths in admin API error responses.
     throw new ServiceUnavailableException(
-      `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot locate attachment files.`,
+      `Attachment storage root is unreadable (${code ?? 'unknown error'}); cannot locate attachment files.`,
     );
   }
 
@@ -239,8 +240,9 @@ function findPrimaryAttachmentFilesOnDisk(
       if (code === 'ENOENT') continue;
       // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
       // produce a false "file not found" for relink/quarantine-by-attachmentId.
+      // Use the campaign directory name (relative), not the absolute path.
       throw new ServiceUnavailableException(
-        `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot locate attachment files.`,
+        `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} in campaign directory ${dir.name}); cannot locate attachment files.`,
       );
     }
     for (const entry of entries) {
