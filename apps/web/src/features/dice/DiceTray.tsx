@@ -153,7 +153,9 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
   // `storageBlocked` is a sticky flag (true once a write has failed) used to
   // badge in-memory presets. `storageNotice` is the one-shot modal: shown once
   // right after a failed save, then dismissed so it doesn't nag on every render.
-  const [storageBlocked, setStorageBlocked] = useState(false);
+  // Tracked for the badge described above; not yet read directly here (kept
+  // for the `setStorageBlocked` side effect below and any future consumer).
+  const [_storageBlocked, setStorageBlocked] = useState(false);
   const [storageNotice, setStorageNotice] = useState(false);
 
   useEffect(() => {
