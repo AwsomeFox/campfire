@@ -22,7 +22,7 @@ import type {
   EncounterWithCombatants,
   HpBand,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import {
@@ -599,7 +599,7 @@ export default function PlayerDisplayPage() {
           ) : (
             <span className="cf-chip">Location unset</span>
           )}
-          <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
+          <span className="cf-chip">{summary.campaign.sessionCount > 0 ? `${summary.campaign.sessionCount} session${summary.campaign.sessionCount === 1 ? '' : 's'}` : 'No sessions yet'}</span>
         </div>
         {syncMessage && (
           <p
