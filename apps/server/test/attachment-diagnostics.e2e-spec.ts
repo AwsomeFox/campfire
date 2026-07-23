@@ -23,6 +23,14 @@ const TINY_PNG = Buffer.from(
   'hex',
 );
 
+function warnBestEffort(label: string, err: unknown): void {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[attachment-diagnostics] ${label}:`,
+    err instanceof Error ? (err.stack ?? err.message) : err,
+  );
+}
+
 describe('Issue #733: attachment diagnostics (e2e)', () => {
   let ctx: TestAppContext;
   let adminAgent: ReturnType<typeof request.agent>;
@@ -693,28 +701,16 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
         // Restricted filesystems may refuse chmod — early-return (still a pass)
         // rather than fail the suite. Best-effort cleanup so later tests don't
         // see residual rows/files; log quietly for CI diagnosis.
-        // eslint-disable-next-line no-console
-        console.warn(
-          '[attachment-diagnostics] chmod unavailable; bailing early:',
-          chmodErr instanceof Error ? chmodErr.message : chmodErr,
-        );
+        warnBestEffort('chmod unavailable; bailing early', chmodErr);
         try {
           await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
         } catch (deleteErr) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            '[attachment-diagnostics] best-effort campaign delete failed:',
-            deleteErr instanceof Error ? deleteErr.message : deleteErr,
-          );
+          warnBestEffort('best-effort campaign delete failed', deleteErr);
         }
         try {
           fs.rmSync(campaignDir, { recursive: true, force: true });
         } catch (rmErr) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            '[attachment-diagnostics] best-effort rm failed:',
-            rmErr instanceof Error ? rmErr.message : rmErr,
-          );
+          warnBestEffort('best-effort rm failed', rmErr);
         }
         return;
       }
