@@ -82,6 +82,7 @@ test.describe('inline character cards — live sheet refresh', () => {
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
       const seedEncounterId = seed().encounterId;
       await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
+      await dm.post(`/api/v1/encounters/${seedEncounterId}/start`).catch(() => undefined);
       await playerCtx.dispose();
       await dm.dispose();
     }

@@ -57,6 +57,7 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
 async function restoreSeedFight(page: Page): Promise<void> {
   const { encounterId } = seed();
   await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
+  await page.request.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
 }
 
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {

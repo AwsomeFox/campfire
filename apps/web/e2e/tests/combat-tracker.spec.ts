@@ -26,6 +26,7 @@ function endedEncounterUrl(): string {
 async function openEncounter(page: Page) {
   const encounterId = seed().encounterId;
   await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
+  await page.request.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
   await page.request.patch(`/api/v1/encounters/${encounterId}`, {
     data: {
       round: 1,

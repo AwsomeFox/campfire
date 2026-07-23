@@ -93,6 +93,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       // subsequent serial spec that assumes a single RUNNING encounter.
       const seedEncounterId = seed().encounterId;
       await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
+      await dm.post(`/api/v1/encounters/${seedEncounterId}/start`).catch(() => undefined);
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
       await dm.dispose();
