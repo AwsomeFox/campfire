@@ -219,3 +219,115 @@ describe('ai-dm driver runtime — gating + access (e2e)', () => {
     expect(res.body.narration).toBe('the player speaks and the world answers');
   });
 });
+
+/**
+ * Issue #1071 — leaving Driver mode must tear down the live in-memory driver session.
+ * Without this, a driver→off/co_dm→driver cycle can strand the seat behind human_control
+ * (or stuck/vote/paused state) with no obvious handback for the DM to perform.
+ */
+describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-teardown-model' });
+    await h.enableExperimental();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
+  async function armDriverWithHumanControl(name: string): Promise<number> {
+    const campaignId = await h.createCampaign(name);
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    const grant = await h.lever(campaignId, 'grant-takeover', { note: 'table freeze' }, dm);
+    expect(grant.status).toBe(201);
+    expect(grant.body.state).toBe('human_control');
+    expect(grant.body.actingDm).not.toBeNull();
+    // Confirm the stranded-session failure mode the teardown closes.
+    const frozen = await h.sendMessage(campaignId, { input: 'AI, narrate' });
+    expect(frozen.status).toBe(503);
+    expect(frozen.text).toContain('human');
+    return campaignId;
+  }
+
+  it('switching to off resets the driver session to fresh idle and emits a lifecycle state SSE', async () => {
+    const campaignId = await armDriverWithHumanControl('Teardown Off');
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    const off = await h.configureSeat(campaignId, { mode: 'off' });
+    sub.unsubscribe();
+    expect(off.status).toBe(200);
+    expect(off.body.mode).toBe('off');
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('running');
+    expect(session.body.actingDm).toBeNull();
+    expect(session.body.vote).toBeNull();
+    expect(session.body.stuck).toBeNull();
+
+    const stateEv = events.find((e) => e.type === 'state');
+    expect(stateEv).toBeDefined();
+    expect(stateEv && stateEv.type === 'state' && stateEv.state).toBe('running');
+  });
+
+  it('switching to co_dm clears stuck/vote/status and re-selecting Driver starts clean', async () => {
+    const campaignId = await h.createCampaign('Teardown CoDM');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // Park the seat with stuck + an open vote so teardown has more than actingDm to clear.
+    h.script({
+      text: 'I reach for the dice…',
+      toolCalls: [{ id: 'boom', name: 'no_such_tool', arguments: {} }],
+    });
+    const stuckTurn = await h.sendMessage(campaignId, { input: 'I pick the lock.' });
+    expect(stuckTurn.status).toBe(201);
+    expect((await h.getDriverSession(campaignId)).body.state).toBe('awaiting_players');
+
+    const opened = await h.lever(campaignId, 'vote', { action: 'open', kind: 'pause' }, player);
+    expect(opened.status).toBe(201);
+    expect(opened.body.vote).not.toBeNull();
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    const coDm = await h.configureSeat(campaignId, { mode: 'co_dm' });
+    sub.unsubscribe();
+    expect(coDm.status).toBe(200);
+    expect(coDm.body.mode).toBe('co_dm');
+
+    const cleared = await h.getDriverSession(campaignId);
+    expect(cleared.body.status).toBe('idle');
+    expect(cleared.body.state).toBe('running');
+    expect(cleared.body.stuck).toBeNull();
+    expect(cleared.body.vote).toBeNull();
+    expect(cleared.body.actingDm).toBeNull();
+    expect(events.some((e) => e.type === 'state' && e.state === 'running')).toBe(true);
+
+    // Re-select Driver — must run turns without a handback.
+    const back = await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+    expect(back.status).toBe(200);
+    expect(back.body.mode).toBe('driver');
+
+    h.script({ text: 'A clean table. The story continues.' });
+    const resumed = await h.sendMessage(campaignId, { input: 'onward' });
+    expect(resumed.status).toBe(201);
+    expect(resumed.body.narration).toBe('A clean table. The story continues.');
+  });
+
+  it('driver→off→driver after human_control does not require handback', async () => {
+    const campaignId = await armDriverWithHumanControl('Teardown Cycle');
+
+    await h.configureSeat(campaignId, { mode: 'off' });
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script({ text: 'Fresh seat, no stranded handback.' });
+    const res = await h.sendMessage(campaignId, { input: 'begin' });
+    expect(res.status).toBe(201);
+    expect(res.body.narration).toBe('Fresh seat, no stranded handback.');
+  });
+});

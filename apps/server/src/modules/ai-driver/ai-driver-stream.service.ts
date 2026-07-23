@@ -34,7 +34,8 @@ export type AiDmStreamEvent =
   // Stuck ladder (#314). `stuck` fires when detection trips (repeated tool errors, budget
   // exhaustion, max-steps-without-progress, empty narration, a loop, or a raised dispute) and
   // moves the seat to `awaiting_players`; `recovered` fires when a lever gets it running again;
-  // `state` announces any other session-state transition (pause, human takeover, handback);
+  // `state` announces any other session-state transition (pause, human takeover, handback, and
+  // Driver-mode teardown when the seat leaves Driver — #1071);
   // `vote` and `takeover` narrate the player levers. All are thin signals — clients refetch
   // GET /ai-dm/session for the authoritative state, exactly like the `tool` signal.
   | { type: 'stuck'; campaignId: number; reason: string; detail: string; state: string; levers: string[]; at: string }
