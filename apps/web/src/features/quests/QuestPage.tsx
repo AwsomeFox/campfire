@@ -3,11 +3,15 @@
  * "Quest detail" screen (~L571-629).
  * Route: /c/:campaignId/quests/:questId (questId === 'new' renders the dm create form).
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { QuestStatus, type Quest, type QuestObjective, type Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import {
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import {
   Card,
@@ -108,6 +112,12 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [addingObjective, setAddingObjective] = useState(false);
   const [editingObjectiveId, setEditingObjectiveId] = useState<number | null>(null);
   const [objectiveDraft, setObjectiveDraft] = useState('');
+  // Issue #854: Enter confirming IME composition must not create an objective.
+  const objectiveCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (objectiveCompositionGateRef.current === null) {
+    objectiveCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const objectiveCompositionGate = objectiveCompositionGateRef.current;
 
   const [editingDmSecret, setEditingDmSecret] = useState(false);
   const [dmSecretDraft, setDmSecretDraft] = useState('');
@@ -646,24 +656,27 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               </div>
             ))}
             {isDm && (
-              <div className="flex items-center gap-2 pl-1">
+              <form
+                className="flex items-center gap-2 pl-1"
+                onSubmit={compositionSafeFormSubmit(objectiveCompositionGate, () => {
+                  void addObjective();
+                })}
+              >
                 <TextInput
                   value={newObjective}
                   onChange={(e) => setNewObjective(e.target.value)}
                   placeholder={t('quests.newObjectivePlaceholder')}
                   className="!py-1.5 text-xs max-w-xs"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void addObjective();
-                  }}
+                  {...objectiveCompositionGate.inputProps}
                 />
                 <button
-                  onClick={addObjective}
+                  type="submit"
                   disabled={addingObjective || !newObjective.trim()}
                   className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50"
                 >
                   {t('quests.addObjective')}
                 </button>
-              </div>
+              </form>
             )}
 
             {hasSubs && (

@@ -293,6 +293,19 @@ export class SessionsService {
 
     await this.recomputeSessionCount(campaignId);
 
+    // Open the initial prose tip so the first overwrite attributes this version to
+    // the creator rather than inventing legacy "Replaced by…" authorship (#813).
+    if (row.recap !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'session',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.recap,
+        user,
+      });
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -338,14 +351,15 @@ export class SessionsService {
     if (input.number !== undefined) {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
     }
-    // Snapshot the PRIOR recap into revision history when the recap actually changes,
-    // so a subsequent overwrite is recoverable (#157). Bounded to committed edits.
+    // Commit an immutable prose version when the recap actually changes (#157/#813):
+    // close the prior tip (real author preserved) and open a tip for the new prose.
     if (input.recap !== undefined && input.recap !== existing.recap) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'session',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.recap,
+        nextProse: input.recap,
         user,
       });
     }

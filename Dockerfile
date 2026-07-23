@@ -13,6 +13,7 @@
 
 ARG NODE_IMAGE=node:24-slim
 ARG APP_VERSION=0.0.0-dev
+ARG APP_COMMIT=
 
 # ---------------------------------------------------------------------------
 # deps: full install (incl. devDependencies) used to build all three workspaces.
@@ -30,8 +31,8 @@ COPY apps/web/package.json apps/web/package.json
 COPY packages/schema/package.json packages/schema/package.json
 
 # Stamp the release version into every workspace package.json so the running
-# app (healthz, DB migration guard, MCP server-info) reports the right version
-# without requiring a version-bump commit in the repo.
+# app (healthz, DB migration guard, MCP server-info, OpenAPI, auth status) and
+# the Vite-baked login footer all report the same semver (issue #432).
 ARG APP_VERSION
 RUN node -e 'const fs=require("fs"),v=process.env.APP_VERSION;if(v&&v!=="0.0.0-dev"){for(const f of["package.json","apps/server/package.json","apps/web/package.json","packages/schema/package.json"]){const p=JSON.parse(fs.readFileSync(f,"utf8"));p.version=v;fs.writeFileSync(f,JSON.stringify(p,null,2)+"\n")}}'
 
@@ -76,16 +77,30 @@ RUN npm ci --omit=dev --workspace apps/server --workspace packages/schema --incl
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /app
 
+# Re-declare so LABEL/ENV see the release build-args (Docker scoping).
+ARG APP_VERSION=0.0.0-dev
+ARG APP_COMMIT=
+
 ENV NODE_ENV=production \
     WEB_DIST=/app/web-dist \
     DATA_DIR=/data \
-    PORT=8080
+    PORT=8080 \
+    APP_COMMIT=${APP_COMMIT}
+
+LABEL org.opencontainers.image.title="Campfire" \
+      org.opencontainers.image.description="Self-hosted, AI-operable D&D campaign tracker" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${APP_COMMIT}" \
+      org.opencontainers.image.source="https://github.com/awsomefox/campfire"
 
 # Workspace metadata (npm needs these present for node_modules/@campfire/* symlinks
 # to resolve correctly, even though we never run `npm install` in this stage).
-COPY package.json package-lock.json ./
-COPY packages/schema/package.json packages/schema/package.json
-COPY apps/server/package.json apps/server/package.json
+# Copy the APP_VERSION-stamped package.json files from the build stage so
+# runtime require('package.json').version matches the image label (issue #432).
+COPY package-lock.json ./
+COPY --from=build /app/package.json ./
+COPY --from=build /app/packages/schema/package.json packages/schema/package.json
+COPY --from=build /app/apps/server/package.json apps/server/package.json
 
 # Production node_modules (includes the compiled better-sqlite3 native addon and the
 # npm-workspaces symlink node_modules/@campfire/schema -> ../packages/schema).

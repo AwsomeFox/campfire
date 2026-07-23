@@ -68,7 +68,7 @@ over **MCP**. You host it. You own the data. One container, one volume.
 ---
 
 !!! note "Project status"
-    Campfire is in active development; the current release is **v0.14.0**. The core
+    Campfire is in active development; the current release is **v0.14.1**. The core
     play loop is complete and well-tested, and the AI Dungeon Master is shipping but
     still gated as experimental — see the
     [Roadmap & status](reference/roadmap.md) for exactly what's done, what's

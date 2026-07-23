@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { APP_VERSION } from '../common/build-metadata';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
@@ -27,14 +28,12 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 const dbLog = new Logger('Database');
 
 /**
- * The version of THIS running binary, single-sourced from apps/server/package.json (the same
- * source /healthz and /readyz report — see health.controller.ts). Recorded alongside the
- * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary can detect
- * that the DB was last touched by a newer app version and refuse to start against a schema it
- * does not understand, rather than silently writing into it.
+ * APP_VERSION (from common/build-metadata, issue #432) is recorded alongside the
+ * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary
+ * can detect that the DB was last touched by a newer app version and refuse to
+ * start against a schema it does not understand, rather than silently writing
+ * into it.
  */
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const APP_VERSION: string = require('../../package.json').version;
 
 /**
  * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
@@ -1653,6 +1652,77 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #813: entity_revisions historically snapshotted prior prose while stamping
+ * the REPLACING editor as `author_*` / `created_at`, so the archive attributed old
+ * canon to the person who overwrote it. Add version-vs-replacer columns and migrate
+ * existing rows into the honest legacy shape: author fields cleared, authorship_known=0,
+ * and the old author/time moved onto replaced_by_* / replaced_at so the UI can label
+ * them "Replaced by Bob at…" rather than inventing an author. Fresh DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the modern columns.
+ */
+function migrateEntityRevisionsForVersionAuthorship(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='entity_revisions'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(entity_revisions)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Only backfill when this run is the one that introduces the replacer columns —
+  // every row present at that moment is pre-#813. Re-running later must not touch
+  // current tips (replaced_at IS NULL with real authorship).
+  const needsLegacyBackfill = !has('replaced_at') || !has('authorship_known');
+
+  if (!has('author_source')) sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source TEXT NOT NULL DEFAULT 'human'");
+  if (!has('author_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_user_id')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_user_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_name')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_name TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_source')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source TEXT NOT NULL DEFAULT 'human'");
+  }
+  if (!has('replaced_by_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_at')) sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN replaced_at TEXT');
+  if (!has('restored_from_revision_id')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN restored_from_revision_id INTEGER');
+  }
+  if (!has('authorship_known')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN authorship_known INTEGER NOT NULL DEFAULT 1');
+  }
+
+  if (!needsLegacyBackfill) return;
+
+  // Pre-#813 rows stamped the replacing editor as author/created_at. Move those
+  // onto the replacer fields and clear version authorship so the UI can say
+  // "Replaced by …" instead of inventing an author.
+  sqlite.exec(`
+    UPDATE entity_revisions
+    SET
+      replaced_by_user_id = author_user_id,
+      replaced_by_name = author_name,
+      replaced_by_source = CASE
+        WHEN author_source IS NULL OR author_source = '' THEN 'human'
+        ELSE author_source
+      END,
+      replaced_by_source_detail = COALESCE(author_source_detail, ''),
+      replaced_at = created_at,
+      author_user_id = '',
+      author_name = '',
+      author_source = 'human',
+      author_source_detail = '',
+      created_at = '',
+      authorship_known = 0
+  `);
+}
+
+/**
 
  * Issue #679: retain consumed refresh-token generations as replay sentinels and
  * link rotations into a revocable family. Existing live rows each become the
@@ -1772,6 +1842,83 @@ function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before notification deep-links could focus a specific
+ * comment (issue #446): `notifications.comment_id` didn't exist. Plain nullable
+ * ADD COLUMN — no table rebuild. Existing rows stay null (parent-entity link only).
+ * Fresh DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForCommentId(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'comment_id')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN comment_id INTEGER');
+}
+
+/**
+ * Migration for issue #819: character assignment is an exclusive seat — at most
+ * one campaign_members row may reference a given character_id. Pre-fix DBs could
+ * accumulate duplicate links (the service overwrote ownerUserId without clearing
+ * the previous seat). This migration:
+ *
+ *   1. Collapses duplicates so the unique index can be created. For each
+ *      character_id with multiple seats, keep the member whose user_id matches
+ *      characters.owner_user_id (canonical owner); fall back to the earliest
+ *      membership id. Losing seats are unlinked (character_id cleared), never
+ *      deleted — the member stays in the campaign.
+ *   2. Creates the partial unique index idempotently (BOOTSTRAP_SQL declares the
+ *      same name for fresh DBs).
+ */
+function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): void {
+  const hasMembersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_members'")
+    .get();
+  if (!hasMembersTable) return;
+
+  // Prefer the seat whose user matches the character's owner_user_id (string form
+  // of users.id). When no seat matches the owner (or the character is missing),
+  // keep MIN(id) so the index can be applied deterministically.
+  const dupGroups = sqlite
+    .prepare(
+      `SELECT character_id
+       FROM campaign_members
+       WHERE character_id IS NOT NULL
+       GROUP BY character_id
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as Array<{ character_id: number }>;
+
+  const seatsFor = sqlite.prepare(
+    `SELECT id, user_id FROM campaign_members WHERE character_id = ? ORDER BY id ASC`,
+  );
+  const ownerOf = sqlite.prepare(`SELECT owner_user_id FROM characters WHERE id = ? LIMIT 1`);
+  const unlink = sqlite.prepare(
+    `UPDATE campaign_members SET character_id = NULL, updated_at = datetime('now') WHERE id = ?`,
+  );
+
+  for (const { character_id } of dupGroups) {
+    const seats = seatsFor.all(character_id) as Array<{ id: number; user_id: number }>;
+    const ownerRow = ownerOf.get(character_id) as { owner_user_id: string | null } | undefined;
+    const ownerUserId = ownerRow?.owner_user_id ?? null;
+    const keep =
+      (ownerUserId != null ? seats.find((s) => String(s.user_id) === ownerUserId) : undefined) ?? seats[0];
+    if (!keep) continue;
+    for (const seat of seats) {
+      if (seat.id !== keep.id) unlink.run(seat.id);
+    }
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
+      ON campaign_members(character_id) WHERE character_id IS NOT NULL;
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1849,6 +1996,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
   { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+  { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
+  { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
+  { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
 ];
 
 /**
