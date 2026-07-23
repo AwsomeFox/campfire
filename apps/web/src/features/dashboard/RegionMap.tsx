@@ -218,6 +218,9 @@ export function RegionMap({
 
   function onPinPointerDown(e: ReactPointerEvent<HTMLDivElement>, locationId: number) {
     if (!isDm || !mapImageUrl) return;
+    // Keyboard move panel owns this pin — ignore pointer drag so Save cannot
+    // overwrite a just-dragged position with stale kbPos (or vice versa).
+    if (kbMovingId != null) return;
     e.preventDefault();
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
