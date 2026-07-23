@@ -45,6 +45,7 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
+import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
@@ -367,11 +368,6 @@ function HpBandBar({ band }: { band: string | null }) {
       <div style={{ width: `${pct}%` }} />
     </div>
   );
-}
-
-/** A combatant is "down" when at 0 HP, or (for a redacted monster) banded 'down'. */
-function isDown(c: Combatant): boolean {
-  return c.hpCurrent != null ? c.hpCurrent <= 0 : c.hpBand === 'down';
 }
 
 const DEATH_STATE_LABEL: Record<string, string> = { dying: 'Dying', stable: 'Stable', dead: 'Dead' };
@@ -3366,8 +3362,8 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
 }
 
 function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
-  const fallen = encounter.combatants.filter(isDown);
-  const survivors = encounter.combatants.filter((c) => !isDown(c));
+  // Issue #492: split the old "Fallen" tally — dead/defeated vs downed (dying/stable PCs).
+  const { dead, downed, survivors } = endedSummaryTallies(encounter.combatants);
   return (
     <Card>
       <span className="card-kicker">Summary</span>
@@ -3376,8 +3372,12 @@ function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
           Rounds: <b>{encounter.round}</b>
         </span>
         <span>
-          Fallen: <b>{fallen.length}</b>
-          {fallen.length > 0 && <span className="text-muted"> ({fallen.map((c) => c.name).join(', ')})</span>}
+          Dead: <b>{dead.length}</b>
+          {dead.length > 0 && <span className="text-muted"> ({dead.map((c) => c.name).join(', ')})</span>}
+        </span>
+        <span>
+          Downed: <b>{downed.length}</b>
+          {downed.length > 0 && <span className="text-muted"> ({downed.map((c) => c.name).join(', ')})</span>}
         </span>
         <span>
           Survivors: <b>{survivors.length}</b>
