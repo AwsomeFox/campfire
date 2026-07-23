@@ -4,12 +4,12 @@
  * SchedulePanel used placeholder-only session fields and styled buttons for
  * RSVP without radiogroup semantics or spoken save outcomes. These pure helpers
  * own the stable form id contract, RSVP vocabulary, and announcement strings
- * so unit tests can pin behavior without a browser.
+ * so unit tests can pin behavior without a browser. Form control ids use
+ * `${SCHEDULE_FORM_ID_PREFIX}-${sessionId}` when editing or `${SCHEDULE_FORM_ID_PREFIX}-${useId}` on create.
  */
 import type { RsvpStatus } from '@campfire/schema';
 
 export const SCHEDULE_FORM_ID_PREFIX = 'schedule-form';
-/** Per-instance suffix: session id when editing, or sanitized useId() for create. */
 
 /** Stable form `name` / id suffix values for create + edit session forms. */
 export const SCHEDULE_FIELD_NAMES = {
@@ -22,6 +22,20 @@ export const SCHEDULE_FIELD_NAMES = {
 
 export const SCHEDULE_WHEN_HELP =
   'Date and time in your local timezone — the table sees the same instant converted for their locale.';
+
+/** Local datetime string for `<input type="datetime-local">` (no timezone suffix). */
+export function formatDatetimeLocalInputValue(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** Relative future datetime-local value (e.g. Playwright fills) that stays in the future. */
+export function datetimeLocalDaysFromNow(days: number, hour = 18, minute = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  d.setHours(hour, minute, 0, 0);
+  return formatDatetimeLocalInputValue(d);
+}
 
 export const SCHEDULE_DURATION_HELP =
   'Length of the game night in minutes (15-minute steps when scheduling; edits may end a session early).';

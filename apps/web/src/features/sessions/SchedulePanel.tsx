@@ -545,6 +545,7 @@ function ScheduleForm({
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         disabled={saving}
+        describedBy={error ? formErrorId : undefined}
       />
       <LabeledField
         idPrefix={idPrefix}
@@ -555,6 +556,7 @@ function ScheduleForm({
         value={location}
         onChange={(e) => setLocation(e.target.value)}
         disabled={saving}
+        describedBy={error ? formErrorId : undefined}
       />
       <LabeledField
         idPrefix={idPrefix}
@@ -567,6 +569,7 @@ function ScheduleForm({
         onChange={(e) => setNotes(e.target.value)}
         minHeight={60}
         disabled={saving}
+        describedBy={error ? formErrorId : undefined}
       />
       <div className="flex gap-2 justify-end">
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>

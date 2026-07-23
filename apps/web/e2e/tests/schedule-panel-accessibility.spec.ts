@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
 import type { ScheduledSessionWithRsvps } from '@campfire/schema';
 import {
+  datetimeLocalDaysFromNow,
   RSVP_GROUP_LEGEND,
   SCHEDULE_WHEN_HELP,
   rsvpOptionDescription,
@@ -141,7 +142,7 @@ test.describe('Schedule panel form accessibility (issue #645)', () => {
       await page.getByRole('button', { name: '+ Schedule session' }).click();
 
       const when = page.getByLabel('When');
-      await when.fill('2028-06-15T18:00');
+      await when.fill(datetimeLocalDaysFromNow(30, 18, 0));
       await page.getByLabel('Duration (minutes)').fill('180');
       await page.getByLabel('Title').fill('E2E645 Zoom night');
 
