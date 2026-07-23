@@ -7,8 +7,8 @@ import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
-import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS } from '../auth/auth.constants';
-import { resolveCookieSecure } from '../../common/security-config';
+import { SESSION_COOKIE_NAME } from '../auth/auth.constants';
+import { sessionCookieOptions } from '../auth/session-cookie';
 import { CampaignAccessService } from './campaign-access.service';
 import { InvitesService } from './invites.service';
 import { InviteCreateDto, InviteAcceptDto } from './invites.dto';
@@ -20,22 +20,6 @@ import { InviteCreateDto, InviteAcceptDto } from './invites.dto';
  * password hash per request — the exact DoS shape the auth throttle exists for.
  */
 const INVITE_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
-
-/** Mirrors auth.controller.ts cookieOptions() — the accept flow issues the same session cookie as login. */
-function cookieOptions() {
-  return {
-    httpOnly: true,
-    sameSite: 'lax' as const,
-    path: '/',
-    maxAge: SESSION_MAX_AGE_MS,
-    // Secure in production, unless the operator opted into plain-HTTP serving
-    // (ALLOW_INSECURE_HTTP) — a Secure cookie is silently dropped over plain HTTP,
-    // causing a login loop on a no-TLS homelab deployment. /login was fixed in
-    // #117; this accept-invite route was the lone holdout because it duplicated
-    // the helper (and hardcoded `secure`) instead of importing the resolver (#525).
-    secure: resolveCookieSecure(),
-  };
-}
 
 @ApiTags('invites')
 @Controller('campaigns/:campaignId/invites')
@@ -112,7 +96,7 @@ export class JoinController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<Me & { campaignId: number }> {
     const { token, me, campaignId } = await this.invites.accept(code, body);
-    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
     return { ...me, campaignId };
   }
 
