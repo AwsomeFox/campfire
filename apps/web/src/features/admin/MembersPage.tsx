@@ -170,14 +170,119 @@ function expiresIn(iso: string): string {
   return `expires in ${Math.ceil(hours / 24)}d`;
 }
 
+/** Expiry preset options for invite creation (#821). */
+type ExpiryPreset = 'end-of-today' | '24h' | '7d' | '30d' | 'custom';
+
+/** Max-uses preset options for invite creation (#821). */
+type MaxUsesPreset = 'unlimited' | '1' | '5' | '10' | 'custom';
+
+/** Compute expiresInDays from the selected preset or custom date. */
+function computeExpiryDays(preset: ExpiryPreset, customDate: string): number {
+  switch (preset) {
+    case 'end-of-today':
+      return 1;
+    case '24h':
+      return 1;
+    case '7d':
+      return 7;
+    case '30d':
+      return 30;
+    case 'custom': {
+      if (!customDate) return 7;
+      const diff = Math.ceil((new Date(customDate).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+      return Math.max(1, Math.min(365, diff));
+    }
+  }
+}
+
+/** Human-readable expiry description for the preview. */
+function describeExpiry(preset: ExpiryPreset, customDate: string): string {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  switch (preset) {
+    case 'end-of-today': {
+      const eod = new Date();
+      eod.setHours(23, 59, 59, 999);
+      return `End of today (${eod.toLocaleString()} ${tz})`;
+    }
+    case '24h': {
+      const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      return `24 hours (${d.toLocaleString()} ${tz})`;
+    }
+    case '7d': {
+      const d = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      return `7 days (${d.toLocaleString()} ${tz})`;
+    }
+    case '30d': {
+      const d = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      return `30 days (${d.toLocaleString()} ${tz})`;
+    }
+    case 'custom': {
+      if (!customDate) return 'Select a date';
+      const d = new Date(customDate);
+      return `${d.toLocaleString()} ${tz}`;
+    }
+  }
+}
+
+/** Compute maxUses value for the API from preset/custom input. */
+function computeMaxUses(preset: MaxUsesPreset, customValue: string): number | null {
+  switch (preset) {
+    case 'unlimited':
+      return null;
+    case '1':
+      return 1;
+    case '5':
+      return 5;
+    case '10':
+      return 10;
+    case 'custom': {
+      const n = parseInt(customValue, 10);
+      return Number.isFinite(n) && n >= 1 ? Math.min(n, 1000) : null;
+    }
+  }
+}
+
+/** Human-readable max-uses description for the preview. */
+function describeMaxUses(preset: MaxUsesPreset, customValue: string): string {
+  switch (preset) {
+    case 'unlimited':
+      return 'Unlimited';
+    case '1':
+      return '1 use';
+    case '5':
+      return '5 uses';
+    case '10':
+      return '10 uses';
+    case 'custom': {
+      const n = parseInt(customValue, 10);
+      if (!Number.isFinite(n) || n < 1) return 'Enter a number';
+      return `${Math.min(n, 1000)} use${n === 1 ? '' : 's'}`;
+    }
+  }
+}
+
+/** Whether the current preset combo is recommended for events/conventions. */
+function isEventPreset(expiryPreset: ExpiryPreset, maxUsesPreset: MaxUsesPreset): boolean {
+  const shortLived = expiryPreset === 'end-of-today' || expiryPreset === '24h';
+  const limited = maxUsesPreset !== 'unlimited';
+  return shortLived && limited;
+}
+
 /**
  * Invite-link generation + live links list, backed by /campaigns/:id/invites.
  * Anyone with a link self-onboards at the chosen role via /join/<code> (see
  * features/auth/JoinPage.tsx) — revoke a link here if it leaks.
+ *
+ * Issue #821: exposes expiry presets (end-of-today, 24h, 7d, 30d, custom) and
+ * max-uses controls (unlimited, 1, 5, 10, custom) with a preview before generation.
  */
 function InviteCard({ campaignId }: { campaignId: number }) {
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
   const [role, setRole] = useState<InviteRole>('player');
+  const [expiryPreset, setExpiryPreset] = useState<ExpiryPreset>('7d');
+  const [customDate, setCustomDate] = useState('');
+  const [maxUsesPreset, setMaxUsesPreset] = useState<MaxUsesPreset>('unlimited');
+  const [customMaxUses, setCustomMaxUses] = useState('');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
@@ -198,7 +303,13 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     setCreating(true);
     setError(null);
     try {
-      await api.post<CampaignInvite>(`${API}/campaigns/${campaignId}/invites`, { role });
+      const expiresInDays = computeExpiryDays(expiryPreset, customDate);
+      const maxUses = computeMaxUses(maxUsesPreset, customMaxUses);
+      await api.post<CampaignInvite>(`${API}/campaigns/${campaignId}/invites`, {
+        role,
+        expiresInDays,
+        ...(maxUses != null ? { maxUses } : {}),
+      });
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the invite.");
@@ -227,37 +338,138 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     }
   }
 
+  // Minimum date for custom picker: tomorrow
+  const minDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  // Maximum date: 365 days from now
+  const maxDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
   return (
     <Card className="space-y-2.5">
       <p className="card-kicker mb-0">Invite</p>
+
+      {/* Role */}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
-          <label>Joins as</label>
-          <select className="input" value={role} onChange={(e) => setRole(e.target.value as InviteRole)}>
+          <label htmlFor="invite-role">Joins as</label>
+          <select id="invite-role" className="input" value={role} onChange={(e) => setRole(e.target.value as InviteRole)}>
             <option value="player">player</option>
             <option value="viewer">viewer</option>
           </select>
         </div>
-        <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
-          {creating ? 'Generating…' : 'Generate invite link'}
-        </button>
       </div>
 
-      {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
+      {/* Expiry */}
+      <div className="field">
+        <label htmlFor="invite-expiry">Link expires</label>
+        <select
+          id="invite-expiry"
+          className="input"
+          style={{ maxWidth: 220 }}
+          value={expiryPreset}
+          onChange={(e) => setExpiryPreset(e.target.value as ExpiryPreset)}
+        >
+          <option value="end-of-today">End of today</option>
+          <option value="24h">24 hours</option>
+          <option value="7d">7 days</option>
+          <option value="30d">30 days</option>
+          <option value="custom">Custom…</option>
+        </select>
+        {expiryPreset === 'custom' && (
+          <input
+            type="date"
+            className="input mt-1.5"
+            style={{ maxWidth: 200 }}
+            aria-label="Custom expiry date"
+            min={minDate}
+            max={maxDate}
+            value={customDate}
+            onChange={(e) => setCustomDate(e.target.value)}
+          />
+        )}
+      </div>
 
+      {/* Max uses */}
+      <div className="field">
+        <label htmlFor="invite-max-uses">Maximum uses</label>
+        <select
+          id="invite-max-uses"
+          className="input"
+          style={{ maxWidth: 220 }}
+          value={maxUsesPreset}
+          onChange={(e) => setMaxUsesPreset(e.target.value as MaxUsesPreset)}
+        >
+          <option value="unlimited">Unlimited</option>
+          <option value="1">1 use</option>
+          <option value="5">5 uses</option>
+          <option value="10">10 uses</option>
+          <option value="custom">Custom…</option>
+        </select>
+        {maxUsesPreset === 'custom' && (
+          <input
+            type="number"
+            className="input mt-1.5"
+            style={{ maxWidth: 120 }}
+            aria-label="Custom max uses"
+            min={1}
+            max={1000}
+            value={customMaxUses}
+            onChange={(e) => setCustomMaxUses(e.target.value)}
+          />
+        )}
+      </div>
+
+      {/* Event recommendation badge */}
+      {isEventPreset(expiryPreset, maxUsesPreset) && (
+        <p className="text-[11px] text-emerald-400 m-0" data-testid="event-recommendation">
+          ✓ Recommended for events — short-lived and seat-limited
+        </p>
+      )}
+
+      {/* Preview section */}
+      <div
+        className="cf-inset border-slate-600/40 rounded px-3 py-2.5 space-y-1"
+        aria-label="Invite preview"
+        data-testid="invite-preview"
+      >
+        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest m-0">Preview</p>
+        <p className="text-[12px] text-slate-300 m-0">
+          <span className="text-slate-500">Role:</span>{' '}
+          <span className={`cf-chip ${ROLE_CHIP[role]}`}>{ROLE_LABEL[role]}</span>
+        </p>
+        <p className="text-[12px] text-slate-300 m-0">
+          <span className="text-slate-500">Expires:</span> {describeExpiry(expiryPreset, customDate)}
+        </p>
+        <p className="text-[12px] text-slate-300 m-0">
+          <span className="text-slate-500">Max admissions:</span> {describeMaxUses(maxUsesPreset, customMaxUses)}
+        </p>
+        <p className="text-[11px] text-amber-400/80 m-0 mt-1.5">
+          ⚠ Anyone with this link can join — treat it like a password.
+        </p>
+      </div>
+
+      <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
+        {creating ? 'Generating…' : 'Generate invite link'}
+      </button>
+
+      {error && <p className="text-xs text-rose-400 m-0" role="alert">{error}</p>}
+
+      {/* Live invite links */}
       {invites.map((invite) => (
-        <div key={invite.id} className="flex gap-2 flex-wrap items-center">
+        <div key={invite.id} className="flex gap-2 flex-wrap items-center" data-testid="invite-row">
           <input
             className="input"
             style={{ flex: 1, minWidth: 190 }}
             readOnly
             value={inviteLinkFor(invite.code)}
+            aria-label={`Invite link for ${invite.role}`}
             onFocus={(e) => e.currentTarget.select()}
           />
           <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
-          <span className="text-muted text-[11px] whitespace-nowrap">
-            {expiresIn(invite.expiresAt)} · used {invite.useCount}
-            {invite.maxUses != null ? `/${invite.maxUses}` : '×'}
+          <span className="text-muted text-[11px] whitespace-nowrap" data-testid="invite-status">
+            {expiresIn(invite.expiresAt)}
+            {invite.maxUses != null
+              ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
+              : ` · used ${invite.useCount}×`}
           </span>
           <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
             {copiedId === invite.id ? 'Copied!' : 'Copy link'}
@@ -270,7 +482,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
 
       <p className="text-muted text-[11.5px] m-0">
         Anyone with a link creates their own account (or signs in) and joins as the chosen role — no server
-        admin needed. Links expire after 7 days; revoke one any time if it leaks.
+        admin needed. Revoke a link any time if it leaks.
       </p>
     </Card>
   );
