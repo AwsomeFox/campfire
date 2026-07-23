@@ -276,10 +276,12 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   'award_xp',
   'level_up_character',
-  // scene / exploration
+  // scene / exploration / world consequences
   'reveal_map_region',
   'check_objective',
   'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
   // table notes the DM jots during play
   'add_note',
 ]);
