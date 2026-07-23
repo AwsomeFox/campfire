@@ -25,6 +25,7 @@ import {
   type RetryConfig,
   DEFAULT_RETRY,
   DEFAULT_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
   postJson,
   getJson,
   parseSse,
@@ -117,7 +118,12 @@ export class OpenAiProvider implements AiProvider {
     if (!res.body) throw new AiProviderError('transport', 'openai: streaming response had no body', { provider: this.name });
 
     const acc = new OpenAiStreamAccumulator(req.model || this.opts.model);
-    for await (const { data } of parseSse(res.body)) {
+    // Idle/read timeout stays armed until the body completes or aborts (#1063).
+    for await (const { data } of parseSse(res.body, {
+      signal: opts?.signal,
+      idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+      provider: this.name,
+    })) {
       if (data === '[DONE]') break;
       let chunk: OpenAiChunk;
       try {

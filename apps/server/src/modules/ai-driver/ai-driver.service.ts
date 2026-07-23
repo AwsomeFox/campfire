@@ -15,6 +15,8 @@ import type {
   AiToolSchema,
   AiGenerateResult,
 } from '../ai-dm/providers/ai-provider';
+import { AiProviderError } from '../ai-dm/providers/errors';
+import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
@@ -28,13 +30,25 @@ const HARD_MAX_STEPS = 12;
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
 
+/**
+ * Max silence between provider stream events before the driver aborts the step (#1063).
+ * Mutable so unit/e2e tests can shrink the watchdog without waiting 30s.
+ */
+export let DRIVER_STREAM_IDLE_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
+
+/** Test-only: override {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}. */
+export function setDriverStreamIdleTimeoutMsForTests(ms: number): void {
+  DRIVER_STREAM_IDLE_TIMEOUT_MS = ms;
+}
+
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
 export type AiDmStopReason =
   | 'complete' // the model produced narration with no further tool calls
   | 'budget_exhausted' // the per-campaign token budget hit its hard cap
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
   | 'max_steps' // the tool loop hit its iteration ceiling
-  | 'aborted'; // seat left Driver mid-turn; session was torn down (#1071)
+  | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
+  | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
@@ -72,7 +86,8 @@ export type AiDmStuckReason =
   | 'max_steps' // the tool loop hit its ceiling without producing final narration
   | 'no_narration' // the turn produced no narration at all
   | 'loop' // the model repeated its previous narration verbatim
-  | 'dispute'; // a player flagged the AI's last ruling as wrong/unfair
+  | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
+  | 'provider_error'; // provider failed or stalled mid-stream (#1046 / #1063)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -801,6 +816,22 @@ export class AiDriverService {
 
         if (step === maxSteps - 1) stopReason = 'max_steps';
       }
+    } catch (err) {
+      // Provider throw / idle timeout (#1046 / #1063): if streamStep throws, do NOT rethrow
+      // past `finally` — that would skip `turn.end` and leave every SSE client's composer
+      // locked forever, even though the seat slot is released. Catch here so we still emit
+      // turn.end with provider_error and park the ladder in awaiting_players for recovery.
+      stopReason = 'provider_error';
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.provider_error',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `${detail} (triggered by ${triggeredBy.id})`,
+      });
     } finally {
       // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
@@ -855,7 +886,11 @@ export class AiDriverService {
     };
   }
 
-  /** Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated text + result. */
+  /**
+   * Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated
+   * text + result. Passes an AbortSignal so a stalled mid-body stream (no chunk within
+   * {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}) aborts instead of wedging the campaign (#1063).
+   */
   private async streamStep(
     campaignId: number,
     provider: AiProvider,
@@ -865,26 +900,57 @@ export class AiDriverService {
     let text = '';
     let result: AiGenerateResult | undefined;
     let aborted = false;
-    for await (const ev of provider.stream({
-      system: req.system,
-      messages: req.messages,
-      model: req.model,
-      maxTokens: req.maxTokens,
-      tools: req.tools,
-      toolChoice: req.tools.length > 0 ? 'auto' : undefined,
-    })) {
-      // Mode-switch teardown detached this session mid-stream (#1071): stop forwarding
-      // deltas so an orphaned turn cannot splice narration onto the live SSE channel.
-      if (session.detached) {
-        aborted = true;
-        break;
+    const ac = new AbortController();
+    const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdle = () => {
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
       }
-      if (ev.type === 'text') {
-        text += ev.delta;
-        this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
-      } else if (ev.type === 'done') {
-        result = ev.result;
+    };
+    const armIdle = () => {
+      clearIdle();
+      if (idleMs <= 0) return;
+      idleTimer = setTimeout(() => {
+        ac.abort(
+          new AiProviderError('timeout', `AI provider stream idle for ${idleMs}ms`, {
+            provider: provider.name,
+          }),
+        );
+      }, idleMs);
+    };
+    armIdle();
+    try {
+      for await (const ev of provider.stream(
+        {
+          system: req.system,
+          messages: req.messages,
+          model: req.model,
+          maxTokens: req.maxTokens,
+          tools: req.tools,
+          toolChoice: req.tools.length > 0 ? 'auto' : undefined,
+        },
+        { signal: ac.signal },
+      )) {
+        // Mode-switch teardown detached this session mid-stream (#1071): stop forwarding
+        // deltas so an orphaned turn cannot splice narration onto the live SSE channel.
+        if (session.detached) {
+          aborted = true;
+          ac.abort();
+          break;
+        }
+        armIdle(); // reset idle watchdog on every chunk (#1063)
+        if (ev.type === 'text') {
+          text += ev.delta;
+          this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
+        } else if (ev.type === 'done') {
+          result = ev.result;
+        }
       }
+    } finally {
+      // Idle timer must not outlive the step — clear only when the stream completes or aborts.
+      clearIdle();
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
@@ -1753,6 +1819,7 @@ function classifyStuck(ctx: {
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
+  if (ctx.stopReason === 'provider_error') return 'provider_error';
   const narration = ctx.narration.trim();
   if (narration === '') return 'no_narration';
   if (ctx.prevNarration && narration === ctx.prevNarration.trim()) return 'loop';
@@ -1774,6 +1841,8 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'The AI repeated its previous narration verbatim (looping).';
     case 'dispute':
       return 'A player disputed the AI’s last ruling.';
+    case 'provider_error':
+      return 'The AI provider failed or stalled mid-response.';
     default:
       return 'The AI needs help.';
   }
