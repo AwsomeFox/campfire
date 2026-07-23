@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
  * Issue #793 — ConfirmDialog busy copy must keep the action (+ object) while a
@@ -39,9 +39,9 @@ async function holdRoute(
     signalStarted();
     await gate;
     await route.fulfill({
-      status: 500,
+      status: 400,
       contentType: 'application/json',
-      body: '{"error":{"message":"test hold"}}',
+      body: '{"message":"test hold"}',
     });
   });
   return { release, started };
@@ -53,6 +53,7 @@ async function expectBusyConfirm(
   pendingLabel: string,
   idleLabel: string,
   release: () => void,
+  shouldClose = false,
 ) {
   const dialog = page.getByRole('dialog', { name: dialogName });
   await expect(dialog).toBeVisible();
@@ -66,12 +67,19 @@ async function expectBusyConfirm(
   await page.keyboard.press('Escape');
   await expect(dialog).toBeVisible();
 
-  // Held request fails → busy clears, idle label returns, dialog stays open.
+  // Held request fails.
   release();
-  await expect(dialog).not.toHaveAttribute('aria-busy', 'true');
-  await expect(dialog.getByRole('button', { name: idleLabel, exact: true })).toBeEnabled();
-  // Live region unmounts when empty so SRs don't announce a blank status.
-  await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveCount(0);
+  if (shouldClose) {
+    await expect(page.getByRole('dialog', { name: dialogName })).toBeHidden();
+  } else {
+    await expect(dialog).not.toHaveAttribute('aria-busy', 'true');
+    const idleConfirm = dialog.getByRole('button', { name: idleLabel });
+    await expect(idleConfirm).toBeEnabled();
+    await expect(idleConfirm).toHaveText(idleLabel);
+    // ConfirmDialog unmounts the polite status region when idle so screen readers
+    // do not announce a blank live region (issue #793).
+    await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveCount(0);
+  }
 }
 
 test.describe('confirm dialog pending labels — slow requests (issue #793)', () => {
@@ -79,15 +87,23 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
   // that still overwrites busy labels with "Working…".
   test.use({ storageState: stateFor('dm'), serviceWorkers: 'block' });
 
-  test('End encounter keeps Ending encounter… while /end is held', async ({ page }) => {
-    const { release, started } = await holdRoute(page, `**/api/v1/encounters/${seeded.encounterId}/end`, 'POST');
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
 
-    await page.goto(encounterUrl());
-    await page.getByRole('button', { name: 'End', exact: true }).click();
-    const dialog = page.getByRole('dialog', { name: 'End this encounter?' });
-    await dialog.getByRole('button', { name: 'End encounter' }).click();
-    await started;
-    await expectBusyConfirm(page, 'End this encounter?', 'Ending encounter…', 'End encounter', release);
+  test('End encounter keeps Ending encounter… while /end is held', async ({ page }) => {
+    try {
+      const { release, started } = await holdRoute(page, `**/api/v1/encounters/${seeded.encounterId}/end`, 'POST');
+
+      await page.goto(encounterUrl());
+      await page.getByRole('button', { name: 'End', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'End this encounter?' });
+      await dialog.getByRole('button', { name: 'End encounter' }).click();
+      await started;
+      await expectBusyConfirm(page, 'End this encounter?', 'Ending encounter…', 'End encounter', release, true);
+    } finally {
+      await restoreSeedEncounter();
+    }
   });
 
   test('Delete encounter keeps Deleting encounter… while DELETE is held', async ({ page }) => {
@@ -131,6 +147,7 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
       'Reopening encounter…',
       'Reopen encounter',
       release,
+      true,
     );
   });
 
