@@ -42,7 +42,20 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
-        expect.arrayContaining(['xp', 'save_proficiencies', 'skills', 'actions', 'spell_slots', 'dm_secret']),
+        expect.arrayContaining([
+          'xp',
+          'save_proficiencies',
+          'skills',
+          'actions',
+          'spell_slots',
+          'dm_secret',
+          // 0056 (#711): death state + temp HP now persist on the character sheet so
+          // ended encounters can reconcile dying/stable/dead/temp-HP back to canon.
+          'hp_temp',
+          'death_state',
+          'death_save_successes',
+          'death_save_failures',
+        ]),
       );
       expect(columnNames(sqlite, 'quests')).toContain('hidden');
       expect(columnNames(sqlite, 'npcs')).toContain('hidden');
@@ -127,6 +140,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       const character = sqlite.prepare('SELECT * FROM characters WHERE id = 1').get() as Record<string, unknown>;
       expect(character).toMatchObject({ name: 'Legacy Hero', hp_current: 17, hp_max: 24, xp: 0, dm_secret: '' });
       expect(character.spell_slots).toBe('{}');
+      // 0056 (#711): death state + temp HP columns backfill with safe defaults on the
+      // pre-existing row — no one is secretly dead or carrying stale temp HP after upgrade.
+      expect(character.hp_temp).toBe(0);
+      expect(character.death_state).toBe('none');
+      expect(character.death_save_successes).toBe(0);
+      expect(character.death_save_failures).toBe(0);
 
       expect((sqlite.prepare('SELECT hidden FROM quests WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);
       expect((sqlite.prepare('SELECT hidden FROM npcs WHERE id = 1').get() as { hidden: number }).hidden).toBe(0);

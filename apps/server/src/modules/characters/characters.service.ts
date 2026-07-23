@@ -63,6 +63,14 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     ac: row.ac,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
+    // Issue #711: persistent echo of the combat death/temp-HP subsystem. The
+    // encounter tracker is the source of truth during a fight; on /end these
+    // fields are reconciled back onto the sheet so a dead PC stays dead and a
+    // stable PC keeps its unconscious state between sessions.
+    hpTemp: row.hpTemp,
+    deathState: row.deathState as Character['deathState'],
+    deathSaveSuccesses: row.deathSaveSuccesses,
+    deathSaveFailures: row.deathSaveFailures,
     conditions: fromJsonText<string[]>(row.conditions, []),
     saveProficiencies: fromJsonText<Character['saveProficiencies']>(row.saveProficiencies, []),
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
@@ -435,9 +443,31 @@ export class CharactersService {
 
       const requested = 'delta' in patch ? fresh.hpCurrent + patch.delta : patch.set;
       const hpCurrent = clampHpCurrent(requested, fresh.hpMax);
+      // Issue #711: make recovery/revival transitions explicit on the sheet, the
+      // same way the combat engine does. Healing a downed character above 0 HP
+      // revives them (deathState -> 'none', death-save counters reset); dropping
+      // a healthy character to 0 HP from a sheet edit puts them 'dying'. This
+      // keeps the persistent death-state echo self-consistent when a DM/player
+      // adjusts HP outside an encounter instead of leaving a stale 'dead' flag
+      // on a healed character or a stale 'none' on a freshly-dropped one.
+      const hpSet: Partial<typeof characters.$inferInsert> = { hpCurrent, updatedAt: nowIso() };
+      if (hpCurrent > 0 && fresh.deathState !== 'none') {
+        hpSet.deathState = 'none';
+        hpSet.deathSaveSuccesses = 0;
+        hpSet.deathSaveFailures = 0;
+        // A revived character is no longer 'dead' on the lifecycle either —
+        // matches the encounter /end reconciliation (issue #711). Without this,
+        // a DM healing a dead PC on the sheet would leave them excluded from
+        // the next encounter's auto-add despite being alive again.
+        if (fresh.status === 'dead') hpSet.status = 'active';
+      } else if (hpCurrent === 0 && fresh.hpCurrent > 0 && fresh.deathState === 'none') {
+        hpSet.deathState = 'dying';
+        hpSet.deathSaveSuccesses = 0;
+        hpSet.deathSaveFailures = 0;
+      }
       const [updated] = tx
         .update(characters)
-        .set({ hpCurrent, updatedAt: nowIso() })
+        .set(hpSet)
         .where(eq(characters.id, id))
         .returning()
         .all();
