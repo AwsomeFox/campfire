@@ -20,6 +20,12 @@ describe('sanitizeAttachmentFilename (issue #630)', () => {
     expect(sanitizeAttachmentFilename('C:\\Users\\x\\evil.png')).toBe('evil.png');
   });
 
+  it('applies basename after percent-decoding so %2F/%5C cannot reintroduce paths', () => {
+    expect(sanitizeAttachmentFilename('../x%2Fy.png')).toBe('y.png');
+    expect(sanitizeAttachmentFilename('dir%5Cnested%5Cfile.png')).toBe('file.png');
+    expect(sanitizeAttachmentFilename('foo%2Fbar%5Cbaz.png')).toBe('baz.png');
+  });
+
   it('removes ASCII control characters', () => {
     expect(sanitizeAttachmentFilename('hello\nworld.png')).toBe('helloworld.png');
     expect(sanitizeAttachmentFilename('a\u0000b\u007fc.png')).toBe('abc.png');
@@ -29,6 +35,12 @@ describe('sanitizeAttachmentFilename (issue #630)', () => {
     expect(sanitizeAttachmentFilename('')).toBe('attachment');
     expect(sanitizeAttachmentFilename('../..')).toBe('attachment');
     expect(sanitizeAttachmentFilename('\n\t')).toBe('attachment');
+  });
+
+  it('never returns "", ".", or ".." even for tiny maxLen', () => {
+    expect(sanitizeAttachmentFilename('.bashrc', 1)).toBe('attachment');
+    expect(sanitizeAttachmentFilename('..hidden', 2)).toBe('attachment');
+    expect(sanitizeAttachmentFilename('x', 1)).toBe('x');
   });
 
   it('preserves Unicode (including emoji) under the length budget', () => {
@@ -152,11 +164,12 @@ describe('asciiFilenameFallback', () => {
     expect(asciiFilenameFallback('Hello World.png')).toBe('Hello World.png');
   });
 
-  it('synthesizes a default when nothing ASCII remains', () => {
+  it('maps Unicode-only stems to underscore fallbacks (not DEFAULT+ext)', () => {
     // Extension-less CJK collapses to underscores only → default basename.
     expect(asciiFilenameFallback('日本語')).toBe('attachment');
-    // With an ASCII extension the extension keeps the fallback non-empty
-    // (3 CJK code points → 3 underscores).
+    // Unicode stem + ASCII ext → underscore stem kept (RFC 6266 intent).
     expect(asciiFilenameFallback('日本語.png')).toBe('___.png');
+    expect(asciiFilenameFallback('файл.png')).toBe('____.png');
+    expect(asciiFilenameFallback('地図🎉.webp')).toBe('____.webp');
   });
 });

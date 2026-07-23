@@ -126,26 +126,39 @@ export function sanitizeAttachmentFilename(
   maxLen: number = MAX_ATTACHMENT_FILENAME_LENGTH,
 ): string {
   const budget = Number.isFinite(maxLen) && maxLen > 0 ? Math.floor(maxLen) : MAX_ATTACHMENT_FILENAME_LENGTH;
-  let name = basenameOnly(String(raw ?? ''));
+  // Decode before basename so encoded separators (%2F / %5C) cannot re-introduce
+  // path components after a pre-decode basenameOnly pass.
+  let name = String(raw ?? '');
   name = maybePercentDecode(name);
   name = decodeMultipartFilename(name);
+  name = basenameOnly(name);
   name = name.replace(CONTROL_OR_DEL, '').trim();
 
   if (!name || name === '.' || name === '..') {
     name = DEFAULT_BASENAME;
   }
 
-  if (name.length <= budget) return name;
-
-  const { stem, ext } = splitExtension(name);
-  if (ext.length >= budget) {
-    const clipped = truncateToCodeUnits(name, budget);
-    return clipped || DEFAULT_BASENAME;
+  let result: string;
+  if (name.length <= budget) {
+    result = name;
+  } else {
+    const { stem, ext } = splitExtension(name);
+    if (ext.length >= budget) {
+      result = truncateToCodeUnits(name, budget) || DEFAULT_BASENAME;
+    } else {
+      const truncatedStem = truncateToCodeUnits(stem, budget - ext.length);
+      result = `${truncatedStem || DEFAULT_BASENAME}${ext}`;
+      if (result.length > budget) {
+        result = truncateToCodeUnits(result, budget) || DEFAULT_BASENAME;
+      }
+    }
   }
 
-  const truncatedStem = truncateToCodeUnits(stem, budget - ext.length);
-  const result = `${truncatedStem || DEFAULT_BASENAME}${ext}`;
-  return result.length <= budget ? result : truncateToCodeUnits(result, budget) || DEFAULT_BASENAME;
+  // Tiny maxLen can clip a leading-dot name to "." / ".." — never return those.
+  if (!result || result === '.' || result === '..') {
+    return DEFAULT_BASENAME;
+  }
+  return result;
 }
 
 /**
@@ -155,10 +168,15 @@ export function sanitizeAttachmentFilename(
  */
 export function asciiFilenameFallback(filename: string): string {
   const fallback = filename.replace(/[^\x20-\x7e]/g, '_');
+  // Underscore-only stems with an ASCII extension are intentional RFC 6266
+  // fallbacks (日本語.png → ___.png). Only collapse to DEFAULT when nothing
+  // usable remains — e.g. extension-less CJK → "___" → "attachment".
   if (fallback.replace(/[_\s.]/g, '').length === 0) {
-    const { ext } = splitExtension(filename);
-    const safeExt = ext.replace(/[^\x20-\x7e]/g, '');
-    return `${DEFAULT_BASENAME}${safeExt}`;
+    const { ext } = splitExtension(fallback);
+    if (ext && /^[\x20-\x7e]+$/.test(ext)) {
+      return fallback;
+    }
+    return DEFAULT_BASENAME;
   }
   return fallback;
 }
