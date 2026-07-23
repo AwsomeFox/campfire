@@ -326,6 +326,15 @@ export function LoginPage() {
     setupRequired: Boolean(status?.setupRequired),
   });
 
+  // Session present (live or stale #579): prefer redirect over recovery so a
+  // status outage does not trap a signed-in user on Retry — matches AuthedLayout
+  // allowing `authed` when hasMe is true even if statusPhase is error.
+  // During a successful submit, onSubmit owns the single history-replacing
+  // navigation after refreshing identity. Do not race it with this guard.
+  if (!submitting && ready && me) {
+    return <Navigate to={redirectTo} replace />;
+  }
+
   // Do not choose setup vs Sign in until /auth/status is known (#801).
   if (bootstrap === 'recovery') {
     return (
@@ -338,11 +347,6 @@ export function LoginPage() {
   }
   if (bootstrap === 'setup') {
     return <Navigate to="/setup" replace />;
-  }
-  // During a successful submit, onSubmit owns the single history-replacing
-  // navigation after refreshing identity. Do not race it with this guard.
-  if (!submitting && bootstrap === 'form' && ready && me) {
-    return <Navigate to={redirectTo} replace />;
   }
 
   async function onSubmit(e: FormEvent) {

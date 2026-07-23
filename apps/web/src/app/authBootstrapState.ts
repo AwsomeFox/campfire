@@ -9,7 +9,8 @@
  * These helpers classify:
  *   - auth status as loading | success | error
  *   - the authed-subtree gate as splash | recovery | setup | login | authed
- *   - public auth screens (login/setup) as loading | recovery | setup | ready
+ *   - /login (and signup) as loading | recovery | setup | form
+ *   - /setup as loading | recovery | form | redirect
  *
  * Kept free of React/DOM so the e2e unit suite can pin the acceptance matrix
  * without mounting providers.
@@ -60,9 +61,10 @@ export function authedBootstrapSurface(input: {
     return 'login';
   }
 
-  // Authenticated (live or stale). setupRequired with a session is rare; keep
-  // the existing redirect so a half-configured install cannot open the hub.
-  if (input.setupRequired) return 'setup';
+  // Authenticated (live or stale). Only trust setupRequired while status is
+  // known — a failed refresh keeps the prior AuthStatus object, so a stale
+  // setupRequired:true must not bounce a live session to /setup.
+  if (input.statusPhase === 'success' && input.setupRequired) return 'setup';
   return 'authed';
 }
 

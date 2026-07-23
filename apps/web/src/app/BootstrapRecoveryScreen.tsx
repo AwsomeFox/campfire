@@ -2,8 +2,8 @@
  * Single recovery surface for cold-load bootstrap failures (issue #801).
  *
  * Shown when GET /auth/status and/or GET /me cannot be classified yet — Retry
- * re-runs both promises. Shared by AuthedLayout, LoginPage, and SetupPage so
- * partial failures never pick setup vs login from an unknown status.
+ * re-runs both promises. Shared by AuthedLayout, LoginPage, SetupPage, and
+ * SignupPage so partial failures never pick setup vs login from an unknown status.
  */
 import { GameIcon } from '../components/GameIcon';
 

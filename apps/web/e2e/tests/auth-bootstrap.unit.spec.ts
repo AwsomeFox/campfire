@@ -113,6 +113,19 @@ test.describe('authed bootstrap surface — recovery outcomes (issue #801)', () 
     ).toBe('authed');
   });
 
+  test('stale setupRequired is ignored when status fails for a signed-in user', () => {
+    // Failed refresh keeps the prior AuthStatus object; a cached
+    // setupRequired:true must not redirect an authenticated session to /setup.
+    expect(
+      authed({
+        statusPhase: 'error',
+        setupRequired: true,
+        hasMe: true,
+        connectionError: false,
+      }),
+    ).toBe('authed');
+  });
+
   test('live session reaches authed once both bootstraps succeed', () => {
     expect(
       authed({
@@ -122,6 +135,17 @@ test.describe('authed bootstrap surface — recovery outcomes (issue #801)', () 
         connectionError: false,
       }),
     ).toBe('authed');
+  });
+
+  test('known setupRequired still redirects a signed-in user to setup', () => {
+    expect(
+      authed({
+        statusPhase: 'success',
+        setupRequired: true,
+        hasMe: true,
+        connectionError: false,
+      }),
+    ).toBe('setup');
   });
 });
 
