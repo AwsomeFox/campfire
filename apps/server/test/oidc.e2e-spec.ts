@@ -1005,20 +1005,269 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       expect(p3.enabled).toBe(false);
     });
 
-    it('test-connection reports ok against a real discovery endpoint and error against an unreachable issuer', async () => {
+    it('test-connection reports Discovery reachable against a real discovery endpoint and error against an unreachable issuer', async () => {
       const { admin } = await bootWithAdmin();
 
       const okRes = await admin.postJson('/api/v1/settings/oidc/test', { issuer: idp.issuer });
       expect(okRes.status).toBe(200); // probe returns 200, not the default POST 201
       const okBody = await okRes.json();
       expect(okBody.ok).toBe(true);
+      expect(okBody.kind).toBe('discovery');
+      expect(okBody.message).toBe('Discovery reachable.');
+      expect(okBody.checks.discovery.status).toBe('pass');
       expect(okBody.authorizationEndpoint).toBe(`${idp.issuer}/authorize`);
       expect(okBody.tokenEndpoint).toBe(`${idp.issuer}/token`);
+      expect(okBody.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+      expect(okBody.testedAt).toBeTruthy();
+      expect(JSON.stringify(okBody)).not.toContain('test-secret');
 
       const badRes = await admin.postJson('/api/v1/settings/oidc/test', { issuer: 'http://127.0.0.1:1/nope' });
       expect(badRes.status).toBe(200);
       const badBody = await badRes.json();
       expect(badBody.ok).toBe(false);
+      expect(badBody.checks.discovery.status).toBe('fail');
+    });
+
+    it('diagnostics: mismatched issuer, bad client, bad redirect, timeout, overrides, claims/groups, and e2e success (issue #848)', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+
+      // --- mismatched issuer ---
+      idp.setDiscoveryIssuer('https://evil.example.com/issuer');
+      const mismatch = await (
+        await admin.postJson('/api/v1/settings/oidc/test', { issuer: idp.issuer })
+      ).json();
+      expect(mismatch.ok).toBe(false);
+      expect(mismatch.checks.discovery.status).toBe('fail');
+      expect(mismatch.message).toMatch(/Issuer mismatch/i);
+      idp.setDiscoveryIssuer(null);
+
+      // --- timeout ---
+      idp.setDiscoveryDelayMs(6_000);
+      const timed = await (
+        await admin.postJson('/api/v1/settings/oidc/test', { issuer: idp.issuer })
+      ).json();
+      expect(timed.ok).toBe(false);
+      expect(timed.checks.discovery.status).toBe('fail');
+      expect(timed.message).toMatch(/timed out/i);
+      idp.setDiscoveryDelayMs(0);
+
+      // Persist a good config so stored/env source labels can be exercised.
+      await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+        adminGroup: 'campfire-admins',
+        allowedGroup: 'campfire-users',
+      });
+
+      // --- success discovery + client probe ---
+      const okProbe = await (
+        await admin.postJson('/api/v1/settings/oidc/test', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          redirectUri,
+        })
+      ).json();
+      expect(okProbe.ok).toBe(true);
+      expect(okProbe.message).toBe('Discovery reachable.');
+      expect(okProbe.checks.discovery.status).toBe('pass');
+      expect(okProbe.checks.redirectClient.status).toBe('pass');
+      expect(okProbe.checks.tokenExchange.status).toBe('skip');
+      expect(okProbe.fieldSources.issuer).toBe('draft');
+      expect(okProbe.fieldSources.clientSecret).toBe('stored');
+      expect(JSON.stringify(okProbe)).not.toContain('test-secret');
+
+      // --- bad client secret ---
+      const badClient = await (
+        await admin.postJson('/api/v1/settings/oidc/test', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          clientSecret: 'wrong-secret',
+          redirectUri,
+        })
+      ).json();
+      expect(badClient.checks.discovery.status).toBe('pass');
+      expect(badClient.checks.redirectClient.status).toBe('fail');
+      expect(badClient.checks.redirectClient.message).toMatch(/client/i);
+
+      // --- bad redirect ---
+      idp.setAllowedRedirectUris([redirectUri]);
+      const badRedirect = await (
+        await admin.postJson('/api/v1/settings/oidc/test', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          clientSecret: 'test-secret',
+          redirectUri: 'http://127.0.0.1:9/not-registered',
+        })
+      ).json();
+      expect(badRedirect.checks.redirectClient.status).toBe('fail');
+      idp.setAllowedRedirectUris(null);
+
+      // --- environment override source labeling ---
+      // Re-boot is expensive; instead assert stored source when no draft issuer is sent.
+      const storedProbe = await (await admin.postJson('/api/v1/settings/oidc/test', {})).json();
+      expect(storedProbe.fieldSources.issuer).toBe('stored');
+      expect(storedProbe.fieldSources.clientId).toBe('stored');
+
+      // Snapshot admin session before e2e diagnostic — must not be replaced.
+      const meBefore = await (await admin.get('/api/v1/me')).json();
+      expect(meBefore.user.username).toBe('root');
+      const userCountBefore = (await (await admin.get('/api/v1/users')).json()).length;
+
+      // --- e2e success (no session swap, no provisioning) ---
+      idp.setNextUser({
+        sub: 'diag-sub',
+        preferred_username: 'diaguser',
+        email: 'diag@example.com',
+        name: 'Diag User',
+        groups: ['campfire-users'],
+      });
+      const start = await admin.postJson('/api/v1/settings/oidc/test-login', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        redirectUri,
+        allowedGroup: 'campfire-users',
+      });
+      expect(start.status).toBe(200);
+      const startBody = await start.json();
+      expect(startBody.authorizationUrl).toContain('/authorize');
+      expect(startBody.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+      expect(startBody).not.toHaveProperty('flowToken');
+      expect(JSON.stringify(startBody)).not.toContain('test-secret');
+
+      const idpRes = await fetchNoRedirect(startBody.authorizationUrl);
+      expect(idpRes.status).toBe(302);
+      const callbackUrl = new URL(idpRes.headers.get('location')!);
+      const cb = await admin.getNoRedirect(callbackUrl.pathname + callbackUrl.search);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.get('location')).toBe('/admin/auth?oidcDiag=1');
+
+      const result = await (await admin.get('/api/v1/settings/oidc/test-login/result')).json();
+      expect(result.kind).toBe('e2e');
+      expect(result.ok).toBe(true);
+      expect(result.checks.tokenExchange.status).toBe('pass');
+      expect(result.checks.requiredClaims.status).toBe('pass');
+      expect(result.checks.groupPolicy.status).toBe('pass');
+      expect(JSON.stringify(result)).not.toContain('test-secret');
+
+      const meAfter = await (await admin.get('/api/v1/me')).json();
+      expect(meAfter.user.username).toBe('root');
+      expect(meAfter.user.id).toBe(meBefore.user.id);
+      const userCountAfter = (await (await admin.get('/api/v1/users')).json()).length;
+      expect(userCountAfter).toBe(userCountBefore);
+
+      const view = await (await admin.get('/api/v1/settings/oidc')).json();
+      expect(view.lastE2eTest?.ok).toBe(true);
+      expect(view.lastE2eTest?.fingerprint).toBe(view.configFingerprint);
+
+      // --- e2e group policy failure (still no provision) ---
+      idp.setNextUser({
+        sub: 'diag-denied',
+        preferred_username: 'denied',
+        email: 'denied@example.com',
+        name: 'Denied',
+        groups: [],
+      });
+      const startDenied = await (
+        await admin.postJson('/api/v1/settings/oidc/test-login', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          redirectUri,
+          allowedGroup: 'campfire-users',
+        })
+      ).json();
+      const idpDenied = await fetchNoRedirect(startDenied.authorizationUrl);
+      const cbDeniedUrl = new URL(idpDenied.headers.get('location')!);
+      await admin.getNoRedirect(cbDeniedUrl.pathname + cbDeniedUrl.search);
+      const deniedResult = await (await admin.get('/api/v1/settings/oidc/test-login/result')).json();
+      expect(deniedResult.ok).toBe(false);
+      expect(deniedResult.checks.groupPolicy.status).toBe('fail');
+      expect((await (await admin.get('/api/v1/users')).json()).length).toBe(userCountBefore);
+
+      // --- e2e missing claims ---
+      idp.setNextMode('missing_claims');
+      const startMissing = await (
+        await admin.postJson('/api/v1/settings/oidc/test-login', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          redirectUri,
+        })
+      ).json();
+      const idpMissing = await fetchNoRedirect(startMissing.authorizationUrl);
+      const cbMissingUrl = new URL(idpMissing.headers.get('location')!);
+      await admin.getNoRedirect(cbMissingUrl.pathname + cbMissingUrl.search);
+      const missingResult = await (await admin.get('/api/v1/settings/oidc/test-login/result')).json();
+      expect(missingResult.ok).toBe(false);
+      expect(
+        missingResult.checks.requiredClaims.status === 'fail' ||
+          missingResult.checks.tokenExchange.status === 'fail',
+      ).toBe(true);
+    });
+
+    it('leftover diagnostic test cookie does not hijack a normal SSO callback (issue #848)', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+      await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+      });
+
+      // Start an admin diagnostic (sets campfire_oidc_test_flow) but do not complete it.
+      const started = await (
+        await admin.postJson('/api/v1/settings/oidc/test-login', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          redirectUri,
+        })
+      ).json();
+      expect(started.authorizationUrl).toContain('/authorize');
+      expect(admin.getCookie('campfire_oidc_test_flow')).toBeTruthy();
+
+      // Normal SSO in the same browser jar must still create a session — the
+      // leftover test cookie's pending state does not match this callback's state.
+      idp.setNextUser({
+        sub: 'sub-normal-sso',
+        preferred_username: 'normalsso',
+        email: 'normal@example.com',
+        name: 'Normal SSO',
+      });
+      const cb = await performOidcLogin(admin);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.get('location')).toBe('/');
+      expect(cb.headers.get('location')).not.toBe('/admin/auth?oidcDiag=1');
+
+      const me = await (await admin.get('/api/v1/me')).json();
+      expect(me.user.username).toBe('normalsso');
+    });
+
+    it('diagnostics label environment-overridden values without echoing secrets (issue #848)', async () => {
+      const app = await bootApp(oidcEnvFor(idp));
+      const admin = new CookieAgent(app.baseUrl);
+      const setupRes = await admin.postJson('/api/v1/auth/setup', {
+        username: 'root',
+        password: 'admin-pass-123',
+        displayName: 'Root Admin',
+      });
+      expect(setupRes.status).toBe(201);
+
+      const probe = await (await admin.postJson('/api/v1/settings/oidc/test', {})).json();
+      expect(probe.ok).toBe(true);
+      expect(probe.message).toBe('Discovery reachable.');
+      expect(probe.fieldSources.issuer).toBe('environment');
+      expect(probe.fieldSources.clientId).toBe('environment');
+      expect(probe.fieldSources.clientSecret).toBe('environment');
+      expect(probe.checks.redirectClient.status).toBe('pass');
+      expect(JSON.stringify(probe)).not.toContain('test-secret');
+
+      const view = await (await admin.get('/api/v1/settings/oidc')).json();
+      expect(view.envKeys).toEqual(
+        expect.arrayContaining(['OIDC_ISSUER', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'OIDC_REDIRECT_URI']),
+      );
+      expect(view.configFingerprint).toMatch(/^[a-f0-9]{16}$/);
     });
 
     it('drives a full OIDC login round trip from in-app config alone (no env vars)', async () => {

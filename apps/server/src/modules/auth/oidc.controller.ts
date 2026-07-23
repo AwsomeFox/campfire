@@ -10,6 +10,7 @@ import {
   OIDC_FLOW_COOKIE_NAME,
   OIDC_RETURN_COOKIE_NAME,
   OIDC_FLOW_COOKIE_MAX_AGE_MS,
+  OIDC_TEST_FLOW_COOKIE_NAME,
 } from './auth.constants';
 import { sessionCookieOptions } from './session-cookie';
 import { resolveCookieSecure } from '../../common/security-config';
@@ -104,10 +105,39 @@ export class OidcController {
     summary: 'OIDC callback (redirect target)',
     description:
       'Provider redirects here after authentication. Campfire verifies state + PKCE, provisions/updates the user, and sets the session cookie. ' +
-      'Success redirects to the stashed same-origin return path (or `/`); expected failures redirect same-origin to `/login/sso-error` with only a safe category and random support reference.',
+      'Success redirects to the stashed same-origin return path (or `/`); expected failures redirect same-origin to `/login/sso-error` with only a safe category and random support reference. ' +
+      'When an admin diagnostic test-login cookie is present AND its pending state matches the IdP callback state (issue #848), completes diagnostics instead — no session change and no user provisioning. ' +
+      'A leftover diagnostic cookie alone never hijacks a normal SSO callback.',
   })
-  @ApiResponse({ status: 302, description: 'Session cookie set and redirect to the validated return path (or `/`) on success; safe same-origin recovery redirect on expected failure. Provider payloads, code, state, tokens, claims, and secrets are never included in the recovery location.' })
+  @ApiResponse({
+    status: 302,
+    description:
+      'Session cookie set and redirect to the validated return path (or `/`) on success; `/admin/auth?oidcDiag=1` for admin diagnostic completion; safe same-origin recovery redirect on expected failure. Provider payloads, code, state, tokens, claims, and secrets are never included in the recovery location.',
+  })
   async callback(@Req() req: Request, @Res() res: Response): Promise<void> {
+    const testFlowToken = req.cookies?.[OIDC_TEST_FLOW_COOKIE_NAME] as string | undefined;
+    const callbackState = typeof req.query.state === 'string' ? req.query.state : undefined;
+    // Only enter the diagnostic path when the pending test-login state matches
+    // this callback. An active leftover test cookie must not misroute normal SSO.
+    if (
+      testFlowToken &&
+      callbackState &&
+      (await this.oidc.matchesActiveTestLogin(testFlowToken, callbackState))
+    ) {
+      res.clearCookie(OIDC_TEST_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+      // Also clear any abandoned real login flow so it cannot race the diagnostic.
+      res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+      res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+      try {
+        await this.oidc.completeTestLogin(testFlowToken, req.query as Record<string, unknown>);
+      } catch {
+        // completeTestLogin already persists structured failures; a throw here
+        // is unexpected — still send the admin back to the diagnostics UI.
+      }
+      res.redirect(302, '/admin/auth?oidcDiag=1');
+      return;
+    }
+
     const flowCookie = req.cookies?.[OIDC_FLOW_COOKIE_NAME] as string | undefined;
     const returnCookie = req.cookies?.[OIDC_RETURN_COOKIE_NAME] as string | undefined;
     res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
@@ -123,7 +153,6 @@ export class OidcController {
       if (!flow) {
         throw new OidcRecoveryFailure('flow_expired', 'flow_cookie_missing_or_invalid');
       }
-      const callbackState = typeof req.query.state === 'string' ? req.query.state : undefined;
       if (!stateMatches(flow.state, callbackState)) {
         throw new OidcRecoveryFailure('state_pkce_mismatch', 'state_verification_failed');
       }

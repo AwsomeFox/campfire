@@ -16,11 +16,18 @@ variables** — and you can mix them.
 
 ### In the admin UI
 
-Go to **Admin → OIDC single sign-on**. Fill in the issuer, client id and secret
-(and optionally a provider display name and the admin/allowed groups), press **Test connection** to validate
-that the discovery endpoint is reachable, then **Save**. Changes take effect on
-the next sign-in — no restart needed. The client secret is write-only: once
-saved it is never shown again (the form shows only whether one is set).
+Go to **Admin → Auth → OIDC single sign-on**. Fill in the issuer, client id and
+secret (and optionally a provider display name and the admin/allowed groups),
+press **Test discovery** to confirm the issuer is reachable (canonical issuer
+equality and endpoint URLs), then **Test login (end-to-end)** before relying on
+SSO as the only sign-in path. The end-to-end test exercises redirect/client
+configuration, token exchange, required claims, and group policy — without
+replacing your admin session or provisioning a user. Then **Save**. Changes take
+effect on the next sign-in — no restart needed. The client secret is write-only:
+once saved it is never shown again (the form shows only whether one is set).
+Diagnostic results show a timestamp and a non-secret fingerprint (including a
+digest of the client secret so rotating it invalidates prior end-to-end
+verification), and clear when you edit relevant fields.
 
 ### Via environment variables
 
