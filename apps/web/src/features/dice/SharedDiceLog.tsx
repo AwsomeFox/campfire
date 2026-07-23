@@ -20,32 +20,9 @@ import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
+import { d20Flavor, d20FlourishI18nKey, d20TotalClasses } from '../../lib/d20Flavor';
 
 const POLL_MS = 5000;
-
-// Flavor a d20 roll for the crit flourish (issue #67): a natural 20 gets a gold
-// total + sparkle, a natural 1 a muted-rose shudder. Only meaningful for a single
-// d20 (the classic to-hit / save die); everything else is a plain roll. For a compound
-// expression (issue #536) we read the d20 term's kept dice from `terms[]` so a dropped
-// d20 or a coincidental face value on another die can't fake a crit/fumble.
-function rollFlavor(r: DiceRoll): 'crit' | 'fumble' | null {
-  if (!/d20(?!\d)/i.test(r.expr)) return null;
-  let dice: number[];
-  if (r.terms) {
-    dice = [];
-    for (const t of r.terms) {
-      if (!/^1?d20(?!\d)/i.test(t.term)) continue;
-      const termDice = t.kept && t.kept.length > 0 ? t.kept : t.rolls;
-      if (termDice) dice.push(...termDice);
-    }
-    if (dice.length === 0) return null;
-  } else {
-    dice = r.rolls;
-  }
-  if (dice.includes(20)) return 'crit';
-  if (dice.includes(1)) return 'fumble';
-  return null;
-}
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -124,8 +101,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         setJustRolledId(result.id); // triggers the tumble/crit/fumble animation (issue #67)
         // Announce the result — the roll feed is otherwise visual-only (issue #93),
         // calling out kept dice, DC success/fail, and a natural 20 / natural 1.
-        const flavor = rollFlavor(result);
-        const flourish = flavor === 'crit' ? t('dice.flourishCrit') : flavor === 'fumble' ? t('dice.flourishFumble') : '';
+        const flavor = d20Flavor(result);
+        const flourishKey = d20FlourishI18nKey(flavor);
+        const flourish = flourishKey ? t(flourishKey) : '';
         const keptSaid = result.kept ? t('dice.announceKept', { kept: result.kept.join(', ') }) : '';
         const checkSaid =
           result.dc != null ? (result.success ? t('dice.announceSuccess', { dc: result.dc }) : t('dice.announceFail', { dc: result.dc })) : '';
@@ -192,14 +170,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       ) : (
         <div className="flex flex-col gap-1">
           {rolls.map((r) => {
-            const flavor = rollFlavor(r);
+            const flavor = d20Flavor(r);
             const fresh = r.id === justRolledId;
-            const totalClass = [
-              flavor === 'crit' ? 'cf-roll-crit' : flavor === 'fumble' ? 'cf-roll-fumble' : '',
-              fresh ? 'cf-anim-roll' : '',
-              fresh && flavor === 'crit' ? 'cf-anim-crit' : '',
-              fresh && flavor === 'fumble' ? 'cf-anim-fumble' : '',
-            ].filter(Boolean).join(' ');
+            const totalClass = d20TotalClasses(flavor, fresh);
             return (
             <div
               key={r.id}
