@@ -253,7 +253,10 @@ export default function AiTablePage() {
         if (event.type === 'turn.start') setStreaming(true);
         else if (event.type === 'turn.end') setStreaming(false);
         else if (event.type === 'tool') {
-          invalidateForToolEvent(queryClient, event, { campaignId, encounterId: activeEncounterId });
+          invalidateForToolEvent(queryClient, event, {
+            campaignId,
+            encounterId: event.encounterId ?? activeEncounterId,
+          });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -902,8 +905,17 @@ function TranscriptRow({
 
   if (entry.kind === 'tool') {
     const chip = resolveToolActivity(
-      { type: 'tool', campaignId, name: entry.name, isError: entry.isError, proposed: entry.proposed, at: entry.at },
-      { campaignId, encounterId },
+      {
+        type: 'tool',
+        campaignId,
+        name: entry.name,
+        isError: entry.isError,
+        proposed: entry.proposed,
+        ...(entry.encounterId !== undefined ? { encounterId: entry.encounterId } : {}),
+        at: entry.at,
+      },
+      // Prefer the entry's preserved identity over the Table's active encounter (#825).
+      { campaignId, encounterId: entry.encounterId ?? encounterId },
     );
     const tone =
       chip.variant === 'error'

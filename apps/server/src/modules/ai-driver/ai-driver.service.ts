@@ -20,7 +20,9 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import { EncountersService } from '../encounters/encounters.service';
 import {
   formatCalendarForPrompt,
   formatListForPrompt,
@@ -63,6 +65,13 @@ export interface AiDmExecutedTool {
   isError: boolean;
   /** True when the call was routed to the proposal queue (a canon write the seat can't make directly). */
   proposed: boolean;
+  /** Encounter mutated by this call, when known from validated args/results (#825). */
+  encounterId?: number;
+}
+
+/** Narrow resource identity to the fields persisted on a turn's executed-tool summary. */
+function pickExecutedIdentity(identity: ToolResourceIdentity): Pick<AiDmExecutedTool, 'encounterId'> {
+  return identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {};
 }
 
 export interface AiDmTurnRunResult {
@@ -1397,8 +1406,15 @@ export class AiDriverService {
           error: { status: 403, code: 'forbidden_tool', message: `The AI DM seat is not permitted to call ${call.name}.` },
         });
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const blockedIdentity = await this.resolveToolResourceIdentity(
+          campaignId,
+          call.name,
+          call.arguments ?? {},
+          undefined,
+          true,
+        );
+        this.emitToolEvent(campaignId, call.name, true, false, blockedIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(blockedIdentity) });
         this.logger.warn(`Blocked out-of-scope tool ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
         await this.audit.log({
           actor,
@@ -1424,8 +1440,9 @@ export class AiDriverService {
           error: { status: 403, code: 'forbidden', message: `This AI DM seat is scoped to campaign ${campaignId}.` },
         });
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+        this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(crossIdentity) });
         toolErrored = true;
         continue;
       }
@@ -1439,8 +1456,9 @@ export class AiDriverService {
             error: { status: 403, code: liveGuard.code, message: liveGuard.message },
           });
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-          executed.push({ name: call.name, isError: true, proposed: false });
+          const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
           this.logger.warn(`Blocked live-play guard on ${call.name} for ${actor} (triggered by ${triggeredBy.id}): ${liveGuard.code}`);
           await this.audit.log({
             actor,
@@ -1480,8 +1498,9 @@ export class AiDriverService {
             },
           });
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-          executed.push({ name: call.name, isError: true, proposed: false });
+          const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
           this.logger.warn(`Blocked secret-bearing read ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
           await this.audit.log({
             actor,
@@ -1560,8 +1579,15 @@ export class AiDriverService {
       const content =
         approvedSecret && !res.isError ? `${cleanedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : cleanedText;
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });
-      this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: res.isError, proposed });
-      executed.push({ name: call.name, isError: res.isError, proposed });
+      const identity = await this.resolveToolResourceIdentity(
+        campaignId,
+        call.name,
+        args,
+        cleanedText,
+        res.isError,
+      );
+      this.emitToolEvent(campaignId, call.name, res.isError, proposed, identity);
+      executed.push({ name: call.name, isError: res.isError, proposed, ...pickExecutedIdentity(identity) });
 
       // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
       // #1072: include a redaction-safe args summary so the DM can inspect WHY the AI acted,
@@ -1576,6 +1602,7 @@ export class AiDriverService {
         campaignId,
         detail:
           `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''}` +
+          `${identity.encounterId !== undefined ? ` encounter=${identity.encounterId}` : ''}` +
           `${argsSummary ? ` args={${argsSummary}}` : ''}` +
           ` by ${triggeredBy.id}`,
       });
@@ -1601,6 +1628,48 @@ export class AiDriverService {
       if (res.isError) toolErrored = true;
     }
     return { toolErrored };
+  }
+
+  /**
+   * Derive + authoritatively resolve encounter resource identity for a tool SSE/turn
+   * summary entry (#825). Args/result text yield a candidate id; the encounter row
+   * confirms campaign scope and `hidden` so role projection can strip prep ids.
+   */
+  private async resolveToolResourceIdentity(
+    campaignId: number,
+    toolName: string,
+    args: Record<string, unknown>,
+    resultText: string | undefined,
+    isError: boolean,
+  ): Promise<ToolResourceIdentity> {
+    const extracted = extractToolResourceIdentity(toolName, args, resultText, isError);
+    if (extracted.encounterId === undefined) return {};
+    try {
+      const row = await this.encounters.getRowOrThrow(extracted.encounterId);
+      if (row.campaignId !== campaignId) return {};
+      return { encounterId: row.id, encounterHidden: row.hidden };
+    } catch {
+      // Missing/inaccessible row — do not advertise an unverified id on the shared stream.
+      return {};
+    }
+  }
+
+  private emitToolEvent(
+    campaignId: number,
+    name: string,
+    isError: boolean,
+    proposed: boolean,
+    identity: ToolResourceIdentity,
+  ): void {
+    this.stream.emit({
+      type: 'tool',
+      campaignId,
+      name,
+      isError,
+      proposed,
+      ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
+      ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
+    });
   }
 
   // ===================================================================================
