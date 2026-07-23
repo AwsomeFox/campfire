@@ -54,9 +54,23 @@ import {
   type PlayerDisplayProjection,
 } from './playerDisplayLoad';
 
-/** Party/quest/status edits have no SSE — poll at the same cadence as PartyPage so
- * Cast picks up retirement/death promptly while the display stays open (issue #824). */
+/** Party/quest/status edits have no SSE. Keep Cast aligned with PartyPage's
+ * visible-tab poll cadence (see PartyPage / usePollWhileVisible) so retirement
+ * and death land promptly without a steeper custom interval (issue #824). */
 const POLL_MS = 5_000;
+
+const NO_PARTICIPATING_IDS: number[] | null = null;
+
+function participatingIdsFromEncounter(
+  encounter: EncounterWithCombatants | null,
+): number[] | null {
+  if (!encounter || encounter.status !== 'running') return NO_PARTICIPATING_IDS;
+  const ids: number[] = [];
+  for (const c of encounter.combatants) {
+    if (c.kind === 'character' && c.characterId != null) ids.push(c.characterId);
+  }
+  return ids;
+}
 const CONTROLS_HIDE_MS = 3_500;
 
 const HP_BAND_LABEL: Record<HpBand, string> = {
@@ -562,12 +576,7 @@ export default function PlayerDisplayPage() {
   const location = safeLocation(summary.currentLocation);
   // During a live fight, prefer PCs seated as combatants over the full active roster
   // (issue #824). Monster-only fights leave this empty and fall back to active-only.
-  const participatingCharacterIds =
-    encounter && encounter.status === 'running'
-      ? encounter.combatants
-          .filter((c) => c.kind === 'character' && c.characterId != null)
-          .map((c) => c.characterId as number)
-      : null;
+  const participatingCharacterIds = participatingIdsFromEncounter(encounter);
   const party = safeParty(summary.characters, { includeAlumni, participatingCharacterIds });
   const quests = safeQuests(summary.quests);
   const npcs = safeNpcs(summary.npcs);

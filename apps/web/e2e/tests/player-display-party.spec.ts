@@ -15,14 +15,13 @@ async function revealControls(page: Page) {
   await expect(page.getByRole('checkbox', { name: /Include alumni \/ inactive/i })).toBeVisible();
 }
 
-async function login(ctx: APIRequestContext, baseURL: string) {
-  await ctx.post(`${baseURL}/api/v1/auth/login`, { data: DM });
+async function login(ctx: APIRequestContext) {
+  await ctx.post('/api/v1/auth/login', { data: DM });
 }
 
-async function createCharacter(baseURL: string, name: string): Promise<number> {
-  const { campaignId } = seed();
+async function createCharacter(baseURL: string, campaignId: number, name: string): Promise<number> {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx, baseURL);
+  await login(ctx);
   const res = await ctx.post(`/api/v1/campaigns/${campaignId}/characters`, {
     data: { name, className: 'Rogue', level: 2, status: 'active' },
   });
@@ -34,7 +33,7 @@ async function createCharacter(baseURL: string, name: string): Promise<number> {
 
 async function patchStatus(baseURL: string, id: number, status: 'active' | 'retired' | 'dead' | 'inactive') {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx, baseURL);
+  await login(ctx);
   const res = await ctx.patch(`/api/v1/characters/${id}`, { data: { status } });
   if (!res.ok()) throw new Error(`patch status -> ${res.status()}: ${await res.text()}`);
   await ctx.dispose();
@@ -42,7 +41,7 @@ async function patchStatus(baseURL: string, id: number, status: 'active' | 'reti
 
 async function trashCharacter(baseURL: string, id: number) {
   const ctx = await request.newContext({ baseURL });
-  await login(ctx, baseURL);
+  await login(ctx);
   const res = await ctx.delete(`/api/v1/characters/${id}`);
   await ctx.dispose();
   if (!res.ok() && res.status() !== 404) {
@@ -95,7 +94,7 @@ test.describe('Player Display party filter (issue #824)', () => {
   test('drops a PC from Party promptly after retirement while Cast stays open', async ({ page, baseURL }) => {
     const { campaignId } = seed();
     const name = `Cast Retire ${Date.now()}`;
-    const id = await createCharacter(baseURL!, name);
+    const id = await createCharacter(baseURL!, campaignId, name);
     try {
       await page.goto(`/c/${campaignId}/screen`);
       await expect(page.getByRole('heading', { name: 'Party' })).toBeVisible();
@@ -119,7 +118,7 @@ test.describe('Player Display party filter (issue #824)', () => {
   test('drops a PC from Party promptly after death while Cast stays open', async ({ page, baseURL }) => {
     const { campaignId } = seed();
     const name = `Cast Death ${Date.now()}`;
-    const id = await createCharacter(baseURL!, name);
+    const id = await createCharacter(baseURL!, campaignId, name);
     try {
       await page.goto(`/c/${campaignId}/screen`);
       await expect(page.getByText(name, { exact: true })).toBeVisible();
