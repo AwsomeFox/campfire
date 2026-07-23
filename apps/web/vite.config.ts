@@ -5,9 +5,10 @@ import { VitePWA } from "vite-plugin-pwa";
 import { version as pkgVersion } from "./package.json";
 
 export default defineConfig({
-  // Single-source the app version from package.json so signed-out surfaces
-  // (e.g. the login footer) report the real build version without an authed
-  // /admin/metrics call, and can never drift from the published version.
+  // Single-source the app version from apps/web/package.json (kept equal to the
+  // root/server package.json by scripts/check-version-sync.mjs + the Docker
+  // APP_VERSION stamp) so signed-out surfaces (e.g. the login footer) report
+  // the real build version without an authed /admin/metrics call (issue #432).
   define: {
     __APP_VERSION__: JSON.stringify(pkgVersion),
   },

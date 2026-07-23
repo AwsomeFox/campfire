@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { APP_VERSION } from '../../common/build-metadata';
 import { MIGRATION_NAMES } from '../../db/db.module';
 
 /** Marks an archive as a Campfire whole-server backup. */
@@ -15,14 +16,11 @@ export const BACKUP_FORMAT_VERSION = 1;
 /** @deprecated Use {@link BACKUP_FORMAT_VERSION}. Kept for existing imports/tests. */
 export const BACKUP_VERSION = BACKUP_FORMAT_VERSION;
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const SERVER_APP_VERSION: string = require('../../../package.json').version;
-
 /** DB migration count at backup time — a coarse schema revision for operators. */
 export const CURRENT_SCHEMA_REVISION = MIGRATION_NAMES.length;
 
 export function serverAppVersion(): string {
-  return SERVER_APP_VERSION;
+  return APP_VERSION;
 }
 
 export interface BackupManifest {

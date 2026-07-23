@@ -2,11 +2,8 @@ import { Controller, Get, Inject, ServiceUnavailableException } from '@nestjs/co
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { sql } from 'drizzle-orm';
 import { Public } from '../../common/decorators/public.decorator';
+import { APP_VERSION } from '../../common/build-metadata';
 import { DB, type DrizzleDb } from '../../db/db.module';
-
-// Single-sourced from package.json so /healthz, Swagger and tags can't drift.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const VERSION: string = require('../../../package.json').version;
 
 @ApiTags('health')
 @Controller()
@@ -18,7 +15,7 @@ export class HealthController {
   @ApiOperation({ summary: 'Liveness check', description: 'Unauthenticated. Always 200 while the process is up — no DB/dependency checks. Use /readyz for readiness (DB) checks.' })
   @ApiResponse({ status: 200, description: 'Server is up.' })
   healthz() {
-    return { ok: true, version: VERSION };
+    return { ok: true, version: APP_VERSION };
   }
 
   @Public()
@@ -39,8 +36,8 @@ export class HealthController {
       this.db.get(sql`SELECT 1`);
     } catch {
       // Body shape mirrors healthz (`ok`/`version`) so probes can parse both alike.
-      throw new ServiceUnavailableException({ ok: false, version: VERSION, error: 'database unavailable' });
+      throw new ServiceUnavailableException({ ok: false, version: APP_VERSION, error: 'database unavailable' });
     }
-    return { ok: true, version: VERSION };
+    return { ok: true, version: APP_VERSION };
   }
 }
