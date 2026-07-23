@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -1092,7 +1092,9 @@ export class EncountersService {
       const adapter = await this.adapterForCampaign(campaignId);
       const combatantValues = partyRows.map((character, index) => {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        const initMod = adapter.initiativeModifier(stats);
+        // Pass character level so PF2e (and similar) can include the proficiency/level
+        // term on the Perception/WIS initiative fallback (issue #491). 5e ignores it.
+        const initMod = adapter.initiativeModifier(stats, 'score', character.level);
         // Issue #711: seed the combatant's death/temp-HP slice from the persistent
         // sheet so a stable-but-unconscious PC (carried over from a prior fight via
         // /end reconciliation) re-enters the next encounter still down, not silently
@@ -1113,7 +1115,10 @@ export class EncountersService {
           // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
           // intervening sheet edits made while the encounter was ended.
           sheetSyncedUpdatedAt: character.updatedAt,
-          conditions: '[]',
+          // Issue #486: seed tracker conditions from the sheet so Poisoned (etc.)
+          // applied before combat is already visible in the run-session roster.
+          // Merge semantics for the overlap window: see sync comment on updateCombatant.
+          conditions: character.conditions,
           ruleEntryId: null,
           sortOrder: index,
         };
@@ -1439,6 +1444,8 @@ export class EncountersService {
     let characterDeathSaveSuccesses = 0;
     let characterDeathSaveFailures = 0;
     let characterSheetUpdatedAt: string | null = null;
+    // Issue #486: sheet conditions carried into a late-join character combatant.
+    let characterConditions = '[]';
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -1526,9 +1533,12 @@ export class EncountersService {
       characterDeathSaveSuccesses = character.deathSaveSuccesses;
       characterDeathSaveFailures = character.deathSaveFailures;
       characterSheetUpdatedAt = character.updatedAt;
+      // Issue #486: seed from the sheet (same contract as create() auto-add).
+      characterConditions = character.conditions;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        initMod = adapter.initiativeModifier(stats);
+        // Character level feeds PF2e trained-Perception proficiency (issue #491).
+        initMod = adapter.initiativeModifier(stats, 'score', character.level);
       }
     } else if (input.ruleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
@@ -1616,7 +1626,8 @@ export class EncountersService {
                   sheetSyncedUpdatedAt: characterSheetUpdatedAt,
                 }
               : {}),
-            conditions: '[]',
+            // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
+            conditions: characterId !== null ? characterConditions : '[]',
             ruleEntryId,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
@@ -1714,6 +1725,22 @@ export class EncountersService {
       }
     }
 
+    // Issue #495: non-DM adds must be in the active rule system's condition
+    // vocabulary. The wire schema stays free-text (so DMs can mint homebrew /
+    // custom labels), but a player cannot inject arbitrary mechanical text into
+    // the shared tracker. Matching is case-insensitive; the stored string is
+    // still whatever the caller sent. MCP `update_combatant` shares this path.
+    if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
+      if (unknown.length > 0) {
+        throw new BadRequestException(
+          `Unknown condition(s) for this rule system: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+            'Players may only add conditions from the active rule vocabulary; the DM may mint custom entries.',
+        );
+      }
+    }
+
     // Non-HP field writes computed up front (initiative/identity). The HP +
     // death-save fields AND the condition add/remove deltas are computed INSIDE
     // the transaction below off a fresh read, so concurrent damage and concurrent
@@ -1757,18 +1784,33 @@ export class EncountersService {
       return combatantToDomain(existing);
     }
 
-    // Combatant write + linked-character HP mirror run in ONE synchronous
+    // Combatant write + linked-character HP/conditions mirror run in ONE synchronous
     // better-sqlite3 transaction (issue #86): the HP math reads the row's CURRENT
     // committed values inside the transaction (never a stale pre-await read), so two
     // authorized deltas landing near-simultaneously compose instead of clobbering —
     // better-sqlite3 serializes the whole synchronous callback. The mirror then reads
     // the transaction's own result.
     //
-    // The character HP mirror is additionally gated on a still-live (non-'ended')
+    // The character mirror is additionally gated on a still-live (non-'ended')
     // encounter (issue #163). assertMutable() above already rejects an ended encounter
     // outright, so this is defense-in-depth: post-combat combatant rows must never leak
     // back onto the live character sheet even if that guard is ever relaxed.
-    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && recomputeHp && encounterRow.status !== 'ended';
+    //
+    // Issue #486 — sheet↔combatant condition merge semantics (overlap window):
+    //   • create/addCombatant seeds the combatant from the sheet.
+    //   • A tracker write (addConditions/removeConditions) applies set deltas on the
+    //     combatant (#747) then overwrites the linked sheet's conditions array.
+    //   • A sheet write (CharactersService.patchConditions / PATCH conditions) overwrites
+    //     the linked live combatant's conditions array (and stamps the CAS token).
+    //   • Last cross-surface write wins as a whole array — there is no 3-way merge.
+    //     Concurrent tracker deltas still compose via the in-tx set rebase (#747).
+    //   • /end writes combatant conditions back onto the sheet alongside HP.
+    //   • MCP `update_combatant` and `set_character_conditions` share these paths.
+    const mirrorSheet =
+      existing.kind === 'character' &&
+      existing.characterId !== null &&
+      encounterRow.status !== 'ended' &&
+      (recomputeHp || conditionsTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -1845,24 +1887,30 @@ export class EncountersService {
       if (conditionsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
-      if (mirrorHp) {
+      if (mirrorSheet) {
         // Issue #711: live-mirror the full combat death/temp-HP slice, not just
         // hpCurrent, so a downed/dead character is reflected on the sheet the
         // moment it happens mid-fight (the same authoritative write-through
         // contract the HP path already uses). The post-/end reconciliation below
         // does the same write once more for the final state; both are idempotent.
-        // Issue #466: stamp the sheet CAS token on the combatant so a later re-end
-        // knows this write-through was the last acknowledged sync.
+        // Issue #486: likewise mirror conditions so a tracker-applied Poisoned
+        // lands on the sheet immediately (and survives /end even if that path
+        // were skipped). Issue #466: stamp the sheet CAS token on the combatant
+        // so a later re-end knows this write-through was the last acknowledged sync.
         const mirroredAt = nowIso();
+        const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
+        if (recomputeHp) {
+          sheetSet.hpCurrent = updated.hpCurrent;
+          sheetSet.hpTemp = updated.hpTemp;
+          sheetSet.deathState = updated.deathState;
+          sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
+          sheetSet.deathSaveFailures = updated.deathSaveFailures;
+        }
+        if (conditionsTouched) {
+          sheetSet.conditions = updated.conditions;
+        }
         tx.update(characters)
-          .set({
-            hpCurrent: updated.hpCurrent,
-            hpTemp: updated.hpTemp,
-            deathState: updated.deathState,
-            deathSaveSuccesses: updated.deathSaveSuccesses,
-            deathSaveFailures: updated.deathSaveFailures,
-            updatedAt: mirroredAt,
-          })
+          .set(sheetSet)
           .where(eq(characters.id, existing.characterId!))
           .run();
         tx.update(combatants)
@@ -2327,6 +2375,8 @@ export class EncountersService {
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
+      // Issue #486: conditions travel back with the HP slice on /end.
+      conditions: string;
       status: 'active' | 'dead';
       sheetSyncedUpdatedAt: string | null;
     }> = [];
@@ -2349,6 +2399,7 @@ export class EncountersService {
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
+        conditions: row.conditions,
         status: nextStatus ?? 'active',
         sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
       });
@@ -2446,12 +2497,14 @@ export class EncountersService {
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
         // whose status was already 'active' doesn't get a spurious write.
+        // Issue #486: also persist tracker conditions back onto the sheet.
         const set: Partial<typeof characters.$inferInsert> = {
           hpCurrent: w.hpCurrent,
           hpTemp: w.hpTemp,
           deathState: w.deathState,
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
+          conditions: w.conditions,
           updatedAt: ts,
         };
         if (prior !== undefined && prior.status !== w.status) {
@@ -2525,8 +2578,13 @@ export class EncountersService {
    * Reopens an 'ended' encounter back to 'running' (issue #109) — an accidental /end
    * was previously unrecoverable (the ended page offered only Refresh/Delete). Requires
    * status 'ended'; clears endedAt and restores 'running' while PRESERVING round /
-   * turnIndex / currentCombatantId, so combat resumes exactly where it stopped rather
-   * than resetting to the top of the order.
+   * turnIndex / currentCombatantId when still valid, so combat resumes where it stopped
+   * rather than resetting to the top of the order.
+   *
+   * Issue #489: reopen re-validates the turn pointer against the present roster.
+   * Zero combatants → 409. A missing `currentCombatantId` or one whose initiative is
+   * now null snaps to the top of the server-sorted running order and emits a combat-
+   * log notice. `turnIndex` is always re-derived from that identity pointer.
    *
    * Issue #466: when sheet HP diverged from the combatant snapshot after the previous
    * End, the caller MUST supply a per-conflict `hpResync` direction (`keep_combatant`
@@ -2549,6 +2607,15 @@ export class EncountersService {
     }
 
     const combatantRows = await this.listCombatantRows(encounterId);
+    // Issue #489: refuse to resume a fight with nobody in it (start has the same
+    // guard via #469; reopen previously flipped status and left a null pointer).
+    if (combatantRows.length === 0) {
+      throw new ConflictException({
+        code: 'REOPEN_NO_COMBATANTS',
+        message: 'Cannot reopen an encounter with no combatants — add at least one combatant first',
+      });
+    }
+
     const conflicts = await this.collectHpSyncConflicts(combatantRows);
     const decisions = new Map((input.hpResync ?? []).map((d) => [d.combatantId, d.direction]));
     if (conflicts.length > 0) {
@@ -2562,6 +2629,20 @@ export class EncountersService {
         });
       }
     }
+
+    // Issue #489: re-derive the turn pointer against the present, initiative-bearing
+    // roster before flipping status. A combatant removed (or initiative cleared) while
+    // the fight was ended would otherwise leave a stale currentCombatantId until the
+    // next /next-turn self-healed via advanceTurn.
+    const sorted = sortCombatants(combatantRows.map(combatantToDomain), 'running');
+    const priorCurrentId = encounterRow.currentCombatantId;
+    const priorCurrent = priorCurrentId == null ? undefined : sorted.find((c) => c.id === priorCurrentId);
+    // Missing id OR present-but-null-initiative both snap to the top of the order
+    // and emit a notice (issue #489) — even when that top happens to be the same id.
+    const pointerInvalid = priorCurrent == null || priorCurrent.initiative === null;
+    const currentCombatantId = pointerInvalid ? (sorted[0]?.id ?? null) : priorCurrentId;
+    const turnIndex = turnIndexFor(sorted, currentCombatantId);
+    const turnPointerSnapped = pointerInvalid;
 
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
@@ -2620,9 +2701,36 @@ export class EncountersService {
         }
       }
 
-      tx.update(encounters).set({ status: 'running', endedAt: null, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+      tx.update(encounters)
+        .set({
+          status: 'running',
+          endedAt: null,
+          // Issue #489: persist the re-validated pointer with the status flip.
+          currentCombatantId,
+          turnIndex,
+          updatedAt: ts,
+        })
+        .where(eq(encounters.id, encounterId))
+        .run();
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
     });
+
+    // Combat-log notice when reopen had to repair a dangling/null-initiative pointer
+    // (issue #489). Appended after the status flip commits — a log failure must not
+    // roll back a successful reopen.
+    if (turnPointerSnapped) {
+      const top = sorted.find((c) => c.id === currentCombatantId);
+      await this.appendEvent(encounterId, encounterRow.round, 'note', {
+        actor: top?.name ?? null,
+        target: top?.name ?? null,
+        actorId: currentCombatantId,
+        targetId: currentCombatantId,
+        detail:
+          priorCurrentId == null || priorCurrent == null
+            ? 'Turn pointer reset to top of order on reopen (previous current combatant missing)'
+            : 'Turn pointer reset to top of order on reopen (previous current combatant had no initiative)',
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -2631,7 +2739,12 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId,
-      detail: decisionAudit.length > 0 ? JSON.stringify({ hpResync: decisionAudit }) : undefined,
+      detail: JSON.stringify({
+        ...(decisionAudit.length > 0 ? { hpResync: decisionAudit } : {}),
+        ...(turnPointerSnapped
+          ? { turnPointerSnapped: true, previousCombatantId: priorCurrentId, currentCombatantId, turnIndex }
+          : { currentCombatantId, turnIndex }),
+      }),
     });
 
     this.emitEncounterEvent('encounter.updated', campaignId, encounterId);

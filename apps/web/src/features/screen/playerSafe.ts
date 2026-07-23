@@ -44,6 +44,10 @@ export function safeLocation(loc: Location | null | undefined): SafeLocation | n
 // Party — characters' HP is shared table info (party members see each other's
 // sheets), so exact HP is fine here; only the DM-only `dmSecret`/prep notes are
 // dropped by never copying them across.
+//
+// Lifecycle status (issue #115 / #824) IS player-safe table info — the Cast view
+// needs it to hide dead/retired/inactive PCs by default and to label alumni when
+// the producer opts them back in. dmSecret/notes stay omitted.
 
 export interface SafeCharacter {
   id: number;
@@ -51,6 +55,8 @@ export interface SafeCharacter {
   species: string;
   className: string;
   level: number;
+  /** Lifecycle status — active / dead / retired / inactive (issue #824). */
+  status: Character['status'];
   ac: number | null;
   hpCurrent: number;
   hpMax: number;
@@ -65,6 +71,7 @@ export function safeCharacter(c: Character): SafeCharacter {
     species: c.species,
     className: c.className,
     level: c.level,
+    status: c.status,
     ac: c.ac,
     hpCurrent: c.hpCurrent,
     hpMax: c.hpMax,
@@ -73,8 +80,46 @@ export function safeCharacter(c: Character): SafeCharacter {
   };
 }
 
-export function safeParty(characters: Character[]): SafeCharacter[] {
-  return characters.map(safeCharacter);
+export interface SafePartyOptions {
+  /**
+   * When false (default), dead/retired/inactive PCs are omitted so the TV
+   * "Party" scene matches the live table (issue #824). Producer opt-in shows
+   * the full undeleted roster with status labels on alumni.
+   */
+  includeAlumni?: boolean;
+  /**
+   * Character ids currently seated as combatants in a running encounter.
+   * When non-empty and alumni are excluded, prefer those participants over the
+   * full active roster (sitting-out actives stay off the cast during the fight).
+   * Pass null/undefined/empty out of combat to fall back to active-only.
+   */
+  participatingCharacterIds?: ReadonlySet<number> | readonly number[] | null;
+}
+
+function asIdSet(
+  ids: SafePartyOptions['participatingCharacterIds'],
+): Set<number> | null {
+  if (ids == null) return null;
+  const set = ids instanceof Set ? ids : new Set(ids);
+  return set.size > 0 ? set : null;
+}
+
+/**
+ * Player-safe party projection for the Cast / Player Display (issue #824).
+ * Defaults to active PCs; during combat prefers participating character combatants;
+ * with `includeAlumni` returns the full undeleted roster (status preserved for labels).
+ */
+export function safeParty(characters: Character[], options: SafePartyOptions = {}): SafeCharacter[] {
+  const includeAlumni = options.includeAlumni === true;
+  const participating = includeAlumni ? null : asIdSet(options.participatingCharacterIds);
+
+  return characters
+    .filter((c) => {
+      if (includeAlumni) return true;
+      if (participating) return participating.has(c.id);
+      return c.status === 'active';
+    })
+    .map(safeCharacter);
 }
 
 // ---------------------------------------------------------------------------

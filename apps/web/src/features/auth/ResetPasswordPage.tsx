@@ -8,6 +8,7 @@
 import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
+import { PasswordInput } from '../../components/PasswordInput';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -214,9 +215,8 @@ export function ResetPasswordPage() {
               </div>
               <div className="field">
                 <label htmlFor={AUTH_FIELD_IDS.newPassword}>New password</label>
-                <input
+                <PasswordInput
                   id={AUTH_FIELD_IDS.newPassword}
-                  type="password"
                   className="input"
                   value={newPassword}
                   onChange={(e) => {
@@ -225,6 +225,7 @@ export function ResetPasswordPage() {
                   }}
                   placeholder="Min 8 characters"
                   autoComplete="new-password"
+                  revealNoun="new password"
                   required
                   minLength={8}
                   aria-invalid={confirmFieldErrors.newPassword ? true : undefined}
