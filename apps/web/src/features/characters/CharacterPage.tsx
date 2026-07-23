@@ -21,7 +21,7 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
@@ -58,6 +58,14 @@ import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
+import {
+  XP_AWARD_HELP,
+  XP_AWARD_LABEL,
+  hpDeltaLabel,
+  hpFullHealLabel,
+  saveProficiencyLabel,
+  skillProficiencyLabel,
+} from './characterSheetA11y';
 import { useFormattingLocale } from '../../lib/format';
 
 export default function CharacterPage() {
@@ -611,6 +619,11 @@ function XpCard({
   const [amountError, setAmountError] = useState<string | null>(null);
   const [hpMaxError, setHpMaxError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
+  // XP award field a11y (issue #448): persistent label + help/error association.
+  const xpFieldId = useId();
+  const xpHelpId = `${xpFieldId}-help`;
+  const xpErrorId = `${xpFieldId}-error`;
+  const xpDescribedBy = amountError ? `${xpHelpId} ${xpErrorId}` : xpHelpId;
   // Level-up celebration (issue #67): the level a confirm just reached; the
   // banner clears itself after a beat (timeout, not animationEnd, so it also
   // clears under prefers-reduced-motion where no animation fires).
@@ -685,7 +698,7 @@ function XpCard({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="character-xp">
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <p className="card-kicker mb-0">Experience</p>
         {ready && (
@@ -731,29 +744,44 @@ function XpCard({
             : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
       </p>
       {canEdit && (
-        <div className="flex gap-2 flex-wrap items-center">
-          {/* type="text" + inputMode="numeric" (issue #633): preserves locale
-              grouping/Arabic digits for the localized parser. */}
-          <input
-            type="text"
-            inputMode="numeric"
-            value={amount}
-            aria-invalid={amountError != null}
-            onChange={(e) => {
-              setAmount(e.target.value);
-              setAmountError(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void addXp();
-            }}
-            placeholder="XP…"
-            className="cf-input !min-h-0 !w-24 text-sm"
-            style={{ minHeight: 44, padding: '4px 10px' }}
-          />
+        <div className="flex gap-2 flex-wrap items-end">
+          {/* Labeled XP award (issue #448): associated label/help/error so the
+              control is not an unnamed spinbutton/textbox. type="text" +
+              inputMode="numeric" (issue #633) preserves locale digits. */}
+          <div className="space-y-1">
+            <label htmlFor={xpFieldId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+              {XP_AWARD_LABEL}
+            </label>
+            <input
+              id={xpFieldId}
+              type="text"
+              inputMode="numeric"
+              value={amount}
+              aria-invalid={amountError != null}
+              aria-describedby={xpDescribedBy}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setAmountError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void addXp();
+              }}
+              placeholder="XP…"
+              className="cf-input !min-h-0 !w-24 text-sm"
+              style={{ minHeight: 44, padding: '4px 10px' }}
+            />
+            <p id={xpHelpId} className="text-[11px] text-slate-500 m-0 max-w-[16rem]">
+              {XP_AWARD_HELP}
+            </p>
+            {amountError && (
+              <p id={xpErrorId} role="alert" className="text-xs text-rose-400 m-0">
+                {amountError}
+              </p>
+            )}
+          </div>
           <Btn className="!min-h-0" style={{ minHeight: 44 }} disabled={busy || !amount.trim()} onClick={addXp}>
             + Award XP
           </Btn>
-          {amountError && <span className="text-xs text-rose-400">{amountError}</span>}
           {!atCap && !levellingUp && (
             <Btn
               ghost={!ready}
@@ -866,7 +894,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
   }
 
   return (
-    <Card className="space-y-2">
+    <Card className="space-y-2" data-testid="character-saving-throws">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Saving throws</p>
         <span className="text-[11px] text-slate-500">proficiency {signed(pb)}</span>
@@ -904,11 +932,12 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   onClick={() => void toggle(k)}
                   disabled={busy}
                   aria-pressed={proficient}
+                  aria-label={saveProficiencyLabel(k, proficient)}
                   className="absolute top-1 right-1"
                   style={{ background: 'transparent', border: 0, padding: 2, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
                   title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                 >
-                  {proficient ? '●' : '○'}
+                  <span aria-hidden="true">{proficient ? '●' : '○'}</span>
                 </button>
               ) : (
                 proficient && (
@@ -955,7 +984,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
   }
 
   return (
-    <Card className="space-y-2">
+    <Card className="space-y-2" data-testid="character-skills">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Skills</p>
         <span className="text-[11px] text-slate-500">
@@ -983,11 +1012,13 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   type="button"
                   onClick={() => void cycle(name)}
                   disabled={busy}
+                  aria-label={skillProficiencyLabel(name, rank ?? 'none')}
+                  aria-pressed={rank != null}
                   className="w-4 shrink-0 text-center"
                   style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
                   title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
                 >
-                  {marker}
+                  <span aria-hidden="true">{marker}</span>
                 </button>
               ) : (
                 <span
@@ -1556,21 +1587,33 @@ function HpEditor({
     void applyDelta(e.shiftKey ? delta * 5 : delta);
   }
 
+  // Contextual HP labels (issue #448): announce character + current/max, not bare deltas.
+  const { name, hpCurrent, hpMax } = character;
   return (
-    <div className="flex gap-2 flex-wrap">
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(-5, e)}>
-        −5
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(-1, e)}>
-        −1
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(1, e)}>
-        +1
-      </Btn>
-      <Btn className="!min-h-0" style={{ minWidth: 52, minHeight: 44 }} disabled={busy} onClick={(e) => click(5, e)}>
-        +5
-      </Btn>
-      <Btn style={{ minHeight: 44 }} disabled={busy} onClick={fullHeal}>
+    <div
+      className="flex gap-2 flex-wrap"
+      role="group"
+      aria-label={`${name} hit points`}
+      data-testid="character-hp-editor"
+    >
+      {([-5, -1, 1, 5] as const).map((step) => (
+        <Btn
+          key={step}
+          className="!min-h-0"
+          style={{ minWidth: 52, minHeight: 44 }}
+          disabled={busy}
+          aria-label={hpDeltaLabel(name, step, hpCurrent, hpMax)}
+          onClick={(e) => click(step, e)}
+        >
+          {step > 0 ? `+${step}` : `−${Math.abs(step)}`}
+        </Btn>
+      ))}
+      <Btn
+        style={{ minHeight: 44 }}
+        disabled={busy}
+        aria-label={hpFullHealLabel(name, hpMax)}
+        onClick={fullHeal}
+      >
         Full heal
       </Btn>
     </div>

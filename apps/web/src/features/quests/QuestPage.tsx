@@ -30,6 +30,25 @@ import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
 import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
+import {
+  QUEST_BODY_HELP,
+  QUEST_BODY_LABEL,
+  QUEST_GIVER_HELP,
+  QUEST_GIVER_LABEL,
+  QUEST_HIDDEN_HELP,
+  QUEST_HIDDEN_LABEL,
+  QUEST_NEW_FORM_PREFIX,
+  QUEST_PARENT_HELP,
+  QUEST_PARENT_LABEL,
+  QUEST_REWARD_HELP,
+  QUEST_REWARD_LABEL,
+  QUEST_TITLE_HELP,
+  QUEST_TITLE_LABEL,
+  QUEST_TITLE_REQUIRED_ERROR,
+  questFieldErrorId,
+  questFieldHelpId,
+  questFieldId,
+} from './questFormA11y';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
 type QuestStatusValue = Quest['status'];
@@ -827,6 +846,24 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const [hidden, setHidden] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [titleError, setTitleError] = useState<string | null>(null);
+
+  // Associated create-form ids (issue #452) — stable prefixes for labels/help/errors.
+  const prefix = QUEST_NEW_FORM_PREFIX;
+  const titleId = questFieldId(prefix, 'title');
+  const titleHelpId = questFieldHelpId(prefix, 'title');
+  const titleErrorId = questFieldErrorId(prefix, 'title');
+  const bodyId = questFieldId(prefix, 'body');
+  const bodyHelpId = questFieldHelpId(prefix, 'body');
+  const rewardId = questFieldId(prefix, 'reward');
+  const rewardHelpId = questFieldHelpId(prefix, 'reward');
+  const giverId = questFieldId(prefix, 'giver');
+  const giverHelpId = questFieldHelpId(prefix, 'giver');
+  const parentFieldId = questFieldId(prefix, 'parent');
+  const parentHelpId = questFieldHelpId(prefix, 'parent');
+  const hiddenId = questFieldId(prefix, 'hidden');
+  const hiddenHelpId = questFieldHelpId(prefix, 'hidden');
+  const titleDescribedBy = titleError ? `${titleHelpId} ${titleErrorId}` : titleHelpId;
 
   useEffect(() => {
     let cancelled = false;
@@ -857,7 +894,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     return () => {
       cancelled = true;
     };
-  }, [campaignId]);
+  }, [campaignId, t]);
 
   if (role !== null && role !== 'dm') {
     return (
@@ -880,7 +917,12 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   }
 
   async function create() {
-    if (!title.trim()) return;
+    if (!title.trim()) {
+      setTitleError(QUEST_TITLE_REQUIRED_ERROR);
+      document.getElementById(titleId)?.focus();
+      return;
+    }
+    setTitleError(null);
     setSaving(true);
     setSaveError(null);
     try {
@@ -903,7 +945,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   return (
     <PageShell campaignId={campaignId}>
       <main className="lg:col-span-2 space-y-5">
-        <Card className="space-y-4">
+        <Card className="space-y-4" data-testid="quest-create-form">
           <h1 className="text-2xl font-extrabold text-white">{t('quests.newQuestHeading')}</h1>
           {error && <ErrorNote message={error} />}
           {saveError && <ErrorNote message={saveError} onRetry={create} />}
@@ -912,27 +954,70 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
           ) : (
             <div className="space-y-3">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldTitle')}</label>
-                <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('quests.titlePlaceholder')} maxLength={200} />
+                <label htmlFor={titleId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                  {QUEST_TITLE_LABEL}
+                </label>
+                <TextInput
+                  id={titleId}
+                  value={title}
+                  aria-invalid={titleError != null}
+                  aria-describedby={titleDescribedBy}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    setTitleError(null);
+                  }}
+                  placeholder={t('quests.titlePlaceholder')}
+                  maxLength={200}
+                />
+                <p id={titleHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_TITLE_HELP}
+                </p>
+                {titleError && (
+                  <p id={titleErrorId} role="alert" className="text-xs text-rose-400 m-0">
+                    {titleError}
+                  </p>
+                )}
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldBody')}</label>
+                <label htmlFor={bodyId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                  {QUEST_BODY_LABEL}
+                </label>
                 <TextArea
+                  id={bodyId}
                   style={{ minHeight: 140 }}
                   value={body}
+                  aria-describedby={bodyHelpId}
                   onChange={(e) => setBody(e.target.value)}
                   placeholder={t('quests.bodyPlaceholder')}
                 />
+                <p id={bodyHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_BODY_HELP}
+                </p>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.reward')}</label>
-                <TextInput value={reward} onChange={(e) => setReward(e.target.value)} placeholder={t('quests.rewardPlaceholder')} />
+                <label htmlFor={rewardId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                  {QUEST_REWARD_LABEL}
+                </label>
+                <TextInput
+                  id={rewardId}
+                  value={reward}
+                  aria-describedby={rewardHelpId}
+                  onChange={(e) => setReward(e.target.value)}
+                  placeholder={t('quests.rewardPlaceholder')}
+                />
+                <p id={rewardHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_REWARD_HELP}
+                </p>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldGiver')}</label>
+                <label htmlFor={giverId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                  {QUEST_GIVER_LABEL}
+                </label>
                 <select
+                  id={giverId}
                   className="cf-select"
                   value={giverNpcId}
+                  aria-describedby={giverHelpId}
                   onChange={(e) => setGiverNpcId(e.target.value)}
                 >
                   <option value="">{t('quests.giverNone')}</option>
@@ -942,10 +1027,21 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                     </option>
                   ))}
                 </select>
+                <p id={giverHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_GIVER_HELP}
+                </p>
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">{t('quests.fieldParent')}</label>
-                <select className="cf-select" value={parent} onChange={(e) => setParent(e.target.value)}>
+                <label htmlFor={parentFieldId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                  {QUEST_PARENT_LABEL}
+                </label>
+                <select
+                  id={parentFieldId}
+                  className="cf-select"
+                  value={parent}
+                  aria-describedby={parentHelpId}
+                  onChange={(e) => setParent(e.target.value)}
+                >
                   <option value="">{t('quests.parentNone')}</option>
                   {parentQuests.map((q) => (
                     <option key={q.id} value={q.id}>
@@ -953,16 +1049,30 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                     </option>
                   ))}
                 </select>
+                <p id={parentHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_PARENT_HELP}
+                </p>
               </div>
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-                <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
-                <span>{t('quests.hiddenCheckbox')}</span>
-              </label>
+              <div className="space-y-1">
+                <label htmlFor={hiddenId} className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
+                  <input
+                    id={hiddenId}
+                    type="checkbox"
+                    checked={hidden}
+                    aria-describedby={hiddenHelpId}
+                    onChange={(e) => setHidden(e.target.checked)}
+                  />
+                  <span>{QUEST_HIDDEN_LABEL}</span>
+                </label>
+                <p id={hiddenHelpId} className="text-[11px] text-slate-500 m-0">
+                  {QUEST_HIDDEN_HELP}
+                </p>
+              </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Btn ghost onClick={() => navigate(-1)}>
                   {t('quests.cancel')}
                 </Btn>
-                <Btn onClick={create} disabled={saving || !title.trim()}>
+                <Btn onClick={create} disabled={saving}>
                   {saving ? t('quests.creating') : t('quests.createQuest')}
                 </Btn>
               </div>

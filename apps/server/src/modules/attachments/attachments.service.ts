@@ -6,7 +6,9 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
+  type OnApplicationBootstrap,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -19,7 +21,7 @@ import type {
   StorageStats,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, campaigns, characters, encounters } from '../../db/schema';
+import { attachments, auditLog, campaigns, characters, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -27,6 +29,10 @@ import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
 import { generatePngThumbnail } from './thumbnail';
 import { sanitizeAttachmentFilename } from './filename';
+import {
+  ATTACHMENT_STATE_COMMITTED,
+  ATTACHMENT_STATE_RESERVED,
+} from './attachment.constants';
 
 /** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
 export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
@@ -48,6 +54,11 @@ export const GENERATED_MIME_TO_EXT: Record<string, string> = {
 };
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const RESERVED = ATTACHMENT_STATE_RESERVED;
+const COMMITTED = ATTACHMENT_STATE_COMMITTED;
+const STAGE_SUFFIX = '.stage';
+
+export { ATTACHMENT_STATE_COMMITTED, ATTACHMENT_STATE_RESERVED } from './attachment.constants';
 
 /**
  * Content sniffing for the three allowed image types (dependency-free — the
@@ -102,11 +113,75 @@ function defaultHiddenForKind(kind: AttachmentKind): boolean {
 }
 
 @Injectable()
-export class AttachmentsService {
+export class AttachmentsService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(AttachmentsService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
   ) {}
+
+  /**
+   * A process interruption can only strand `reserved` rows. They are deliberately
+   * not resumable: the request never received a committed result, and the audit row
+   * was never committed, so recovery rolls them back and lets the caller retry.
+   * Final and staged names are both removed before the reservation row is released.
+   */
+  onApplicationBootstrap(): void {
+    try {
+      this.recoverPendingPublications();
+    } catch (err) {
+      // Filesystem/permission failures must not prevent the rest of the server from
+      // starting. Per-row recovery already logs and keeps unrecoverable reservations;
+      // this catch covers top-level IO (e.g. unreadable uploads root).
+      this.logger.error(
+        `Attachment publication recovery failed during startup: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Roll back every interrupted publication. Public so whole-server restore can run
+   * the same protocol immediately after swapping in a backup, without waiting for a
+   * process restart. Returns the number of reservation rows released.
+   *
+   * Dangling `.stage` scrubbing: ordinary recovery with reserved rows only walks the
+   * campaigns that had reservations. Restore passes `{ scrubDanglingStages: true }`
+   * for a full-root scan because a backup cut can leave stage files under any
+   * campaign without a matching reservation. Scrubbing never deletes a stage whose
+   * attachment id is still `reserved` in that same campaign. DB reservation
+   * rollback runs before any scrub so the event-loop-blocking FS walk stays gated.
+   */
+  recoverPendingPublications(opts?: { scrubDanglingStages?: boolean }): number {
+    // Restore can replace committed bytes while reusing an attachment id/path.
+    // Never carry a pre-restore content hash into the recovered filesystem.
+    this.etagCache.clear();
+    const pending = this.db.select().from(attachments).where(eq(attachments.state, RESERVED)).all();
+    const pendingCampaignIds = [...new Set(pending.map((row) => row.campaignId))];
+    let recovered = 0;
+    for (const row of pending) {
+      try {
+        this.rollbackReservation(row);
+        recovered += 1;
+      } catch (err) {
+        // Keep the row (and therefore its quota charge) when durable cleanup could
+        // not be proved. A later restart/restore retries instead of admitting bytes
+        // that might make the campaign exceed quota on disk.
+        this.logger.error(
+          `Could not recover attachment reservation ${row.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (opts?.scrubDanglingStages === true) {
+      this.removeDanglingStageFiles();
+    } else if (pendingCampaignIds.length > 0) {
+      this.removeDanglingStageFiles({ campaignIds: pendingCampaignIds });
+    }
+    if (recovered > 0) this.logger.warn(`Recovered ${recovered} interrupted attachment publication(s)`);
+    return recovered;
+  }
 
   /** Absolute path a stored attachment's bytes live at, given its DB row. */
   filePath(row: { campaignId: number; id: number; mime: string }): string {
@@ -117,6 +192,11 @@ export class AttachmentsService {
   /** Absolute path a generated thumbnail (always PNG) is cached at on disk. */
   private thumbPath(row: { campaignId: number; id: number }): string {
     return path.join(uploadsRoot(), String(row.campaignId), `${row.id}.thumb.png`);
+  }
+
+  /** Same-filesystem stage path so link(stage, final) + unlink(stage) can publish. */
+  stagePath(row: { campaignId: number; id: number; mime: string }): string {
+    return `${this.filePath(row)}${STAGE_SUFFIX}`;
   }
 
   /**
@@ -201,7 +281,11 @@ export class AttachmentsService {
   }
 
   async getRowOrThrow(id: number) {
-    const [row] = await this.db.select().from(attachments).where(eq(attachments.id, id)).limit(1);
+    const [row] = await this.db
+      .select()
+      .from(attachments)
+      .where(and(eq(attachments.id, id), eq(attachments.state, COMMITTED)))
+      .limit(1);
     if (!row) throw new NotFoundException(`Attachment ${id} not found`);
     return row;
   }
@@ -212,7 +296,11 @@ export class AttachmentsService {
    * embed the actual files rather than dangling references (issue #87).
    */
   async listRowsForCampaign(campaignId: number) {
-    return this.db.select().from(attachments).where(eq(attachments.campaignId, campaignId)).orderBy(attachments.id);
+    return this.db
+      .select()
+      .from(attachments)
+      .where(and(eq(attachments.campaignId, campaignId), eq(attachments.state, COMMITTED)))
+      .orderBy(attachments.id);
   }
 
   /** True when the attachment's bytes exist on disk (cheap stat, no read). */
@@ -330,7 +418,7 @@ export class AttachmentsService {
     const rows = await this.db
       .select()
       .from(attachments)
-      .where(eq(attachments.campaignId, campaignId))
+      .where(and(eq(attachments.campaignId, campaignId), eq(attachments.state, COMMITTED)))
       .orderBy(desc(attachments.id));
     return rows.map(toDomain);
   }
@@ -362,14 +450,8 @@ export class AttachmentsService {
   }
 
   /**
-   * Persist the uploaded buffer to disk under DATA_DIR/uploads/<campaignId>/<id>.<ext>
-   * and record its metadata. Two-step (insert row -> write file named by the new
-   * row id) because the on-disk filename embeds the DB id.
-   *
-   * The declared mimetype is never trusted on its own: the multer fileFilter only
-   * sees the multipart header (the buffer doesn't exist yet at that point), so the
-   * actual bytes are sniffed here and must match the declared type — otherwise
-   * HTML-declared-as-PNG (and the like) would be stored and served as an image.
+   * Persist a multipart upload through the reservation/publication protocol. The
+   * declared mimetype is never trusted on its own: the actual bytes must match it.
    */
   async create(
     campaignId: number,
@@ -385,44 +467,14 @@ export class AttachmentsService {
       );
     }
 
-    // Per-campaign upload quota (issue #24). When a quota is set, an upload that
-    // would push the campaign's total attachment bytes past it is rejected with a
-    // 413 — same status the size cap uses, so callers treat "too big" uniformly.
-    await this.enforceQuota(campaignId, file.size);
-
-    const ts = nowIso();
-    const [row] = await this.db
-      .insert(attachments)
-      .values({
-        campaignId,
-        uploaderUserId: user.id,
-        kind,
-        // Issue #630: grapheme-safe truncation + path/control scrubbing (not
-        // bare String#slice, which can bisect a surrogate pair).
-        filename: sanitizeAttachmentFilename(file.originalname),
-        mime: file.mimetype,
-        size: file.size,
-        hidden: defaultHiddenForKind(kind),
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
-
-    const dest = this.filePath(row);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, file.buffer);
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'attachment.upload',
-      entityType: 'attachment',
-      entityId: row.id,
+    return this.createAndPublish(
       campaignId,
-      detail: kind,
-    });
-
-    return toDomain(row);
+      kind,
+      { filename: file.originalname, mime: file.mimetype, bytes: file.buffer },
+      user,
+      role,
+      'attachment.upload',
+    );
   }
 
   /**
@@ -440,39 +492,375 @@ export class AttachmentsService {
     user: RequestUser,
     role: Role,
   ): Promise<Attachment> {
-    await this.enforceQuota(campaignId, file.bytes.length);
-
-    const ts = nowIso();
-    const [row] = await this.db
-      .insert(attachments)
-      .values({
-        campaignId,
-        uploaderUserId: user.id,
-        kind,
-        filename: sanitizeAttachmentFilename(file.filename),
-        mime: file.mime,
-        size: file.bytes.length,
-        hidden: defaultHiddenForKind(kind),
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
-
-    const dest = this.filePath(row);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, file.bytes);
-
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'attachment.generate',
-      entityType: 'attachment',
-      entityId: row.id,
+    return this.createAndPublish(
       campaignId,
-      detail: kind,
-    });
+      kind,
+      file,
+      user,
+      role,
+      'attachment.generate',
+    );
+  }
 
-    return toDomain(row);
+  /**
+   * Reserve quota, durably publish bytes, then atomically commit metadata + audit.
+   *
+   * Ordering is load-bearing because SQLite and the filesystem cannot share a
+   * transaction:
+   *   1. one conditional INSERT creates a quota-counted, non-public reservation;
+   *   2. write + fsync a stage file in the destination directory;
+   *   3. hard-link stage→final (fails if final exists), unlink stage, fsync dir;
+   *   4. in one SQLite transaction, insert the audit row and mark committed.
+   *
+   * A handled failure rolls back files and metadata synchronously. A process death
+   * before step 4 leaves only a reservation, which startup/restore recovery rolls
+   * back. A process death after step 4 leaves a durable final file and committed row.
+   * A crash between link and unlink can leave both names pointing at the same inode;
+   * recovery removes the stage name.
+   */
+  private async createAndPublish(
+    campaignId: number,
+    kind: AttachmentKind,
+    file: { filename: string; mime: string; bytes: Buffer },
+    user: RequestUser,
+    role: Role,
+    auditAction: 'attachment.upload' | 'attachment.generate',
+  ): Promise<Attachment> {
+    const row = await this.reserveQuota(campaignId, kind, file, user);
+    try {
+      this.stageAndPublish(row, file.bytes);
+      const committed = this.commitPublication(row, user, role, auditAction);
+      return toDomain(committed);
+    } catch (err) {
+      try {
+        this.rollbackReservation(row);
+      } catch (cleanupErr) {
+        this.logger.error(
+          `Attachment ${row.id} publication failed and durable rollback could not complete: ${
+            cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
+          }`,
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Atomic quota reservation. The subquery counts both committed and reserved rows,
+   * and the quota predicate lives in the INSERT statement itself, so concurrent
+   * boundary requests cannot both pass a stale SUM/check window.
+   */
+  private async reserveQuota(
+    campaignId: number,
+    kind: AttachmentKind,
+    file: { filename: string; mime: string; bytes: Buffer },
+    user: RequestUser,
+  ): Promise<typeof attachments.$inferSelect> {
+    const size = file.bytes.length;
+    const ts = nowIso();
+    // Issue #630: grapheme-safe truncation + path/control scrubbing (not bare
+    // String#slice, which can bisect a surrogate pair).
+    const filename = sanitizeAttachmentFilename(file.filename);
+    const inserted = this.db.all<{
+      id: number;
+      campaignId: number;
+      uploaderUserId: string;
+      kind: string;
+      filename: string;
+      mime: string;
+      size: number;
+      hidden: number;
+      state: string;
+      createdAt: string;
+      updatedAt: string;
+    }>(sql`
+      INSERT INTO attachments (
+        campaign_id, uploader_user_id, kind, filename, mime, size, hidden, state, created_at, updated_at
+      )
+      SELECT
+        ${campaignId}, ${user.id}, ${kind}, ${filename}, ${file.mime}, ${size},
+        ${defaultHiddenForKind(kind) ? 1 : 0}, ${RESERVED}, ${ts}, ${ts}
+      FROM campaigns AS campaign
+      WHERE campaign.id = ${campaignId}
+        AND (
+          campaign.storage_quota_bytes IS NULL
+          OR coalesce((
+            SELECT sum(existing.size)
+            FROM attachments AS existing
+            WHERE existing.campaign_id = campaign.id
+          ), 0) + ${size} <= campaign.storage_quota_bytes
+        )
+      RETURNING
+        id,
+        campaign_id AS campaignId,
+        uploader_user_id AS uploaderUserId,
+        kind,
+        filename,
+        mime,
+        size,
+        hidden,
+        state,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+    `);
+
+    if (inserted.length === 0) {
+      const [camp] = await this.db
+        .select({ quota: campaigns.storageQuotaBytes })
+        .from(campaigns)
+        .where(eq(campaigns.id, campaignId))
+        .limit(1);
+      if (!camp) throw new NotFoundException(`Campaign ${campaignId} not found`);
+
+      const usage = this.db.get<{ committed: number; reserved: number }>(sql`
+        SELECT
+          coalesce(sum(CASE WHEN state = ${COMMITTED} THEN size ELSE 0 END), 0) AS committed,
+          coalesce(sum(CASE WHEN state = ${RESERVED} THEN size ELSE 0 END), 0) AS reserved
+        FROM attachments
+        WHERE campaign_id = ${campaignId}
+      `);
+      throw new PayloadTooLargeException(
+        `Upload would exceed this campaign's storage quota (${camp.quota} bytes; ` +
+          `${Number(usage?.committed ?? 0)} committed, ${Number(usage?.reserved ?? 0)} reserved).`,
+      );
+    }
+
+    return { ...inserted[0], hidden: Boolean(inserted[0].hidden) } as typeof attachments.$inferSelect;
+  }
+
+  /**
+   * Write and fsync a stage file, hard-link it to the final name (no-clobber),
+   * unlink the stage name, then fsync the directory. Synchronous disk IO is
+   * intentional: durability must finish before metadata becomes visible.
+   */
+  private stageAndPublish(row: typeof attachments.$inferSelect, bytes: Buffer): void {
+    const finalPath = this.filePath(row);
+    const stagePath = this.stagePath(row);
+    const dir = path.dirname(finalPath);
+    this.ensurePublicationDirectory(dir);
+
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(stagePath, 'wx', 0o600);
+      fs.writeFileSync(fd, bytes);
+      const stagedSize = fs.fstatSync(fd).size;
+      if (stagedSize !== bytes.length) {
+        throw new Error(`Short attachment write: expected ${bytes.length} bytes, staged ${stagedSize}`);
+      }
+      fs.fsyncSync(fd);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+
+    // Publish without clobbering: hard-link stage→final fails with EEXIST if the
+    // destination already exists (existsSync+rename races under restore/parallel
+    // publish). Then unlink the stage name.
+    try {
+      fs.linkSync(stagePath, finalPath);
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as NodeJS.ErrnoException).code)
+          : '';
+      try {
+        fs.rmSync(stagePath, { force: true });
+      } catch {
+        /* ignore */
+      }
+      if (code === 'EEXIST') {
+        throw new Error(`Attachment publication refused: ${finalPath} already exists`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
+    fs.unlinkSync(stagePath);
+    this.fsyncDirectory(dir);
+  }
+
+  /** Ensure newly-created directory entries are themselves durable. */
+  private ensurePublicationDirectory(dir: string): void {
+    const root = uploadsRoot();
+    // recursive mkdir is race-safe under concurrent uploads (EEXIST is not thrown).
+    const rootExisted = fs.existsSync(root);
+    fs.mkdirSync(root, { recursive: true });
+    if (!rootExisted) this.fsyncDirectory(path.dirname(root));
+    const dirExisted = fs.existsSync(dir);
+    fs.mkdirSync(dir, { recursive: true });
+    if (!dirExisted) this.fsyncDirectory(root);
+  }
+
+  /**
+   * Best-effort directory fsync. Unsupported on Windows and some filesystems
+   * (EPERM/EINVAL/EISDIR/ENOTSUP); durability stays strict where fsync works.
+   */
+  private fsyncDirectory(dir: string): void {
+    if (process.platform === 'win32') return;
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(dir, 'r');
+      fs.fsyncSync(fd);
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as NodeJS.ErrnoException).code)
+          : '';
+      if (code === 'EPERM' || code === 'EINVAL' || code === 'EISDIR' || code === 'ENOTSUP') {
+        this.logger.warn(
+          `Directory fsync unsupported for ${dir} (${code}); continuing without it`,
+        );
+        return;
+      }
+      throw err;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* ignore close errors after fsync failure */
+        }
+      }
+    }
+  }
+
+  /** Commit the public state and its audit record together, or neither. */
+  private commitPublication(
+    row: typeof attachments.$inferSelect,
+    user: RequestUser,
+    role: Role,
+    action: 'attachment.upload' | 'attachment.generate',
+  ): typeof attachments.$inferSelect {
+    return this.db.transaction((tx) => {
+      tx.insert(auditLog)
+        .values({
+          actor: auditActor(user),
+          actorRole: role,
+          action,
+          entityType: 'attachment',
+          entityId: row.id,
+          campaignId: row.campaignId,
+          detail: row.kind,
+          createdAt: nowIso(),
+        })
+        .run();
+      const committed = tx
+        .update(attachments)
+        .set({ state: COMMITTED, updatedAt: nowIso() })
+        .where(and(eq(attachments.id, row.id), eq(attachments.state, RESERVED)))
+        .returning()
+        .get();
+      if (!committed) throw new Error(`Attachment reservation ${row.id} is no longer publishable`);
+      return committed;
+    });
+  }
+
+  /**
+   * Remove durable file artifacts first, then release the quota reservation row.
+   *
+   * Only acts while the DB row is still `reserved`. A concurrent whole-server restore
+   * can reopen the DB/uploads tree between reserve and commit, so the same attachment
+   * id may now point at a restored committed row — deleting its final path would wipe
+   * restored bytes while metadata remains.
+   */
+  private rollbackReservation(row: typeof attachments.$inferSelect): void {
+    const current = this.db
+      .select({ id: attachments.id, state: attachments.state })
+      .from(attachments)
+      .where(eq(attachments.id, row.id))
+      .get();
+    if (!current || current.state !== RESERVED) {
+      this.logger.warn(
+        `Skipping attachment reservation rollback for ${row.id}: ${
+          current ? `state is ${current.state}` : 'row no longer exists'
+        }`,
+      );
+      return;
+    }
+
+    const finalPath = this.filePath(row);
+    const dir = path.dirname(finalPath);
+    for (const candidate of [this.stagePath(row), finalPath, this.thumbPath(row)]) {
+      fs.rmSync(candidate, { force: true });
+      this.etagCache.delete(candidate);
+    }
+    if (fs.existsSync(dir)) this.fsyncDirectory(dir);
+    this.db
+      .delete(attachments)
+      .where(and(eq(attachments.id, row.id), eq(attachments.state, RESERVED)))
+      .run();
+  }
+
+  /**
+   * Remove stage artifacts that have no reservation row (e.g. an unusual backup cut).
+   * When `campaignIds` is set, only those campaign directories are scanned.
+   * Stage files are kept only when their parsed id is still `reserved` in the same
+   * campaign directory — a reserved id in another campaign must not retain a stray
+   * stage here (restore scrub / orphan cleanup).
+   */
+  private removeDanglingStageFiles(opts?: { campaignIds?: number[] }): void {
+    const root = uploadsRoot();
+    if (!fs.existsSync(root)) return;
+
+    const reservedByCampaign = new Map<number, Set<number>>();
+    for (const row of this.db
+      .select({ id: attachments.id, campaignId: attachments.campaignId })
+      .from(attachments)
+      .where(eq(attachments.state, RESERVED))
+      .all()) {
+      let ids = reservedByCampaign.get(row.campaignId);
+      if (!ids) {
+        ids = new Set<number>();
+        reservedByCampaign.set(row.campaignId, ids);
+      }
+      ids.add(row.id);
+    }
+
+    const campaignNames =
+      opts?.campaignIds !== undefined
+        ? opts.campaignIds.map(String)
+        : fs
+            .readdirSync(root, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name);
+
+    for (const campaignName of campaignNames) {
+      const dir = path.join(root, campaignName);
+      if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+      const campaignId = Number(campaignName);
+      const reservedInCampaign = Number.isInteger(campaignId)
+        ? reservedByCampaign.get(campaignId)
+        : undefined;
+      let removed = false;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        // Final names are `<id>.<ext>`; staged names are `<id>.<ext>.stage`.
+        const match = /^(\d+)\.[^.]+\.stage$/.exec(entry.name);
+        if (!match) continue;
+        const id = Number(match[1]);
+        if (Number.isInteger(id) && reservedInCampaign?.has(id)) continue;
+        try {
+          fs.rmSync(path.join(dir, entry.name), { force: true });
+          removed = true;
+        } catch (err) {
+          this.logger.error(
+            `Could not remove staged attachment artifact ${path.join(dir, entry.name)}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+      if (removed) {
+        try {
+          this.fsyncDirectory(dir);
+        } catch (err) {
+          this.logger.error(
+            `Could not fsync attachment directory ${dir} after recovery: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
   }
 
   /**
@@ -526,33 +914,6 @@ export class AttachmentsService {
   // ---------- storage management (issue #24) ----------
 
   /**
-   * Reject an upload that would push a campaign's total attachment bytes past its
-   * quota (413). No-op when the campaign has no quota set (the common case).
-   * `additionalBytes` is the size of the incoming file.
-   */
-  private async enforceQuota(campaignId: number, additionalBytes: number): Promise<void> {
-    const [camp] = await this.db
-      .select({ quota: campaigns.storageQuotaBytes })
-      .from(campaigns)
-      .where(eq(campaigns.id, campaignId))
-      .limit(1);
-    const quota = camp?.quota;
-    if (quota === null || quota === undefined) return; // unlimited
-
-    const [used] = await this.db
-      .select({ total: sql<number>`coalesce(sum(${attachments.size}), 0)` })
-      .from(attachments)
-      .where(eq(attachments.campaignId, campaignId));
-    const currentBytes = Number(used?.total ?? 0);
-
-    if (currentBytes + additionalBytes > quota) {
-      throw new PayloadTooLargeException(
-        `Upload would exceed this campaign's storage quota (${quota} bytes; ${currentBytes} used).`,
-      );
-    }
-  }
-
-  /**
    * Set (bytes) or clear (null) a campaign's upload quota. Server-admin action —
    * the controller gates it with @ServerRoles('admin'). Throws 404 if the campaign
    * doesn't exist. Returns the persisted quota (echoes the input).
@@ -580,33 +941,63 @@ export class AttachmentsService {
       .select({ id: campaigns.id, name: campaigns.name, quota: campaigns.storageQuotaBytes })
       .from(campaigns);
 
-    // Aggregate attachment metadata per campaign.
-    const perCampaign = new Map<number, { totalBytes: number; fileCount: number }>();
-    let totalBytes = 0;
+    // Aggregate public/committed usage separately from in-flight reservations.
+    const perCampaign = new Map<
+      number,
+      { committedBytes: number; reservedBytes: number; fileCount: number; reservedFileCount: number }
+    >();
+    let committedBytes = 0;
+    let reservedBytes = 0;
+    let fileCount = 0;
+    let reservedFileCount = 0;
     for (const r of rows) {
-      totalBytes += r.size;
-      const agg = perCampaign.get(r.campaignId) ?? { totalBytes: 0, fileCount: 0 };
-      agg.totalBytes += r.size;
-      agg.fileCount += 1;
+      const agg = perCampaign.get(r.campaignId) ?? {
+        committedBytes: 0,
+        reservedBytes: 0,
+        fileCount: 0,
+        reservedFileCount: 0,
+      };
+      if (r.state === COMMITTED) {
+        committedBytes += r.size;
+        fileCount += 1;
+        agg.committedBytes += r.size;
+        agg.fileCount += 1;
+      } else {
+        reservedBytes += r.size;
+        reservedFileCount += 1;
+        agg.reservedBytes += r.size;
+        agg.reservedFileCount += 1;
+      }
       perCampaign.set(r.campaignId, agg);
     }
 
     const campaignsUsage = campRows
       .map((c) => {
-        const agg = perCampaign.get(c.id) ?? { totalBytes: 0, fileCount: 0 };
+        const agg = perCampaign.get(c.id) ?? {
+          committedBytes: 0,
+          reservedBytes: 0,
+          fileCount: 0,
+          reservedFileCount: 0,
+        };
         const quotaBytes = c.quota ?? null;
         return {
           campaignId: c.id,
           name: c.name,
           fileCount: agg.fileCount,
-          totalBytes: agg.totalBytes,
+          reservedFileCount: agg.reservedFileCount,
+          // Backward-compatible alias: totalBytes has always meant publicly
+          // committed attachment bytes, not temporary quota reservations.
+          totalBytes: agg.committedBytes,
+          committedBytes: agg.committedBytes,
+          reservedBytes: agg.reservedBytes,
           quotaBytes,
-          overQuota: quotaBytes !== null && agg.totalBytes > quotaBytes,
+          overQuota: quotaBytes !== null && agg.committedBytes + agg.reservedBytes > quotaBytes,
         };
       })
-      .sort((a, b) => b.totalBytes - a.totalBytes);
+      .sort((a, b) => b.committedBytes + b.reservedBytes - (a.committedBytes + a.reservedBytes));
 
     const validIds = new Set(rows.map((r) => r.id));
+    const reservedIds = new Set(rows.filter((r) => r.state === RESERVED).map((r) => r.id));
     // storageStats is the admin's read-only visibility surface, so a transient
     // storage outage (missing/unreadable volume) is tolerated here — the admin
     // needs to SEE the situation, and nothing deletes rows on this path. We fall
@@ -615,20 +1006,23 @@ export class AttachmentsService {
     // cleanupOrphans, which DELETES based on the orphan verdict (issue #722).
     let disk: { totalBytes: number; orphanFiles: Array<{ path: string; size: number }>; orphanBytes: number };
     try {
-      disk = this.scanDisk(validIds);
+      disk = this.scanDisk(validIds, reservedIds);
     } catch {
       disk = { totalBytes: 0, orphanFiles: [], orphanBytes: 0 };
     }
 
     // Rows whose backing original file is gone from disk.
     let rowsWithoutFile = 0;
-    for (const r of rows) {
+    for (const r of rows.filter((candidate) => candidate.state === COMMITTED)) {
       if (!fs.existsSync(this.filePath(r))) rowsWithoutFile += 1;
     }
 
     return {
-      totalBytes,
-      fileCount: rows.length,
+      totalBytes: committedBytes,
+      committedBytes,
+      reservedBytes,
+      fileCount,
+      reservedFileCount,
       diskBytes: disk.totalBytes,
       campaigns: campaignsUsage,
       orphans: {
@@ -668,9 +1062,10 @@ export class AttachmentsService {
 
     const rows = await this.db.select().from(attachments);
     const validIds = new Set(rows.map((r) => r.id));
+    const reservedIds = new Set(rows.filter((r) => r.state === RESERVED).map((r) => r.id));
 
-    const orphanRows = rows.filter((r) => !fs.existsSync(this.filePath(r)));
-    const disk = this.scanDisk(validIds);
+    const orphanRows = rows.filter((r) => r.state === COMMITTED && !fs.existsSync(this.filePath(r)));
+    const disk = this.scanDisk(validIds, reservedIds);
 
     let rowsDeleted = 0;
     let filesDeleted = 0;
@@ -745,9 +1140,13 @@ export class AttachmentsService {
 
   /**
    * Walk DATA_DIR/uploads once, returning the total on-disk byte size and the set
-   * of orphan files — those whose leading numeric id (from `<id>.<ext>` or
-   * `<id>.thumb.png`) has no matching attachment row in `validIds`. Non-numeric
-   * or unparseable entries are treated as orphans too (nothing else writes here).
+   * of orphan files — those whose filename does not match a live attachment
+   * artifact:
+   *   - `<id>.<ext>` / `<id>.thumb.png` owned when `validIds` has `id`
+   *   - `<id>.<ext>.stage` owned only when `reservedIds` has `id` (in-flight
+   *     publication). Leftover stages must not hitchhike on a committed id via
+   *     `parseInt` stopping at the first dot.
+   * Non-matching names are orphans too (nothing else writes here).
    *
    * FAIL CLOSED on infra errors (issue #722): if the root vanished between the
    * caller's preflight and this walk, or readdir fails for an infrastructure
@@ -756,7 +1155,10 @@ export class AttachmentsService {
    * one unreadable file shouldn't abort the whole scan, and the file is simply
    * skipped rather than misclassified.
    */
-  private scanDisk(validIds: Set<number>): {
+  private scanDisk(
+    validIds: Set<number>,
+    reservedIds: Set<number>,
+  ): {
     totalBytes: number;
     orphanFiles: Array<{ path: string; size: number }>;
     orphanBytes: number;
@@ -812,9 +1214,7 @@ export class AttachmentsService {
           continue;
         }
         totalBytes += size;
-        // Leading integer is the attachment id (`12.png`, `12.thumb.png`).
-        const id = Number.parseInt(entry.name, 10);
-        if (!Number.isInteger(id) || id <= 0 || !validIds.has(id)) {
+        if (!this.isOwnedUploadArtifact(entry.name, validIds, reservedIds)) {
           orphanFiles.push({ path: filePath, size });
           orphanBytes += size;
         }
@@ -822,5 +1222,32 @@ export class AttachmentsService {
     }
 
     return { totalBytes, orphanFiles, orphanBytes };
+  }
+
+  /**
+   * Strict upload filename ownership (do not use parseInt — it treats
+   * `12.png.stage` as id 12 even when that row is already committed).
+   */
+  private isOwnedUploadArtifact(
+    name: string,
+    validIds: Set<number>,
+    reservedIds: Set<number>,
+  ): boolean {
+    const stageMatch = /^(\d+)\.[^.]+\.stage$/.exec(name);
+    if (stageMatch) {
+      const id = Number(stageMatch[1]);
+      return Number.isInteger(id) && id > 0 && reservedIds.has(id);
+    }
+    const thumbMatch = /^(\d+)\.thumb\.png$/.exec(name);
+    if (thumbMatch) {
+      const id = Number(thumbMatch[1]);
+      return Number.isInteger(id) && id > 0 && validIds.has(id);
+    }
+    const normalMatch = /^(\d+)\.[a-z0-9]+$/.exec(name);
+    if (normalMatch) {
+      const id = Number(normalMatch[1]);
+      return Number.isInteger(id) && id > 0 && validIds.has(id);
+    }
+    return false;
   }
 }

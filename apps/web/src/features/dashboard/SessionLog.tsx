@@ -1,5 +1,8 @@
+import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import type { ScheduledSessionWithRsvps, SessionListItem } from '@campfire/schema';
+import { useAuth } from '../../app/auth';
+import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
 import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -25,6 +28,11 @@ export function SessionLog({
   scheduleSync: 'live' | 'stale' | 'offline';
 }) {
   useFormattingLocale();
+  const { me } = useAuth();
+  const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
+  const mine = nextSession ? findViewerRsvp(nextSession.rsvps, myIds) : undefined;
+  const rsvpCue = dashboardRsvpCue(mine?.status);
+
   const sorted = [...sessions].sort((a, b) => b.number - a.number);
   const latest3 = sorted.slice(0, 3);
 
@@ -89,8 +97,40 @@ export function SessionLog({
               </span>
             )}
           </span>
-          <span className="text-muted" style={{ fontSize: 'var(--type-meta)', marginLeft: 'auto', flex: 'none' }}>
-            RSVP →
+          {/*
+            Issue #785: surface the viewer's saved RSVP. Only unanswered keeps
+            the urgent "RSVP needed →" cue; answered states show the status plus
+            a quieter Change RSVP affordance.
+          */}
+          <span
+            data-testid="dashboard-rsvp-cue"
+            data-rsvp-unanswered={rsvpCue.unanswered ? 'true' : 'false'}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-end',
+              gap: 2,
+              marginLeft: 'auto',
+              flex: 'none',
+              textAlign: 'right',
+              fontSize: 'var(--type-meta)',
+            }}
+          >
+            <span
+              className={rsvpCue.unanswered ? undefined : 'text-muted'}
+              style={{
+                color: rsvpCue.unanswered ? 'var(--color-accent-2-300)' : undefined,
+                fontWeight: rsvpCue.unanswered ? 600 : 400,
+              }}
+            >
+              {rsvpCue.statusLabel}
+              {rsvpCue.unanswered ? ' →' : ''}
+            </span>
+            {rsvpCue.changeLabel && (
+              <span className="text-muted" style={{ fontSize: 11 }}>
+                {rsvpCue.changeLabel} →
+              </span>
+            )}
           </span>
         </Link>
       )}

@@ -16,6 +16,7 @@ import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
+import { viewerRsvpIds } from '../../lib/dashboardRsvp';
 
 const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> = [
   { status: 'yes', label: 'In', icon: '✓' },
@@ -32,11 +33,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [showAddForm, setShowAddForm] = useState(false);
 
   // RSVP rows store the server-side user id: String(users.id) for real users,
-  // `dev:<name>` on the DEV_AUTH header path. Match either.
-  const myIds = useMemo(() => {
-    if (!me) return new Set<string>();
-    return new Set([String(me.user.id), `dev:${me.user.username}`]);
-  }, [me]);
+  // `dev:<name>` on the DEV_AUTH header path. Match either (shared with #785).
+  const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
 
   // Core content (the schedule list) loads on its own. The optional calendar-feed
   // panel loads independently below in <FeedCard> so a feed outage can never blank

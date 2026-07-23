@@ -11,6 +11,10 @@
 /** Irregular gerund spellings that do not follow the default -ing rules. */
 const SPECIAL_GERUNDS: Record<string, string> = {
   cancel: 'Cancelling',
+  submit: 'Submitting',
+  commit: 'Committing',
+  permit: 'Permitting',
+  refer: 'Referring',
 };
 
 /**
