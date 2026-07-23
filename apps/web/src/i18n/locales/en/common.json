@@ -8,6 +8,8 @@
     "loading": "Loading…",
     "saving": "Saving…",
     "retry": "Retry",
-    "undated": "Undated"
+    "undated": "Undated",
+    "moreActions": "More actions",
+    "pageActionsMenu": "Page actions"
   }
 }

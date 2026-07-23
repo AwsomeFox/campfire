@@ -12,6 +12,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
+import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
 import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
@@ -107,14 +108,18 @@ export default function FactionListPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="black-flag" size={18} /> Factions</h1>
-          {isDm && !creating && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-              + New faction
-            </Btn>
-          )}
-        </div>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="black-flag" size={18} />}
+          title="Factions"
+          primaryAction={
+            isDm && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New faction
+              </Btn>
+            ) : undefined
+          }
+        />
 
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">

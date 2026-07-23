@@ -14,6 +14,7 @@ import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -121,22 +122,24 @@ export default function PartyPage() {
   // allows it, so don't cap the button at one owned character (issue #129).
   const canCreate = isDm || role === 'player';
 
+  const secondaryActions: PageHeaderSecondaryAction[] =
+    isDm && !awarding && characters.length > 0
+      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }]
+      : [];
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-extrabold text-white">Party</h1>
-        <div className="flex-1" />
-        {isDm && !awarding && characters.length > 0 && (
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAwardingOpen(true)}>
-            ✦ Award XP
-          </Btn>
-        )}
-        {canCreate && !creating && characters.length > 0 && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-            + New character
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Party"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          canCreate && !creating && characters.length > 0 ? (
+            <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              + New character
+            </Btn>
+          ) : undefined
+        }
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

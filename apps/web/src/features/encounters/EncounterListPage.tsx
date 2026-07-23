@@ -23,7 +23,9 @@ import {
   ENCOUNTER_SESSION_LABEL,
 } from '../../components/formFieldLabels';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
 import { GameIcon } from '../../components/GameIcon';
 import {
   ENCOUNTER_NAME_HELP,
@@ -54,6 +56,8 @@ export default function EncounterListPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [draftOpen, setDraftOpen] = useState(false);
+  const draftAvailable = useDraftWithAiAvailable(id);
 
   const load = useCallback(async () => {
     setError(null);
@@ -79,18 +83,30 @@ export default function EncounterListPage() {
     );
   }
 
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAvailable
+    ? [{ key: 'draft', label: 'Draft with AI', onClick: () => setDraftOpen(true) }]
+    : [];
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-extrabold text-white">Encounters</h1>
-        <div className="flex-1" />
-        <DraftWithAiButton campaignId={id} target="encounter" />
-        {isDm && !creating && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-            + New encounter
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Encounters"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          isDm && !creating ? (
+            <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              + New encounter
+            </Btn>
+          ) : undefined
+        }
+      />
+      <DraftWithAiButton
+        campaignId={id}
+        target="encounter"
+        showTrigger={false}
+        open={draftOpen}
+        onOpenChange={setDraftOpen}
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

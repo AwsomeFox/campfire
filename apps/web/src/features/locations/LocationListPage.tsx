@@ -3,14 +3,16 @@
  * (~1259-1271): a stacked row list, name + status chip + DM-secret tag, body preview.
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { LocationStatusLabel } from '../../components/LocationStatusLabel';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
 import { GameIcon } from '../../components/GameIcon';
 
 function firstLine(body: string): string {
@@ -67,6 +69,8 @@ export default function LocationListPage() {
   const [newParentId, setNewParentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [draftOpen, setDraftOpen] = useState(false);
+  const draftAvailable = useDraftWithAiAvailable(id);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -83,6 +87,16 @@ export default function LocationListPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  const secondaryActions: PageHeaderSecondaryAction[] = useMemo(() => {
+    const actions: PageHeaderSecondaryAction[] = [
+      { key: 'npcs', label: 'NPCs →', href: `/c/${id}/npcs` },
+    ];
+    if (draftAvailable) {
+      actions.push({ key: 'draft', label: 'Draft with AI', onClick: () => setDraftOpen(true) });
+    }
+    return actions;
+  }, [draftAvailable, id]);
 
   async function createLocation() {
     if (!newName.trim()) return;
@@ -136,20 +150,27 @@ export default function LocationListPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2">
-            <GameIcon slug="world" size={18} /> World <span className="text-slate-500 font-normal text-sm">· Locations</span>
-          </h1>
-          <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
-            NPCs →
-          </Link>
-          <DraftWithAiButton campaignId={id} target="location" />
-          {isDm && !creating && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-              + New location
-            </Btn>
-          )}
-        </div>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="world" size={18} />}
+          title="World"
+          subtitle="· Locations"
+          secondaryActions={secondaryActions}
+          primaryAction={
+            isDm && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New location
+              </Btn>
+            ) : undefined
+          }
+        />
+        <DraftWithAiButton
+          campaignId={id}
+          target="location"
+          showTrigger={false}
+          open={draftOpen}
+          onOpenChange={setDraftOpen}
+        />
 
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">
