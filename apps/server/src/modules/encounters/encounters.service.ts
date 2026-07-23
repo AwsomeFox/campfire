@@ -878,31 +878,24 @@ export class EncountersService {
     this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
   }
 
-  /** Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a combatant (issue #115 — non-active PCs are skipped). */
+  /**
+   * Creates the encounter (preparing) and auto-adds every ACTIVE campaign character as a
+   * combatant (issue #115 — non-active PCs are skipped).
+   *
+   * Issue #864: every non-null location/quest/session link is validated against THIS
+   * campaign before any insert, audit, or SSE. Missing and foreign targets share one
+   * non-enumerating 404. The encounter row + auto-added combatants commit in a single
+   * transaction so a mid-create failure never leaves partial rows. REST, MCP,
+   * generate?commit, and AI/proposal creates all funnel through this method.
+   */
   async create(campaignId: number, input: EncounterCreateInput, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    // Validate links BEFORE any write so a bad target never produces an encounter row,
+    // combatants, audit entry, or SSE event (issue #864).
     if (input.locationId != null) await this.assertEntityInCampaign('location', input.locationId, campaignId);
     if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, campaignId);
     if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, campaignId);
+
     const ts = nowIso();
-    const [encounterRow] = await this.db
-      .insert(encounters)
-      .values({
-        campaignId,
-        name: input.name,
-        status: 'preparing',
-        round: 0,
-        turnIndex: 0,
-        // Optional where/why/when links (issue #126). undefined -> null.
-        locationId: input.locationId ?? null,
-        questId: input.questId ?? null,
-        sessionId: input.sessionId ?? null,
-        // Entity-level secrecy (issue #262): start hidden (DM prep) when requested.
-        hidden: input.hidden ?? false,
-        endedAt: null,
-        createdAt: ts,
-        updatedAt: ts,
-      })
-      .returning();
 
     // Auto-add only ACTIVE characters (issue #115). Dead/retired/inactive PCs stay on
     // the roster but are skipped here, so a long campaign's fallen and replaced
@@ -913,39 +906,69 @@ export class EncountersService {
       .select()
       .from(characters)
       .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active'), notDeleted(characters.deletedAt)));
-    // Auto-add the whole party in ONE multi-row INSERT (#72) rather than one INSERT
-    // per character — the row values (including the sequential sortOrder) are computed
-    // in JS and handed to a single `.values([...])`. Behavior is identical to the old
-    // per-row loop; only the round-trip count changes (N -> 1).
-    if (partyRows.length > 0) {
-      const adapter = await this.adapterForCampaign(campaignId);
-      const combatantValues = partyRows.map((character, index) => {
-        const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        const initMod = adapter.initiativeModifier(stats);
-        // Issue #711: seed the combatant's death/temp-HP slice from the persistent
-        // sheet so a stable-but-unconscious PC (carried over from a prior fight via
-        // /end reconciliation) re-enters the next encounter still down, not silently
-        // revived. Defaults hold for pre-#711 sheets (alive + temp-less).
-        return {
-          encounterId: encounterRow.id,
-          kind: 'character' as const,
-          characterId: character.id,
-          name: character.name,
-          initiative: null,
-          initMod,
-          hpCurrent: character.hpCurrent,
-          hpMax: character.hpMax,
-          hpTemp: character.hpTemp,
-          deathState: character.deathState,
-          deathSaveSuccesses: character.deathSaveSuccesses,
-          deathSaveFailures: character.deathSaveFailures,
-          conditions: '[]',
-          ruleEntryId: null,
-          sortOrder: index,
-        };
-      });
-      await this.db.insert(combatants).values(combatantValues);
-    }
+    // Resolve the adapter outside the write transaction — it is a pure campaign lookup
+    // and must not sit between the encounter INSERT and the combatant INSERT.
+    const adapter = partyRows.length > 0 ? await this.adapterForCampaign(campaignId) : null;
+
+    // Encounter + party combatants land in ONE synchronous transaction (issue #864 /
+    // better-sqlite3) so a mid-create failure never leaves a fight without its party
+    // (or combatants without a parent). Audit/SSE fire only after commit.
+    const encounterRow = this.db.transaction((tx) => {
+      const [row] = tx
+        .insert(encounters)
+        .values({
+          campaignId,
+          name: input.name,
+          status: 'preparing',
+          round: 0,
+          turnIndex: 0,
+          // Optional where/why/when links (issue #126). undefined -> null.
+          locationId: input.locationId ?? null,
+          questId: input.questId ?? null,
+          sessionId: input.sessionId ?? null,
+          // Entity-level secrecy (issue #262): start hidden (DM prep) when requested.
+          hidden: input.hidden ?? false,
+          endedAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+
+      // Auto-add the whole party in ONE multi-row INSERT (#72) rather than one INSERT
+      // per character — the row values (including the sequential sortOrder) are computed
+      // in JS and handed to a single `.values([...])`. Behavior is identical to the old
+      // per-row loop; only the round-trip count changes (N -> 1).
+      if (partyRows.length > 0 && adapter) {
+        const combatantValues = partyRows.map((character, index) => {
+          const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
+          const initMod = adapter.initiativeModifier(stats);
+          // Issue #711: seed the combatant's death/temp-HP slice from the persistent
+          // sheet so a stable-but-unconscious PC (carried over from a prior fight via
+          // /end reconciliation) re-enters the next encounter still down, not silently
+          // revived. Defaults hold for pre-#711 sheets (alive + temp-less).
+          return {
+            encounterId: row.id,
+            kind: 'character' as const,
+            characterId: character.id,
+            name: character.name,
+            initiative: null,
+            initMod,
+            hpCurrent: character.hpCurrent,
+            hpMax: character.hpMax,
+            hpTemp: character.hpTemp,
+            deathState: character.deathState,
+            deathSaveSuccesses: character.deathSaveSuccesses,
+            deathSaveFailures: character.deathSaveFailures,
+            conditions: '[]',
+            ruleEntryId: null,
+            sortOrder: index,
+          };
+        });
+        tx.insert(combatants).values(combatantValues).run();
+      }
+      return row;
+    });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -962,12 +985,16 @@ export class EncountersService {
     return this.getWithCombatantsOrThrow(encounterRow.id, role);
   }
 
-  /** Guard that a link target exists in the same campaign as the encounter (issue #126). */
+  /**
+   * Guard that a link target exists in the same campaign as the encounter (issues #126 /
+   * #864). Missing and foreign (other-campaign) targets share one non-enumerating 404 —
+   * the response never reveals whether the id exists elsewhere.
+   */
   private async assertEntityInCampaign(kind: 'location' | 'quest' | 'session', id: number, campaignId: number): Promise<void> {
     const table = kind === 'location' ? locations : kind === 'quest' ? quests : sessions;
     const [row] = await this.db.select({ campaignId: table.campaignId }).from(table).where(eq(table.id, id)).limit(1);
     if (!row || row.campaignId !== campaignId) {
-      throw new NotFoundException(`${kind} ${id} not found in campaign ${campaignId}`);
+      throw new NotFoundException(`${kind} not found`);
     }
   }
 
