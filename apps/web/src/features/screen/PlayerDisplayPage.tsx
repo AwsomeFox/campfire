@@ -599,7 +599,7 @@ export default function PlayerDisplayPage() {
           ) : (
             <span className="cf-chip">Location unset</span>
           )}
-          <span className="cf-chip">{summary.campaign.sessionCount} session{summary.campaign.sessionCount === 1 ? '' : 's'}</span>
+          <span className="cf-chip">{summary.campaign.sessionCount > 0 ? `${summary.campaign.sessionCount} session${summary.campaign.sessionCount === 1 ? '' : 's'}` : 'No sessions yet'}</span>
         </div>
         {syncMessage && (
           <p
