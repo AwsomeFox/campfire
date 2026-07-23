@@ -32,6 +32,9 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
+import { RouteChangeFocus } from './RouteChangeFocus';
+import { SkipToMainLink } from './SkipToMainLink';
+import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 
 function FlameMark({ size = 20 }: { size?: number }) {
@@ -315,14 +318,21 @@ function LayoutContent() {
   const formattingLocale = useFormattingLocale();
   const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
   // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
   // and confuse campaign lookups. Treat invalid params as "outside campaign".
   // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
-  const campaignId = parseCampaignIdParam(params.campaignId);
+  // Unmatched `/c/:id/...` splats (404) do not populate `params.campaignId`; read
+  // the id from the pathname so chrome + document titles stay campaign-scoped.
+  const campaignIdFromParams = parseCampaignIdParam(params.campaignId);
+  const campaignIdFromPath = useMemo(() => {
+    const match = location.pathname.match(/^\/c\/(\d+)(?:\/|$)/);
+    return match ? parseCampaignIdParam(match[1]) : undefined;
+  }, [location.pathname]);
+  const campaignId = campaignIdFromParams ?? campaignIdFromPath;
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
-  const navigate = useNavigate();
-  const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -334,6 +344,7 @@ function LayoutContent() {
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
   );
   const menuRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
 
   // Issue #434: clear encounter/dice live-region text when the signed-in user or
   // active campaign changes, and again when this chrome unmounts (→ /login).
@@ -636,6 +647,7 @@ function LayoutContent() {
   return (
     <AiDmLiveActivityProvider value={liveActivity}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
+      <SkipToMainLink mainRef={mainRef} />
       {/* Desktop sidebar */}
       {(campaignId !== undefined || onAdminRoute) && (
         <aside
@@ -858,7 +870,13 @@ function LayoutContent() {
           </div>
         )}
 
-        <main className="flex-1 w-full pb-20 md:pb-10">
+        <main
+          ref={mainRef}
+          id={MAIN_CONTENT_ID}
+          tabIndex={-1}
+          className="flex-1 w-full pb-20 md:pb-10"
+        >
+          <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
             <Outlet />
