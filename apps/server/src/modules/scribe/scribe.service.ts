@@ -202,9 +202,21 @@ export class ScribeService implements OnApplicationBootstrap {
     const resolvedInbox = await this.notes.listInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encounters = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
+    // Pull the combat-log event trail for encounters that were actually run (issue #1068).
+    // Preparing encounters have no meaningful log; skip the DB work. The scribe runs as the
+    // DM/system actor, so no viewer role is passed — the full (unredacted) DM view is correct.
+    const foughtEncounterIds = new Set(
+      encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
+    );
+    const events = await Promise.all(
+      encounterList.map((e) =>
+        foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
+      ),
+    );
+    const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
     const source: RecapDraftSource = {
       resolvedInbox: resolvedInbox.map((n: Note) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-      encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants })),
+      encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
     };
     const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
     if (fought.length === 0 && source.resolvedInbox.length === 0) return null;
