@@ -16,10 +16,10 @@ import type { DiceRoll } from '@campfire/schema';
 
 export type D20Flavor = 'crit' | 'fumble';
 
-/** True when `term` is a (possibly signed, keep/drop) d20 die term — not d200. */
+/** True when `term` is a (keep/drop) d20 die term — optional leading `-`, not `+`, not d200. */
 function isD20Term(term: string): boolean {
   // Allow count (`2d20kh1`), implicit count (`d20`), and a leading minus (`-1d20`).
-  // `(?!\d)` after `d20` excludes `d200` / `1d200`.
+  // Leading `+` is not accepted. `(?!\d)` after `d20` excludes `d200` / `1d200`.
   return /^-?\d*d20(?!\d)/i.test(term);
 }
 

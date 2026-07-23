@@ -21,8 +21,8 @@ export interface Roller {
   rolling: boolean;
 }
 
-/** Re-export the shared helper so existing imports from this module keep working. */
-export { d20Flavor } from './d20Flavor';
+/** Re-export for existing import sites (same binding as the local import). */
+export { d20Flavor };
 
 export function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
   last: DiceRoll | null;
