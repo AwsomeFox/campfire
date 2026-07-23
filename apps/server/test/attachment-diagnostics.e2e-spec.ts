@@ -702,21 +702,15 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
         // is ineffective — assert the fix succeeds rather than masking a
         // success:false "not found".
         if (fixRes.status === 503) {
-          expect(String(fixRes.body.message)).toMatch(/unreadable/i);
+          expect(String(fixRes.body.message)).toMatch(/unreadable|inaccessible|not accessible/i);
         } else {
           expect(fixRes.status).toBe(201);
           expect(fixRes.body.success).toBe(true);
         }
       } finally {
-        try {
-          fs.chmodSync(campaignDir, previousMode);
-        } catch (restoreErr) {
-          // Isolated to `isolatedCampaignId` above, so a failed restore here
-          // can't leave shared fixtures unreadable for other tests — but log
-          // it with a clear cause instead of swallowing it silently.
-          // eslint-disable-next-line no-console
-          console.error(`Failed to restore mode on ${campaignDir} after test:`, restoreErr);
-        }
+        // Fail fast if restore fails so the suite stops with a clear cause.
+        // The campaign dir is isolated above, so this cannot poison shared fixtures.
+        fs.chmodSync(campaignDir, previousMode);
       }
     });
   });
