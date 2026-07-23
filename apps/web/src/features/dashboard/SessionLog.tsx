@@ -17,9 +17,14 @@ function firstLinePlain(text: string): string {
 
 function rsvpSummary(rsvps: ScheduledSessionWithRsvps['rsvps']): string | null {
   if (rsvps.length === 0) return null;
-  const yes = rsvps.filter((r) => r.status === 'yes').length;
-  const maybe = rsvps.filter((r) => r.status === 'maybe').length;
-  const no = rsvps.filter((r) => r.status === 'no').length;
+  let yes = 0;
+  let maybe = 0;
+  let no = 0;
+  for (const r of rsvps) {
+    if (r.status === 'yes') yes += 1;
+    else if (r.status === 'maybe') maybe += 1;
+    else if (r.status === 'no') no += 1;
+  }
   const parts: string[] = [];
   if (yes) parts.push(`${yes} in`);
   if (maybe) parts.push(`${maybe} maybe`);

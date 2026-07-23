@@ -17,7 +17,9 @@ export type ScheduleWindowFields = {
 export function scheduleEndsAtMs(scheduledAt: string, durationMinutes: number): number {
   const start = Date.parse(scheduledAt);
   if (!Number.isFinite(start)) return Number.NaN;
-  const minutes = Number.isFinite(durationMinutes) ? durationMinutes : 0;
+  // Clamp to schema bounds so legacy/invalid durations cannot misclassify phases.
+  const raw = Number.isFinite(durationMinutes) ? durationMinutes : 0;
+  const minutes = Math.min(24 * 60, Math.max(0, raw));
   return start + minutes * 60_000;
 }
 
@@ -70,7 +72,11 @@ export function partitionSchedules<T extends ScheduleWindowFields>(
     else if (phase === 'upcoming') upcoming.push(s);
     else past.push(s);
   }
-  past.reverse();
+  const byStartAsc = (a: T, b: T) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt);
+  const byStartDesc = (a: T, b: T) => Date.parse(b.scheduledAt) - Date.parse(a.scheduledAt);
+  inProgress.sort(byStartAsc);
+  upcoming.sort(byStartAsc);
+  past.sort(byStartDesc);
   return { inProgress, upcoming, past };
 }
 

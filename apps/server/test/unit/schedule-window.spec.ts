@@ -30,12 +30,18 @@ describe('schedule window helpers (issue #818)', () => {
 
   it('keeps absolute duration across a US daylight-saving spring-forward', () => {
     // Local wall clocks spring forward, but the stored ISO UTC window is unchanged.
+    const prevTz = process.env.TZ;
     process.env.TZ = 'America/New_York';
-    const dstStart = '2026-03-08T06:30:00.000Z'; // 01:30 EST → spans the 02:00 gap
-    const ms = scheduleEndsAtMs(dstStart, 180);
-    expect(ms - Date.parse(dstStart)).toBe(180 * 60_000);
-    expect(schedulePhase(dstStart, 180, Date.parse(dstStart) + 90 * 60_000)).toBe('in_progress');
-    expect(schedulePhase(dstStart, 180, Date.parse(dstStart) + 180 * 60_000)).toBe('past');
+    try {
+      const dstStart = '2026-03-08T06:30:00.000Z'; // 01:30 EST → spans the 02:00 gap
+      const ms = scheduleEndsAtMs(dstStart, 180);
+      expect(ms - Date.parse(dstStart)).toBe(180 * 60_000);
+      expect(schedulePhase(dstStart, 180, Date.parse(dstStart) + 90 * 60_000)).toBe('in_progress');
+      expect(schedulePhase(dstStart, 180, Date.parse(dstStart) + 180 * 60_000)).toBe('past');
+    } finally {
+      if (prevTz === undefined) delete process.env.TZ;
+      else process.env.TZ = prevTz;
+    }
   });
 
   it('partitions same-day, overlapping, and past schedules', () => {

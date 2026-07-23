@@ -790,8 +790,9 @@ export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaign
   .partial()
   .required({ scheduledAt: true })
   .extend({
-    // Planned game nights stay at least 15 minutes; updates may shrink to 0 to end now.
-    durationMinutes: z.number().int().min(15).max(24 * 60).optional(),
+    // Planned game nights stay at least 15 minutes; keep the 240-minute default when
+    // callers omit the field (updates may shrink to 0 via ScheduledSessionUpdate).
+    durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
   });
 export const ScheduledSessionUpdate = ScheduledSession.omit({
   id: true,
