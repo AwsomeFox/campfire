@@ -168,7 +168,7 @@ export class ExportService {
       this.sessions.listRecapsForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.notes.listForCampaign(campaignId, user, role, {}),
-      this.comments.listForCampaign(campaignId, role, { authorUserId: user.id }),
+      this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
       this.audit.listForCampaign(campaignId, 500),
       this.proposals.listForCampaign(campaignId, undefined),
