@@ -121,12 +121,19 @@ test.describe('sign out (issue #506)', () => {
     const meStarted = new Promise<void>((resolve) => {
       mePending = resolve;
     });
+    let meDone!: () => void;
+    const meSettled = new Promise<void>((resolve) => {
+      meDone = resolve;
+    });
     let holdNext = true;
     await page.route('**/api/v1/me', async (route) => {
       if (holdNext && route.request().method() === 'GET') {
         holdNext = false;
         mePending();
         await meGate;
+        await route.continue();
+        meDone();
+        return;
       }
       await route.continue();
     });
@@ -141,8 +148,9 @@ test.describe('sign out (issue #506)', () => {
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 
     releaseMe();
-    // Allow the late refresh() to settle; logout epoch must discard it.
-    await page.waitForTimeout(300);
+    // Wait for the gated /me to finish (not a fixed sleep) so the epoch discard
+    // is asserted after the late refresh() has actually settled.
+    await meSettled;
     await expect(page).toHaveURL(/\/login/);
     await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();

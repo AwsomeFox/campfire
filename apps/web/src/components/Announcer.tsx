@@ -39,7 +39,10 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const clear = useCallback<ClearFn>(() => {
-    if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
     setPolite('');
     setAssertive('');
   }, []);

@@ -121,7 +121,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
-    void clearApiCache().finally(() => queryClient.clear());
+    // Drop in-memory campaign data immediately; SW cache purge stays best-effort.
+    queryClient.clear();
+    // If the first /me was still in flight, refresh() will early-return — mark
+    // ready so AuthedLayout can leave the splash and show the logged-out UI.
+    setReady(true);
+    void clearApiCache();
   }, []);
 
   useAuthStorageListener(handleMultiTabSignOut);
@@ -137,7 +142,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     // Sign-out won the race: do not apply a late /me (live or snapshot restore).
-    if (epoch !== logoutEpochRef.current) return;
+    // Still mark ready — otherwise a first-load /me cancelled by multi-tab
+    // sign-out leaves AuthedLayout stuck on Splash forever.
+    if (epoch !== logoutEpochRef.current) {
+      setReady(true);
+      return;
+    }
 
     const snapshot = readMeSnapshot<Me>();
     const decision = decideAuthOutcome(outcome, {
@@ -151,7 +161,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       queryClient.clear();
     }
     // Re-check after the cache await — logout may have started meanwhile.
-    if (epoch !== logoutEpochRef.current) return;
+    if (epoch !== logoutEpochRef.current) {
+      setReady(true);
+      return;
+    }
 
     if (decision.shouldClearSnapshot) {
       clearMeSnapshot();
@@ -247,8 +260,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setConnectionError(false);
     applyAccentColor(null);
     applyReadingPreference(document.documentElement, 'default');
-    // Match handleMultiTabSignOut: purge is best-effort and must not gate UI.
-    void clearApiCache().finally(() => queryClient.clear());
+    // Clear React Query synchronously so a fast shared-device re-login cannot
+    // read the prior account's in-memory campaign cache. SW Cache Storage purge
+    // stays fire-and-forget (must never block sign-out).
+    queryClient.clear();
+    setReady(true);
+    void clearApiCache();
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
