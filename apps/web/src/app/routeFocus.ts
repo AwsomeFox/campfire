@@ -229,7 +229,13 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   if (!tryFocusHeading()) {
     const focusMainIfStillHeadless = () => {
       if (settled || main.querySelector('h1')) return;
-      settleOnTarget(main);
+      publishTitle();
+      if (moveFocus) {
+        scheduleFrame(() => {
+          if (shouldPreserveFocusInsideMain(main, document)) return;
+          if (!main.querySelector('h1')) focusProgrammatically(main);
+        });
+      }
     };
 
     // Many list screens have no h1 — do not leave focus on nav chrome for seconds.
@@ -238,8 +244,12 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     });
 
     timeout = window.setTimeout(() => {
-      observer?.disconnect();
-      focusMainIfStillHeadless();
+      if (settled) return;
+      if (main.querySelector('h1')) {
+        tryFocusHeading();
+        return;
+      }
+      settleOnTarget(main);
     }, 10_000);
   }
 
