@@ -189,12 +189,24 @@ export class CharactersService {
 
     const touchedEncounterIds = new Set<number>();
     let campaignId = opts?.campaignId;
+    // Issue #466: when the sheet mirrors into a live combatant, stamp the sheet's
+    // current updatedAt as the CAS token so a later re-end knows this sync.
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
       await this.db
         .update(combatants)
-        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .set({
+          hpCurrent: nextCurrent,
+          hpMax: nextMax,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
         .where(eq(combatants.id, combatant.id));
       touchedEncounterIds.add(encounterId);
       campaignId ??= encCampaignId;
