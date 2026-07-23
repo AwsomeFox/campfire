@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { ConflictException } from '@nestjs/common';
-import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
+import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 

@@ -3150,7 +3150,10 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // The primary exfiltration fix binds the API key to its own scope's endpoint (see
 // AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
 // what an override endpoint may even look like. `http` is permitted so self-hosted
-// local model servers (e.g. http://localhost:11434) keep working.
+// local model servers (e.g. http://localhost:11434) can be expressed — but the server
+// applies a separate SSRF host policy (issue #1064): cloud metadata / link-local are
+// always blocked, and private/loopback hosts require an operator opt-in
+// (`AI_PROVIDER_ALLOW_PRIVATE_HOSTS`) or an explicit host allowlist.
 const AiProviderBaseUrl = z
   .string()
   .trim()

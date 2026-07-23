@@ -148,6 +148,9 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `OPENAI_API_KEY` | *(unset)* | Fallback credential for a configured `openai` / OpenAI-compatible server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
 | `ANTHROPIC_API_KEY` | *(unset)* | Fallback credential for a configured `anthropic` server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
+| `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | *(unset)* | Set to `1` to allow private/loopback AI provider `baseUrl` hosts (local Ollama / llama.cpp / LM Studio). Cloud metadata / link-local stay blocked. See docs for the safer per-host allowlist alternative |
+| `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | *(unset)* | Optional comma-separated hostname allowlist for provider `baseUrl` |
+| `AI_PROVIDER_BASEURL_DENY_HOSTS` | *(unset)* | Optional comma-separated hostname denylist for provider `baseUrl` |
 | `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
 | `BACKUP_SCHEDULE_ENABLED` | *(unset)* | Set to `1` to enable periodic on-disk backups (see **Backup & restore** below). Off by default |
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when `BACKUP_SCHEDULE_ENABLED=1`) |
