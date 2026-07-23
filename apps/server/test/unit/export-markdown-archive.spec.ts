@@ -45,7 +45,11 @@ function buildService(entities: {
 }): ExportService {
   const noop = async () => [];
   const campaign = campaignRow();
+  const emptyDbQuery = {
+    from: () => ({ where: () => ({ limit: async () => [] }) }),
+  };
   return new ExportService(
+    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
     { getOrThrow: async () => campaign } as any,
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any,
     { listForCampaign: async () => entities.npcs ?? [] } as any,
