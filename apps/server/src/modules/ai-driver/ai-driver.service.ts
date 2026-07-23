@@ -276,6 +276,11 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   'award_xp',
   'level_up_character',
+  // economy / loot — the AI DM can award treasure and items post-encounter (#1021),
+  // consistent with award_xp already being live-play allowed.
+  'adjust_treasury',
+  'add_inventory_item',
+  'update_inventory_item',
   // scene / exploration
   'reveal_map_region',
   'check_objective',
