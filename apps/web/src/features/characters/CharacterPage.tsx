@@ -1963,9 +1963,11 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
         <span className="block">Imported from D&amp;D Beyond</span>
         <span className="block text-[11px] text-slate-500">
           One-time import — not synced.{' '}
-          {/* Visible selectable target so clipboard-failure recovery highlights the id. */}
-          <span id={sourceIdEl} title="D&D Beyond character id">
-            id {sourceId}
+          {/* Selectable target must contain exactly `text` (raw id) — not a
+              prefixed label — so manual recovery after a clipboard failure
+              copies the same payload as writeText. */}
+          <span title="D&D Beyond character id">
+            id <span id={sourceIdEl}>{sourceId}</span>
           </span>
           {isBareId && (
             <>

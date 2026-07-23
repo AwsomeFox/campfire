@@ -218,8 +218,8 @@ function CopyRequest({ text }: { text: string }) {
   const textId = useId();
   return (
     <div className="cf-inset p-2 mt-1.5 space-y-1">
-      <p id={textId} className="text-[11px] text-[var(--color-neutral-400)] italic">
-        “{text}”
+      <p className="text-[11px] text-[var(--color-neutral-400)] italic">
+        “<span id={textId}>{text}</span>”
       </p>
       <CopyControl
         text={text}
