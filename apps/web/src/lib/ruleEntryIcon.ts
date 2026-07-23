@@ -117,7 +117,7 @@ export function ruleEntryIconSlug(entry: Pick<RuleEntry, 'type' | 'dataJson' | '
   if (entry.iconSlug) return entry.iconSlug;
 
   const data = readData(entry.dataJson);
-  let slug: string | null = null;
+  let slug: string | null;
 
   switch (entry.type) {
     case 'spell': {

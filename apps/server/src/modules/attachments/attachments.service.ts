@@ -750,7 +750,7 @@ export class AttachmentsService {
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const filePath = path.join(dirPath, entry.name);
-        let size = 0;
+        let size: number;
         try {
           size = fs.statSync(filePath).size;
         } catch {

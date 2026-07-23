@@ -15,8 +15,7 @@ type InventoryItemCreateInput = z.infer<typeof InventoryItemCreate>;
 type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
-const COINS = ['cp', 'sp', 'ep', 'gp', 'pp'] as const;
-type CoinKey = (typeof COINS)[number];
+type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   return {

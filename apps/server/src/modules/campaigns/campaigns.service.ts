@@ -1564,7 +1564,6 @@ export class CampaignsService {
       // files were renamed away (consumed); on failure the tx rolled back and
       // the staged files are orphans. Either way nothing should remain here.
       cleanupStagingDir(stagingDir);
-      stagingDir = null;
     }
   }
 

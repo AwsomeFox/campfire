@@ -28,11 +28,6 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
   const draft = (body: Record<string, unknown>, headers = dm) =>
     request(h.server).post(api(campaignId)).set(headers).send(body);
 
-  const listProposals = (status?: string) =>
-    request(h.server)
-      .get(`/api/v1/campaigns/${campaignId}/proposals${status ? `?status=${status}` : ''}`)
-      .set(dm);
-
   it('drafts an NPC as a PENDING proposal — nothing is written to canon directly', async () => {
     const before = await request(h.server).get(`/api/v1/campaigns/${campaignId}/npcs`).set(dm);
     const beforeCount = before.body.length;
