@@ -65,14 +65,19 @@ export default defineConfig({
         // ...except backend routes, which must never resolve to the shell.
         navigateFallbackDenylist: [/^\/api/, /^\/healthz/, /^\/readyz/],
         cleanupOutdatedCaches: true,
+        // Issue #730: on activate, drop the legacy campfire-api bucket and scrub
+        // any sensitive URLs that an older worker may have cached.
+        importScripts: ["sw-sensitive-purge.js"],
         runtimeCaching: [
           {
-            // Issue #879: SSE streams, backups, exports, admin/credential
-            // surfaces, and unbounded attachment downloads must never enter
-            // Cache Storage. NetworkOnly means Workbox does not clone/consume
-            // the body for a cache write (critical for never-ending event
-            // streams). Matchers live in lib/pwaCachePolicy.ts and are embedded
-            // into sw.js via Function.prototype.toString().
+            // Issues #879 / #730: SSE streams, backups, exports, admin/credential
+            // / capability-token surfaces, and unbounded attachment downloads must
+            // never enter Cache Storage. NetworkOnly means Workbox does not
+            // clone/consume the body for a cache write (critical for never-ending
+            // event streams) and offline archive requests fail at the network
+            // boundary instead of replaying a stale zip/JSON. Matchers live in
+            // lib/pwaCachePolicy.ts and are embedded into sw.js via
+            // Function.prototype.toString().
             urlPattern: matchNetworkOnlyApi,
             handler: "NetworkOnly",
           },
@@ -109,12 +114,13 @@ export default defineConfig({
             //
             // PROVEN-LIVE EXCLUSION (issue #579): `/me` and `/auth/*` are matched
             // by the NetworkOnly rule above. cacheWillUpdateJson additionally
-            // rejects text/event-stream, Content-Disposition: attachment, and
-            // bodies over API_JSON_MAX_BYTES so a mis-routed download can never
-            // poison the offline JSON set (issue #879). Attachment bytes and
-            // role/fog-specific VTT map renders stay out of this matcher too
-            // (secrecy leak #463 — a previously revealed map must not be served
-            // offline after the DM re-hides it).
+            // rejects text/event-stream, Content-Disposition: attachment,
+            // Cache-Control: no-store, and bodies over API_JSON_MAX_BYTES so a
+            // mis-routed download can never poison the offline JSON set
+            // (issues #879 / #730). Attachment bytes and role/fog-specific VTT
+            // map renders stay out of this matcher too (secrecy leak #463).
+            // Issue #730 further allowlists only campaign/entity/rule JSON reads
+            // rather than matching every remaining API GET.
             urlPattern: matchApiJsonCache,
             handler: "NetworkFirst",
             options: {

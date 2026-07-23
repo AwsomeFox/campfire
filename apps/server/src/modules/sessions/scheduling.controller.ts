@@ -162,7 +162,8 @@ export class CalendarFeedController {
       .set({
         'Content-Type': 'text/calendar; charset=utf-8',
         'Content-Disposition': 'inline; filename="campfire.ics"',
-        'Cache-Control': 'no-store',
+        // Issue #730: capability-token ICS feeds must never be stored by caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(ics);
   }
