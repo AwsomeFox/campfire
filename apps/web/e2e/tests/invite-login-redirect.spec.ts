@@ -84,7 +84,7 @@ test.describe('issue #478 - invite login redirect', () => {
     );
 
     await page.getByLabel('Username').fill('existing');
-    await page.getByLabel('Password').fill('password123');
+    await page.getByLabel('Password', { exact: true }).fill('password123');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
     await expect(page).toHaveURL(new RegExp(`${JOIN_PATH.replace(/\//g, '\\/')}$`));
@@ -129,7 +129,7 @@ test.describe('issue #478 - invite login redirect', () => {
     });
 
     await page.getByLabel('Username').fill('existing');
-    await page.getByLabel('Password').fill('password123');
+    await page.getByLabel('Password', { exact: true }).fill('password123');
     authed = true;
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
