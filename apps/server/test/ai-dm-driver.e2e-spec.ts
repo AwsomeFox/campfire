@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 
 /**
@@ -329,5 +330,46 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     const res = await h.sendMessage(campaignId, { input: 'begin' });
     expect(res.status).toBe(201);
     expect(res.body.narration).toBe('Fresh seat, no stranded handback.');
+  });
+
+  it('teardown mid-turn detaches the orphaned turn so a replacement session can run cleanly', async () => {
+    const campaignId = await h.createCampaign('Teardown Mid-Turn Race');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const driver = h.ctx.app.get(AiDriverService);
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
+
+    // On the first streamed token, tear down — same shape as a driver→off mid-narration.
+    let toreDown = false;
+    const deltas: string[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e: AiDmStreamEvent) => {
+      if (e.type === 'narration.delta') {
+        deltas.push(e.text);
+        if (!toreDown) {
+          toreDown = true;
+          driver.teardownSession(campaignId);
+        }
+      }
+    });
+
+    h.script({ text: 'ABCDEFGH', streamChunks: 8 });
+    const orphaned = await driver.runTurn(campaignId, user, 'go');
+    sub.unsubscribe();
+
+    expect(toreDown).toBe(true);
+    expect(orphaned.stopReason).toBe('aborted');
+    // Detached after the first delta — remaining chunks must not reach the SSE channel.
+    expect(deltas.length).toBe(1);
+
+    // Map holds a fresh idle session; a follow-up turn must not 409 against the orphan.
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('running');
+
+    h.script({ text: 'Clean seat after mid-turn teardown.' });
+    const resumed = await h.sendMessage(campaignId, { input: 'again' });
+    expect(resumed.status).toBe(201);
+    expect(resumed.body.narration).toBe('Clean seat after mid-turn teardown.');
   });
 });
