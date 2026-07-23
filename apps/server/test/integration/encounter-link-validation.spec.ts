@@ -20,15 +20,26 @@ import { makeTempDataDir } from './fixtures';
  */
 describe('encounter link validation on create (real SQLite, issue #864)', () => {
   let dataDir: string;
+  let sqliteHandle: { close: () => void } | null = null;
 
   afterEach(() => {
-    if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
+    try {
+      sqliteHandle?.close();
+    } catch {
+      /* already closed */
+    }
+    sqliteHandle = null;
+    if (dataDir) {
+      fs.rmSync(dataDir, { recursive: true, force: true });
+      dataDir = '';
+    }
   });
 
   const dmUser: RequestUser = { id: 'dev:dm', name: 'DM', serverRole: 'admin', devRole: 'dm' };
 
   function build() {
-    const { orm } = openDatabase(dataDir);
+    const { orm, sqlite } = openDatabase(dataDir);
+    sqliteHandle = sqlite;
     const audit = new AuditService(orm);
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
@@ -39,7 +50,7 @@ describe('encounter link validation on create (real SQLite, issue #864)', () => 
     jest.spyOn(events, 'emit').mockImplementation((event) => {
       emitted.push({ type: event.type, campaignId: event.campaignId });
     });
-    return { orm, encountersService, events, emitted };
+    return { orm, sqlite, encountersService, events, emitted };
   }
 
   function seedTwoCampaigns() {

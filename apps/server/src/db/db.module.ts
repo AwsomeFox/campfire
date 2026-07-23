@@ -1503,9 +1503,9 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
 
   const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
   const has = (name: string) => columns.some((c) => c.name === name);
-  // Pre-0019 DBs lack the link columns entirely — nothing to repair until
-  // migrateEncountersTableForLinks has run (it always precedes this entry).
-  if (!has('location_id') || !has('quest_id') || !has('session_id')) return;
+  // Pre-0019 DBs may lack some/all link columns. Repair whichever exist —
+  // each UPDATE below is independently gated on its column.
+  if (!has('location_id') && !has('quest_id') && !has('session_id')) return;
 
   const hasLocations = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'").get();
   const hasQuests = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quests'").get();
@@ -1513,7 +1513,7 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
 
   // Clear each link independently so a single bad field never wipes the other two
   // valid attachments on the same encounter.
-  if (hasLocations) {
+  if (has('location_id') && hasLocations) {
     sqlite.exec(`
       UPDATE encounters
       SET location_id = NULL
@@ -1525,7 +1525,7 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
         )
     `);
   }
-  if (hasQuests) {
+  if (has('quest_id') && hasQuests) {
     sqlite.exec(`
       UPDATE encounters
       SET quest_id = NULL
@@ -1537,7 +1537,7 @@ function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
         )
     `);
   }
-  if (hasSessions) {
+  if (has('session_id') && hasSessions) {
     sqlite.exec(`
       UPDATE encounters
       SET session_id = NULL
@@ -1705,6 +1705,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
   { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
+  // 0058 reserved / skipped — keep 0059 id stable for DBs that already applied it.
   { name: '0059_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
 
 ];

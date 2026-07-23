@@ -992,8 +992,12 @@ export class EncountersService {
    */
   private async assertEntityInCampaign(kind: 'location' | 'quest' | 'session', id: number, campaignId: number): Promise<void> {
     const table = kind === 'location' ? locations : kind === 'quest' ? quests : sessions;
-    const [row] = await this.db.select({ campaignId: table.campaignId }).from(table).where(eq(table.id, id)).limit(1);
-    if (!row || row.campaignId !== campaignId) {
+    const [row] = await this.db
+      .select({ campaignId: table.campaignId })
+      .from(table)
+      .where(and(eq(table.id, id), eq(table.campaignId, campaignId)))
+      .limit(1);
+    if (!row) {
       throw new NotFoundException(`${kind} not found`);
     }
   }
