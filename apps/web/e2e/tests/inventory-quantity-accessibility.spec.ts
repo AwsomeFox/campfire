@@ -3,9 +3,11 @@ import { expect, test } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
 /**
- * Issue #459 — Inventory Add item must name the quantity spinbutton with an
+ * Issue #459 — Inventory Add item must name the quantity control with an
  * associated Quantity label (not placeholder-only), expose min/max/step plus
  * validation help, announce field errors, and stay axe-clean.
+ * Issue #633 — quantity stays type="text" + inputMode="numeric" so locale
+ * parsing via parseLocalizedInteger is not bypassed by a number input.
  */
 
 test.describe('inventory add-item quantity accessibility (#459)', () => {
@@ -19,8 +21,11 @@ test.describe('inventory add-item quantity accessibility (#459)', () => {
     const form = page.getByTestId('inventory-add-item');
     await expect(form.getByRole('heading', { name: 'Add item' })).toBeVisible();
 
-    const quantity = form.getByRole('spinbutton', { name: 'Quantity' });
+    // textbox (not spinbutton): type="text" + inputMode="numeric" for #633.
+    const quantity = form.getByRole('textbox', { name: 'Quantity' });
     await expect(quantity).toBeVisible();
+    await expect(quantity).toHaveAttribute('type', 'text');
+    await expect(quantity).toHaveAttribute('inputmode', 'numeric');
     await expect(quantity).toHaveAttribute('min', '0');
     await expect(quantity).toHaveAttribute('max', '1000000');
     await expect(quantity).toHaveAttribute('step', '1');
