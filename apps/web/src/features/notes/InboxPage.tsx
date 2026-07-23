@@ -18,6 +18,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
+import { firstGrapheme } from '../../lib/avatarText';
 import { ENTITY_ICON } from '../../lib/uiIcons';
 import { entityHref as targetHref } from '../../lib/entityLinks';
 
@@ -212,7 +213,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
     <Card className="!p-4 space-y-2.5">
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
-          {(item.authorName || '?').slice(0, 1).toUpperCase()}
+          {firstGrapheme(item.authorName || '?')}
         </span>
         <div className="flex-1 min-w-0">
           <Markdown>{item.body}</Markdown>
@@ -323,7 +324,7 @@ function InboxItem({
     <Card className={`!p-4 space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`}>
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
-          {(item.authorName || '?').slice(0, 1).toUpperCase()}
+          {firstGrapheme(item.authorName || '?')}
         </span>
         <div className="flex-1 min-w-0">
           <Markdown>{item.body}</Markdown>

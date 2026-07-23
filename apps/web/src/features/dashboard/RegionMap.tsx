@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
 import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -58,6 +58,99 @@ export function RegionMap({
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
 
+  // Keyboard-accessible pin positioning state (#807)
+  const [kbMovingId, setKbMovingId] = useState<number | null>(null);
+  const [kbPos, setKbPos] = useState<{ x: number; y: number } | null>(null);
+  const [kbAnnouncement, setKbAnnouncement] = useState('');
+  const [kbSaving, setKbSaving] = useState(false);
+  const kbAnnounceRaf = useRef<number | null>(null);
+
+  const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
+
+  /** Re-announce identical consecutive messages (matches shared Announcer). */
+  const announceKb = useCallback((message: string) => {
+    setKbAnnouncement('');
+    if (kbAnnounceRaf.current != null) cancelAnimationFrame(kbAnnounceRaf.current);
+    kbAnnounceRaf.current = requestAnimationFrame(() => setKbAnnouncement(message));
+  }, []);
+
+  const startKbMove = useCallback((loc: Location) => {
+    const x = Math.max(0, Math.min(100, loc.mapX ?? 50));
+    const y = Math.max(0, Math.min(100, loc.mapY ?? 50));
+    setKbMovingId(loc.id);
+    setKbPos({ x, y });
+    announceKb(
+      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${Math.round(x)}% horizontal, ${Math.round(y)}% vertical.`,
+    );
+  }, [announceKb]);
+
+  function handleKbArrow(e: ReactKeyboardEvent) {
+    if (kbMovingId == null || kbPos == null) return;
+    const target = e.target as HTMLElement | null;
+    // Let native button activation own Enter/Space; avoid double-save.
+    if (
+      (e.key === 'Enter' || e.key === ' ') &&
+      target?.closest('button, [role="button"]')
+    ) {
+      return;
+    }
+    const step = e.shiftKey ? 5 : 1;
+    let { x, y } = kbPos;
+    switch (e.key) {
+      case 'ArrowLeft':
+        x = Math.max(0, x - step);
+        break;
+      case 'ArrowRight':
+        x = Math.min(100, x + step);
+        break;
+      case 'ArrowUp':
+        y = Math.max(0, y - step);
+        break;
+      case 'ArrowDown':
+        y = Math.min(100, y + step);
+        break;
+      case 'Escape':
+        e.preventDefault();
+        e.stopPropagation();
+        cancelKbMove();
+        return;
+      case 'Enter':
+        e.preventDefault();
+        e.stopPropagation();
+        void saveKbMove();
+        return;
+      default:
+        return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    setKbPos({ x, y });
+    announceKb(`${Math.round(x)}% horizontal, ${Math.round(y)}% vertical`);
+  }
+
+  function cancelKbMove() {
+    setKbMovingId(null);
+    setKbPos(null);
+    announceKb('Pin move cancelled.');
+  }
+
+  async function saveKbMove() {
+    if (kbMovingId == null || kbPos == null || kbSaving) return;
+    setKbSaving(true);
+    try {
+      const ok = await savePinPercent(kbMovingId, kbPos.x, kbPos.y);
+      if (!ok) {
+        announceKb('Failed to save pin position.');
+        return;
+      }
+      announceKb(`Pin saved at ${Math.round(kbPos.x)}% horizontal, ${Math.round(kbPos.y)}% vertical.`);
+      setKbMovingId(null);
+      setKbPos(null);
+    } finally {
+      setKbSaving(false);
+    }
+  }
+
   const mapImageUrl = campaign.mapAttachmentId ? attachmentFileUrl(campaign.mapAttachmentId) : null;
 
   async function handleMapUpload(attachment: Attachment) {
@@ -100,15 +193,18 @@ export function RegionMap({
     }
   }
 
-  async function savePinPercent(locationId: number, xPct: number, yPct: number) {
+  /** Returns false when the patch fails (error state is set; does not throw). */
+  async function savePinPercent(locationId: number, xPct: number, yPct: number): Promise<boolean> {
     try {
       await api.patch(`${API}/locations/${locationId}`, {
         mapX: Math.max(0, Math.min(100, xPct)),
         mapY: Math.max(0, Math.min(100, yPct)),
       });
       onChange();
+      return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      return false;
     }
   }
 
@@ -201,8 +297,9 @@ export function RegionMap({
             {pinned.map((loc) => {
               const isCurrent = loc.status === 'current';
               const isDragging = draggingId === loc.id && dragPos != null;
-              const left = isDragging ? dragPos!.x : (loc.mapX ?? 0);
-              const top = isDragging ? dragPos!.y : (loc.mapY ?? 0);
+              const isKbMoving = kbMovingId === loc.id && kbPos != null;
+              const left = isDragging ? dragPos!.x : isKbMoving ? kbPos!.x : (loc.mapX ?? 0);
+              const top = isDragging ? dragPos!.y : isKbMoving ? kbPos!.y : (loc.mapY ?? 0);
               return (
                 <div
                   key={loc.id}
@@ -216,14 +313,16 @@ export function RegionMap({
                     cursor: isDm ? 'grab' : 'pointer',
                     touchAction: 'none',
                     opacity: isDragging ? 0.85 : 1,
-                    zIndex: isDragging ? 10 : 1,
+                    zIndex: isDragging || isKbMoving ? 10 : 1,
                   }}
                   onPointerDown={(e) => onPinPointerDown(e, loc.id)}
                 >
                   <Link
                     to={`/c/${campaignId}/locations/${loc.id}`}
                     onClick={(e) => {
-                      if (draggingId != null) e.preventDefault();
+                      // Block navigation during pointer drag or in-progress keyboard move
+                      // so unsaved coordinates aren't abandoned by an accidental open.
+                      if (draggingId != null || kbMovingId != null) e.preventDefault();
                     }}
                     className="flex flex-col items-center gap-0.5"
                   >
@@ -307,6 +406,95 @@ export function RegionMap({
           ))}
         </div>
       )}
+
+      {/* Keyboard-accessible pin positioning panel (#807) */}
+      {isDm && kbMovingId != null && kbPos != null && kbMovingLoc && (
+        <div
+          className="flex flex-wrap items-center gap-3"
+          style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)' }}
+          role="group"
+          aria-labelledby="kb-pin-heading"
+          onKeyDown={handleKbArrow}
+        >
+          <span id="kb-pin-heading" className="text-xs font-bold text-slate-300">
+            Move {kbMovingLoc.name} pin
+          </span>
+          <div className="flex items-center gap-2">
+            <label htmlFor="kb-pin-x" className="text-[10px] text-slate-400">Horizontal position (%)</label>
+            <input
+              id="kb-pin-x"
+              type="number"
+              min={0}
+              max={100}
+              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              value={Math.round(kbPos.x)}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                setKbPos({ ...kbPos, x: v });
+                announceKb(`${v}% horizontal, ${Math.round(kbPos.y)}% vertical`);
+              }}
+              aria-describedby="kb-pin-help"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label htmlFor="kb-pin-y" className="text-[10px] text-slate-400">Vertical position (%)</label>
+            <input
+              id="kb-pin-y"
+              type="number"
+              min={0}
+              max={100}
+              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              value={Math.round(kbPos.y)}
+              onChange={(e) => {
+                const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                setKbPos({ ...kbPos, y: v });
+                announceKb(`${Math.round(kbPos.x)}% horizontal, ${v}% vertical`);
+              }}
+              aria-describedby="kb-pin-help"
+            />
+          </div>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            onClick={cancelKbMove}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            disabled={kbSaving}
+            onClick={() => void saveKbMove()}
+          >
+            {kbSaving ? 'Saving…' : 'Save'}
+          </button>
+          <span id="kb-pin-help" className="text-[10px] text-slate-500 basis-full">
+            Arrow keys move 1%, Shift+arrow moves 5%. 0% = left/top edge, 100% = right/bottom edge.
+          </span>
+        </div>
+      )}
+
+      {/* DM pin move buttons — keyboard/touch/pointer accessible (#807) */}
+      {isDm && pinned.length > 0 && kbMovingId == null && (
+        <div className="flex flex-wrap gap-2" style={{ padding: '4px 14px 8px' }}>
+          {pinned.map((loc) => (
+            <button
+              key={loc.id}
+              className="btn btn-ghost"
+              style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+              aria-label={`Move ${loc.name} pin`}
+              onClick={() => startKbMove(loc)}
+            >
+              ↕ {loc.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Screen reader live region for position announcements (#807) */}
+      <div aria-live="assertive" aria-atomic="true" className="sr-only" data-testid="pin-move-announcer">
+        {kbAnnouncement}
+      </div>
       <div
         className="text-muted"
         style={{
@@ -330,7 +518,7 @@ export function RegionMap({
           <span style={{ width: 8, height: 8, borderRadius: '50%', border: '1px dashed var(--color-neutral-600)' }} />
           {STATUS_GLYPH.unexplored} {STATUS_LABEL.unexplored}
         </span>
-        <span style={{ marginLeft: 'auto' }}>{isDm && mapImageUrl ? 'Drag a pin to move it' : 'Tap a pin to open it'}</span>
+        <span style={{ marginLeft: 'auto' }}>Open or move a pin</span>
       </div>
     </div>
   );
