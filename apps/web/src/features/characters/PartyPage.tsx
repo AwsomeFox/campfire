@@ -13,7 +13,7 @@ import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -218,7 +218,6 @@ function CharacterCard({
   onChange: () => void;
 }) {
   const tone = avatarTone(index);
-  const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
   // Dead/retired/inactive PCs (issue #115) are muted so a fallen or shelved character
   // is visually distinct from the live party, while staying fully viewable.
   const isActive = character.status === 'active';
@@ -275,9 +274,7 @@ function CharacterCard({
             {character.hpCurrent} / {character.hpMax}
           </span>
         </div>
-        <div className="h-[5px] rounded-full bg-[var(--color-neutral-800)] overflow-hidden">
-          <div className="h-full rounded-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
-        </div>
+        <HpBar current={character.hpCurrent} max={character.hpMax} />
         {character.conditions.length > 0 && (
           <div className="flex gap-1.5 flex-wrap">
             <span className="tag tag-outline" style={{ fontSize: 10 }}>
