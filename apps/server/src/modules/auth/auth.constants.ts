@@ -1,6 +1,13 @@
 export const SESSION_COOKIE_NAME = 'campfire_session';
+/** Idle lifetime: each qualifying activity slides `expiresAt` to now + this. */
 export const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-export const SESSION_SLIDING_UPDATE_INTERVAL_MS = 60 * 60 * 1000; // update lastSeenAt at most once/hour
+/**
+ * Absolute lifetime from `createdAt`. Sliding idle extension cannot push a
+ * session past this — stolen cookies cannot live forever under continuous use.
+ */
+export const SESSION_ABSOLUTE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+/** Rate-limit for sliding `lastSeenAt` / `expiresAt` writes (and cookie re-issue). */
+export const SESSION_SLIDING_UPDATE_INTERVAL_MS = 60 * 60 * 1000; // at most once/hour
 export const VERSION = '0.1.0';
 
 /** Approved password-reset codes die after this — the admin hands the code to the user out-of-band, so give it a real (but bounded) window. */
