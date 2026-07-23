@@ -9,6 +9,7 @@
 import type { RsvpStatus } from '@campfire/schema';
 
 export const SCHEDULE_FORM_ID_PREFIX = 'schedule-form';
+/** Per-instance suffix: session id when editing, or sanitized useId() for create. */
 
 /** Stable form `name` / id suffix values for create + edit session forms. */
 export const SCHEDULE_FIELD_NAMES = {

@@ -5,7 +5,7 @@
  * DM: schedule/edit/cancel sessions, enable/rotate/disable the feed.
  * Everyone: see what's coming, one-tap RSVP.
  */
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
@@ -19,6 +19,7 @@ import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { sanitizeFieldPrefix } from '../../components/Field';
 import { LabeledField } from '../../components/LabeledField';
 import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
@@ -453,7 +454,11 @@ function ScheduleForm({
   onCancel: () => void;
 }) {
   const announce = useAnnounce();
-  const formErrorId = `${SCHEDULE_FORM_ID_PREFIX}-error`;
+  const reactId = useId();
+  const idPrefix = initial
+    ? `${SCHEDULE_FORM_ID_PREFIX}-${initial.id}`
+    : `${SCHEDULE_FORM_ID_PREFIX}-${sanitizeFieldPrefix(reactId)}`;
+  const formErrorId = `${idPrefix}-error`;
   const [when, setWhen] = useState(initial ? toLocalInputValue(initial.scheduledAt) : '');
   const [duration, setDuration] = useState(String(initial?.durationMinutes ?? 240));
   const [title, setTitle] = useState(initial?.title ?? '');
@@ -507,7 +512,7 @@ function ScheduleForm({
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <LabeledField
-          idPrefix={SCHEDULE_FORM_ID_PREFIX}
+          idPrefix={idPrefix}
           name={SCHEDULE_FIELD_NAMES.when}
           type="datetime-local"
           label="When"
@@ -518,7 +523,7 @@ function ScheduleForm({
           describedBy={error ? formErrorId : undefined}
         />
         <LabeledField
-          idPrefix={SCHEDULE_FORM_ID_PREFIX}
+          idPrefix={idPrefix}
           name={SCHEDULE_FIELD_NAMES.durationMinutes}
           type="number"
           label="Duration (minutes)"
@@ -532,7 +537,7 @@ function ScheduleForm({
         />
       </div>
       <LabeledField
-        idPrefix={SCHEDULE_FORM_ID_PREFIX}
+        idPrefix={idPrefix}
         name={SCHEDULE_FIELD_NAMES.title}
         label="Title"
         help={SCHEDULE_TITLE_HELP}
@@ -542,7 +547,7 @@ function ScheduleForm({
         disabled={saving}
       />
       <LabeledField
-        idPrefix={SCHEDULE_FORM_ID_PREFIX}
+        idPrefix={idPrefix}
         name={SCHEDULE_FIELD_NAMES.location}
         label="Where"
         help={SCHEDULE_LOCATION_HELP}
@@ -552,7 +557,7 @@ function ScheduleForm({
         disabled={saving}
       />
       <LabeledField
-        idPrefix={SCHEDULE_FORM_ID_PREFIX}
+        idPrefix={idPrefix}
         name={SCHEDULE_FIELD_NAMES.notes}
         as="textarea"
         label="Notes"
