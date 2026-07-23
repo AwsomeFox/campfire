@@ -386,7 +386,7 @@ export default function FactionPage() {
               error={fieldErrors.standing}
               disabled={saving}
             >
-              {standingOptions().map(({ value, label }) => (
+              {standingOptions.map(({ value, label }) => (
                 <option key={value} value={value}>
                   {label}
                 </option>

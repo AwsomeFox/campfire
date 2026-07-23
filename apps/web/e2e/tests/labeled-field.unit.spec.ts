@@ -4,6 +4,7 @@ import {
   FACTION_FIELD_NAMES,
   NPC_EDITOR_ID_PREFIX,
   NPC_FIELD_NAMES,
+  PRIVACY_FIELD_NAMES,
   labeledFieldIds,
 } from '../../src/components/LabeledField';
 
@@ -73,5 +74,14 @@ test.describe('labeledFieldIds (issue #777)', () => {
       expect(labeledFieldIds(NPC_EDITOR_ID_PREFIX, name).controlId).toBe(`${NPC_EDITOR_ID_PREFIX}-${name}`);
       expect(proposeVisible).not.toContain(name);
     }
+  });
+
+  test('DM privacy hidden control id uses PRIVACY_FIELD_NAMES.hidden', () => {
+    expect(labeledFieldIds(NPC_EDITOR_ID_PREFIX, PRIVACY_FIELD_NAMES.hidden)).toEqual({
+      controlId: 'npc-editor-hidden',
+      helpId: 'npc-editor-hidden-help',
+      errorId: 'npc-editor-hidden-error',
+    });
+    expect(PRIVACY_FIELD_NAMES.hidden).toBe('hidden');
   });
 });
