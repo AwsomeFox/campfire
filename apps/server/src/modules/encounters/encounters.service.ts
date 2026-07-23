@@ -742,9 +742,12 @@ export class EncountersService {
       // this fight's tokens must not float on a fully masked board.
       const fog = parseFog(row.fog);
       const invalidFog = row.fog !== null && fog === null;
+      // Sibling protection applies whenever THIS encounter does not itself conceal
+      // pixels — including fog enabled but fully revealed (no rectangles masked).
+      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
       const siblingProtects =
         !invalidFog &&
-        !fog?.enabled &&
+        !ownFogConceals &&
         row.mapAttachmentId != null &&
         (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
       if (invalidFog || siblingProtects) {

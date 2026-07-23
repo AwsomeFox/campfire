@@ -163,7 +163,16 @@ export class EncountersController {
     // for <=8MB image uploads. Reject it explicitly after authorization instead of
     // ever slicing the raw source attachment.
     if (req.headers.range !== undefined) {
-      res.status(416).set({ 'Accept-Ranges': 'none', 'Cache-Control': 'private, no-store' }).end();
+      // RFC 9110: 416 should advertise the valid range space even when we refuse ranges.
+      res
+        .status(416)
+        .set({
+          'Accept-Ranges': 'none',
+          'Cache-Control': 'private, no-store',
+          'Content-Range': 'bytes */0',
+          Vary: 'Authorization, Cookie',
+        })
+        .end();
       return;
     }
 
