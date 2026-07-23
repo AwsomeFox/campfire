@@ -640,10 +640,13 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
   // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
   // button and the surface sits above the mobile tab bar.
+  // z-index from --cf-layer-notification so the sheet shares the dialog tier
+  // and stays under the undo snackbar (issue #794 layer scale).
   const rootClassName = narrow
-    ? 'fixed inset-0 z-50 flex items-end justify-center'
-    : 'fixed inset-0 z-50';
+    ? 'fixed inset-0 flex items-end justify-center'
+    : 'fixed inset-0';
   const rootStyle = {
+    zIndex: 'var(--cf-layer-notification)' as const,
     background: narrow
       ? 'color-mix(in srgb, var(--color-neutral-900) 55%, transparent)'
       : 'color-mix(in srgb, var(--color-neutral-900) 35%, transparent)',

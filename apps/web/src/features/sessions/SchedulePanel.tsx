@@ -21,6 +21,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { viewerRsvpIds } from '../../lib/dashboardRsvp';
@@ -544,8 +545,8 @@ function FeedCard({
   onChange: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [mutateError, setMutateError] = useState<string | null>(null);
+  const feedUrlId = `calendar-feed-url-${campaignId}`;
 
   // The calendar feed is an AUXILIARY panel (issue #697): it loads on its own so a
   // feed outage degrades only this card — never the schedule list above, and never a
@@ -595,17 +596,6 @@ function FeedCard({
     }
   }
 
-  async function copy() {
-    if (!absoluteUrl) return;
-    try {
-      await navigator.clipboard.writeText(absoluteUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable — the URL is still selectable */
-    }
-  }
-
   return (
     <Card className="space-y-2.5">
       <div className="flex items-center gap-2">
@@ -641,14 +631,22 @@ function FeedCard({
           </p>
           <div className="flex items-center gap-2">
             <code
+              id={feedUrlId}
               className="text-[11px] px-2 py-1.5 rounded flex-1 min-w-0 overflow-x-auto whitespace-nowrap"
               style={{ background: 'var(--color-neutral-900)', color: 'var(--color-text)' }}
             >
               {absoluteUrl}
             </code>
-            <Btn ghost className="!min-h-0 !py-1 text-xs shrink-0" onClick={copy}>
-              {copied ? 'Copied!' : 'Copy'}
-            </Btn>
+            {absoluteUrl && (
+              <CopyControl
+                text={absoluteUrl}
+                selectTargetId={feedUrlId}
+                ghost
+                className="!min-h-0 !py-1 text-xs shrink-0"
+                successAnnouncement="Calendar feed URL copied to clipboard."
+                failureAnnouncement="Copy failed. Clipboard blocked — select the URL and copy it manually."
+              />
+            )}
           </div>
         </>
       ) : (

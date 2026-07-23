@@ -2739,6 +2739,18 @@ export const SettingsUpdate = ServerSettings.partial();
 const OidcField = z.string().trim().max(2048);
 const OidcProviderNameField = z.string().trim().max(80);
 
+/** Non-secret origin of a single OIDC field value used during a diagnostic probe (issue #848). */
+export const OidcConfigValueSource = z.enum(['draft', 'stored', 'environment', 'default']);
+export type OidcConfigValueSource = z.infer<typeof OidcConfigValueSource>;
+
+/** Last successful (or attempted) admin end-to-end OIDC diagnostic — never includes secrets. */
+export const OidcLastE2eTest = z.object({
+  testedAt: IsoDate,
+  fingerprint: z.string(), // non-secret fingerprint of the config that was tested
+  ok: z.boolean(),
+});
+export type OidcLastE2eTest = z.infer<typeof OidcLastE2eTest>;
+
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
   providerName: z.string(),
@@ -2754,6 +2766,10 @@ export const OidcSettings = z.object({
   enabled: z.boolean(), // effective config is complete (issuer + clientId + clientSecret all resolve)
   envKeys: z.array(z.string()), // OIDC_* env vars currently set — these override the stored values
   effectiveRedirectUri: z.string(), // the callback URL the flow will actually use
+  /** Non-secret fingerprint of the effective (env-over-stored) config — compare to lastE2eTest.fingerprint. */
+  configFingerprint: z.string(),
+  /** Most recent admin end-to-end diagnostic result, if any. */
+  lastE2eTest: OidcLastE2eTest.nullable().default(null),
 });
 export type OidcSettings = z.infer<typeof OidcSettings>;
 
@@ -2771,19 +2787,83 @@ export const OidcSettingsUpdate = z.object({
 });
 export type OidcSettingsUpdate = z.infer<typeof OidcSettingsUpdate>;
 
-/** Test-connection request. Optional issuer lets an admin validate before saving; omitted = test the effective issuer. */
-export const OidcTestRequest = z.object({ issuer: OidcField.optional() });
+/**
+ * Diagnostic probe request (issue #848). Optional draft fields let an admin
+ * validate before saving; omitted fields resolve from env-over-stored effective
+ * config. `clientSecret` is write-only: omit/blank reuses the effective secret.
+ */
+export const OidcTestRequest = z.object({
+  issuer: OidcField.optional(),
+  clientId: OidcField.optional(),
+  clientSecret: z.string().max(2048).optional(),
+  redirectUri: OidcField.optional(),
+  adminGroup: OidcField.optional(),
+  allowedGroup: OidcField.optional(),
+  groupsClaim: OidcField.optional(),
+  scope: OidcField.optional(),
+});
 export type OidcTestRequest = z.infer<typeof OidcTestRequest>;
 
-/** Result of fetching + validating the issuer's OIDC discovery document. */
+/** Per-check status for OIDC diagnostics. `skip` = not exercised by this probe kind. */
+export const OidcCheckStatus = z.enum(['pass', 'fail', 'skip']);
+export type OidcCheckStatus = z.infer<typeof OidcCheckStatus>;
+
+export const OidcCheckResult = z.object({
+  status: OidcCheckStatus,
+  message: z.string(),
+});
+export type OidcCheckResult = z.infer<typeof OidcCheckResult>;
+
+export const OidcDiagnosticChecks = z.object({
+  discovery: OidcCheckResult,
+  redirectClient: OidcCheckResult,
+  tokenExchange: OidcCheckResult,
+  requiredClaims: OidcCheckResult,
+  groupPolicy: OidcCheckResult,
+});
+export type OidcDiagnosticChecks = z.infer<typeof OidcDiagnosticChecks>;
+
+/** Which diagnostic probe produced the result. */
+export const OidcDiagnosticKind = z.enum(['discovery', 'e2e']);
+export type OidcDiagnosticKind = z.infer<typeof OidcDiagnosticKind>;
+
+/**
+ * Result of an OIDC diagnostic probe (discovery-only or end-to-end test login).
+ * Never echoes secrets. `message` for a successful discovery probe is
+ * "Discovery reachable." (issue #848) — not a claim that login works.
+ */
 export const OidcTestResult = z.object({
   ok: z.boolean(),
+  kind: OidcDiagnosticKind,
   issuer: z.string(),
   message: z.string(),
   authorizationEndpoint: z.string().nullable().default(null),
   tokenEndpoint: z.string().nullable().default(null),
+  testedAt: IsoDate,
+  /** Non-secret fingerprint of the config values that were tested. */
+  fingerprint: z.string(),
+  /** Per-field non-secret origin of each value used in the probe. */
+  fieldSources: z.object({
+    issuer: OidcConfigValueSource,
+    clientId: OidcConfigValueSource,
+    clientSecret: OidcConfigValueSource,
+    redirectUri: OidcConfigValueSource,
+    adminGroup: OidcConfigValueSource,
+    allowedGroup: OidcConfigValueSource,
+    groupsClaim: OidcConfigValueSource,
+    scope: OidcConfigValueSource,
+  }),
+  checks: OidcDiagnosticChecks,
 });
 export type OidcTestResult = z.infer<typeof OidcTestResult>;
+
+/** Response from starting an admin-only end-to-end OIDC test login (issue #848). */
+export const OidcTestLoginStart = z.object({
+  authorizationUrl: z.string(),
+  fingerprint: z.string(),
+  fieldSources: OidcTestResult.shape.fieldSources,
+});
+export type OidcTestLoginStart = z.infer<typeof OidcTestLoginStart>;
 
 export const CampaignMember = z.object({
   id: Id,
