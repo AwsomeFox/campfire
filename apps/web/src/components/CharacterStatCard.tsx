@@ -36,7 +36,7 @@ import { RollResultBanner } from './RollResultBanner';
 const NOOP = () => {};
 
 /** Shared style for a roll-me pill (button) vs. a static pill (span). */
-const PILL: CSSProperties = { fontSize: 10 };
+const PILL: CSSProperties = { fontSize: 12, minHeight: 44, minWidth: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '0 10px' };
 const ROLL_HINT = ' · shift-click for advantage · alt/ctrl/⌘-click for disadvantage';
 
 function StatChip({ label, value, title }: { label: string; value: string; title?: string }) {
@@ -47,11 +47,13 @@ function StatChip({ label, value, title }: { label: string; value: string; title
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
+        justifyContent: 'center',
         gap: 1,
         padding: '4px 2px',
         border: '1px solid var(--color-divider)',
         borderRadius: 'var(--radius-md)',
         minWidth: 46,
+        minHeight: 44,
       }}
     >
       <span className="text-muted" style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
@@ -225,64 +227,57 @@ export function CharacterStatCard({
             </Section>
           )}
 
-          {/* Actions / attacks */}
+          {/* Actions / attacks — primary combat rolls use 44×44 hit areas (issue #428). */}
           {character.actions.length > 0 && (
             <Section title="Actions">
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="character-stat-actions">
                 {character.actions.map((a, i) => {
                   const canRollHit = interactive && !!a.toHit && toHitExpr(a.toHit, 'flat') != null;
                   const dmgExpr = a.damage ? damageExpr(a.damage) : null;
                   const canRollDmg = interactive && dmgExpr != null;
                   return (
-                    <div key={i} style={{ fontSize: 12.5, lineHeight: 1.4 }}>
+                    <div key={i} style={{ fontSize: 12.5, lineHeight: 1.4, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                       <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>{a.name}</span>
                       {a.kind && (
                         <span className="text-muted" style={{ fontSize: 11 }}>
-                          {' '}
                           · {a.kind}
                         </span>
                       )}
-                      {(a.toHit || a.damage) && (
-                        <span style={{ fontSize: 11.5 }}>
-                          {' — '}
-                          {a.toHit &&
-                            (canRollHit ? (
-                              <button
-                                type="button"
-                                className="cf-linkish"
-                                disabled={roller.rolling}
-                                title={`Roll ${a.name} to hit${ROLL_HINT}`}
-                                onClick={(e) => void roller.roll(toHitExpr(a.toHit, advFromEvent(e))!, `${character.name} · ${a.name} to hit`)}
-                                style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer', color: 'var(--color-accent)', font: 'inherit' }}
-                              >
-                                {a.toHit} to hit
-                              </button>
-                            ) : (
-                              <span className="text-muted">{a.toHit} to hit</span>
-                            ))}
-                          {a.toHit && a.damage && <span className="text-muted">, </span>}
-                          {a.damage &&
-                            (canRollDmg ? (
-                              <button
-                                type="button"
-                                className="cf-linkish"
-                                disabled={roller.rolling}
-                                title={`Roll ${a.name} damage${onApplyDamage ? ' — then apply to a target' : ''}`}
-                                onClick={async () => {
-                                  const res = await roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`);
-                                  // Normalize to a non-negative amount — a damage expr
-                                  // like 1d4-1 can net 0/negative; damage is never < 0.
-                                  if (res && onApplyDamage) onApplyDamage(Math.max(0, res.total), `${a.name} (${character.name})`);
-                                }}
-                                style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer', color: 'var(--color-accent)', font: 'inherit' }}
-                              >
-                                {a.damage}
-                              </button>
-                            ) : (
-                              <span className="text-muted">{a.damage}</span>
-                            ))}
-                        </span>
-                      )}
+                      {a.toHit &&
+                        (canRollHit ? (
+                          <button
+                            type="button"
+                            className="cf-roll-control"
+                            disabled={roller.rolling}
+                            title={`Roll ${a.name} to hit${ROLL_HINT}`}
+                            onClick={(e) => void roller.roll(toHitExpr(a.toHit, advFromEvent(e))!, `${character.name} · ${a.name} to hit`)}
+                            data-testid="attack-roll-control"
+                          >
+                            {a.toHit} to hit
+                          </button>
+                        ) : (
+                          <span className="text-muted">{a.toHit} to hit</span>
+                        ))}
+                      {a.damage &&
+                        (canRollDmg ? (
+                          <button
+                            type="button"
+                            className="cf-roll-control"
+                            disabled={roller.rolling}
+                            title={`Roll ${a.name} damage${onApplyDamage ? ' — then apply to a target' : ''}`}
+                            onClick={async () => {
+                              const res = await roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`);
+                              // Normalize to a non-negative amount — a damage expr
+                              // like 1d4-1 can net 0/negative; damage is never < 0.
+                              if (res && onApplyDamage) onApplyDamage(Math.max(0, res.total), `${a.name} (${character.name})`);
+                            }}
+                            data-testid="damage-roll-control"
+                          >
+                            {a.damage}
+                          </button>
+                        ) : (
+                          <span className="text-muted">{a.damage}</span>
+                        ))}
                     </div>
                   );
                 })}

@@ -306,7 +306,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0058_campaigns_public_invites_enabled');
       expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
       expect(MIGRATION_NAMES).toContain('0060_encounter_events_combatant_ids');
-      expect(MIGRATION_NAMES).toContain('0061_attachments_publication_state');
+      expect(MIGRATION_NAMES).toContain('0062_attachments_publication_state');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));

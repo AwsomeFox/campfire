@@ -355,9 +355,10 @@ export const ConditionsPatch = z.object({
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
- * Conditions stay free-text on the wire (homebrew is allowed), but these are the
- * standard names surfaced as suggestions so the three surfaces speak the same
- * vocabulary instead of each hardcoding its own list.
+ * The wire schema stays `string` (DM homebrew is allowed), but non-DM combatant
+ * adds are validated against the active adapter's list (issue #495). These are
+ * also the standard names surfaced as suggestions so the three surfaces speak
+ * the same vocabulary instead of each hardcoding its own list.
  */
 export const CONDITIONS = [
   'Blinded',
@@ -377,6 +378,16 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/**
+ * Case-insensitive membership check against a rule-system condition vocabulary
+ * (issue #495). Trims the candidate; empty strings never match.
+ */
+export function isKnownCondition(vocab: readonly string[], name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  return vocab.some((c) => c.toLowerCase() === needle);
+}
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -1575,10 +1586,14 @@ export interface RuleSystemAdapter {
    * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
    * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
    * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation?: AbilityRepresentation,
+    level?: number,
   ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
@@ -2131,21 +2146,36 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. When `representation` is `modifier` (mapped creatures), WIS
-  // is already a modifier and must not be converted again (issue #767).
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
+    level?: number,
   ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return resolveAbilityModifier(this, wisScore, representation);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -4093,7 +4123,50 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
 });
 
-export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+/**
+ * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
+ * When the sheet advanced after /end, the DM must choose a resync direction before
+ * reopening — never silently overwrite intervening healing/rest.
+ */
+export const HpSyncSlice = z.object({
+  hpCurrent: z.number().int(),
+  hpTemp: z.number().int().min(0),
+  deathState: DeathState,
+  deathSaveSuccesses: z.number().int().min(0).max(3),
+  deathSaveFailures: z.number().int().min(0).max(3),
+});
+export type HpSyncSlice = z.infer<typeof HpSyncSlice>;
+
+export const HpSyncConflict = z.object({
+  combatantId: Id,
+  characterId: Id,
+  name: z.string(),
+  combatant: HpSyncSlice,
+  sheet: HpSyncSlice.extend({ updatedAt: IsoDate }),
+});
+export type HpSyncConflict = z.infer<typeof HpSyncConflict>;
+
+export const HpResyncDirection = z.enum(['keep_combatant', 'pull_sheet']);
+export type HpResyncDirection = z.infer<typeof HpResyncDirection>;
+
+/** Body for POST /encounters/:id/reopen — required when hpSyncConflicts is non-empty. */
+export const EncounterReopen = z.object({
+  hpResync: z
+    .array(
+      z.object({
+        combatantId: Id,
+        direction: HpResyncDirection,
+      }),
+    )
+    .optional(),
+});
+export type EncounterReopen = z.infer<typeof EncounterReopen>;
+
+export const EncounterWithCombatants = Encounter.extend({
+  combatants: z.array(Combatant),
+  /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
+  hpSyncConflicts: z.array(HpSyncConflict).optional(),
+});
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
 // roll-initiative response (issue #702). The encounter (with combatants) is returned as

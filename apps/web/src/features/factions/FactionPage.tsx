@@ -14,12 +14,10 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { standingVariant } from './FactionListPage';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { initials } from '../../lib/avatarText';
-
-const STANDINGS: FactionStanding[] = ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'];
+import { formatStandingChip, standingLabel, standingOptions, standingVariant } from './standing';
 
 export default function FactionPage() {
   const { campaignId, factionId } = useParams<{ campaignId: string; factionId: string }>();
@@ -202,7 +200,7 @@ export default function FactionPage() {
               {faction.kind && <p className="text-sm text-slate-400 break-words">{faction.kind}</p>}
             </div>
             <Chip variant={standingVariant(faction.standing)}>
-              {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
+              {formatStandingChip(faction.standing, faction.reputation)}
             </Chip>
             {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
@@ -268,7 +266,7 @@ export default function FactionPage() {
                 <p className="card-kicker">Party standing</p>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Standing</span>
-                  <span className="capitalize">{faction.standing}</span>
+                  <span>{standingLabel(faction.standing)}</span>
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Reputation</span>
@@ -289,10 +287,11 @@ export default function FactionPage() {
                       value={faction.standing}
                       disabled={bumping}
                       onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
+                      aria-label="Party standing"
                     >
-                      {STANDINGS.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
+                      {standingOptions().map(({ value, label }) => (
+                        <option key={value} value={value}>
+                          {label}
                         </option>
                       ))}
                     </select>
@@ -320,10 +319,15 @@ export default function FactionPage() {
             </div>
             <div className="space-y-1">
               <label className="text-[10px] text-slate-500 font-bold uppercase">Standing</label>
-              <select className="cf-select" value={form.standing} onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}>
-                {STANDINGS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+              <select
+                className="cf-select"
+                value={form.standing}
+                onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
+                aria-label="Standing"
+              >
+                {standingOptions().map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
                   </option>
                 ))}
               </select>

@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
@@ -368,12 +368,23 @@ export class EncountersController {
   }
 
   @Post(':id/reopen')
-  @ApiOperation({ summary: 'Reopen an ended encounter', description: "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state — recovers an accidental End. HP was already written back on End; the same write-back caveat applies on the next End." })
+  @ApiOperation({
+    summary: 'Reopen an ended encounter',
+    description:
+      "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state. " +
+      'When character sheets advanced after the previous End (heal/rest/another fight), pass `hpResync` ' +
+      'decisions for each conflict listed on GET (issue #466) — never silently overwrite newer sheet HP.',
+  })
   @ApiResponse({ status: 201, description: 'Reopened (running) encounter.' })
   @ApiResponse({ status: 400, description: 'Encounter is not ended.' })
-  async reopen(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiResponse({ status: 409, description: 'HP sync conflicts require hpResync decisions (issue #466).' })
+  async reopen(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterReopenDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.reopen(id, user, role);
+    return this.encounters.reopen(id, user, role, body);
   }
 }
