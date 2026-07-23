@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Character, Comment, EntityType } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useAnnounce } from '../../components/Announcer';
 import { Btn, TextArea, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -201,6 +202,13 @@ function CommentCard({
   const characterLabel = comment.inCharacter ? comment.characterName?.trim() : null;
 
   async function save() {
+    // Server rejects identical bodies with 400; treat an unchanged draft as a
+    // successful no-op so Save never surfaces a spurious error toast.
+    if (draft === comment.body) {
+      setEditing(false);
+      setError(null);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -329,11 +337,13 @@ function ComposeBox({
   onPosted: () => void;
   onCancel?: () => void;
 }) {
+  const announce = useAnnounce();
   const [body, setBody] = useState('');
   const [inCharacter, setInCharacter] = useState(false);
   const [characterId, setCharacterId] = useState<number | null>(null);
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [speakerNotice, setSpeakerNotice] = useState<string | null>(null);
 
   // Keep the selection inside the live owned roster. Ownership can change while the
   // compose box is open (delete/transfer + thread reload); a stale id would otherwise
@@ -348,12 +358,20 @@ function ComposeBox({
     if (ownedCharacters.length === 0) {
       setInCharacter(false);
       setCharacterId(null);
+      const message = 'In-character posting turned off — no owned characters remain.';
+      setSpeakerNotice(message);
+      announce(message);
       return;
     }
-    if (selectedCharacterId == null) {
-      setCharacterId(ownedCharacters[0]!.id);
+    // Stale speaker left the roster: clear selection (do not silently switch) and
+    // require an explicit choice, with visible + announced feedback.
+    if (characterId != null && selectedCharacterId == null) {
+      setCharacterId(null);
+      const message = 'Your previous speaking character is no longer available. Choose another.';
+      setSpeakerNotice(message);
+      announce(message);
     }
-  }, [inCharacter, ownedCharacters, selectedCharacterId]);
+  }, [announce, characterId, inCharacter, ownedCharacters.length, selectedCharacterId]);
 
   async function post() {
     if (!body.trim()) return;
@@ -383,6 +401,11 @@ function ComposeBox({
   return (
     <div className="space-y-2">
       {error && <ErrorNote message={error} />}
+      {speakerNotice && (
+        <p role="status" className="text-xs text-amber-300/90">
+          {speakerNotice}
+        </p>
+      )}
       <TextArea
         style={{ minHeight: 72 }}
         value={body}
@@ -400,6 +423,7 @@ function ComposeBox({
             disabled={ownedCharacters.length === 0}
             onChange={(e) => {
               const checked = e.target.checked;
+              setSpeakerNotice(null);
               setInCharacter(checked);
               setCharacterId(
                 checked
@@ -418,6 +442,7 @@ function ComposeBox({
               value={selectedCharacterId ?? ''}
               onChange={(e) => {
                 const next = Number(e.target.value);
+                setSpeakerNotice(null);
                 setCharacterId(
                   Number.isInteger(next) && ownedCharacters.some((character) => character.id === next)
                     ? next
@@ -426,6 +451,11 @@ function ComposeBox({
               }}
               aria-label="Speaking character"
             >
+              {selectedCharacterId == null && (
+                <option value="" disabled>
+                  Choose a character…
+                </option>
+              )}
               {ownedCharacters.map((character) => (
                 <option key={character.id} value={character.id}>{character.name}</option>
               ))}
