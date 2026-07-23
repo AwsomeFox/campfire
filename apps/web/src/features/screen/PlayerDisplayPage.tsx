@@ -24,7 +24,12 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
-import { useAnnounce } from '../../components/Announcer';
+import {
+  fingerprintDedupeParts,
+  formatGroupedAnnouncement,
+  formatGroupedCombatantAnnouncement,
+  useAnnounce,
+} from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { useAuth } from '../../app/auth';
@@ -194,29 +199,42 @@ export default function PlayerDisplayPage() {
     const prev = prevAnnounceRef.current;
 
     if (prev) {
+      const parts: string[] = [];
       if (turnKey !== prev.turnKey) {
         if (encounter.status === 'running') {
           const current = safe.find((c) => c.id === currentId);
-          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
+          parts.push(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
         } else if (encounter.status === 'ended') {
-          announce('Encounter ended');
+          parts.push('Encounter ended');
         }
       }
+      const combatantUpdates: string[] = [];
       for (const c of safe) {
         const before = prev.hp.get(c.id);
         const now = hp.get(c.id);
         if (before == null || now == null || now === '' || before === now) continue;
         if (c.hpBand != null) {
           // Monster — band label only, never the exact numbers.
-          announce(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
+          combatantUpdates.push(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
         } else if (c.hpCurrent != null && c.hpMax != null) {
           // Character — exact HP is shared table info.
-          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
+          combatantUpdates.push(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
+      }
+      const combatantMessage = formatGroupedCombatantAnnouncement(combatantUpdates);
+      if (combatantMessage) parts.push(combatantMessage);
+      // One atomic announce keeps turn + bulk HP/condition updates from racing
+      // the shared live region; dedupeKey suppresses identical reconnect refetches.
+      // Fingerprint + count keep the key bounded (avoid joining full update text).
+      const message = formatGroupedAnnouncement(parts);
+      if (message) {
+        announce(message, {
+          dedupeKey: `screen:${cid}:${encounter.id}:${turnKey}:${combatantUpdates.length}:${fingerprintDedupeParts(combatantUpdates)}`,
+        });
       }
     }
     prevAnnounceRef.current = { hp, turnKey };
-  }, [encounter, announce]);
+  }, [cid, encounter, announce]);
 
   // Fullscreen can end without this control being used (Escape, browser chrome,
   // or another caller), so the browser events — not the request promise — own

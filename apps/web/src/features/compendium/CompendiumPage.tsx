@@ -5,16 +5,29 @@
  * bar (AI rules lookup) and inline homebrew authoring are out of scope for
  * this pass (no backing endpoint per the BUILD spec) — search + browse only.
  */
-import { useEffect, useMemo, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
-import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
+import type { RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
+import {
+  COMPENDIUM_CLEAR_FILTERS_LABEL,
+  COMPENDIUM_SEARCH_ID,
+  COMPENDIUM_SEARCH_LABEL,
+  COMPENDIUM_TYPE_FILTER_LABEL,
+  COMPENDIUM_URL_Q,
+  COMPENDIUM_URL_TYPE,
+  applyCompendiumSearchParams,
+  compendiumResultsStatus,
+  effectiveCompendiumSearchQuery,
+  parseCompendiumTypeParam,
+  type CompendiumUrlType,
+} from './compendiumA11y';
 
-const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
+const TYPE_CHIPS: { key: CompendiumUrlType; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'spell', label: 'Spells' },
   { key: 'monster', label: 'Monsters' },
@@ -24,6 +37,8 @@ const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'race', label: 'Races' },
   { key: 'feat', label: 'Feats' },
 ];
+
+const TYPE_CHIP_KEYS = TYPE_CHIPS.map((c) => c.key);
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -37,6 +52,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 export default function CompendiumPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
+  const [searchParams, setSearchParams] = useSearchParams();
   const campaign = useCampaign(Number.isFinite(id) ? id : undefined);
   const { loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const campaignPack = campaign?.ruleSystem || '';
@@ -45,9 +61,57 @@ export default function CompendiumPage() {
   // campaign to resolve). Distinguish "still loading" from "couldn't load".
   const campaignUnresolved = campaign === undefined && (campaignsLoading || campaignsError);
 
-  const [query, setQuery] = useState('');
+  // URL is authoritative for filters (issue #647): `type` is read directly;
+  // `q` is mirrored into local draft state so keystrokes stay responsive while
+  // we debounce writes back with replace (no history spam). External URL
+  // changes (history / Link / clearFilters) snap the draft + search query
+  // immediately — debounce applies only to typing.
+  const type = parseCompendiumTypeParam(searchParams.get(COMPENDIUM_URL_TYPE));
+  const committedQuery = searchParams.get(COMPENDIUM_URL_Q) ?? '';
+  const [query, setQuery] = useState(committedQuery);
   const debouncedQuery = useDebounced(query, 300);
-  const [type, setType] = useState<RuleEntryType | 'all'>('all');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const prevCommittedQueryRef = useRef(committedQuery);
+  const urlQueryChanged = committedQuery !== prevCommittedQueryRef.current;
+
+  // Snap draft input to URL `q` after external navigation / clearFilters.
+  // Keep this in an effect — setState during render can warn or loop.
+  useEffect(() => {
+    if (!urlQueryChanged) return;
+    prevCommittedQueryRef.current = committedQuery;
+    setQuery((current) => (current !== committedQuery ? committedQuery : current));
+  }, [committedQuery, urlQueryChanged]);
+
+  const searchQuery = effectiveCompendiumSearchQuery({
+    draftQuery: query,
+    committedQuery,
+    debouncedQuery,
+    urlQueryChanged,
+  });
+
+  useEffect(() => {
+    const trimmed = debouncedQuery.trim();
+    // Normalize both sides so padded URL `q` values don't cause rewrite loops.
+    if (trimmed === committedQuery.trim()) return;
+    // Skip stale debounce ticks (e.g. Clear filters) so we don't rewrite `q`.
+    if (trimmed !== query.trim()) return;
+    setSearchParams(
+      (prev) => applyCompendiumSearchParams(prev, { q: trimmed, type }),
+      { replace: true },
+    );
+  }, [debouncedQuery, committedQuery, query, type, setSearchParams]);
+
+  function setType(next: CompendiumUrlType) {
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        if (next === 'all') params.delete(COMPENDIUM_URL_TYPE);
+        else params.set(COMPENDIUM_URL_TYPE, next);
+        return params;
+      },
+      { replace: true },
+    );
+  }
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [results, setResults] = useState<RuleEntry[] | null>(null);
@@ -93,7 +157,7 @@ export default function CompendiumPage() {
       setError(null);
       try {
         const params = new URLSearchParams();
-        if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
+        if (searchQuery.trim()) params.set('q', searchQuery.trim());
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
         const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
@@ -110,13 +174,68 @@ export default function CompendiumPage() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
+  }, [searchQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
 
   const chips = useMemo(() => TYPE_CHIPS, []);
   // Empty results have two very different causes: a search that found nothing vs.
   // a type filter (e.g. "Monsters") the installed pack has no entries for. The
   // copy should say which (issue #242).
   const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
+  const filtersActive = type !== 'all' || query.trim().length > 0;
+  const chipRefs = useRef<Partial<Record<CompendiumUrlType, HTMLButtonElement | null>>>({});
+
+  const canAnnounceResults =
+    campaign !== undefined &&
+    !campaignUnresolved &&
+    !packsLoading &&
+    !noRuleSystemChosen &&
+    !noPacksInstalled;
+
+  const statusMessage = canAnnounceResults
+    ? compendiumResultsStatus({
+        loading,
+        resultCount: results ? results.length : null,
+        query: searchQuery,
+        typeKey: type,
+        typeLabel: activeTypeLabel,
+        failed: Boolean(error),
+      })
+    : '';
+
+  function clearFilters() {
+    // Clear local input immediately; URL params drop both filters (replace).
+    setQuery('');
+    setSearchParams(
+      (prev) => applyCompendiumSearchParams(prev, { q: '', type: 'all' }),
+      { replace: true },
+    );
+    // Button unmounts when filtersActive becomes false. Defer past the unmount
+    // and React Router's navigation focus reset so search keeps keyboard focus.
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+  }
+
+  function focusChip(key: CompendiumUrlType) {
+    chipRefs.current[key]?.focus();
+  }
+
+  function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, key: CompendiumUrlType) {
+    // Roving tabindex for the type-filter radiogroup: arrows move AND select
+    // (WAI-ARIA single-select pattern), wrapping at the ends.
+    const idx = TYPE_CHIP_KEYS.indexOf(key);
+    let nextIdx: number | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % TYPE_CHIP_KEYS.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      nextIdx = (idx - 1 + TYPE_CHIP_KEYS.length) % TYPE_CHIP_KEYS.length;
+    } else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = TYPE_CHIP_KEYS.length - 1;
+    if (nextIdx == null) return;
+    e.preventDefault();
+    const next = TYPE_CHIP_KEYS[nextIdx]!;
+    setType(next);
+    focusChip(next);
+  }
 
   if (!Number.isFinite(id)) {
     return (
@@ -137,27 +256,66 @@ export default function CompendiumPage() {
         </div>
       </div>
 
-      <div className="flex gap-2 flex-wrap">
-        <input
-          className="input"
-          style={{ flex: 1, minWidth: 200 }}
-          placeholder="Search monsters, spells, items…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={COMPENDIUM_SEARCH_ID} style={{ fontSize: 12, fontWeight: 600 }}>
+          {COMPENDIUM_SEARCH_LABEL}
+        </label>
+        <div className="flex gap-2 flex-wrap items-center">
+          <input
+            ref={searchInputRef}
+            id={COMPENDIUM_SEARCH_ID}
+            className="input"
+            style={{ flex: 1, minWidth: 200 }}
+            placeholder="Search monsters, spells, items…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            type="search"
+            autoComplete="off"
+          />
+          {filtersActive && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ fontSize: 12, minHeight: 40 }}
+              onClick={clearFilters}
+            >
+              {COMPENDIUM_CLEAR_FILTERS_LABEL}
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="flex gap-1.5 flex-wrap">
-        {chips.map((chip) => (
-          <button
-            key={chip.key}
-            onClick={() => setType(chip.key)}
-            className={chip.key === type ? 'tag tag-accent' : 'tag tag-neutral'}
-            style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
-          >
-            {chip.label}
-          </button>
-        ))}
+      <div
+        className="flex gap-1.5 flex-wrap"
+        role="radiogroup"
+        aria-label={COMPENDIUM_TYPE_FILTER_LABEL}
+      >
+        {chips.map((chip) => {
+          const checked = chip.key === type;
+          return (
+            <button
+              key={chip.key}
+              ref={(el) => {
+                chipRefs.current[chip.key] = el;
+              }}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              tabIndex={checked ? 0 : -1}
+              onClick={() => setType(chip.key)}
+              onKeyDown={(e) => onChipKeyDown(e, chip.key)}
+              className={checked ? 'tag tag-accent' : 'tag tag-neutral'}
+              style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
+            >
+              {chip.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Polite live region for search/filter result counts (issue #647). */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {statusMessage}
       </div>
 
       <div className="flex flex-col gap-2">
@@ -194,67 +352,68 @@ export default function CompendiumPage() {
         ) : (
           <>
             {error && <ErrorNote message={error} />}
-            {loading && !results ? (
-              <Card>
-                <Skeleton lines={5} />
-              </Card>
-            ) : results && results.length === 0 ? (
-              <div className="card items-center text-center" style={{ padding: 24 }}>
-                {debouncedQuery.trim() ? (
-                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                    Nothing matches “{debouncedQuery.trim()}”
-                    {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
-                    {type !== 'all' ? ', or switch to All' : ''}.
-                  </p>
-                ) : type !== 'all' ? (
-                  <>
-                    <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-                      No {activeTypeLabel.toLowerCase()} in this rule system.
+            {!error &&
+              (loading && !results ? (
+                <Card>
+                  <Skeleton lines={5} />
+                </Card>
+              ) : results && results.length === 0 ? (
+                <div className="card items-center text-center" style={{ padding: 24 }}>
+                  {searchQuery.trim() ? (
+                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                      Nothing matches “{searchQuery.trim()}”
+                      {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
+                      {type !== 'all' ? ', or switch to All' : ''}.
                     </p>
-                    <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-                      This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
+                  ) : type !== 'all' ? (
+                    <>
+                      <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
+                        No {activeTypeLabel.toLowerCase()} in this rule system.
+                      </p>
+                      <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
+                        This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                      This rule system has no entries yet.
                     </p>
-                  </>
-                ) : (
-                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                    This rule system has no entries yet.
-                  </p>
-                )}
-              </div>
-            ) : (
-              (results ?? []).map((entry) => (
-                <Link
-                  key={entry.id}
-                  to={`/c/${id}/compendium/${entry.id}`}
-                  className="card elev-sm text-left"
-                  style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
-                >
-                  {/* Type/school/monster glyph (issue #305): the DM's override if set,
-                      else derived from the entry's type + dataJson. Decorative — the
-                      name beside it carries the label. */}
-                  <span
-                    aria-hidden="true"
-                    style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                  )}
+                </div>
+              ) : (
+                (results ?? []).map((entry) => (
+                  <Link
+                    key={entry.id}
+                    to={`/c/${id}/compendium/${entry.id}`}
+                    className="card elev-sm text-left"
+                    style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                   >
-                    <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
-                  </span>
-                  <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
-                      {entry.name}
+                    {/* Type/school/monster glyph (issue #305): the DM's override if set,
+                        else derived from the entry's type + dataJson. Decorative — the
+                        name beside it carries the label. */}
+                    <span
+                      aria-hidden="true"
+                      style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                    >
+                      <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
                     </span>
-                    <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
-                      {entry.summary}
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
+                        {entry.name}
+                      </span>
+                      <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+                        {entry.summary}
+                      </span>
                     </span>
-                  </span>
-                  <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
-                    {entry.type}
-                  </span>
-                  <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
-                    ›
-                  </span>
-                </Link>
-              ))
-            )}
+                    <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
+                      {entry.type}
+                    </span>
+                    <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
+                      ›
+                    </span>
+                  </Link>
+                ))
+              ))}
           </>
         )}
       </div>
