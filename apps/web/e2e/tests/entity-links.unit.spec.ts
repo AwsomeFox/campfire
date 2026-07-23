@@ -114,22 +114,48 @@ test.describe('source adapters', () => {
     expect(proposalTargetHref(campaignId, { entityType: 'map', entityId: 11 } as never)).toBeNull();
   });
 
-  test('notifications open session, quest, note, proposal, schedule, and AI destinations', () => {
+  test('notifications route every type to its exact destination (issue #446)', () => {
     const base = {
       id: 1, userId: 2, campaignId, title: 'Notice', body: '', actorName: '', readAt: null,
-      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null,
+      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null,
     } satisfies Omit<Notification, 'type'>;
     const href = (type: Notification['type'], patch: Partial<Notification> = {}) =>
       notificationHref({ ...base, type, ...patch } as Notification);
 
-    expect(href('recap_posted', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
-    expect(href('note_shared', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('comment_reply', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('proposal_submitted')).toBe('/c/7/proposals');
+    // Schedule/RSVP → Schedule tab (+ exact card when entityId is a schedule row).
     expect(href('session_scheduled')).toBe('/c/7/sessions?tab=schedule');
+    expect(href('session_rsvp')).toBe('/c/7/sessions?tab=schedule');
+    expect(href('session_scheduled', { entityId: 11 })).toBe(expected.scheduled_session);
+    expect(href('session_rsvp', { entityId: 11 })).toBe(expected.scheduled_session);
+    // Legacy log-session playedAt ping must NOT open the session log.
+    expect(href('session_scheduled', { entityType: 'session', entityId: 11 })).toBe(
+      '/c/7/sessions?tab=schedule',
+    );
+
+    // Quest detail route (not an ignored ?quest= query).
+    expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
+    expect(href('quest_updated')).toBe('/c/7/quests');
+
+    // Comment replies: parent entity + optional comment focus (session and non-session).
+    expect(href('comment_reply', { entityType: 'session', entityId: 11, commentId: 19 })).toBe(
+      '/c/7/sessions?session=11&comment=19#entity-comment-19',
+    );
+    expect(href('comment_reply', { entityType: 'quest', entityId: 11, commentId: 19 })).toBe(
+      '/c/7/quests/11?comment=19#entity-comment-19',
+    );
+    expect(href('comment_reply', { entityType: 'npc', entityId: 11 })).toBe(expected.npc);
+    expect(href('comment_reply')).toBe('/c/7');
+
+    expect(href('recap_posted', { entityType: 'session', entityId: 11 })).toBe(expected.session);
+    expect(href('note_shared', { entityType: 'session', entityId: 11 })).toBe(expected.session);
+    expect(href('note_reply')).toBe('/c/7/notes');
+    expect(href('note_shared')).toBe('/c/7/notes');
+    expect(href('proposal_submitted')).toBe('/c/7/proposals');
+    expect(href('proposal_resolved')).toBe('/c/7/proposals');
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
+    expect(href('recap_share_enabled')).toBe('/c/7');
+    expect(href('recap_share_extended')).toBe('/c/7');
   });
 });
 

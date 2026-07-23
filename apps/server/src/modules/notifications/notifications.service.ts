@@ -17,6 +17,8 @@ export interface NotificationEvent {
   body?: string;
   entityType?: EntityType | null;
   entityId?: number | null;
+  /** Focus a specific comment inside the parent entity thread (issue #446). */
+  commentId?: number | null;
   actorName?: string;
 }
 
@@ -30,6 +32,7 @@ function toDomain(row: typeof notifications.$inferSelect): Notification {
     body: row.body,
     entityType: row.entityType as EntityType | null,
     entityId: row.entityId,
+    commentId: row.commentId ?? null,
     actorName: row.actorName,
     readAt: row.readAt,
     createdAt: row.createdAt,
@@ -103,6 +106,7 @@ export class NotificationsService {
         body: event.body ?? '',
         entityType: event.entityType ?? null,
         entityId: event.entityId ?? null,
+        commentId: event.commentId ?? null,
         actorName: event.actorName ?? '',
         readAt: null,
         createdAt: ts,

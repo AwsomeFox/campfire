@@ -599,6 +599,7 @@ export class CommentsService {
         body: excerpt(row.body),
         entityType: row.entityType as EntityTypeValue,
         entityId: row.entityId,
+        commentId: row.id,
         actorName: user.name,
       });
     }
@@ -642,6 +643,7 @@ export class CommentsService {
         body: `The discussion on this ${row.entityType} lost its top comment; your reply is preserved.`,
         entityType: row.entityType as EntityTypeValue,
         entityId: row.entityId,
+        commentId: row.id,
         actorName: user.name,
       });
     }

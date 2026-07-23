@@ -1246,6 +1246,11 @@ export const Notification = z.object({
   body: z.string().max(1000).default(''), // short excerpt/context, plain text
   entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
   entityId: Id.nullable().default(null),
+  /**
+   * Issue #446: when set (typically `comment_reply`), the UI focuses this comment
+   * inside the parent entity's discussion thread (`entityType`/`entityId`).
+   */
+  commentId: Id.nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
