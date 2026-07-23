@@ -1847,11 +1847,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
   { name: '0061_combatants_sheet_synced_updated_at', run: migrateCombatantsTableForSheetSyncedUpdatedAt },
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
-<<<<<<< HEAD
-  { name: '0063_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
-=======
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
->>>>>>> origin/main
+  { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
 ];
 
 /**
