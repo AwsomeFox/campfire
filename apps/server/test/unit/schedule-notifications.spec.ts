@@ -165,6 +165,20 @@ describe('schedule notification helpers (issue #820)', () => {
     ).toBe('Changed: venue and notes.');
   });
 
+  it('keeps body empty when the title already carries the localized instant', () => {
+    expect(formatScheduleNotificationBody(data({ changeType: 'created' }))).toBe('');
+    expect(
+      formatScheduleNotificationBody(
+        data({ changeType: 'rescheduled', changedFields: ['time'] }),
+      ),
+    ).toBe('');
+    expect(
+      formatScheduleNotificationBody(
+        data({ changeType: 'rescheduled', changedFields: ['time', 'venue'] }),
+      ),
+    ).toBe('Changed: time and venue.');
+  });
+
   it('parses structured notification data and rejects malformed payloads', () => {
     const ok = parseScheduleNotificationData({
       kind: 'schedule',
@@ -180,5 +194,16 @@ describe('schedule notification helpers (issue #820)', () => {
     expect(parseScheduleNotificationData(null)).toBeNull();
     expect(parseScheduleNotificationData('{not json')).toBeNull();
     expect(parseScheduleNotificationData({ kind: 'other' })).toBeNull();
+    expect(
+      parseScheduleNotificationData({
+        kind: 'schedule',
+        scheduleId: 11,
+        scheduledAt: 'not-a-date',
+        durationMinutes: 240,
+        changeType: 'created',
+        changedFields: [],
+        label: 'Game night',
+      }),
+    ).toBeNull();
   });
 });

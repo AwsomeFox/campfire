@@ -30,8 +30,8 @@ export type ScheduleNotificationChangedField = z.infer<typeof ScheduleNotificati
 export const ScheduleNotificationData = z.object({
   kind: z.literal('schedule'),
   scheduleId: z.number().int().positive(),
-  /** Canonical ISO UTC start instant. */
-  scheduledAt: z.string().min(1).max(40),
+  /** Canonical ISO-8601 start instant with offset (Z or ±HH:MM). */
+  scheduledAt: z.string().datetime({ offset: true }).max(40),
   durationMinutes: z.number().int().min(0).max(24 * 60),
   changeType: ScheduleNotificationChangeType,
   /** Field names only — never venue URLs or note bodies (invite links stay private). */

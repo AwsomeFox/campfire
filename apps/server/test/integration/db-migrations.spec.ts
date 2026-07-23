@@ -410,6 +410,70 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
     }
   });
 
+  it('0070 adds notifications.data on a legacy table and preserves JSON payloads', () => {
+    dataDir = makeTempDataDir();
+    const seeded = openDatabase(dataDir);
+    seeded.sqlite.close();
+
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.pragma('foreign_keys = OFF');
+      const now = '2026-07-22T00:00:00.000Z';
+      legacy.prepare(
+        "INSERT INTO users (id, username, display_name, password_hash, server_role, disabled, created_at, updated_at) VALUES (1, 'legacy-notif-dm', 'Legacy Notif DM', 'hash', 'user', 0, ?, ?)",
+      ).run(now, now);
+      legacy.prepare("INSERT INTO campaigns (id, name, created_at, updated_at) VALUES (1, 'Legacy Notif Campaign', ?, ?)").run(now, now);
+      legacy.exec(`
+        DROP TABLE notifications;
+        CREATE TABLE notifications (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          campaign_id INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '',
+          entity_type TEXT,
+          entity_id INTEGER,
+          comment_id INTEGER,
+          actor_name TEXT NOT NULL DEFAULT '',
+          read_at TEXT,
+          created_at TEXT NOT NULL
+        );
+      `);
+      legacy
+        .prepare(
+          "INSERT INTO notifications (id, user_id, campaign_id, type, title, body, entity_type, entity_id, actor_name, created_at) VALUES (1, 1, 1, 'schedule', 'Game night was scheduled', 'Starts at 2026-07-22T00:00:00.000Z', 'schedule', 11, 'DM', ?)",
+        )
+        .run(now);
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0070_notifications_data'").run();
+    } finally {
+      legacy.close();
+    }
+
+    const upgraded = openDatabase(dataDir);
+    try {
+      expect(columnNames(upgraded.sqlite, 'notifications')).toEqual(expect.arrayContaining(['data']));
+      const payload = JSON.stringify({
+        kind: 'schedule',
+        scheduleId: 11,
+        scheduledAt: '2026-07-22T00:00:00.000Z',
+        durationMinutes: 240,
+        changeType: 'created',
+        changedFields: [],
+        label: 'Game night',
+      });
+      upgraded.sqlite.prepare('UPDATE notifications SET data = ? WHERE id = 1').run(payload);
+      const row = upgraded.sqlite.prepare('SELECT data, title FROM notifications WHERE id = 1').get() as {
+        data: string;
+        title: string;
+      };
+      expect(row.title).toBe('Game night was scheduled');
+      expect(JSON.parse(row.data)).toMatchObject({ kind: 'schedule', scheduleId: 11, changeType: 'created' });
+    } finally {
+      upgraded.sqlite.close();
+    }
+  });
+
   it('0052 upgrades legacy recap shares with a seven-day sunset and audit metadata columns', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);

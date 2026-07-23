@@ -31,7 +31,18 @@ test.describe('schedule notification client helpers (issue #820)', () => {
     );
     expect(title).toMatch(/Underdark heist scheduled for/);
     expect(title).toMatch(/Jul\s*21,\s*2026/);
+    expect(title).toMatch(/8:00\s*PM/);
+    expect(title).toMatch(/EDT|GMT-4|UTC-4/);
     expect(title).not.toMatch(/Jul\s*22/);
+
+    const tokyo = scheduleNotificationDisplayTitle(
+      { ...snapshot, changeType: 'created', scheduledAt: '2026-07-21T15:00:00.000Z' },
+      'en-US',
+      'Asia/Tokyo',
+    );
+    expect(tokyo).toMatch(/Jul\s*22,\s*2026/);
+    expect(tokyo).toMatch(/12:00\s*AM|00:00/);
+    expect(tokyo).toMatch(/JST|GMT\+9|UTC\+9/);
   });
 
   test('cancelled detail href is stable and sessionStorage round-trips the snapshot', () => {
