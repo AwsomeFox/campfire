@@ -280,6 +280,13 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'reveal_map_region',
   'check_objective',
   'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
+  // private information delivery (#1023)
+  'whisper_to_player',
+  // economy / loot (#1021) — parity with award_xp
+  'adjust_treasury',
+  'add_inventory_item',
   // table notes the DM jots during play
   'add_note',
 ]);
