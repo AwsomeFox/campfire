@@ -153,7 +153,7 @@ export default function ReaderPage() {
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
           ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={4} />
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={2} />
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}

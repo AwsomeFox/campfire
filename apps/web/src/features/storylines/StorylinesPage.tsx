@@ -426,7 +426,7 @@ function ArcCard({
       {...entityTargetProps('arc', arc.id)}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h4
+        <h2
           id={arcTitleId}
           style={{
             fontFamily: 'var(--font-heading)',
@@ -440,7 +440,7 @@ function ArcCard({
           }}
         >
           {arc.title}
-        </h4>
+        </h2>
         {isDm ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
@@ -721,12 +721,12 @@ function BeatRow({
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span aria-hidden="true" style={{ width: 14, flex: 'none', textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
-        <h5
+        <h3
           id={beatTitleId}
           style={{ fontWeight: 500, fontSize: 14, flex: '1 1 150px', minWidth: 0, margin: 0, overflowWrap: 'anywhere' }}
         >
           {beat.title}
-        </h5>
+        </h3>
         {isDm ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>
