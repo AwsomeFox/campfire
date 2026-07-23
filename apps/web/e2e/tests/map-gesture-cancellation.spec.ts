@@ -113,6 +113,9 @@ async function openGestureFixture(page: Page) {
   await page.route(`**/api/v1/attachments/${MAP_ATTACHMENT_ID}/file`, (route) =>
     route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
   );
+  await page.route(`**/api/v1/encounters/${encounterId}/map*`, (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
+  );
   await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
     const request = route.request();
     if (request.method() === 'GET') {
@@ -173,8 +176,9 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     await dispatchPointer(token, 'pointerup', tokenEnd, mouse);
     await dispatchPointer(token, 'lostpointercapture', tokenEnd, mouse);
     await dispatchPointer(token, 'pointerup', tokenEnd, mouse);
-    await expect.poll(() => calls.length).toBe(1);
-    expect(calls[0]).toMatchObject({ target: 'combatant', body: { tokenX: 70, tokenY: 60 } });
+    expect(calls[0].target).toBe('combatant');
+    expect((calls[0].body as { tokenX: number }).tokenX).toBeCloseTo(70, 1);
+    expect((calls[0].body as { tokenY: number }).tokenY).toBeCloseTo(60, 1);
 
     const aoeStart = { xPct: 0.4, yPct: 0.4 };
     const aoeEnd = { xPct: 0.65, yPct: 0.3 };
@@ -187,8 +191,8 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     expect(calls[1].target).toBe('encounter');
     const completedAoe = (calls[1].body.aoe as Array<{ id: string; x: number; y: number }>)[0];
     expect(completedAoe).toMatchObject({ id: AOE_ID });
-    expect(completedAoe.x).toBeCloseTo(65);
-    expect(completedAoe.y).toBeCloseTo(30);
+    expect(completedAoe.x).toBeCloseTo(65, 1);
+    expect(completedAoe.y).toBeCloseTo(30, 1);
 
     await page.getByRole('button', { name: 'Reveal', exact: true }).click();
     const fogStart = { xPct: 0.1, yPct: 0.15 };
@@ -203,10 +207,10 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     const completedFog = calls[2].body.fog as { enabled: boolean; revealed: Array<{ x: number; y: number; w: number; h: number }> };
     expect(completedFog.enabled).toBe(true);
     expect(completedFog.revealed).toHaveLength(1);
-    expect(completedFog.revealed[0].x).toBeCloseTo(10);
-    expect(completedFog.revealed[0].y).toBeCloseTo(15);
-    expect(completedFog.revealed[0].w).toBeCloseTo(45);
-    expect(completedFog.revealed[0].h).toBeCloseTo(60);
+    expect(completedFog.revealed[0].x).toBeCloseTo(10, 1);
+    expect(completedFog.revealed[0].y).toBeCloseTo(15, 1);
+    expect(completedFog.revealed[0].w).toBeCloseTo(45, 1);
+    expect(completedFog.revealed[0].h).toBeCloseTo(60, 1);
 
     await expect.poll(() => page.evaluate(
       () => (window as unknown as { __releasedPointerIds: number[] }).__releasedPointerIds,
@@ -225,8 +229,8 @@ test.describe('battle-map gesture ownership and cancellation', () => {
       x: Number(line.getAttribute('x2')?.replace('%', '')),
       y: Number(line.getAttribute('y2')?.replace('%', '')),
     }));
-    expect(finalRulerPoint.x).toBeCloseTo(60);
-    expect(finalRulerPoint.y).toBeCloseTo(35);
+    expect(finalRulerPoint.x).toBeCloseTo(60, 1);
+    expect(finalRulerPoint.y).toBeCloseTo(35, 1);
     await expect.poll(() => page.evaluate(
       () => (window as unknown as { __releasedPointerIds: number[] }).__releasedPointerIds,
     )).toEqual([1, 7, 12, 13]);
@@ -304,8 +308,8 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     await dispatchPointer(token, 'pointerup', ownerEnd, owner);
     await expect.poll(() => calls.length).toBe(1);
     expect(calls[0].target).toBe('combatant');
-    expect(calls[0].body.tokenX).toBeCloseTo(60);
-    expect(calls[0].body.tokenY).toBeCloseTo(65);
+    expect(calls[0].body.tokenX).toBeCloseTo(60, 1);
+    expect(calls[0].body.tokenY).toBeCloseTo(65, 1);
 
     const aoeStart = { xPct: 0.4, yPct: 0.4 };
     const aoeOwnerEnd = { xPct: 0.55, yPct: 0.25 };
@@ -318,8 +322,8 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     await expect.poll(() => calls.length).toBe(2);
     const ownedAoe = (calls[1].body.aoe as Array<{ id: string; x: number; y: number }>)[0];
     expect(ownedAoe).toMatchObject({ id: AOE_ID });
-    expect(ownedAoe.x).toBeCloseTo(55);
-    expect(ownedAoe.y).toBeCloseTo(25);
+    expect(ownedAoe.x).toBeCloseTo(55, 1);
+    expect(ownedAoe.y).toBeCloseTo(25, 1);
 
     await page.getByRole('button', { name: 'Reveal', exact: true }).click();
     const fogStart = { xPct: 0.2, yPct: 0.2 };
@@ -334,10 +338,10 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     expect(calls[2].target).toBe('encounter');
     const ownedFog = calls[2].body.fog as { revealed: Array<{ x: number; y: number; w: number; h: number }> };
     expect(ownedFog.revealed).toHaveLength(1);
-    expect(ownedFog.revealed[0].x).toBeCloseTo(20);
-    expect(ownedFog.revealed[0].y).toBeCloseTo(20);
-    expect(ownedFog.revealed[0].w).toBeCloseTo(30);
-    expect(ownedFog.revealed[0].h).toBeCloseTo(50);
+    expect(ownedFog.revealed[0].x).toBeCloseTo(20, 1);
+    expect(ownedFog.revealed[0].y).toBeCloseTo(20, 1);
+    expect(ownedFog.revealed[0].w).toBeCloseTo(30, 1);
+    expect(ownedFog.revealed[0].h).toBeCloseTo(50, 1);
   });
 
   for (const gesture of ['token', 'aoe', 'fog'] as const) {

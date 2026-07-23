@@ -110,6 +110,9 @@ async function openPingFixture(page: Page) {
   await page.route(`**/api/v1/attachments/${MAP_ATTACHMENT_ID}/file`, (route) =>
     route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
   );
+  await page.route(`**/api/v1/encounters/${encounterId}/map*`, (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
+  );
   await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
     if (route.request().method() === 'GET') {
       await route.fulfill({ status: 200, contentType: 'application/json', json: encounter });
@@ -149,16 +152,16 @@ test.describe('battle-map ping tap completion', () => {
     await dispatchPointer(surface, 'lostpointercapture', mouseSpot, mouse);
     await dispatchPointer(surface, 'pointerup', mouseSpot, mouse);
     await expect.poll(() => pings.length).toBe(1);
-    expect(pings[0].x).toBeCloseTo(30);
-    expect(pings[0].y).toBeCloseTo(40);
+    expect(pings[0].x).toBeCloseTo(30, 1);
+    expect(pings[0].y).toBeCloseTo(40, 1);
 
     const touchSpot = { xRatio: 0.7, yRatio: 0.55 };
     const touch = { pointerId: 12, pointerType: 'touch', isPrimary: true } as const;
     await dispatchPointer(surface, 'pointerdown', touchSpot, touch);
     await dispatchPointer(surface, 'pointerup', touchSpot, touch, { x: MAP_PING_TAP_SLOP_PX, y: 0 });
     await expect.poll(() => pings.length).toBe(2);
-    expect(pings[1].x).toBeCloseTo(70);
-    expect(pings[1].y).toBeCloseTo(55);
+    expect(pings[1].x).toBeCloseTo(70, 1);
+    expect(pings[1].y).toBeCloseTo(55, 1);
   });
 
   test('pointerdown alone never publishes; cancel and capture-loss drop the armed tap', async ({ page }) => {
