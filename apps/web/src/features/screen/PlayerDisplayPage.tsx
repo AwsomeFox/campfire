@@ -24,11 +24,13 @@ import type {
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { useAuth } from '../../app/auth';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
+import { STATUS_LABEL } from '../characters/status';
 import {
   safeCombatants,
   safeLocation,
@@ -38,7 +40,9 @@ import {
   type SafeCombatant,
 } from './playerSafe';
 
-const POLL_MS = 12_000;
+/** Party/quest/status edits have no SSE — poll at the same cadence as PartyPage so
+ * Cast picks up retirement/death promptly while the display stays open (issue #824). */
+const POLL_MS = 5_000;
 const CONTROLS_HIDE_MS = 3_500;
 
 const HP_BAND_LABEL: Record<HpBand, string> = {
@@ -113,6 +117,8 @@ export default function PlayerDisplayPage() {
   const [isFullscreen, setIsFullscreen] = useState(fullscreenActive);
   const [fullscreenPending, setFullscreenPending] = useState(false);
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
+  /** Producer opt-in: show dead/retired/inactive PCs under Party with status labels (#824). */
+  const [includeAlumni, setIncludeAlumni] = useState(false);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
 
@@ -147,11 +153,9 @@ export default function PlayerDisplayPage() {
   }, [cid, load]);
 
   // Slow poll — catches location/quest/party edits (no SSE event) without hammering.
-  useEffect(() => {
-    if (!Number.isFinite(cid)) return;
-    const handle = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(handle);
-  }, [cid, load]);
+  // Pauses while the cast tab is hidden; refetches immediately on becoming visible
+  // so a status change made in another tab lands promptly when Cast is watched again.
+  usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
@@ -395,6 +399,16 @@ export default function PlayerDisplayPage() {
         >
           <span aria-hidden="true">✕</span> Exit
         </button>
+        {role === 'dm' && (
+          <label className="cf-screen-alumni-toggle" title="Show dead, retired, and inactive PCs on the Party scene">
+            <input
+              type="checkbox"
+              checked={includeAlumni}
+              onChange={(event) => setIncludeAlumni(event.target.checked)}
+            />
+            <span>Include alumni / inactive</span>
+          </label>
+        )}
         <button
           type="button"
           className="btn btn-ghost"
@@ -456,7 +470,15 @@ export default function PlayerDisplayPage() {
   if (!summary) return null;
 
   const location = safeLocation(summary.currentLocation);
-  const party = safeParty(summary.characters);
+  // During a live fight, prefer PCs seated as combatants over the full active roster
+  // (issue #824). Monster-only fights leave this empty and fall back to active-only.
+  const participatingCharacterIds =
+    encounter && encounter.status === 'running'
+      ? encounter.combatants
+          .filter((c) => c.kind === 'character' && c.characterId != null)
+          .map((c) => c.characterId as number)
+      : null;
+  const party = safeParty(summary.characters, { includeAlumni, participatingCharacterIds });
   const quests = safeQuests(summary.quests);
   const npcs = safeNpcs(summary.npcs);
   const combatants = encounter ? safeCombatants(encounter.combatants) : [];
@@ -508,16 +530,26 @@ export default function PlayerDisplayPage() {
             <h2>Party</h2>
           </div>
           {party.length === 0 ? (
-            <p className="cf-empty">No characters yet.</p>
+            <p className="cf-empty">{includeAlumni ? 'No characters yet.' : 'No active party members.'}</p>
           ) : (
             <div className="cf-party">
               {party.map((c) => {
                 const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
                 const tone = pct <= 25 ? 'crit' : pct <= 50 ? 'low' : '';
+                const isActive = c.status === 'active';
                 return (
-                  <div key={c.id} className="cf-party-card">
+                  <div
+                    key={c.id}
+                    className={`cf-party-card${isActive ? '' : ' alumni'}`}
+                    data-character-status={c.status}
+                  >
                     <div className="cf-party-top">
-                      <span className="cf-party-name">{c.name}</span>
+                      <span className="cf-party-name">
+                        {c.name}
+                        {!isActive && (
+                          <span className="cf-chip cf-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
+                        )}
+                      </span>
                       {c.ac != null && <span className="cf-chip cf-chip-sm">AC {c.ac}</span>}
                     </div>
                     <div className="cf-party-sub">
@@ -713,7 +745,26 @@ const SCREEN_CSS = `
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+.cf-screen-alumni-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  color: var(--color-neutral-200);
+  padding: 7px 12px;
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  user-select: none;
+}
+.cf-screen-alumni-toggle input {
+  margin: 0;
+  accent-color: var(--color-accent);
 }
 .cf-screen-fullscreen-notice {
   margin: 8px 0 0 auto;
@@ -853,8 +904,22 @@ const SCREEN_CSS = `
 /* Party */
 .cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 12px; }
 .cf-party-card { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 12px 14px; }
+.cf-party-card.alumni { opacity: 0.62; }
 .cf-party-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.cf-party-name { font-weight: 700; color: #fff; font-size: clamp(15px, 1.5vw, 22px); }
+.cf-party-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 700;
+  color: #fff;
+  font-size: clamp(15px, 1.5vw, 22px);
+}
+.cf-party-status {
+  text-transform: none;
+  color: var(--color-neutral-300);
+  border-color: color-mix(in srgb, var(--color-neutral-400) 45%, transparent);
+}
 .cf-party-sub { color: var(--color-neutral-400); font-size: clamp(12px, 1.1vw, 16px); margin-top: 2px; text-transform: capitalize; }
 
 /* Conditions */
