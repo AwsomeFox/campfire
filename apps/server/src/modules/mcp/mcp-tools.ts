@@ -2847,6 +2847,8 @@ export class McpToolsService {
         '(temp-HP pool, absorbs damage first), deathSaveSuccesses/deathSaveFailures (0–3; 3 failures = dead, 3 ' +
         'successes = stable), deathSaveRoll (a d20 death-save result; 5e crit/fumble rules: nat 1 = two failures, ' +
         'nat 20 = revive at 1 HP, 10–19 = one success, 2–9 = one failure), addConditions/removeConditions. ' +
+        'addConditions for a non-DM must use the active rule system\'s condition vocabulary (400 otherwise); ' +
+        'the DM may mint custom condition labels. ' +
         'actorId (optional): the combatant who dealt the damage/heal/death, used to attribute the combat-log ' +
         'entry ("Ember hit Goblin 3 for 8"); omit to fall back to the current-turn combatant, or pass null to ' +
         'suppress attribution entirely (legacy target-only phrasing). DM-only ' +
