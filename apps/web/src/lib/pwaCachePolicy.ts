@@ -67,9 +67,11 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
   // Identity channel — proven-live only (issue #579); never SW-cached.
   if (path === '/api/v1/me' || path.startsWith('/api/v1/auth/')) return true;
 
-  // SSE: Accept header and/or known stream paths (campaign events + AI-DM).
+  // SSE: Accept header and/or known stream paths (campaign SSE + AI-DM).
+  // Do NOT treat every `/events` suffix as a stream — encounter combat-log
+  // JSON lives at `/api/v1/encounters/:id/events` and should stay cacheable.
   if (accept.includes('text/event-stream')) return true;
-  if (path.endsWith('/events') || path.endsWith('/ai-dm/stream')) return true;
+  if (/\/campaigns\/[^/]+\/events$/.test(path) || path.endsWith('/ai-dm/stream')) return true;
 
   // Whole-server backup + campaign/member exports (issues #730 / #879).
   if (path === '/api/v1/backup' || path.startsWith('/api/v1/backup/')) return true;
@@ -116,7 +118,7 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
 
   if (path === '/api/v1/me' || path.startsWith('/api/v1/auth/')) return false;
   if (accept.includes('text/event-stream')) return false;
-  if (path.endsWith('/events') || path.endsWith('/ai-dm/stream')) return false;
+  if (/\/campaigns\/[^/]+\/events$/.test(path) || path.endsWith('/ai-dm/stream')) return false;
   if (path === '/api/v1/backup' || path.startsWith('/api/v1/backup/')) return false;
   if (path.includes('/export')) return false;
   if (path.startsWith('/api/v1/admin/')) return false;

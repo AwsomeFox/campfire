@@ -60,6 +60,9 @@ test.describe('pwaCachePolicy matchers (#879)', () => {
     expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/events'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/ai-dm/stream'))).toBe(true);
     expect(matchApiJsonCache(req('/api/v1/campaigns/3/events'))).toBe(false);
+    // Encounter combat-log JSON is not a stream — keep it in the JSON bucket.
+    expect(matchNetworkOnlyApi(req('/api/v1/encounters/9/events'))).toBe(false);
+    expect(matchApiJsonCache(req('/api/v1/encounters/9/events'))).toBe(true);
   });
 
   test('NetworkOnly matches backup, export, admin, auth, and full attachments', () => {
@@ -251,6 +254,23 @@ test.describe('offline campaign manifest (#879)', () => {
     expect(stale.staleCount).toBeGreaterThan(0);
 
     clearOfflineManifestMeta(7);
+  });
+
+  test('Workbox-cached bytes without a downloaded pack stay missing (not stale)', async () => {
+    const memory = new MemoryCacheStorage();
+    (globalThis as { caches?: CacheStorage }).caches = memory as unknown as CacheStorage;
+    const cache = await memory.open('campfire-api-json');
+    for (const entry of campaignOfflineManifest(11)) {
+      if (entry.kind !== 'image') {
+        await cache.put(entry.url, new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }));
+      }
+    }
+    const inspection = await inspectCampaignOfflineManifest(11, {
+      caches: memory as unknown as CacheStorage,
+    });
+    expect(offlinePackIndicator(inspection)).toBe('missing');
+    expect(inspection.staleCount).toBe(0);
+    expect(inspection.missingCount).toBeGreaterThan(0);
   });
 
   test('large download / policy-reject does not enter the pack', async () => {

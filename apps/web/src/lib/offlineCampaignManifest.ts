@@ -183,8 +183,10 @@ export async function inspectCampaignOfflineManifest(
     if (inCache && stored) {
       status = isStale(stored.cachedAt, now) ? 'stale' : 'present';
     } else if (inCache && !stored) {
-      // Bytes exist but we lost bookkeeping — treat as stale so the UI prompts refresh.
-      status = 'stale';
+      // Workbox may populate the JSON bucket during normal online use without
+      // offline-pack metadata. Only treat that as stale when a pack was once
+      // downloaded (meta exists) and we lost per-entry bookkeeping.
+      status = meta ? 'stale' : 'missing';
     } else {
       status = 'missing';
     }
@@ -314,6 +316,13 @@ async function putWithQuotaRetry(
   let evicted = 0;
   try {
     await cache.put(requestUrl, response.clone());
+    // Rank the fresh write as newest before LRU eviction so a full bucket
+    // cannot immediately drop the entry we just stored (cachedAt default 0).
+    metaEntries[requestUrl] = {
+      cachedAt: Date.now(),
+      bytes: metaEntries[requestUrl]?.bytes ?? 0,
+      cacheName,
+    };
     evicted += await evictCacheEntries(cache, { maxEntries, metaEntries });
     return { ok: true, quotaExceeded: false, evicted };
   } catch (err) {
