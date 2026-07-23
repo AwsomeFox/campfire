@@ -137,6 +137,36 @@ describe('campaigns (e2e)', () => {
     expect(getRes.body.ruleSystem).toBe('');
   });
 
+  /**
+   * Issue #539: clients must persist ruleSystem on POST — a create-then-PATCH flow
+   * can leave a campaign on the empty-system fallback when the PATCH fails.
+   */
+  it('issue #539: ruleSystem on POST is authoritative; failed PATCH after create-without-rules leaves empty system', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const atomic = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Atomic PF2e Choice', ruleSystem: 'dnd5e-srd' });
+    expect(atomic.status).toBe(201);
+    expect(atomic.body.ruleSystem).toBe('dnd5e-srd');
+    const getAtomic = await request(server).get(`/api/v1/campaigns/${atomic.body.id}`).set(dm);
+    expect(getAtomic.body.ruleSystem).toBe('dnd5e-srd');
+
+    const createOnly = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Two-step hazard' });
+    expect(createOnly.status).toBe(201);
+    expect(createOnly.body.ruleSystem).toBe('');
+
+    const failedPatch = await request(server)
+      .patch(`/api/v1/campaigns/${createOnly.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: 'not-a-real-pack' });
+    expect(failedPatch.status).toBe(400);
+
+    const afterFailedPatch = await request(server).get(`/api/v1/campaigns/${createOnly.body.id}`).set(dm);
+    expect(afterFailedPatch.body.ruleSystem).toBe('');
+  });
+
   it('GET /campaigns/:id/summary returns aggregate shape', async () => {
     const server = ctx.app.getHttpServer();
     const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Summary Test' });
