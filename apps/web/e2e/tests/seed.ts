@@ -25,8 +25,8 @@ export const PNG_16_9 = Buffer.from(
 /** Reopens and resets the main seeded encounter using captured DM authentication. */
 export async function restoreSeedEncounter(_page?: { request: APIRequestContext }): Promise<void> {
   try {
-    const { encounterId, endedEncounterId, bossId, skirmisherId } = seed();
-    const dmContext = await request.newContext({ storageState: stateFor('dm') });
+    const { baseURL, encounterId, endedEncounterId, bossId, skirmisherId } = seed();
+    const dmContext = await request.newContext({ baseURL: baseURL || undefined, storageState: stateFor('dm') });
     try {
       await dmContext.post(`/api/v1/encounters/${encounterId}/reopen`).catch(() => undefined);
       await dmContext.patch(`/api/v1/encounters/${encounterId}`, {

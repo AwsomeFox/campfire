@@ -40,7 +40,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
   for (const viewport of VIEWPORTS) {
     test(`primary combat + map controls are ≥44×44 at ${viewport.name}px`, async ({ page }) => {
       const { baseURL, campaignId } = seed();
-      const dm = await request.newContext({ baseURL });
+      const dm = await request.newContext({ baseURL, storageState: stateFor('dm') });
       let characterId: number | null = null;
       let encounterId: number | null = null;
 
