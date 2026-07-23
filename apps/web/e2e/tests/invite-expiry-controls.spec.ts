@@ -135,7 +135,7 @@ test.describe('issue #821 — invite expiry & max-use controls', () => {
     await expect(preview).toContainText('Anyone with this link can join');
 
     // Change role to viewer
-    await page.locator('#invite-role').selectOption('viewer');
+    await page.locator('#invite-join-role').selectOption('viewer');
     await expect(preview).toContainText('Viewer');
 
     // Change expiry to 24h
@@ -232,7 +232,7 @@ test.describe('issue #821 — invite expiry & max-use controls', () => {
     await page.goto(`/c/${CAMPAIGN_ID}/members`);
 
     // All form controls have associated labels
-    await expect(page.locator('label[for="invite-role"]')).toBeVisible();
+    await expect(page.locator('label[for="invite-join-role"]')).toBeVisible();
     await expect(page.locator('label[for="invite-expiry"]')).toBeVisible();
     await expect(page.locator('label[for="invite-max-uses"]')).toBeVisible();
 
@@ -241,8 +241,8 @@ test.describe('issue #821 — invite expiry & max-use controls', () => {
     await expect(preview).toBeVisible();
 
     // Tab through controls
-    await page.locator('#invite-role').focus();
-    await expect(page.locator('#invite-role')).toBeFocused();
+    await page.locator('#invite-join-role').focus();
+    await expect(page.locator('#invite-join-role')).toBeFocused();
 
     await page.keyboard.press('Tab');
     await expect(page.locator('#invite-expiry')).toBeFocused();
