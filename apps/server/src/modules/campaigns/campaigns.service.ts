@@ -1262,8 +1262,17 @@ export class CampaignsService {
 
     // srcAttachmentId -> new attachment id, populated inside the tx.
     const attMap = new Map<number, number>();
-    /** Rewrite a source portraitUrl through attMap (shared helper with clone — #524 / #236). */
-    const remapPortraitUrl = (url: unknown): string | null => remapAttachmentFileUrl(url, attMap);
+    /**
+     * Rewrite a source portraitUrl through attMap (shared helper with clone — #524 / #236).
+     * Preserve safe remote HTTPS portraits; drop dangling local attachment refs.
+     */
+    const remapPortraitUrl = (url: unknown): string | null => {
+      const safe = safeHistoricalAvatarUrl(url);
+      if (!safe) return null;
+      const remapped = remapAttachmentFileUrl(safe, attMap);
+      if (remapped != null) return remapped;
+      return historicalAvatarAttachmentId(safe) == null ? safe : null;
+    };
     /** Preserve safe remote historical avatars; remap local attachment snapshots. */
     const remapHistoricalAvatarUrl = (url: unknown): string | null => {
       const safe = safeHistoricalAvatarUrl(url);
