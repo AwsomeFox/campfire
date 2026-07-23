@@ -17,7 +17,11 @@ export function isEntityDeepLinkHash(hash: string): boolean {
   return ENTITY_DEEP_LINK_HASH.test(hash);
 }
 
-/** Genuine route changes move focus; query/hash-only updates do not. */
+/**
+ * Whether RouteChangeFocus should move focus after navigation.
+ * Compares pathnames and treats entity deep-link hashes as non-route changes.
+ * Query-only updates are handled by RouteChangeFocus (effect deps omit `search`).
+ */
 export function shouldMoveFocusOnNavigation(
   previousPathname: string | null,
   nextPathname: string,

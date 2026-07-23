@@ -22,9 +22,10 @@ test.describe('route focus helpers (#591)', () => {
     expect(ENTITY_DEEP_LINK_HASH.test('#entity-npc-12')).toBe(true);
   });
 
-  test('shouldMoveFocusOnNavigation ignores query/hash-only updates', () => {
-    expect(shouldMoveFocusOnNavigation('/c/1/sessions', '/c/1/sessions', '?tab=schedule')).toBe(false);
-    expect(shouldMoveFocusOnNavigation('/c/1/compendium', '/c/1/compendium', '?q=fire')).toBe(false);
+  test('shouldMoveFocusOnNavigation ignores same-pathname and hash-only updates', () => {
+    // Query-only navigations never call this with a pathname change (RouteChangeFocus omits search).
+    expect(shouldMoveFocusOnNavigation('/c/1/sessions', '/c/1/sessions', '')).toBe(false);
+    expect(shouldMoveFocusOnNavigation('/c/1/compendium', '/c/1/compendium', '#item-42')).toBe(false);
     expect(shouldMoveFocusOnNavigation('/c/1/party', '/c/1/party', '#entity-npc-1')).toBe(false);
   });
 
