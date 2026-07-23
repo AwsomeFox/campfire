@@ -21,6 +21,7 @@ import type { Notification } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
+import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
@@ -176,6 +177,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<Notification[] | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const announce = useAnnounce();
 
   const mountedRef = useRef(false);
   const initializedRef = useRef(false);
@@ -506,11 +508,13 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
         publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
       } catch {
-        /* best-effort — user already landed on the destination */
+        // User already navigated; still announce the failed mark-read so the
+        // unread badge state is explainable (issue #592 mark-read announce AC).
+        announce("Couldn't mark notification as read.", { assertive: true });
       }
       void refreshCount(true);
     }
-  }, [cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
+  }, [announce, cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
   const markAllRead = useCallback(async (): Promise<boolean> => {
     try {
@@ -611,8 +615,11 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
   // so it stays put when the panel re-renders across the breakpoint.
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
+  // Load failures are announced by ErrorNote (role=alert). Keep the dialog
+  // description as neutral list state so screen readers don't hear the same
+  // failure twice (orchestrator review / #592).
   const itemCountAnnouncement = markAllAnnouncement ?? (items === null
-    ? (loadError ? "Couldn't load notifications." : 'Loading items.')
+    ? (loadError ? 'Notification list unavailable.' : 'Loading items.')
     : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`);
 
   const handleMarkAllRead = useCallback(async () => {
