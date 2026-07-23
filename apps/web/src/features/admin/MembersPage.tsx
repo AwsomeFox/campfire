@@ -21,6 +21,7 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import { firstGrapheme } from '../../lib/avatarText';
 import {
   INVITE_COPY_FAILURE,
   INVITE_COPY_SUCCESS,
@@ -814,7 +815,7 @@ function MemberRow({
   return (
     <div className="flex items-center gap-2.5 py-2.5 flex-wrap" style={{ borderTop: '1px solid var(--color-divider)' }}>
       <span className="h-8 w-8 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[12px] text-[var(--color-neutral-300)]">
-        {(member.displayName || member.username || '?').slice(0, 1).toUpperCase()}
+        {firstGrapheme(member.displayName || member.username || '?')}
       </span>
       <div className="min-w-0">
         <p className="text-[13.5px] m-0 flex items-center gap-1.5">

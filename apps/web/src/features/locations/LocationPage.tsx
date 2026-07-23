@@ -336,13 +336,21 @@ export default function LocationPage() {
     const x = Number(pinX);
     const y = Number(pinY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const clampedX = Math.max(0, Math.min(100, x));
+    const clampedY = Math.max(0, Math.min(100, y));
+    // Keep the form in sync with the clamped values that will be submitted.
+    setPinX(String(clampedX));
+    setPinY(String(clampedY));
     setPinSaving(true);
     try {
-      const updated = await api.patch<Location>(`${API}/locations/${id}`, { mapX: x, mapY: y });
+      const updated = await api.patch<Location>(`${API}/locations/${id}`, { mapX: clampedX, mapY: clampedY });
       setLocation(updated);
       setMovingPin(false);
+      announce(`Pin saved at ${clampedX}% horizontal, ${clampedY}% vertical.`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't move the pin.";
+      setError(msg);
+      announce(`Failed to save pin position: ${msg}`, { assertive: true });
     } finally {
       setPinSaving(false);
     }
@@ -514,35 +522,51 @@ export default function LocationPage() {
                     </Btn>
                   )}
                   {isDm && movingPin && (
-                    <div className="absolute bottom-2 right-2 cf-card p-2 flex items-end gap-2">
-                      <div className="space-y-0.5">
-                        <label className="text-[9px] text-slate-500 font-bold uppercase">X</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          className="cf-input !min-h-0 !py-1 !w-16 text-xs"
-                          value={pinX}
-                          onChange={(e) => setPinX(e.target.value)}
-                        />
+                    <div className="absolute bottom-2 right-2 cf-card p-2 flex flex-col gap-1.5" role="group" aria-labelledby="pin-position-heading">
+                      <span id="pin-position-heading" className="text-[9px] text-slate-400 font-bold uppercase">
+                        Move {location.name} pin
+                      </span>
+                      <div className="flex items-end gap-2">
+                        <div className="space-y-0.5">
+                          <label htmlFor="pin-x-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                            Horizontal position (%)
+                          </label>
+                          <input
+                            id="pin-x-input"
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            value={pinX}
+                            onChange={(e) => setPinX(e.target.value)}
+                            aria-describedby="pin-position-help"
+                          />
+                        </div>
+                        <div className="space-y-0.5">
+                          <label htmlFor="pin-y-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                            Vertical position (%)
+                          </label>
+                          <input
+                            id="pin-y-input"
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            value={pinY}
+                            onChange={(e) => setPinY(e.target.value)}
+                            aria-describedby="pin-position-help"
+                          />
+                        </div>
+                        <Btn ghost className="!min-h-0 !py-1 text-[10px]" onClick={() => setMovingPin(false)}>
+                          Cancel
+                        </Btn>
+                        <Btn className="!min-h-0 !py-1 text-[10px]" disabled={pinSaving} onClick={savePin}>
+                          {pinSaving ? '…' : 'Save'}
+                        </Btn>
                       </div>
-                      <div className="space-y-0.5">
-                        <label className="text-[9px] text-slate-500 font-bold uppercase">Y</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          className="cf-input !min-h-0 !py-1 !w-16 text-xs"
-                          value={pinY}
-                          onChange={(e) => setPinY(e.target.value)}
-                        />
-                      </div>
-                      <Btn ghost className="!min-h-0 !py-1 text-[10px]" onClick={() => setMovingPin(false)}>
-                        Cancel
-                      </Btn>
-                      <Btn className="!min-h-0 !py-1 text-[10px]" disabled={pinSaving} onClick={savePin}>
-                        {pinSaving ? '…' : 'Save'}
-                      </Btn>
+                      <p id="pin-position-help" className="text-[9px] text-slate-500 m-0">
+                        0% = left/top edge, 100% = right/bottom edge
+                      </p>
                     </div>
                   )}
                 </div>

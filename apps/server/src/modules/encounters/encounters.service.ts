@@ -354,6 +354,64 @@ export class EncountersService {
   }
 
   /**
+   * Resolve the actor name to attribute a combat-log HP/death event to (issue #620).
+   * Resolution order:
+   *   1. an explicit numeric `actorId` from the patch (the apply-damage caller naming
+   *      the attacker directly);
+   *   2. the running encounter's current-turn combatant (the default attacker) — only
+   *      when `actorId` was omitted (`undefined`);
+   *   3. null — fall back to the original target-only phrasing.
+   * Tri-state `actorId` contract:
+   *   - omitted / `undefined` → try current-turn fallback;
+   *   - `null` → opt out of attribution entirely (no current-turn fallback);
+   *   - number → use that combatant (self-damage collapses; unknown id falls back).
+   * Returns null (no attribution) when:
+   *   - the caller sent `actorId: null` to suppress attribution;
+   *   - the resolved combatant IS the target (self-damage, or the monster on its own
+   *     turn), because the existing log phrasing ("Ember took 8 damage") reads better
+   *     than the attributed form ("Ember: took 8 damage") when the actor and target
+   *     collapse to the same name;
+   *   - the explicit actorId references a combatant that no longer exists in this
+   *     encounter (a stale client) — dropped (and the current-turn fallback retried)
+   *     rather than 400ing, so a stale client can still apply damage without a second
+   *     round-trip and the log still attributes to the most-likely attacker.
+   */
+  private async resolveCombatLogActor(
+    encounterId: number,
+    actorId: number | null | undefined,
+    currentCombatantId: number | null,
+    targetCombatantId: number,
+  ): Promise<string | null> {
+    // Explicit null = "do not attribute" (used by a11y e2e and callers that want the
+    // legacy target-only phrasing). Distinct from omitted/undefined, which falls back
+    // to the current-turn combatant.
+    if (actorId === null) return null;
+
+    // An explicitly-provided numeric actorId is authoritative: respect it (including
+    // the actor==target self-damage case, which collapses to no attribution). Only when
+    // it is absent OR fails to resolve (a stale client referencing a removed combatant)
+    // do we fall back to the current-turn combatant, so a bogus id still lands the
+    // damage and attributes to the most plausible attacker.
+    if (actorId !== undefined) {
+      if (actorId === targetCombatantId) return null; // explicit self-attribution
+      const [explicit] = await this.db
+        .select({ name: combatants.name })
+        .from(combatants)
+        .where(and(eq(combatants.id, actorId), eq(combatants.encounterId, encounterId)))
+        .limit(1);
+      if (explicit?.name) return explicit.name;
+      // explicit id didn't resolve — fall through to the current-turn fallback.
+    }
+    if (currentCombatantId === null || currentCombatantId === targetCombatantId) return null;
+    const [current] = await this.db
+      .select({ name: combatants.name })
+      .from(combatants)
+      .where(and(eq(combatants.id, currentCombatantId), eq(combatants.encounterId, encounterId)))
+      .limit(1);
+    return current?.name ?? null;
+  }
+
+  /**
    * Persist one combat-log event (issue #61). Called from the combat mutations (HP
    * damage/heal, condition add/remove, death, turn/round) so the run view can show a
    * scrollable history that survives reload. `detail` must never carry a monster's
@@ -1642,24 +1700,42 @@ export class EncountersService {
     const round = encounterRow.round;
     const targetName = row.name;
 
+    // Issue #620: attribute HP/death events to the attacker so the log reads "Ember hit
+    // Goblin 3 for 8" rather than just "Goblin 3 took 8 damage". Resolution order:
+    //   1. explicit numeric `actorId` on the patch (the apply-damage caller knows who swung);
+    //   2. the running encounter's current-turn combatant (the default attacker) — only
+    //      when `actorId` was omitted;
+    //   3. nothing — fall back to the original target-only phrasing.
+    // Tri-state: omit → current-turn fallback; `actorId: null` → suppress attribution;
+    // number → that combatant. The actor is only attached when it differs from the
+    // target: self-damage (Ember smiting Ember) or the monster being on its own turn
+    // otherwise collapses to "Ember: took 8 damage" — worse than the unattributed
+    // "Ember took 8 damage" the existing log produced. An explicit actorId referencing
+    // a combatant NOT in this encounter is dropped (the lookup returns null) so a stale
+    // client can't pollute the log with a phantom name; it doesn't 400, mirroring how
+    // other optional metadata is best-effort rather than fail-loud.
+    const actorName = await this.resolveCombatLogActor(encounterId, patch.actorId, encounterRow.currentCombatantId, combatantId);
+
     // HP damage/heal — only when an HP change was actually requested (not a pure temp-HP
     // grant or a death-save toggle). Compare the TOTAL pool (hp + temp) so temp-HP
     // absorption shows as the real change; record only the magnitude.
     if (patch.hpDelta !== undefined || patch.hpSet !== undefined) {
       const poolDelta = afterHp + afterTemp - (beforeHp + beforeTemp);
       if (poolDelta < 0) {
-        await this.appendEvent(encounterId, round, 'damage', { target: targetName, detail: `took ${-poolDelta} damage` });
+        await this.appendEvent(encounterId, round, 'damage', { actor: actorName, target: targetName, detail: `took ${-poolDelta} damage` });
       } else if (poolDelta > 0) {
-        await this.appendEvent(encounterId, round, 'heal', { target: targetName, detail: `healed ${poolDelta} HP` });
+        await this.appendEvent(encounterId, round, 'heal', { actor: actorName, target: targetName, detail: `healed ${poolDelta} HP` });
       }
     }
 
     // Death — a character reaching `dead` (3 failed saves / massive damage), or a monster
-    // dropping to 0 HP (monsters don't roll saves; 0 HP is simply "down").
+    // dropping to 0 HP (monsters don't roll saves; 0 HP is simply "down"). Attribute the
+    // kill when the attacker is known and distinct (issue #620), so a recap can say who
+    // felled the boss rather than only that it dropped.
     if (afterDeath === 'dead' && beforeDeath !== 'dead') {
-      await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'died' });
+      await this.appendEvent(encounterId, round, 'death', { actor: actorName, target: targetName, detail: 'died' });
     } else if ((existing.kind === 'monster' || existing.kind === 'npc') && afterHp <= 0 && beforeHp > 0) {
-      await this.appendEvent(encounterId, round, 'death', { target: targetName, detail: 'dropped to 0 HP' });
+      await this.appendEvent(encounterId, round, 'death', { actor: actorName, target: targetName, detail: 'dropped to 0 HP' });
     }
 
     // A rolled death save (issue #619) — record the roll + its 5e outcome so the combat
@@ -1863,6 +1939,13 @@ export class EncountersService {
       throw new BadRequestException(`Encounter must be in 'preparing' status to start (currently '${encounterRow.status}')`);
     }
     const rows = await this.listCombatantRows(encounterId);
+    if (rows.length === 0) {
+      // Without this guard an empty roster passes the (vacuous) initiative check below
+      // and Start flips the encounter to 'running' with round=1 and currentCombatantId
+      // null — a nonsensical fight with nobody in it that only manual End can clear
+      // (issue #469). At least one combatant must exist before Start is meaningful.
+      throw new BadRequestException('Cannot start an encounter with no combatants — add at least one combatant first');
+    }
     if (rows.some((r) => r.initiative === null)) {
       throw new BadRequestException('All combatants must have initiative rolled before starting the encounter');
     }
