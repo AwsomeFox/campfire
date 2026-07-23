@@ -12,6 +12,16 @@ interface TestWindow extends Window {
 
 async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
   const { campaignId } = seed();
+  // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
+  // encounter is currently RUNNING; end it so this throwaway encounter can start.
+  // restoreSeedFight() (called by each test's finally) reopens it afterward, since
+  // /reopen preserves round/turnIndex and the combat-tracker suite expects Round 1.
+  const live = await page.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`);
+  if (live.ok()) {
+    for (const enc of (await live.json()) as { id: number }[]) {
+      await page.request.post(`/api/v1/encounters/${enc.id}/end`);
+    }
+  }
   const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name } });
   expect(created.ok()).toBe(true);
   const encounter = (await created.json()) as { id: number };
@@ -33,6 +43,20 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
   const started = await page.request.post(`/api/v1/encounters/${encounter.id}/start`);
   expect(started.ok()).toBe(true);
   return { campaignId, encounterId: encounter.id, combatantId: combatant.id };
+}
+
+/**
+ * Restore the seeded "Ambush" encounter as the campaign's RUNNING live fight after
+ * a throwaway-encounter test ended it (issue #744). /reopen transitions 'ended' ->
+ * 'running' and preserves round/turnIndex, so the combat-tracker suite still sees
+ * Round 1 with its seeded initiatives intact. Safe to call when the seed fight is
+ * already running (the 400 from /reopen on a non-'ended' status is ignored). Called
+ * from each test's `finally` block so the one-live-fight invariant holds across the
+ * serial suite regardless of which throwaway fight a test created and ended.
+ */
+async function restoreSeedFight(page: Page): Promise<void> {
+  const { encounterId } = seed();
+  await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
 }
 
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {
@@ -127,6 +151,7 @@ test.describe('combat log accessibility — remote clients', () => {
       await viewerContext.close();
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
+      await restoreSeedFight(dmPage);
     }
   });
 
@@ -162,6 +187,7 @@ test.describe('combat log accessibility — remote clients', () => {
       await viewerContext.close();
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
+      await restoreSeedFight(dmPage);
     }
   });
 
