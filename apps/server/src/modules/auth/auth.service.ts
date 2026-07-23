@@ -39,6 +39,12 @@ export interface ResolvedSession {
   user: RequestUser;
   /** True when this call wrote a sliding `lastSeenAt` / `expiresAt` update. */
   slid: boolean;
+  /**
+   * Absolute server-side expiry (epoch ms) after a slide. Cookie re-issue must
+   * use remaining time until this instant — not a fresh idle `SESSION_MAX_AGE_MS`
+   * — so Max-Age cannot exceed an absolute-capped `expiresAt`.
+   */
+  expiresAtMs?: number;
 }
 
 /** Sweep expired sessions once an hour — see AuthService.onApplicationBootstrap(). */
@@ -291,6 +297,7 @@ export class AuthService implements OnApplicationBootstrap {
     if (!user || user.disabled) return null;
 
     let slid = false;
+    let expiresAtMs: number | undefined;
     if (now - new Date(session.lastSeenAt).getTime() > SESSION_SLIDING_UPDATE_INTERVAL_MS) {
       // Slide idle expiry forward, never shorten, and never past the absolute cap.
       const nextExpiresAt = Math.min(
@@ -305,6 +312,7 @@ export class AuthService implements OnApplicationBootstrap {
         })
         .where(eq(userSessions.id, session.id));
       slid = true;
+      expiresAtMs = nextExpiresAt;
     }
 
     return {
@@ -314,6 +322,7 @@ export class AuthService implements OnApplicationBootstrap {
         serverRole: user.serverRole as RequestUser['serverRole'],
       },
       slid,
+      ...(expiresAtMs !== undefined ? { expiresAtMs } : {}),
     };
   }
 
