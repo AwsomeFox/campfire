@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
@@ -49,6 +49,7 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
+import { persistedFogConcealsPixels } from '../../common/fog';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -473,7 +474,18 @@ export class CampaignsService {
     // Attachments now default to DM-only (issue #97), so reveal the newly-wired
     // map here, otherwise players would 404 on the background image they're meant
     // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
+    // Fog-protected encounter maps cannot be the region background: players load
+    // RegionMap via /attachments/:id/file, which must stay a full-source URL.
     if (input.mapAttachmentId != null) {
+      const fogRows = await this.db
+        .select({ fog: encounters.fog })
+        .from(encounters)
+        .where(and(eq(encounters.mapAttachmentId, input.mapAttachmentId), eq(encounters.campaignId, id)));
+      if (fogRows.some((row) => persistedFogConcealsPixels(row.fog))) {
+        throw new ConflictException(
+          'This attachment is protecting a fogged encounter map — use a separate image for the campaign region map, or disable fog first',
+        );
+      }
       await this.db
         .update(attachments)
         .set({ hidden: false, updatedAt: nowIso() })

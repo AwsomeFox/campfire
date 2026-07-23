@@ -783,7 +783,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   sort_order INTEGER NOT NULL DEFAULT 0,
   token_x REAL,
   token_y REAL,
-  token_size TEXT NOT NULL DEFAULT 'medium'
+  token_size TEXT NOT NULL DEFAULT 'medium',
+  -- Issue #466: CAS token for sheet↔combatant HP sync (character.updatedAt at last sync).
+  sheet_synced_updated_at TEXT
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain

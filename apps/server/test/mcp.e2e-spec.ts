@@ -1825,6 +1825,77 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(afterRemoval.combatants.some((c) => c.id === goblinCombatant.id)).toBe(false);
   });
 
+  // Issue #495: update_combatant addConditions is vocabulary-gated for non-DMs (same
+  // EncountersService path as REST). Players cannot inject arbitrary free-text labels.
+  it('update_combatant rejects unknown conditions from a player; DM may mint custom (issue #495)', async () => {
+    const createPlayer = await dmAgent
+      .post('/api/v1/users')
+      .send({ username: 'mcp-495-player', password: 'player-password-1', serverRole: 'user' });
+    expect(createPlayer.status).toBe(201);
+    const playerId = createPlayer.body.id as number;
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'MCP Vocab Hero',
+      hpMax: 20,
+      hpCurrent: 20,
+      ownerUserId: String(playerId),
+    });
+    expect(charRes.status).toBe(201);
+
+    const playerAgent = request.agent(ctx.app.getHttpServer());
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'mcp-495-player', password: 'player-password-1' });
+    const mint = await playerAgent
+      .post('/api/v1/tokens')
+      .send({ name: 'mcp-495-player', scope: 'player', writeScope: 'direct', campaignId });
+    expect(mint.status).toBe(201);
+    const playerClient = await mcpClient(mint.body.token);
+
+    const dmClient = await mcpClient(dmToken);
+    const createResult = await dmClient.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId, name: 'MCP Vocab Fight' },
+    });
+    const encounter = parseResult(createResult) as {
+      id: number;
+      combatants: Array<{ id: number; characterId: number | null }>;
+    };
+    let heroCombatant = encounter.combatants.find((c) => c.characterId === charRes.body.id);
+    if (!heroCombatant) {
+      const add = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: encounter.id, kind: 'character', characterId: charRes.body.id },
+      });
+      expect(add.isError).toBeFalsy();
+      heroCombatant = parseResult(add) as { id: number; characterId: number | null };
+    }
+
+    const rejected = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['god_mode'] },
+    });
+    expect(rejected.isError).toBe(true);
+    const rejectedBody = parseResult(rejected) as { error?: { status?: number; message?: string } };
+    expect(rejectedBody.error?.status).toBe(400);
+    expect(String(rejectedBody.error?.message ?? JSON.stringify(rejectedBody))).toMatch(
+      /god_mode|vocabulary|Unknown condition/i,
+    );
+
+    const allowed = await playerClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['Prone'] },
+    });
+    expect(allowed.isError).toBeFalsy();
+    expect((parseResult(allowed) as { conditions: string[] }).conditions).toContain('Prone');
+
+    const custom = await dmClient.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: encounter.id, combatantId: heroCombatant!.id, addConditions: ['hexed_by_patron'] },
+    });
+    expect(custom.isError).toBeFalsy();
+    expect((parseResult(custom) as { conditions: string[] }).conditions).toContain('hexed_by_patron');
+  });
+
   it('generate_encounter builds a target-band group, is non-mutating + reproducible, and commits via create_encounter/add_combatant (issue #304)', async () => {
     const client = await mcpClient(dmToken);
 

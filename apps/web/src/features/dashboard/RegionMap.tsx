@@ -1,9 +1,19 @@
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { Link } from 'react-router-dom';
 import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { clampPercentInt } from './mapPercent';
+
+export { clampPercentInt };
 
 const VIEW_W = 500;
 const VIEW_H = 260;
@@ -87,6 +97,10 @@ export function RegionMap({
   const [kbAnnouncement, setKbAnnouncement] = useState('');
   const [kbSaving, setKbSaving] = useState(false);
   const kbAnnounceRaf = useRef<number | null>(null);
+  const kbXInputRef = useRef<HTMLInputElement>(null);
+  /** Bumped on cancel/escape so in-flight saveKbMove ignores its result. */
+  const kbSaveGen = useRef(0);
+  const kbSaveAbort = useRef<AbortController | null>(null);
 
   const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
 
@@ -94,16 +108,40 @@ export function RegionMap({
   const announceKb = useCallback((message: string) => {
     setKbAnnouncement('');
     if (kbAnnounceRaf.current != null) cancelAnimationFrame(kbAnnounceRaf.current);
-    kbAnnounceRaf.current = requestAnimationFrame(() => setKbAnnouncement(message));
+    kbAnnounceRaf.current = requestAnimationFrame(() => {
+      kbAnnounceRaf.current = null;
+      setKbAnnouncement(message);
+    });
   }, []);
 
+  // Cancel pending live-region RAF and abort any in-flight keyboard save on unmount
+  // so late network activity cannot setState / announce after teardown.
+  useEffect(() => {
+    return () => {
+      if (kbAnnounceRaf.current != null) {
+        cancelAnimationFrame(kbAnnounceRaf.current);
+        kbAnnounceRaf.current = null;
+      }
+      kbSaveGen.current += 1;
+      kbSaveAbort.current?.abort();
+      kbSaveAbort.current = null;
+    };
+  }, []);
+
+  // Focus the positioning panel so arrow keys work immediately after Move activates.
+  useEffect(() => {
+    if (kbMovingId == null) return;
+    const id = requestAnimationFrame(() => kbXInputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [kbMovingId]);
+
   const startKbMove = useCallback((loc: Location) => {
-    const x = Math.max(0, Math.min(100, loc.mapX ?? 50));
-    const y = Math.max(0, Math.min(100, loc.mapY ?? 50));
+    const x = clampPercentInt(loc.mapX ?? 50);
+    const y = clampPercentInt(loc.mapY ?? 50);
     setKbMovingId(loc.id);
     setKbPos({ x, y });
     announceKb(
-      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${Math.round(x)}% horizontal, ${Math.round(y)}% vertical.`,
+      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${x}% horizontal, ${y}% vertical.`,
     );
   }, [announceKb]);
 
@@ -148,29 +186,50 @@ export function RegionMap({
     e.preventDefault();
     e.stopPropagation();
     setKbPos({ x, y });
-    announceKb(`${Math.round(x)}% horizontal, ${Math.round(y)}% vertical`);
+    announceKb(`${x}% horizontal, ${y}% vertical`);
   }
 
   function cancelKbMove() {
+    // Invalidate + abort any in-flight save so Cancel/Escape cannot leave a late patch.
+    kbSaveGen.current += 1;
+    kbSaveAbort.current?.abort();
+    kbSaveAbort.current = null;
     setKbMovingId(null);
     setKbPos(null);
+    setKbSaving(false);
     announceKb('Pin move cancelled.');
   }
 
   async function saveKbMove() {
     if (kbMovingId == null || kbPos == null || kbSaving) return;
+    const gen = ++kbSaveGen.current;
+    kbSaveAbort.current?.abort();
+    const controller = new AbortController();
+    kbSaveAbort.current = controller;
+    const locationId = kbMovingId;
+    const { x, y } = kbPos;
     setKbSaving(true);
     try {
-      const ok = await savePinPercent(kbMovingId, kbPos.x, kbPos.y);
+      // refresh:false — parent reload only after the gen token confirms this
+      // save was not cancelled (Cancel/Escape must not apply a late onChange).
+      const ok = await savePinPercent(locationId, x, y, {
+        signal: controller.signal,
+        refresh: false,
+      });
+      if (gen !== kbSaveGen.current || controller.signal.aborted) return;
       if (!ok) {
         announceKb('Failed to save pin position.');
         return;
       }
-      announceKb(`Pin saved at ${Math.round(kbPos.x)}% horizontal, ${Math.round(kbPos.y)}% vertical.`);
+      onChange();
+      announceKb(`Pin saved at ${x}% horizontal, ${y}% vertical.`);
       setKbMovingId(null);
       setKbPos(null);
     } finally {
-      setKbSaving(false);
+      if (gen === kbSaveGen.current) {
+        setKbSaving(false);
+        if (kbSaveAbort.current === controller) kbSaveAbort.current = null;
+      }
     }
   }
 
@@ -226,17 +285,40 @@ export function RegionMap({
     }
   }
 
-  /** Returns false when the patch fails (error state is set; does not throw). */
-  async function savePinPercent(locationId: number, xPct: number, yPct: number): Promise<boolean> {
+  /**
+   * Returns false when the patch fails or is aborted (error state is set only
+   * for real failures). When `refresh` is false, the caller must invoke
+   * `onChange()` only after its own cancel/generation guard passes — otherwise
+   * a Cancel/Escape that races a completed PATCH still reloads parent data.
+   */
+  async function savePinPercent(
+    locationId: number,
+    xPct: number,
+    yPct: number,
+    options?: { signal?: AbortSignal; refresh?: boolean },
+  ): Promise<boolean> {
+    const signal = options?.signal;
+    const refresh = options?.refresh ?? true;
     try {
-      await api.patch(`${API}/locations/${locationId}`, {
-        mapX: Math.max(0, Math.min(100, xPct)),
-        mapY: Math.max(0, Math.min(100, yPct)),
-      });
+      await api.patch(
+        `${API}/locations/${locationId}`,
+        {
+          mapX: clampPercentInt(xPct),
+          mapY: clampPercentInt(yPct),
+        },
+        signal ? { signal } : undefined,
+      );
+      // Abort may land after the response; skip refresh so Cancel stays cancelled.
+      if (signal?.aborted) return false;
       clearMapError();
-      onChange();
+      if (refresh) onChange();
       return true;
     } catch (err) {
+      const aborted =
+        signal?.aborted ||
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (aborted) return false;
       setMapError(
         err instanceof ApiError ? err.message : "Couldn't move the pin.",
         () => savePinPercent(locationId, xPct, yPct),
@@ -484,16 +566,18 @@ export function RegionMap({
           <div className="flex items-center gap-2">
             <label htmlFor="kb-pin-x" className="text-[10px] text-slate-400">Horizontal position (%)</label>
             <input
+              ref={kbXInputRef}
               id="kb-pin-x"
               type="number"
               min={0}
               max={100}
+              step={1}
               className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
-              value={Math.round(kbPos.x)}
+              value={kbPos.x}
               onChange={(e) => {
-                const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                const v = clampPercentInt(Number(e.target.value) || 0);
                 setKbPos({ ...kbPos, x: v });
-                announceKb(`${v}% horizontal, ${Math.round(kbPos.y)}% vertical`);
+                announceKb(`${v}% horizontal, ${kbPos.y}% vertical`);
               }}
               aria-describedby="kb-pin-help"
             />
@@ -505,12 +589,13 @@ export function RegionMap({
               type="number"
               min={0}
               max={100}
+              step={1}
               className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
-              value={Math.round(kbPos.y)}
+              value={kbPos.y}
               onChange={(e) => {
-                const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                const v = clampPercentInt(Number(e.target.value) || 0);
                 setKbPos({ ...kbPos, y: v });
-                announceKb(`${Math.round(kbPos.x)}% horizontal, ${v}% vertical`);
+                announceKb(`${kbPos.x}% horizontal, ${v}% vertical`);
               }}
               aria-describedby="kb-pin-help"
             />

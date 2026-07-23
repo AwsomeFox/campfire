@@ -11,6 +11,35 @@
  *  - Create/Update input schemas are derived from the entity schema
  */
 import { z } from 'zod';
+import {
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterDifficultyStatus,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+  type EncounterDifficultyInput,
+} from './encounter-difficulty';
+
+export {
+  DifficultyBand,
+  EncounterDifficultyStatus,
+  EncounterDifficulty,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+};
+export type { EncounterDifficultyInput };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -327,9 +356,10 @@ export const ConditionsPatch = z.object({
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
- * Conditions stay free-text on the wire (homebrew is allowed), but these are the
- * standard names surfaced as suggestions so the three surfaces speak the same
- * vocabulary instead of each hardcoding its own list.
+ * The wire schema stays `string` (DM homebrew is allowed), but non-DM combatant
+ * adds are validated against the active adapter's list (issue #495). These are
+ * also the standard names surfaced as suggestions so the three surfaces speak
+ * the same vocabulary instead of each hardcoding its own list.
  */
 export const CONDITIONS = [
   'Blinded',
@@ -349,6 +379,16 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/**
+ * Case-insensitive membership check against a rule-system condition vocabulary
+ * (issue #495). Trims the candidate; empty strings never match.
+ */
+export function isKnownCondition(vocab: readonly string[], name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  return vocab.some((c) => c.toLowerCase() === needle);
+}
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -1558,10 +1598,14 @@ export interface RuleSystemAdapter {
    * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
    * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
    * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation?: AbilityRepresentation,
+    level?: number,
   ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
@@ -1591,6 +1635,17 @@ export interface RuleSystemAdapter {
    * affordance and the server checks to REJECT a direct-API request that bypasses the UI.
    */
   readonly supportsDdbImport?: boolean;
+  /**
+   * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
+   * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
+   * explicit unsupported result instead of a misleading 5e "Trivial" band.
+   */
+  readonly supportsEncounterDifficulty?: boolean;
+  /**
+   * Estimate encounter difficulty for this ruleset. Required when
+   * `supportsEncounterDifficulty` is true; unsupported adapters omit it.
+   */
+  estimateEncounterDifficulty?(input: EncounterDifficultyInput): EncounterDifficulty;
 }
 
 /**
@@ -1683,6 +1738,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
+  supportsEncounterDifficulty: true,
+  estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
+    return computeDnd5eEncounterDifficulty(input);
+  },
 };
 
 // ---------- Open Legend adapter (issue #299) ----------
@@ -2098,21 +2158,36 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. When `representation` is `modifier` (mapped creatures), WIS
-  // is already a modifier and must not be converted again (issue #767).
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
+    level?: number,
   ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return resolveAbilityModifier(this, wisScore, representation);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -2240,6 +2315,40 @@ export function ddbImportSupported(ruleSystem?: string | null): boolean {
   const adapter = ADAPTERS[ruleSystem];
   if (!adapter) return false; // unrecognized slug — don't trust an unknown pack
   return adapter.supportsDdbImport === true;
+}
+
+/**
+ * Whether encounter-difficulty estimation should run for a campaign whose `ruleSystem`
+ * is the given slug (issue #429).
+ *
+ * - Empty / unrecognized slugs fall back to the 5e estimator (same default as combat math)
+ *   so homebrew tables still get XP guidance — zero-data fights surface as `unknown`, not
+ *   a fake Trivial band.
+ * - A registered non-5e adapter (PF2e, OSR, …) that does not opt in returns unsupported.
+ */
+export function encounterDifficultySupported(ruleSystem?: string | null): boolean {
+  if (!ruleSystem) return true; // homebrew → 5e fallback
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter) return true; // unrecognized → 5e fallback
+  return adapter.supportsEncounterDifficulty === true;
+}
+
+/**
+ * Resolve difficulty for a campaign rule-system slug (issue #429). Supported adapters own
+ * the math/labels; registered non-supporting systems return an explicit unsupported result.
+ */
+export function estimateEncounterDifficultyForRuleSystem(
+  ruleSystem: string | null | undefined,
+  input: EncounterDifficultyInput,
+): EncounterDifficulty {
+  if (!ruleSystem || !ADAPTERS[ruleSystem]) {
+    return Dnd5eAdapter.estimateEncounterDifficulty!(input);
+  }
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter.supportsEncounterDifficulty || !adapter.estimateEncounterDifficulty) {
+    return unsupportedEncounterDifficulty(adapter.label, input);
+  }
+  return adapter.estimateEncounterDifficulty(input);
 }
 
 // ---------- generic uploaded rule packs (issue #19) ----------
@@ -3806,29 +3915,7 @@ export const ImportMapAttribution = z.object({
 });
 export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
 
-// ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
-// Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
-// thresholds vs the total adjusted monster XP (monster CR->XP with the standard
-// number-of-monsters multiplier). `trivial` is below the party's Easy threshold.
-export const DifficultyBand = z.enum(['trivial', 'easy', 'medium', 'hard', 'deadly']);
-export type DifficultyBand = z.infer<typeof DifficultyBand>;
-export const EncounterDifficulty = z.object({
-  band: DifficultyBand,
-  // Party XP thresholds (sum across the PC combatants' per-level thresholds).
-  thresholds: z.object({
-    easy: z.number().int().nonnegative(),
-    medium: z.number().int().nonnegative(),
-    hard: z.number().int().nonnegative(),
-    deadly: z.number().int().nonnegative(),
-  }),
-  partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
-  partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
-  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
-  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
-  multiplier: z.number(), // 5e encounter multiplier for the monster count
-  adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
-});
-export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
+// Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------
 // First-party, offline & deterministic encounter builder. There is no open dataset of
@@ -3976,6 +4063,11 @@ export const Combatant = z.object({
   // Token footprint size category (issue #40, phase 2) — scales the rendered token on the
   // battle map (tiny→gargantuan). Defaults to 'medium' (a 1×1 cell). No effect on combat math.
   tokenSize: TokenSize.default('medium'),
+  // Ephemeral fog redaction flag (issue #418): when fog withholds tokenX/tokenY for a
+  // non-DM viewer, this is true so the client can distinguish "placed but outside the
+  // revealed area" from a truly unplaced token — without leaking coordinates. Always
+  // false for DMs and for tokens whose position is visible (or truly null in storage).
+  tokenHiddenByFog: z.boolean().default(false),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -4043,7 +4135,50 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
 });
 
-export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+/**
+ * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
+ * When the sheet advanced after /end, the DM must choose a resync direction before
+ * reopening — never silently overwrite intervening healing/rest.
+ */
+export const HpSyncSlice = z.object({
+  hpCurrent: z.number().int(),
+  hpTemp: z.number().int().min(0),
+  deathState: DeathState,
+  deathSaveSuccesses: z.number().int().min(0).max(3),
+  deathSaveFailures: z.number().int().min(0).max(3),
+});
+export type HpSyncSlice = z.infer<typeof HpSyncSlice>;
+
+export const HpSyncConflict = z.object({
+  combatantId: Id,
+  characterId: Id,
+  name: z.string(),
+  combatant: HpSyncSlice,
+  sheet: HpSyncSlice.extend({ updatedAt: IsoDate }),
+});
+export type HpSyncConflict = z.infer<typeof HpSyncConflict>;
+
+export const HpResyncDirection = z.enum(['keep_combatant', 'pull_sheet']);
+export type HpResyncDirection = z.infer<typeof HpResyncDirection>;
+
+/** Body for POST /encounters/:id/reopen — required when hpSyncConflicts is non-empty. */
+export const EncounterReopen = z.object({
+  hpResync: z
+    .array(
+      z.object({
+        combatantId: Id,
+        direction: HpResyncDirection,
+      }),
+    )
+    .optional(),
+});
+export type EncounterReopen = z.infer<typeof EncounterReopen>;
+
+export const EncounterWithCombatants = Encounter.extend({
+  combatants: z.array(Combatant),
+  /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
+  hpSyncConflicts: z.array(HpSyncConflict).optional(),
+});
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
 // roll-initiative response (issue #702). The encounter (with combatants) is returned as
@@ -4239,6 +4374,8 @@ export const CampaignEventType = z.enum([
   'schedule.updated',
   'membership.revoked',
   'treasury.updated',
+  // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
+  'character.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -4297,6 +4434,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // (the client compares userId against the local session and ignores its own echo).
     type: z.literal('treasury.updated'),
     campaignId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #421: a character sheet (or member-linked resource on that sheet) changed.
+    // Thin invalidation only — no stats/actions payload — so run-session inline cards
+    // refetch the permission-checked character list without requiring an encounterId
+    // (the old SSE filter dropped these as non-encounter frames). `userId` is the actor
+    // (String(users.id)); `characterId` identifies which sheet went stale.
+    type: z.literal('character.updated'),
+    campaignId: Id,
+    characterId: Id,
     userId: z.string().max(120),
     at: IsoDate,
   }),

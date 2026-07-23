@@ -143,12 +143,12 @@ describe('procedural map generation (e2e, issue #306)', () => {
     expect(enc.body.gridScale).toBe(5);
     expect(enc.body.gridType).toBe('square');
 
-    // The map attachment is hidden (never auto-revealed to players, #259) …
+    // The map attachment is hidden (never auto-revealed to players, #259 / #463) …
     const meta = await request(server).get(`/api/v1/campaigns/${campaignId}/attachments`).set(dm);
     const row = meta.body.find((a: { id: number }) => a.id === gen.body.attachmentId);
     expect(row.hidden).toBe(true);
-    // … but IS fetchable by a member because it is the encounter's battle map (isEncounterMap
-    // exception — the fogged canvas needs the bytes for everyone at the table).
+    // … and the DM can still fetch the source. Non-DMs load role-safe bytes through
+    // GET /encounters/:id/map — raw attachment URLs stay DM-only while hidden.
     const file = await fetchSvg(server, gen.body.attachmentId);
     expect(file.status).toBe(200);
     expect(file.contentType).toContain('image/svg+xml');
