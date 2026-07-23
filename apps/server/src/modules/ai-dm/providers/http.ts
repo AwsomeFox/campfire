@@ -44,16 +44,31 @@ export interface RetryConfig {
 
 export const DEFAULT_RETRY: RetryConfig = { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 8000 };
 export const DEFAULT_TIMEOUT_MS = 60_000;
+/**
+ * Max silence between streamed body chunks before the read is aborted (#1063).
+ * Distinct from {@link DEFAULT_TIMEOUT_MS} (time-to-first-byte): a long narration may
+ * legitimately exceed 60s wall-clock, but a provider that goes quiet mid-body must not
+ * wedge the driver seat forever.
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
 
 /** Deterministic-friendly sleep (overridable in tests). */
 export type Sleep = (ms: number) => Promise<void>;
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+export interface TimeoutHandle {
+  signal: AbortSignal;
+  cleanup: () => void;
+  didTimeout: () => boolean;
+  /** Clear only the TTFB timer; keep the external AbortSignal linked to `signal`. */
+  clearTimer: () => void;
+}
+
 /**
  * Compose a per-request AbortSignal: fires when the caller's signal fires OR the
  * timeout elapses. Returns the signal plus a `cleanup` to clear the timer.
  */
-export function withTimeout(timeoutMs: number, external?: AbortSignal): { signal: AbortSignal; cleanup: () => void; didTimeout: () => boolean } {
+export function withTimeout(timeoutMs: number, external?: AbortSignal): TimeoutHandle {
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -68,6 +83,9 @@ export function withTimeout(timeoutMs: number, external?: AbortSignal): { signal
   return {
     signal: controller.signal,
     didTimeout: () => timedOut,
+    clearTimer: () => {
+      clearTimeout(timer);
+    },
     cleanup: () => {
       clearTimeout(timer);
       external?.removeEventListener('abort', onExternalAbort);
@@ -117,9 +135,17 @@ export async function postJson(
       await sleep(backoffDelayMs(attempt, opts.retry, undefined, opts.rand));
       continue;
     }
-    t.cleanup();
+    if (res.ok) {
+      // Issue #1063: for streaming bodies, clear ONLY the time-to-first-byte timer.
+      // Keep the caller's AbortSignal linked so a mid-body idle abort (or seat
+      // teardown) still cancels the underlying fetch. Non-streaming responses have
+      // no further reads, so full cleanup is safe.
+      if (res.body) t.clearTimer();
+      else t.cleanup();
+      return res;
+    }
 
-    if (res.ok) return res;
+    t.cleanup();
 
     // Non-2xx: classify from status + body, retry the retryable ones.
     const bodyText = await safeText(res);
@@ -178,19 +204,104 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
 
+/** Options for {@link parseSse} — idle/read timeout + caller abort (#1063). */
+export interface ParseSseOptions {
+  /** Abort mid-read (driver idle watchdog / seat teardown). */
+  signal?: AbortSignal;
+  /**
+   * Abort if `reader.read()` yields no chunk within this many ms. Defaults to
+   * {@link DEFAULT_IDLE_TIMEOUT_MS}. Pass `0` to disable.
+   */
+  idleTimeoutMs?: number;
+  /** Provider name for timeout error messages. */
+  provider?: string;
+}
+
+/**
+ * Race a promise against an AbortSignal and an optional idle timer. The idle timer is
+ * armed for each call (so callers reset it per chunk). Rejects with `AiProviderError`
+ * (`timeout`) when the idle deadline elapses or the signal aborts for an idle reason.
+ */
+export function raceRead<T>(
+  read: Promise<T>,
+  opts: {
+    signal?: AbortSignal;
+    idleTimeoutMs: number;
+    provider: string;
+    onIdle: () => void;
+  },
+): Promise<T> {
+  const { signal, idleTimeoutMs, provider, onIdle } = opts;
+  if (signal?.aborted) {
+    onIdle();
+    return Promise.reject(
+      new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal.reason }),
+    );
+  }
+  if (idleTimeoutMs <= 0 && !signal) return read;
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
+
+    const onAbort = () => {
+      onIdle();
+      finish(() =>
+        reject(new AiProviderError('timeout', `${provider}: stream aborted`, { provider, retryable: false, cause: signal?.reason })),
+      );
+    };
+
+    if (idleTimeoutMs > 0) {
+      idleTimer = setTimeout(() => {
+        onIdle();
+        finish(() =>
+          reject(
+            new AiProviderError('timeout', `${provider}: stream idle for ${idleTimeoutMs}ms`, {
+              provider,
+              cause: new Error('stream idle timeout'),
+            }),
+          ),
+        );
+      }, idleTimeoutMs);
+    }
+
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+
+    read.then(
+      (value) => finish(() => resolve(value)),
+      (err) => finish(() => reject(err)),
+    );
+  });
+}
+
 /**
  * Parse a byte stream of Server-Sent Events into `{ event, data }` records. Handles CRLF
  * or LF, multi-line `data:` accumulation, and blank-line dispatch. Adapters interpret the
  * `data` payload themselves (OpenAI: raw JSON or `[DONE]`; Anthropic: JSON keyed by `event`).
+ *
+ * Issue #1063: each `reader.read()` is bounded by an idle timeout (and the caller's
+ * AbortSignal). The idle timer is NOT cleared until the stream fully completes or aborts —
+ * it resets on every chunk so a healthy slow stream survives, but silence mid-body aborts.
  */
 export async function* parseSse(
   stream: ReadableStream<Uint8Array>,
+  opts: ParseSseOptions = {},
 ): AsyncGenerator<{ event: string | null; data: string }> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let event: string | null = null;
   let dataLines: string[] = [];
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const provider = opts.provider ?? 'ai';
 
   const flush = function* (): Generator<{ event: string | null; data: string }> {
     if (dataLines.length === 0 && event === null) return;
@@ -201,9 +312,18 @@ export async function* parseSse(
     if (data.length > 0 || ev !== null) yield { event: ev, data };
   };
 
+  const cancelReader = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+
   try {
     for (;;) {
-      const { value, done } = await reader.read();
+      const { value, done } = await raceRead(reader.read(), {
+        signal: opts.signal,
+        idleTimeoutMs,
+        provider,
+        onIdle: cancelReader,
+      });
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let idx: number;
