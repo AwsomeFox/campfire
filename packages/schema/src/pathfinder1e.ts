@@ -93,7 +93,11 @@ function pf1eNum(v: unknown): number | null {
  *  Uses pf1eNum so SRD numeric strings are accepted the same way as native Init. */
 function pf1eDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
   if (!abilities) return null;
-  return pf1eNum(abilities.DEX ?? abilities.dexterity ?? abilities.dex);
+  for (const key of ['DEX', 'dexterity', 'dex'] as const) {
+    const n = pf1eNum(abilities[key]);
+    if (n !== null) return n;
+  }
+  return null;
 }
 
 /**
@@ -243,7 +247,7 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   // across web / REST / MCP / generator / duplicate-add / reroll call sites (issue #764).
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const scores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
-    const nativeInit = pf1eNum(d.initiative ?? d.init);
+    const nativeInit = pf1eNativeInitiative(d);
     // Only allocate a new object when folding native Init into the ability map.
     const abilityScores =
       scores && typeof scores === 'object'
