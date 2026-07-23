@@ -600,6 +600,13 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.015em;
 }
 
+/* Issue #649 — route-level page title. Matches nocturne h3 size so screens that
+   previously used a bare <h3> keep their visual weight when promoted to <h1>. */
+.cf-page-title {
+  margin: 4px 0 0;
+  font-size: 1.5625rem;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

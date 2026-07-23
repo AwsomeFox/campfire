@@ -36,6 +36,7 @@ import {
   paletteToCssVars,
 } from '../../app/accentPalette';
 import { Card, ErrorNote } from '../../components/ui';
+import { PageTitle } from '../../components/PageTitle';
 
 // Swatch hexes converted from the design's accent palette (Campfire.dc.html
 // `accents:` state — oklch(0.72 0.13 55) "ember", oklch(0.72 0.12 150) "moss",
@@ -213,7 +214,7 @@ export default function PreferencesPage() {
   return (
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 640 }}>
       <div>
-        <h3 style={{ margin: '4px 0 0' }}>{t('preferences.title')}</h3>
+        <PageTitle>{t('preferences.title')}</PageTitle>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12.5 }}>
           {t('preferences.subtitle')}
         </p>
