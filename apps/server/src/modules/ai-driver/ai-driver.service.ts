@@ -774,46 +774,77 @@ export class AiDriverService {
           stopReason = 'budget_exhausted';
           break;
         }
-        steps = step + 1;
+        const stepNumber = step + 1;
 
-        const maxTokens = Math.min(perStepCap, budgetRemaining);
-        const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
-          system,
-          messages,
-          // Issue #564: the executable model derives ONLY from the effective provider
-          // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-          model: execModel,
-          maxTokens,
-          tools: toolSchemas,
+        // Driver and scribe share the same campaign mutex (#1058). Re-read the
+        // seat after ownership, then keep provider streaming and metering in one
+        // critical section. A scribe that spent while this turn waited can
+        // exhaust the budget without this driver making another provider call.
+        const spend = await this.aiDm.withSpendLock(campaignId, async () => {
+          const currentSeat = await this.aiDm.getSeat(campaignId);
+          const currentRemaining = currentSeat.tokenBudget - currentSeat.tokensUsed;
+          if (currentRemaining <= 0) {
+            return { kind: 'budget_exhausted' as const, seat: currentSeat };
+          }
+          if (session.detached || isFrozen(session)) {
+            return { kind: 'aborted' as const, seat: currentSeat, budgetRemaining: currentRemaining, text: '' };
+          }
+
+          const maxTokens = Math.min(perStepCap, currentRemaining);
+          const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
+            system,
+            messages,
+            // Issue #564: the executable model derives ONLY from the effective provider
+            // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+            model: execModel,
+            maxTokens,
+            tools: toolSchemas,
+          });
+          if (aborted || session.detached || isFrozen(session)) {
+            return { kind: 'aborted' as const, seat: currentSeat, budgetRemaining: currentRemaining, text };
+          }
+
+          // Meter this step's REAL usage before releasing the mutex. The SQL
+          // clamp remains defense in depth; another campaign-local spender can
+          // no longer pass a stale budget gate while this provider call runs.
+          let usage = result?.usage.totalTokens ?? 0;
+          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+          // rather than silently fail-open on budget enforcement.
+          const outputText = text || result?.text || '';
+          if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
+            const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
+            // ~4 chars per token is a conservative English-language estimate.
+            usage = Math.max(1, Math.ceil(outputChars / 4));
+            this.logger.warn(
+              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+            );
+          }
+          const servedModel = result?.model || execModel;
+          const metered = await this.aiDm.meterTurn(campaignId, usage, {
+            actor,
+            action: 'ai-dm.driver.turn',
+            detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
+          });
+          return { kind: 'metered' as const, text, result, metered };
         });
-        if (aborted || session.detached || isFrozen(session)) {
+
+        if (spend.kind === 'budget_exhausted') {
+          latestSeat = spend.seat;
+          budgetRemaining = 0;
+          stopReason = 'budget_exhausted';
+          break;
+        }
+        if (spend.kind === 'aborted') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
           stopReason = 'aborted';
-          if (text) finalNarration = text;
+          if (spend.text) finalNarration = spend.text;
           break;
         }
 
-        // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
-        // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
-        // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
-        let usage = result?.usage.totalTokens ?? 0;
-        // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
-        // omit streaming usage. When that happens usage is 0 despite real content. Estimate
-        // rather than silently fail-open on budget enforcement.
-        const outputText = text || result?.text || '';
-        if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
-          const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
-          // ~4 chars per token is a conservative English-language estimate.
-          usage = Math.max(1, Math.ceil(outputChars / 4));
-          this.logger.warn(
-            `Provider did not report streaming usage for step ${steps} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
-          );
-        }
-        const servedModel = result?.model || execModel;
-        const metered = await this.aiDm.meterTurn(campaignId, usage, {
-          actor,
-          action: 'ai-dm.driver.turn',
-          detail: `step ${steps} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-        });
+        steps = stepNumber;
+        const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;

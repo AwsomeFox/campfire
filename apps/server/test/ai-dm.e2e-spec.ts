@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
 
 /**
  * Experimental server-side AI Dungeon Master (issue #28).
@@ -33,6 +34,33 @@ describe('ai-dm (e2e)', () => {
     expect(res.status).toBe(200);
     expect(res.body.experimentalAiDm).toBe(on);
   }
+
+  it('#1058 serializes concurrent budget gates and releases the queue after failures', async () => {
+    const aiDm = ctx.app.get(AiDmService);
+    let remaining = 1;
+    let providerCalls = 0;
+
+    const spend = () => aiDm.withSpendLock(campaignId, async () => {
+      if (remaining <= 0) return false;
+      providerCalls += 1;
+      // Yield while holding the mutex: without a real queue both callers can
+      // pass the gate before either accounts for its provider spend.
+      await Promise.resolve();
+      remaining -= 1;
+      return true;
+    });
+
+    await expect(Promise.all([spend(), spend()])).resolves.toEqual([true, false]);
+    expect(providerCalls).toBe(1);
+
+    // A throwing config/provider/metering operation must not strand the campaign.
+    await expect(
+      aiDm.withSpendLock(campaignId, async () => {
+        throw new Error('simulated provider failure');
+      }),
+    ).rejects.toThrow('simulated provider failure');
+    await expect(aiDm.withSpendLock(campaignId, async () => 'released')).resolves.toBe('released');
+  });
 
   it('GET seat returns an un-configured default (members, no experimental gate)', async () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);

@@ -74,6 +74,13 @@ export class AiDmService {
    */
   private driverSessionTeardown: ((campaignId: number) => void) | null = null;
 
+  /**
+   * Per-campaign budget-spend queues (#1058). Each value is the tail promise
+   * for that campaign. Appending synchronously before awaiting the prior tail
+   * gives FIFO mutex semantics even when multiple waiters arrive together.
+   */
+  private readonly spendLockTails = new Map<number, Promise<void>>();
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -81,6 +88,36 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /**
+   * Run one provider-spend operation while holding the campaign's advisory
+   * mutex (#1058). The queue is planted before awaiting its predecessor, so
+   * simultaneous waiters cannot wake and both become owners. Cleanup lives in
+   * `finally`: provider, config, and metering failures cannot strand the lock.
+   *
+   * Callers must keep the budget re-check, provider call, and metering inside
+   * `operation`; checking before entering the mutex would reintroduce the TOCTOU
+   * race this helper closes.
+   */
+  async withSpendLock<T>(campaignId: number, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.spendLockTails.get(campaignId) ?? Promise.resolve();
+    let release!: () => void;
+    const owned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = predecessor.then(() => owned);
+    this.spendLockTails.set(campaignId, tail);
+
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.spendLockTails.get(campaignId) === tail) {
+        this.spendLockTails.delete(campaignId);
+      }
+    }
+  }
 
   /** Register the driver-session teardown used when the seat leaves Driver mode (#1071). */
   registerDriverSessionTeardown(fn: (campaignId: number) => void): void {
