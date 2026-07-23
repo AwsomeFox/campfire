@@ -608,6 +608,8 @@ export default function RunSessionPage() {
     ),
     // The stream was down for a while — refetch to catch anything missed.
     onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    // Parser recovery (connection stayed up) — same catch-up refetch.
+    onStreamRecovery: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
   });
 
   // The persisted event stream is the single announcement source for turn, HP,

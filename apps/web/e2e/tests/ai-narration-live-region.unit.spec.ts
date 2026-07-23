@@ -370,6 +370,20 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     expect(seedStarted.additions).toEqual([]);
   });
 
+  test('formatNarrationLogAddition prefers localized formatSystem over English fallback', () => {
+    const addition = {
+      id: 's1',
+      kind: 'system' as const,
+      variant: 'divider' as const,
+    };
+    expect(formatNarrationLogAddition(addition)).toBe('Joined mid-session');
+    expect(
+      formatNarrationLogAddition(addition, {
+        formatSystem: () => '— Beigetreten mitten in der Session —',
+      }),
+    ).toBe('— Beigetreten mitten in der Session —');
+  });
+
   test('pendingStreamingNarrationChunk returns only the unannounced suffix', () => {
     const entries = stream({ type: 'turn.start', campaignId: 1, at });
     const withText = transcriptReducer(
