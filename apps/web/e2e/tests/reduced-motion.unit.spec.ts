@@ -45,7 +45,16 @@ test.describe('prefersReducedMotion helper (issue #594)', () => {
 
 test.describe('global reduced-motion CSS policy (issue #594)', () => {
   const css = readFileSync(INDEX_CSS, 'utf8');
-  const reduceBlock = css.match(/@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)\s*\{[\s\S]*$/)?.[0] ?? '';
+  const reduceBlock = (() => {
+    const start = css.search(/@media\s*\(\s*prefers-reduced-motion\s*:\s*reduce\s*\)/);
+    if (start < 0) return '';
+    let depth = 0;
+    for (let i = start; i < css.length; i++) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}' && --depth === 0) return css.slice(start, i + 1);
+    }
+    return '';
+  })();
 
   test('universal selector zeros animations, transitions, and scroll-behavior', () => {
     expect(reduceBlock, 'prefers-reduced-motion block must exist').toMatch(/prefers-reduced-motion\s*:\s*reduce/);

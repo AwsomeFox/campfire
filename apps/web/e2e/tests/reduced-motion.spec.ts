@@ -93,6 +93,8 @@ async function probeMotion(page: Page): Promise<Record<string, MotionProbe>> {
     }
     const castFill = host.querySelector('[data-probe-child="cast-hp-fill"]');
     if (castFill) out['cast-hp-fill'] = { ...read(castFill), id: 'cast-hp-fill' };
+    const sharedHpFill = host.querySelector('[data-probe-child="shared-hp"]');
+    if (sharedHpFill) out['shared-hp'] = { ...read(sharedHpFill), id: 'shared-hp' };
     return out;
   });
 }
@@ -174,9 +176,11 @@ test.describe('reduced-motion global policy (issue #594)', () => {
       };
       return { stack: read(stack), hpFill: read(hpFill) };
     });
+    expect(castMotion.stack, 'cast control stack must be present on /screen').toBeTruthy();
     if (castMotion.stack) {
       expect(castMotion.stack.transitionDuration.split(',')[0]?.trim()).toBe('0s');
     }
+    expect(castMotion.hpFill, 'HP fill element must be present on /screen').toBeTruthy();
     if (castMotion.hpFill) {
       expect(castMotion.hpFill.transitionDuration.split(',')[0]?.trim()).toBe('0s');
     }
