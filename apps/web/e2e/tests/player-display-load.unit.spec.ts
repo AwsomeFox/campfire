@@ -330,15 +330,16 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
     });
   });
 
-  test('persistent 404/403 with keepLastKnown:false clears prior projection (no stale rail)', async () => {
+  test('persistent 404 after summary keeps cast and drops only the rail', async () => {
     const sequencer = new PlayerDisplayLoadSequencer();
     const prior: PlayerDisplayProjection = {
       campaignId: 7,
       summary: summaryFor(7, 'Ashfall'),
       encounter: detailFor(9, 7, 2),
     };
+    const freshSummary = summaryFor(7, 'Ashfall Renewed');
     const fetchers: PlayerDisplayFetchers = {
-      getSummary: async () => summaryFor(7, 'Ashfall'),
+      getSummary: async () => freshSummary,
       getRunningEncounters: async () => [runningEncounter(9, 7)],
       getEncounter: async () => {
         throw new ApiError(404, 'Encounter not found');
@@ -351,13 +352,78 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
       keepLastKnown: false,
       transient: false,
       message: 'Encounter not found',
+      summary: freshSummary,
     });
-    // Page applies this helper when keepLastKnown is false — rail must drop.
-    expect(projectionAfterLoadFailure(prior, 7, false)).toBeNull();
-    expect(projectionAfterLoadFailure(prior, 7, true)).toBe(prior);
-    // Other campaign's paint is left alone.
+    // Page applies this helper when keepLastKnown is false — rail drops, cast stays.
+    expect(
+      projectionAfterLoadFailure(prior, 7, { keepLastKnown: false, summary: result.kind === 'failed' ? result.summary : null }),
+    ).toEqual({
+      campaignId: 7,
+      summary: freshSummary,
+      encounter: null,
+    });
+    // Transient path still leaves the prior paint untouched.
+    expect(projectionAfterLoadFailure(prior, 7, { keepLastKnown: true })).toBe(prior);
+    // Other campaign's paint is left alone when this campaign has no summary to keep.
     const other = { ...prior, campaignId: 99 };
-    expect(projectionAfterLoadFailure(other, 7, false)).toBe(other);
+    expect(projectionAfterLoadFailure(other, 7, { keepLastKnown: false, summary: null })).toBe(other);
+  });
+
+  test('persistent summary 404 clears projection (full-screen path)', async () => {
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const prior: PlayerDisplayProjection = {
+      campaignId: 7,
+      summary: summaryFor(7, 'Ashfall'),
+      encounter: detailFor(9, 7, 2),
+    };
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: async () => {
+        throw new ApiError(404, 'Campaign not found');
+      },
+      getRunningEncounters: async () => [],
+      getEncounter: async () => detailFor(9, 7, 2),
+    };
+
+    const result = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: true });
+    expect(result).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: false,
+      transient: false,
+      message: 'Campaign not found',
+      summary: null,
+    });
+    expect(
+      projectionAfterLoadFailure(prior, 7, { keepLastKnown: false, summary: null }),
+    ).toBeNull();
+  });
+
+  test('first-load persistent detail 404 still keeps the fetched summary', async () => {
+    // Pre-#743 nested try/catch: summary success + encounter failure painted the
+    // cast and cleared only the rail — never a full-screen wipe.
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const summary = summaryFor(7, 'Ashfall');
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: async () => summary,
+      getRunningEncounters: async () => [runningEncounter(9, 7)],
+      getEncounter: async () => {
+        throw new ApiError(403, 'Forbidden');
+      },
+    };
+
+    const result = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: false });
+    expect(result).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: false,
+      transient: false,
+      message: 'Forbidden',
+      summary,
+    });
+    expect(
+      projectionAfterLoadFailure(null, 7, {
+        keepLastKnown: false,
+        summary: result.kind === 'failed' ? result.summary : null,
+      }),
+    ).toEqual({ campaignId: 7, summary, encounter: null });
   });
 
   test('campaign identity change invalidates in-flight work for the prior id', async () => {
