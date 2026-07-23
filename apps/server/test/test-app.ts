@@ -27,6 +27,8 @@ export interface TestAppOverride {
 export interface CreateTestAppOptions {
   /** Provider bindings to override in the AppModule before it compiles. */
   overrides?: TestAppOverride[];
+  /** Re-open an existing test data directory (used by interruption/recovery specs). */
+  dataDir?: string;
 }
 
 /**
@@ -38,7 +40,7 @@ export interface CreateTestAppOptions {
  * supertest agent instead, which SessionAuthGuard prefers over headers.
  */
 export async function createTestApp(options: CreateTestAppOptions = {}): Promise<TestAppContext> {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
+  const dataDir = options.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DEV_AUTH = '1';
   // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
