@@ -14,6 +14,7 @@ import {
   clearDeferredInstallPrompt,
   ensureDeferredInstallPromptCapture,
   getDeferredInstallPrompt,
+  setDeferredInstallPrompt,
   subscribeDeferredInstallPrompt,
   type DeferredInstallPrompt,
 } from './deferredInstallPrompt';
@@ -134,18 +135,24 @@ export function InstallHintBanner() {
   async function installNative() {
     if (!nativePrompt) return;
     const deferred = nativePrompt;
-    clearDeferredInstallPrompt();
+    // Keep the deferred prompt until prompt() successfully starts — a failed
+    // call (gesture timing, transient browser refusal) must remain retryable.
     try {
       await deferred.prompt();
+      // Chromium consumes the event once prompt() resolves; drop it from module
+      // scope so remounts do not offer a dead CTA.
+      clearDeferredInstallPrompt();
       const choice = await deferred.userChoice;
       if (choice.outcome === 'accepted') {
         // appinstalled listener also flips standalone; set eagerly for snappy UI.
         setIsStandalone(true);
       }
     } catch {
-      // Prompt can fail if the browser already consumed it; fall back to guidance
-      // on the next render by leaving nativePrompt null (manual copy still works
-      // if status stays installable — a fresh beforeinstallprompt restores the CTA).
+      // Restore module scope so the Install CTA stays available for a retry.
+      if (getDeferredInstallPrompt() === null) {
+        setDeferredInstallPrompt(deferred);
+      }
+      setNativePrompt(deferred);
     }
   }
 
@@ -153,7 +160,8 @@ export function InstallHintBanner() {
     <div
       role="region"
       aria-label={guidance.title}
-      data-install-hint={status}
+      data-has-native-prompt={nativePrompt !== null ? 'true' : 'false'}
+      data-install-platform={platform}
       style={{
         display: 'flex',
         alignItems: 'center',

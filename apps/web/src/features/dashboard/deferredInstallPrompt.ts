@@ -30,7 +30,15 @@ export function getDeferredInstallPrompt(): DeferredInstallPrompt | null {
 
 export function setDeferredInstallPrompt(prompt: DeferredInstallPrompt | null): void {
   deferred = prompt;
-  for (const sub of subscribers) sub(deferred);
+  // Isolate subscriber failures so one bad listener cannot break install-prompt
+  // propagation for the rest of the document lifetime.
+  for (const sub of subscribers) {
+    try {
+      sub(deferred);
+    } catch {
+      // Ignore — subscribers must not throw into the capture path.
+    }
+  }
 }
 
 export function clearDeferredInstallPrompt(): void {
