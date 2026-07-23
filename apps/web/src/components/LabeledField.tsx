@@ -25,7 +25,6 @@ import { TextArea, TextInput } from './ui';
 export const NPC_EDITOR_ID_PREFIX = 'npc-editor';
 export const FACTION_EDITOR_ID_PREFIX = 'faction-editor';
 
-/** Stable form `name` / id suffix values for the NPC editor. */
 /** Shared DM-privacy control names (entity hide vs secret-field privacy). */
 export const PRIVACY_FIELD_NAMES = {
   dmSecret: 'dmSecret',
