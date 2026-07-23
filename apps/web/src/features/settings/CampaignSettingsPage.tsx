@@ -19,6 +19,7 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -113,10 +114,7 @@ export default function CampaignSettingsPage() {
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        const reduceMotion =
-          typeof window !== 'undefined' &&
-          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+        el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       });
       return true;
     };

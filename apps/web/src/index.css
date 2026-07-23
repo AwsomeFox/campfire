@@ -1420,10 +1420,28 @@ h1, h2, h3, h4, h5, h6 {
 }
 .cf-sparkle { display: inline-block; animation: cf-sparkle-float 1.4s ease-out both; }
 
-/* Accessibility: honour a reduced-motion preference — drop every animation
-   above. The persistent, non-motion cues (gold/rose roll totals, the level-up
-   banner text) remain so the feedback is never motion-only. */
+/* Accessibility: honour a reduced-motion preference globally (issue #594).
+   Named cf-anim-* classes are not enough — Tailwind animate-* utilities,
+   inline/injected keyframes (AI pulse, map pings), and common transitions
+   must also settle to a static resting look. Persistent non-motion cues
+   (gold/rose roll totals, level-up banner text, AI-active copy, skeleton
+   bars, loading status text) remain so feedback is never motion-only. */
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition: none !important;
+    transition-duration: 0s !important;
+    scroll-behavior: auto !important;
+  }
+
   .cf-btn {
     transition: none;
   }
