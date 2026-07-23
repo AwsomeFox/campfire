@@ -824,43 +824,85 @@ export class CampaignsService {
           if (historicalAvatarAttachmentId(safe) != null) return null;
           return safe;
         };
+        // Parent-first insert so reply parentId is set on INSERT (no N UPDATEs).
         const commentMap = new Map<number, number>();
-        for (const c of commentRows) {
-          const entityId = c.entityType === 'campaign'
-            ? cloneId
-            : commentEntityMaps[c.entityType]?.get(c.entityId);
-          if (entityId == null) continue;
-          const [row] = tx
-            .insert(comments)
-            .values({
-              campaignId: cloneId,
-              entityType: c.entityType,
-              entityId,
-              parentId: null,
-              authorUserId: c.authorUserId,
-              authorName: c.authorName,
-              body: c.body,
-              inCharacter: c.inCharacter,
-              characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
-              characterName: c.characterName,
-              characterAvatarUrl: remapClonedHistoricalAvatarUrl(c.characterAvatarUrl),
-              deletedAt: c.deletedAt,
-              deletedBy: c.deletedBy,
-              editedAt: c.editedAt,
-              editedBy: c.editedBy,
-              createdAt: c.createdAt,
-              updatedAt: c.updatedAt,
-            })
-            .returning()
-            .all();
-          commentMap.set(c.id, row.id);
-        }
-        for (const c of commentRows) {
-          if (c.parentId == null) continue;
-          const selfId = commentMap.get(c.id);
-          const parentId = commentMap.get(c.parentId);
-          if (selfId != null && parentId != null) {
-            tx.update(comments).set({ parentId }).where(eq(comments.id, selfId)).run();
+        const pendingComments = [...commentRows];
+        while (pendingComments.length > 0) {
+          let progressed = false;
+          for (let i = 0; i < pendingComments.length; ) {
+            const c = pendingComments[i]!;
+            if (c.parentId != null && !commentMap.has(c.parentId)) {
+              i += 1;
+              continue;
+            }
+            const entityId = c.entityType === 'campaign'
+              ? cloneId
+              : commentEntityMaps[c.entityType]?.get(c.entityId);
+            if (entityId == null) {
+              pendingComments.splice(i, 1);
+              progressed = true;
+              continue;
+            }
+            const parentId = c.parentId != null ? (commentMap.get(c.parentId) ?? null) : null;
+            const [row] = tx
+              .insert(comments)
+              .values({
+                campaignId: cloneId,
+                entityType: c.entityType,
+                entityId,
+                parentId,
+                authorUserId: c.authorUserId,
+                authorName: c.authorName,
+                body: c.body,
+                inCharacter: c.inCharacter,
+                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterName: c.characterName,
+                characterAvatarUrl: remapClonedHistoricalAvatarUrl(c.characterAvatarUrl),
+                deletedAt: c.deletedAt,
+                deletedBy: c.deletedBy,
+                editedAt: c.editedAt,
+                editedBy: c.editedBy,
+                createdAt: c.createdAt,
+                updatedAt: c.updatedAt,
+              })
+              .returning()
+              .all();
+            commentMap.set(c.id, row.id);
+            pendingComments.splice(i, 1);
+            progressed = true;
+          }
+          if (!progressed) {
+            // Orphaned parent refs — insert remaining as roots.
+            for (const c of pendingComments.splice(0)) {
+              const entityId = c.entityType === 'campaign'
+                ? cloneId
+                : commentEntityMaps[c.entityType]?.get(c.entityId);
+              if (entityId == null) continue;
+              const [row] = tx
+                .insert(comments)
+                .values({
+                  campaignId: cloneId,
+                  entityType: c.entityType,
+                  entityId,
+                  parentId: null,
+                  authorUserId: c.authorUserId,
+                  authorName: c.authorName,
+                  body: c.body,
+                  inCharacter: c.inCharacter,
+                  characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                  characterName: c.characterName,
+                  characterAvatarUrl: remapClonedHistoricalAvatarUrl(c.characterAvatarUrl),
+                  deletedAt: c.deletedAt,
+                  deletedBy: c.deletedBy,
+                  editedAt: c.editedAt,
+                  editedBy: c.editedBy,
+                  createdAt: c.createdAt,
+                  updatedAt: c.updatedAt,
+                })
+                .returning()
+                .all();
+              commentMap.set(c.id, row.id);
+            }
           }
         }
 
@@ -1452,51 +1494,103 @@ export class CampaignsService {
         session: sessionMap,
         encounter: encounterMap,
       };
+      // Parent-first insert so reply parentId is set on INSERT (no N UPDATEs).
       const commentMap = new Map<number, number>();
-      for (const c of commentRows) {
-        const srcId = intOrNull(c.id);
-        const entityType = str(c.entityType);
-        const sourceEntityId = intOrNull(c.entityId);
-        const entityId = entityType === 'campaign'
-          ? cid
-          : sourceEntityId != null
-            ? commentEntityMaps[entityType]?.get(sourceEntityId)
-            : undefined;
-        if (srcId == null || entityId == null) continue;
-        const sourceCharacterId = intOrNull(c.characterId);
-        const [row] = tx
-          .insert(comments)
-          .values({
-            campaignId: cid,
-            entityType,
-            entityId,
-            parentId: null,
-            authorUserId: importerId,
-            authorName: str(c.authorName).slice(0, 120),
-            body: str(c.body, '[deleted]').slice(0, 20_000),
-            inCharacter: boolOf(c.inCharacter),
-            characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
-            characterName: typeof c.characterName === 'string' ? c.characterName.slice(0, 120) : null,
-            characterAvatarUrl: remapHistoricalAvatarUrl(c.characterAvatarUrl),
-            deletedAt: typeof c.deletedAt === 'string' ? c.deletedAt : null,
-            deletedBy: typeof c.deletedBy === 'string' ? c.deletedBy.slice(0, 120) : null,
-            editedAt: typeof c.editedAt === 'string' ? c.editedAt : null,
-            editedBy: typeof c.editedBy === 'string' ? c.editedBy.slice(0, 120) : null,
-            createdAt: typeof c.createdAt === 'string' ? c.createdAt : ts,
-            updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : ts,
-          })
-          .returning()
-          .all();
-        commentMap.set(srcId, row.id);
-      }
-      for (const c of commentRows) {
-        const srcId = intOrNull(c.id);
-        const parentSrc = intOrNull(c.parentId);
-        if (srcId == null || parentSrc == null) continue;
-        const selfId = commentMap.get(srcId);
-        const parentId = commentMap.get(parentSrc);
-        if (selfId != null && parentId != null) {
-          tx.update(comments).set({ parentId }).where(eq(comments.id, selfId)).run();
+      const pendingImportComments = [...commentRows];
+      while (pendingImportComments.length > 0) {
+        let progressed = false;
+        for (let i = 0; i < pendingImportComments.length; ) {
+          const c = pendingImportComments[i]!;
+          const srcId = intOrNull(c.id);
+          const parentSrc = intOrNull(c.parentId);
+          if (srcId == null) {
+            pendingImportComments.splice(i, 1);
+            progressed = true;
+            continue;
+          }
+          if (parentSrc != null && !commentMap.has(parentSrc)) {
+            i += 1;
+            continue;
+          }
+          const entityType = str(c.entityType);
+          const sourceEntityId = intOrNull(c.entityId);
+          const entityId = entityType === 'campaign'
+            ? cid
+            : sourceEntityId != null
+              ? commentEntityMaps[entityType]?.get(sourceEntityId)
+              : undefined;
+          if (entityId == null) {
+            pendingImportComments.splice(i, 1);
+            progressed = true;
+            continue;
+          }
+          const sourceCharacterId = intOrNull(c.characterId);
+          const parentId = parentSrc != null ? (commentMap.get(parentSrc) ?? null) : null;
+          const [row] = tx
+            .insert(comments)
+            .values({
+              campaignId: cid,
+              entityType,
+              entityId,
+              parentId,
+              authorUserId: importerId,
+              authorName: str(c.authorName).slice(0, 120),
+              body: str(c.body, '[deleted]').slice(0, 20_000),
+              inCharacter: boolOf(c.inCharacter),
+              characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
+              characterName: typeof c.characterName === 'string' ? c.characterName.slice(0, 120) : null,
+              characterAvatarUrl: remapHistoricalAvatarUrl(c.characterAvatarUrl),
+              deletedAt: typeof c.deletedAt === 'string' ? c.deletedAt : null,
+              deletedBy: typeof c.deletedBy === 'string' ? c.deletedBy.slice(0, 120) : null,
+              editedAt: typeof c.editedAt === 'string' ? c.editedAt : null,
+              editedBy: typeof c.editedBy === 'string' ? c.editedBy.slice(0, 120) : null,
+              createdAt: typeof c.createdAt === 'string' ? c.createdAt : ts,
+              updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : ts,
+            })
+            .returning()
+            .all();
+          commentMap.set(srcId, row.id);
+          pendingImportComments.splice(i, 1);
+          progressed = true;
+        }
+        if (!progressed) {
+          // Orphaned parent refs — insert remaining as roots.
+          for (const c of pendingImportComments.splice(0)) {
+            const srcId = intOrNull(c.id);
+            const entityType = str(c.entityType);
+            const sourceEntityId = intOrNull(c.entityId);
+            const entityId = entityType === 'campaign'
+              ? cid
+              : sourceEntityId != null
+                ? commentEntityMaps[entityType]?.get(sourceEntityId)
+                : undefined;
+            if (srcId == null || entityId == null) continue;
+            const sourceCharacterId = intOrNull(c.characterId);
+            const [row] = tx
+              .insert(comments)
+              .values({
+                campaignId: cid,
+                entityType,
+                entityId,
+                parentId: null,
+                authorUserId: importerId,
+                authorName: str(c.authorName).slice(0, 120),
+                body: str(c.body, '[deleted]').slice(0, 20_000),
+                inCharacter: boolOf(c.inCharacter),
+                characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
+                characterName: typeof c.characterName === 'string' ? c.characterName.slice(0, 120) : null,
+                characterAvatarUrl: remapHistoricalAvatarUrl(c.characterAvatarUrl),
+                deletedAt: typeof c.deletedAt === 'string' ? c.deletedAt : null,
+                deletedBy: typeof c.deletedBy === 'string' ? c.deletedBy.slice(0, 120) : null,
+                editedAt: typeof c.editedAt === 'string' ? c.editedAt : null,
+                editedBy: typeof c.editedBy === 'string' ? c.editedBy.slice(0, 120) : null,
+                createdAt: typeof c.createdAt === 'string' ? c.createdAt : ts,
+                updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : ts,
+              })
+              .returning()
+              .all();
+            commentMap.set(srcId, row.id);
+          }
         }
       }
 

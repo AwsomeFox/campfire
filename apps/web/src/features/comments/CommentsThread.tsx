@@ -48,23 +48,40 @@ export function CommentsThread({
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
 
+  // Roster is fetched once per campaign/user — not on every comment reload.
+  useEffect(() => {
+    let cancelled = false;
+    if (myUserId == null) {
+      setOwnedCharacters([]);
+      return;
+    }
+    void api
+      .get<Character[]>(`${API}/campaigns/${campaignId}/characters`)
+      .then((characterList) => {
+        if (cancelled) return;
+        setOwnedCharacters(characterList.filter((character) => character.ownerUserId === myUserId));
+      })
+      .catch(() => {
+        if (!cancelled) setOwnedCharacters([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaignId, myUserId]);
+
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [list, characterList] = await Promise.all([
-        api.get<Comment[]>(`${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`),
-        api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`),
-      ]);
-      setComments(list);
-      setOwnedCharacters(
-        myUserId == null ? [] : characterList.filter((character) => character.ownerUserId === myUserId),
+      const list = await api.get<Comment[]>(
+        `${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`,
       );
+      setComments(list);
     } catch {
       setError("Couldn't load the discussion.");
     } finally {
       setLoading(false);
     }
-  }, [campaignId, entityType, entityId, myUserId]);
+  }, [campaignId, entityType, entityId]);
 
   useEffect(() => {
     setLoading(true);
@@ -303,6 +320,7 @@ function CharacterAvatar({ name, avatarUrl }: { name: string; avatarUrl: string 
         src={avatarUrl}
         alt=""
         loading="lazy"
+        referrerPolicy="no-referrer"
         onError={() => setFailed(true)}
         className="h-9 w-9 shrink-0 rounded-full object-cover border border-slate-700"
       />
