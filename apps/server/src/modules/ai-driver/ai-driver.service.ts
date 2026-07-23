@@ -28,6 +28,9 @@ const HARD_MAX_STEPS = 12;
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
 
+/** Maximum active (unconsumed) secret-read approvals per campaign (#1059). */
+const MAX_SECRET_APPROVALS_PER_CAMPAIGN = 50;
+
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
 export type AiDmStopReason =
   | 'complete' // the model produced narration with no further tool calls
@@ -943,6 +946,10 @@ export class AiDriverService {
           campaignId,
           detail: `approved secret read ${call.name}#${approvedSecret.entityId} granted by ${approvedSecret.grantedBy}${res.isError ? ' [error]' : ''} (triggered by ${triggeredBy.id})`,
         });
+        // #1059: remove consumed approval immediately — it is single-use and should not accumulate
+        const approvals = session.secretReadApprovals ?? {};
+        const key = approvalKey(call.name, approvedSecret.entityId);
+        delete approvals[key];
       }
 
       // (5) #557 — defense-in-depth redaction of any dmSecret field from a read result before
@@ -1088,6 +1095,13 @@ export class AiDriverService {
     const session = this.ensureSession(campaignId);
     session.secretReadApprovals = session.secretReadApprovals ?? {};
     const key = approvalKey(tool, entityId);
+    // #1059: bound total active approvals per campaign — refuse if at capacity
+    const activeCount = Object.values(session.secretReadApprovals).filter(a => !a.consumed).length;
+    if (activeCount >= MAX_SECRET_APPROVALS_PER_CAMPAIGN && !session.secretReadApprovals[key]) {
+      throw new BadRequestException(
+        `Maximum active secret-read approvals (${MAX_SECRET_APPROVALS_PER_CAMPAIGN}) reached for this campaign. Revoke unused approvals before granting more.`,
+      );
+    }
     // Replace any prior approval for the same {tool, entityId} (the new one is unconsumed).
     const approval: AiDmSecretReadApproval = {
       tool,
