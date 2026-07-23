@@ -69,7 +69,7 @@ type NotificationContextValue = {
   closePanel(): void;
   retryLoadItems(): void;
   markRead(notification: Notification): Promise<void>;
-  markAllRead(): Promise<void>;
+  markAllRead(): Promise<boolean>;
 };
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
@@ -512,7 +512,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     }
   }, [cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
-  const markAllRead = useCallback(async () => {
+  const markAllRead = useCallback(async (): Promise<boolean> => {
     try {
       await api.post(`${API}/notifications/read-all`);
       cancelCountRequest();
@@ -520,8 +520,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       syncReadMessage({ type: 'read-all', readAt });
       channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
       publishSnapshot({ count: 0, refreshedAt: Date.now() });
+      return true;
     } catch {
-      /* best-effort */
+      return false;
     }
   }, [cancelCountRequest, publishSnapshot, syncReadMessage]);
 
@@ -615,8 +616,10 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`);
 
   const handleMarkAllRead = useCallback(async () => {
-    await markAllRead();
-    setMarkAllAnnouncement('All notifications marked as read.');
+    const ok = await markAllRead();
+    setMarkAllAnnouncement(
+      ok ? 'All notifications marked as read.' : "Couldn't mark all notifications as read.",
+    );
   }, [markAllRead]);
 
   // Bottom sheet on phones (issue #664), top-right flyout everywhere else —

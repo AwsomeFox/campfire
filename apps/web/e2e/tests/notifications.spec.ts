@@ -205,6 +205,29 @@ test.describe('shared notification controller', () => {
     await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
   });
 
+  test('announces mark all read failure in the dialog status region', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 2 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({
+      json: [
+        notification('First unread', 9921),
+        notification('Second unread', 9922),
+      ],
+    }));
+    await page.route('**/api/v1/notifications/read-all', async (route) => {
+      await route.fulfill({ status: 503, json: { message: 'Unavailable' } });
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications (2 unread)' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await expect(dialog.getByRole('status')).toHaveText('2 items.');
+    await dialog.getByRole('button', { name: 'Mark all read' }).click();
+    await expect(dialog.getByRole('status')).toHaveText("Couldn't mark all notifications as read.");
+    await expect(page.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+  });
+
   test('announces loading before items arrive', async ({ page }) => {
     const { campaignId } = seed();
     let releaseList: () => void = () => {};
