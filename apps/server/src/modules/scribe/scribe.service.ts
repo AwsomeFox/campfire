@@ -436,13 +436,24 @@ export class ScribeService implements OnApplicationBootstrap {
     return results;
   }
 
-  /** True when the campaign has at least one scheduled session whose end time is in the past. */
+  /** True when the campaign has at least one scheduled session whose end time is in the past AND after the last post_session scribe run (#1066). */
   private async hasEndedSession(campaignId: number, now: Date): Promise<boolean> {
+    // Find the last successful (or attempted) post_session run as a watermark.
+    const [lastRun] = await this.db
+      .select({ createdAt: aiScribeJobs.createdAt })
+      .from(aiScribeJobs)
+      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')))
+      .orderBy(desc(aiScribeJobs.createdAt))
+      .limit(1);
+    const watermark = lastRun ? Date.parse(lastRun.createdAt) : 0;
+
     const rows = await this.db.select().from(scheduledSessions).where(eq(scheduledSessions.campaignId, campaignId));
     return rows.some((r) => {
       const start = Date.parse(r.scheduledAt);
       if (!Number.isFinite(start)) return false;
-      return start + (r.durationMinutes ?? 0) * 60_000 <= now.getTime();
+      const endTime = start + (r.durationMinutes ?? 0) * 60_000;
+      // Session must have ended AND ended after the last post_session run.
+      return endTime <= now.getTime() && endTime > watermark;
     });
   }
 
