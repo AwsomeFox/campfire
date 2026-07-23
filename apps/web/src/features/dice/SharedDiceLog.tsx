@@ -91,8 +91,6 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
 
     const previous = rollAnnouncementRef.current;
     const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
-    // Skip only the pre-fetch empty render; after load() returns [] we still need a baseline.
-    if (cursor === null && rolls.length === 0 && rollsCampaignIdRef.current !== campaignId) return;
 
     const localIds = takeLocalDiceAnnouncements(campaignId);
     if (cursor === null) {
