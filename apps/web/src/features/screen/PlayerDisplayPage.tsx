@@ -22,7 +22,7 @@ import type {
   EncounterWithCombatants,
   HpBand,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import {
