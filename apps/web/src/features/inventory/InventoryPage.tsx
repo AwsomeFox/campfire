@@ -807,7 +807,7 @@ function AddItemForm({
     e.preventDefault();
     if (!name.trim()) return;
     // Issue #633: parse qty without silently defaulting to 1. Issue #459: enforce
-    // the same min/max the spinbutton exposes so out-of-range values announce.
+    // the same min/max the field help exposes so out-of-range values announce.
     const qtyParsed = parseLocalizedInteger(qty, formatLocale, {
       min: ITEM_QTY_MIN,
       max: ITEM_QTY_MAX,
