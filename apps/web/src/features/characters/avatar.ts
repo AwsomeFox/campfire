@@ -10,7 +10,13 @@
  * identity hues, so this palette is intentionally NOT migrated to
  * --color-accent (collapsing six hues into the blurple family would erase
  * the distinguishability the palette exists to provide).
+ *
+ * The {@link initials} function re-exports the grapheme-aware helper from
+ * `lib/avatarText` (issue #631) so legacy imports keep working while all
+ * surfaces converge on the same Unicode-safe implementation.
  */
+export { initials } from '../../lib/avatarText';
+
 export const AVATAR_PALETTE = [
   { bg: 'bg-purple-500/15', border: 'border-purple-500/60', text: 'text-purple-400' },
   { bg: 'bg-sky-500/15', border: 'border-sky-500/60', text: 'text-sky-400' },
@@ -22,11 +28,4 @@ export const AVATAR_PALETTE = [
 
 export function avatarTone(index: number) {
   return AVATAR_PALETTE[index % AVATAR_PALETTE.length];
-}
-
-export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0] + parts[parts.length - 1]![0]).toUpperCase();
 }

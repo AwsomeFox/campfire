@@ -37,6 +37,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
@@ -1224,13 +1225,8 @@ export default function RunSessionPage() {
 
 // ---------------------------------------------------------------------------
 
-/** Two-letter token initials from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1"). */
-function tokenInitials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
+// `tokenInitials` is the shared grapheme-aware helper (issue #631): two-letter
+// token labels from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1").
 
 // Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
 // rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
