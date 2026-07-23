@@ -1092,7 +1092,7 @@ export class AiDriverService {
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
 
-      // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
+      // (4) #557 — consume the approval (single-use) once the DM-scoped read attempt finishes,
       // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
       if (approvedSecret) {
         // Single-use: remove the approval the moment its DM-scoped read completes, so it can't be
