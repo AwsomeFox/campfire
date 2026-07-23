@@ -992,8 +992,10 @@ export const combatants = sqliteTable('combatants', {
 // per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
 // written by EncountersService so the run view can show a scrollable history that
 // survives reload. actor/target are denormalized combatant NAMES (nullable) so the log
-// renders even after a combatant is removed; `detail` never carries a monster's exact HP
-// total (only the delta), so listing the log to a non-DM can't leak issue #43's redaction.
+// renders even after a combatant is removed; actor_id/target_id are stable combatant
+// ids for role-aware projection (issue #869). `detail` never carries a monster's exact
+// HP total (only the delta) and must not embed combatant names that could bypass
+// actor/target redaction for hidden NPCs.
 export const encounterEvents = sqliteTable('encounter_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
@@ -1001,6 +1003,8 @@ export const encounterEvents = sqliteTable('encounter_events', {
   type: text('type').notNull(), // EncounterEventType in @campfire/schema
   actor: text('actor'),
   target: text('target'),
+  actorId: integer('actor_id'),
+  targetId: integer('target_id'),
   detail: text('detail').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
