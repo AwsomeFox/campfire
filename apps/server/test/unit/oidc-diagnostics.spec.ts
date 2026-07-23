@@ -27,7 +27,7 @@ describe('oidc diagnostics helpers (issue #848)', () => {
   });
 
   describe('fingerprint', () => {
-    it('is stable for equivalent config and never embeds the secret', () => {
+    it('is stable for equivalent config, changes with secret rotation, and never embeds the secret', () => {
       const a = oidcConfigFingerprint({
         issuer: 'https://idp.example.com/',
         clientId: 'campfire',
@@ -38,7 +38,22 @@ describe('oidc diagnostics helpers (issue #848)', () => {
         groupsClaim: '',
         scope: '',
       });
-      const b = oidcConfigFingerprint({
+      const sameSecret = oidcConfigFingerprint({
+        issuer: 'https://idp.example.com',
+        clientId: 'campfire',
+        clientSecret: 'super-secret-value',
+        redirectUri: 'https://app/callback',
+        adminGroup: 'admins',
+        allowedGroup: '',
+        groupsClaim: 'groups',
+        scope: 'openid profile email',
+      });
+      // Defaults applied — same fingerprint; secret text absent.
+      expect(a).toBe(sameSecret);
+      expect(a).not.toContain('super-secret');
+      expect(a).toMatch(/^[a-f0-9]{16}$/);
+
+      const rotated = oidcConfigFingerprint({
         issuer: 'https://idp.example.com',
         clientId: 'campfire',
         clientSecret: 'different-secret',
@@ -48,10 +63,8 @@ describe('oidc diagnostics helpers (issue #848)', () => {
         groupsClaim: 'groups',
         scope: 'openid profile email',
       });
-      // Secret presence matches, defaults applied — same fingerprint; secret text absent.
-      expect(a).toBe(b);
-      expect(a).not.toContain('super-secret');
-      expect(a).toMatch(/^[a-f0-9]{16}$/);
+      // Secret rotation must invalidate prior e2e verification.
+      expect(rotated).not.toBe(a);
 
       const noSecret = oidcConfigFingerprint({
         issuer: 'https://idp.example.com',

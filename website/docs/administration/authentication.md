@@ -25,8 +25,9 @@ configuration, token exchange, required claims, and group policy — without
 replacing your admin session or provisioning a user. Then **Save**. Changes take
 effect on the next sign-in — no restart needed. The client secret is write-only:
 once saved it is never shown again (the form shows only whether one is set).
-Diagnostic results show a timestamp and a non-secret fingerprint, and clear when
-you edit relevant fields.
+Diagnostic results show a timestamp and a non-secret fingerprint (including a
+digest of the client secret so rotating it invalidates prior end-to-end
+verification), and clear when you edit relevant fields.
 
 ### Via environment variables
 

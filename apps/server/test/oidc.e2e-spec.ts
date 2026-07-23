@@ -1206,6 +1206,44 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       ).toBe(true);
     });
 
+    it('leftover diagnostic test cookie does not hijack a normal SSO callback (issue #848)', async () => {
+      const { app, admin } = await bootWithAdmin();
+      const redirectUri = `${app.baseUrl}/api/v1/auth/oidc/callback`;
+      await admin.patchJson('/api/v1/settings/oidc', {
+        issuer: idp.issuer,
+        clientId: 'test-client',
+        clientSecret: 'test-secret',
+        redirectUri,
+      });
+
+      // Start an admin diagnostic (sets campfire_oidc_test_flow) but do not complete it.
+      const started = await (
+        await admin.postJson('/api/v1/settings/oidc/test-login', {
+          issuer: idp.issuer,
+          clientId: 'test-client',
+          redirectUri,
+        })
+      ).json();
+      expect(started.authorizationUrl).toContain('/authorize');
+      expect(admin.getCookie('campfire_oidc_test_flow')).toBeTruthy();
+
+      // Normal SSO in the same browser jar must still create a session — the
+      // leftover test cookie's pending state does not match this callback's state.
+      idp.setNextUser({
+        sub: 'sub-normal-sso',
+        preferred_username: 'normalsso',
+        email: 'normal@example.com',
+        name: 'Normal SSO',
+      });
+      const cb = await performOidcLogin(admin);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.get('location')).toBe('/');
+      expect(cb.headers.get('location')).not.toBe('/admin/auth?oidcDiag=1');
+
+      const me = await (await admin.get('/api/v1/me')).json();
+      expect(me.user.username).toBe('normalsso');
+    });
+
     it('diagnostics label environment-overridden values without echoing secrets (issue #848)', async () => {
       const app = await bootApp(oidcEnvFor(idp));
       const admin = new CookieAgent(app.baseUrl);

@@ -54,8 +54,9 @@ export function isAbsoluteHttpUrl(value: string): boolean {
 }
 
 /**
- * Non-secret fingerprint of a diagnostic candidate. Includes whether a client
- * secret is present, never the secret value itself.
+ * Non-secret fingerprint of a diagnostic candidate. Includes a SHA-256 digest
+ * of the trimmed client secret (or `secret:absent`) so rotating the secret
+ * invalidates prior e2e verification — never the secret value itself.
  */
 export function oidcConfigFingerprint(candidate: {
   issuer: string;
@@ -67,10 +68,14 @@ export function oidcConfigFingerprint(candidate: {
   groupsClaim: string;
   scope: string;
 }): string {
+  const secret = candidate.clientSecret.trim();
+  const secretFingerprint = secret
+    ? createHash('sha256').update(secret).digest('hex')
+    : 'secret:absent';
   const material = [
     canonicalIssuer(candidate.issuer),
     candidate.clientId.trim(),
-    candidate.clientSecret.trim() ? 'secret:set' : 'secret:absent',
+    secretFingerprint,
     candidate.redirectUri.trim(),
     candidate.adminGroup.trim(),
     candidate.allowedGroup.trim(),

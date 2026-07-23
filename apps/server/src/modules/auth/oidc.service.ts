@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type * as client from 'openid-client';
 import {
   EMPTY_STORED_OIDC,
@@ -37,15 +37,20 @@ import type {
 } from '@campfire/schema';
 import { OidcTestResult as OidcTestResultSchema } from '@campfire/schema';
 import { OidcRecoveryFailure } from './oidc-recovery';
+import {
+  getLatestOidcTestResult,
+  hashFlowToken,
+  peekOidcTestPending,
+  putOidcTestPending,
+  setLatestOidcTestResult,
+  takeOidcTestPending,
+  type OidcTestPending,
+} from './oidc-test-pending';
 
 /** Settings-store key under which the in-app OIDC config blob is persisted. */
 const OIDC_SETTINGS_KEY = 'oidcConfig';
 /** Persisted last admin end-to-end diagnostic summary (non-secret). */
 const OIDC_LAST_E2E_KEY = 'oidcLastE2eTest';
-/** Ephemeral pending diagnostic login state (includes secret — server-side only). */
-const OIDC_TEST_PENDING_KEY = 'oidcTestPending';
-/** Ephemeral completed diagnostic result awaiting the admin UI poll/redirect. */
-const OIDC_TEST_RESULT_KEY = 'oidcTestResult';
 
 /** How long to wait for the discovery document during a test-connection probe. */
 const TEST_CONNECTION_TIMEOUT_MS = 5_000;
@@ -59,16 +64,6 @@ export interface OidcClaims {
   email?: string;
   name?: string;
   [key: string]: unknown;
-}
-
-/** Server-side pending state for an admin diagnostic login (includes secret — never returned to clients). */
-interface OidcTestPending {
-  flowTokenHash: string;
-  state: string;
-  codeVerifier: string;
-  candidate: OidcDiagnosticResolved;
-  fingerprint: string;
-  expiresAt: number;
 }
 
 function emptyFieldSources(): OidcTestResult['fieldSources'] {
@@ -189,7 +184,7 @@ export class OidcService {
     const stored = await this.loadStored();
     const resolved = resolveOidcConfig(stored);
     const effective = resolveDiagnosticCandidate(stored);
-    const lastE2e = await this.settings.getJson<OidcLastE2eTest>(OIDC_LAST_E2E_KEY);
+    const lastE2e = (await this.settings.getJson<OidcLastE2eTest>(OIDC_LAST_E2E_KEY)) ?? null;
     return {
       providerName: stored.providerName,
       issuer: stored.issuer,
@@ -587,16 +582,18 @@ export class OidcService {
     const flowToken = randomBytes(16).toString('hex');
     const fingerprint = oidcConfigFingerprint(candidate);
     const pending: OidcTestPending = {
-      flowTokenHash: createHash('sha256').update(flowToken).digest('hex'),
+      flowTokenHash: hashFlowToken(flowToken),
       state,
       codeVerifier,
       candidate,
       fingerprint,
       expiresAt: Date.now() + TEST_LOGIN_PENDING_MAX_AGE_MS,
     };
-    await this.settings.setJson(OIDC_TEST_PENDING_KEY, pending);
-    // Clear any stale result so the UI doesn't show a previous run.
-    await this.settings.setJson(OIDC_TEST_RESULT_KEY, null);
+    // In-memory only (includes client secret) — keyed by flow token so concurrent
+    // admin diagnostics do not overwrite each other.
+    putOidcTestPending(pending);
+    // Clear any stale poll result so the UI doesn't show a previous run.
+    setLatestOidcTestResult(null);
 
     return {
       authorizationUrl: url.toString(),
@@ -608,11 +605,21 @@ export class OidcService {
 
   /** True when a non-expired diagnostic pending state exists for this flow token. */
   async hasActiveTestLogin(flowToken: string | undefined): Promise<boolean> {
-    if (!flowToken) return false;
-    const pending = await this.loadPendingTestLogin();
-    if (!pending) return false;
-    const hash = createHash('sha256').update(flowToken).digest('hex');
-    return pending.flowTokenHash === hash;
+    return peekOidcTestPending(flowToken) !== null;
+  }
+
+  /**
+   * True when the diagnostic flow cookie matches a pending test login whose
+   * OIDC `state` equals the IdP callback state. Used so a leftover test cookie
+   * cannot hijack a normal SSO callback (issue #848).
+   */
+  async matchesActiveTestLogin(
+    flowToken: string | undefined,
+    callbackState: string | undefined,
+  ): Promise<boolean> {
+    if (!flowToken || !callbackState) return false;
+    const pending = peekOidcTestPending(flowToken);
+    return pending !== null && pending.state === callbackState;
   }
 
   /**
@@ -628,36 +635,38 @@ export class OidcService {
     flowToken: string,
     callbackQuery: Record<string, unknown>,
   ): Promise<OidcTestResult> {
-    const pending = await this.loadPendingTestLogin();
-    await this.settings.setJson(OIDC_TEST_PENDING_KEY, null);
+    // Atomically take pending for this token so overlapping callbacks cannot
+    // clear a successful run's slot and overwrite lastE2e with a stale failure.
+    const pending = takeOidcTestPending(flowToken);
 
     const testedAt = new Date().toISOString();
     if (!pending) {
-      return this.persistE2eResult(
-        OidcTestResultSchema.parse({
-          ok: false,
-          kind: 'e2e',
-          issuer: '',
-          message: 'Diagnostic login flow expired or was missing.',
-          authorizationEndpoint: null,
-          tokenEndpoint: null,
-          testedAt,
-          fingerprint: '',
-          fieldSources: emptyFieldSources(),
-          checks: {
-            discovery: checkSkip('Flow expired before completion.'),
-            redirectClient: checkSkip('Flow expired before completion.'),
-            tokenExchange: checkFail('Diagnostic login flow expired or was missing.'),
-            requiredClaims: checkSkip('Skipped — token exchange did not succeed.'),
-            groupPolicy: checkSkip('Skipped — token exchange did not succeed.'),
-          },
-        }),
-      );
+      // Do not update oidcLastE2eTest — a late/refreshed callback must not
+      // clobber a previously successful verification with an empty fingerprint.
+      const expired = OidcTestResultSchema.parse({
+        ok: false,
+        kind: 'e2e',
+        issuer: '',
+        message: 'Diagnostic login flow expired or was missing.',
+        authorizationEndpoint: null,
+        tokenEndpoint: null,
+        testedAt,
+        fingerprint: '',
+        fieldSources: emptyFieldSources(),
+        checks: {
+          discovery: checkSkip('Flow expired before completion.'),
+          redirectClient: checkSkip('Flow expired before completion.'),
+          tokenExchange: checkFail('Diagnostic login flow expired or was missing.'),
+          requiredClaims: checkSkip('Skipped — token exchange did not succeed.'),
+          groupPolicy: checkSkip('Skipped — token exchange did not succeed.'),
+        },
+      });
+      setLatestOidcTestResult(expired);
+      return expired;
     }
 
     const callbackState = typeof callbackQuery.state === 'string' ? callbackQuery.state : undefined;
-    const tokenHash = createHash('sha256').update(flowToken).digest('hex');
-    if (pending.flowTokenHash !== tokenHash || !callbackState || pending.state !== callbackState) {
+    if (!callbackState || pending.state !== callbackState) {
       return this.persistE2eResult(
         OidcTestResultSchema.parse({
           ok: false,
@@ -816,23 +825,17 @@ export class OidcService {
     );
   }
 
-  /** Latest completed diagnostic result (cleared after read by the admin UI, or left for SettingsCard). */
+  /**
+   * Latest completed diagnostic result for the admin UI poll after redirect.
+   * Ephemeral in-memory value (non-secret); the durable verification signal is
+   * `lastE2eTest` on the settings GET response.
+   */
   async getTestLoginResult(): Promise<OidcTestResult | null> {
-    return this.settings.getJson<OidcTestResult>(OIDC_TEST_RESULT_KEY);
-  }
-
-  private async loadPendingTestLogin(): Promise<OidcTestPending | null> {
-    const pending = await this.settings.getJson<OidcTestPending>(OIDC_TEST_PENDING_KEY);
-    if (!pending) return null;
-    if (typeof pending.expiresAt !== 'number' || pending.expiresAt < Date.now()) {
-      await this.settings.setJson(OIDC_TEST_PENDING_KEY, null);
-      return null;
-    }
-    return pending;
+    return getLatestOidcTestResult();
   }
 
   private async persistE2eResult(result: OidcTestResult): Promise<OidcTestResult> {
-    await this.settings.setJson(OIDC_TEST_RESULT_KEY, result);
+    setLatestOidcTestResult(result);
     const summary: OidcLastE2eTest = {
       testedAt: result.testedAt,
       fingerprint: result.fingerprint,
