@@ -1772,6 +1772,65 @@ function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for issue #819: character assignment is an exclusive seat — at most
+ * one campaign_members row may reference a given character_id. Pre-fix DBs could
+ * accumulate duplicate links (the service overwrote ownerUserId without clearing
+ * the previous seat). This migration:
+ *
+ *   1. Collapses duplicates so the unique index can be created. For each
+ *      character_id with multiple seats, keep the member whose user_id matches
+ *      characters.owner_user_id (canonical owner); fall back to the earliest
+ *      membership id. Losing seats are unlinked (character_id cleared), never
+ *      deleted — the member stays in the campaign.
+ *   2. Creates the partial unique index idempotently (BOOTSTRAP_SQL declares the
+ *      same name for fresh DBs).
+ */
+function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): void {
+  const hasMembersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_members'")
+    .get();
+  if (!hasMembersTable) return;
+
+  // Prefer the seat whose user matches the character's owner_user_id (string form
+  // of users.id). When no seat matches the owner (or the character is missing),
+  // keep MIN(id) so the index can be applied deterministically.
+  const dupGroups = sqlite
+    .prepare(
+      `SELECT character_id
+       FROM campaign_members
+       WHERE character_id IS NOT NULL
+       GROUP BY character_id
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as Array<{ character_id: number }>;
+
+  const seatsFor = sqlite.prepare(
+    `SELECT id, user_id FROM campaign_members WHERE character_id = ? ORDER BY id ASC`,
+  );
+  const ownerOf = sqlite.prepare(`SELECT owner_user_id FROM characters WHERE id = ? LIMIT 1`);
+  const unlink = sqlite.prepare(
+    `UPDATE campaign_members SET character_id = NULL, updated_at = datetime('now') WHERE id = ?`,
+  );
+
+  for (const { character_id } of dupGroups) {
+    const seats = seatsFor.all(character_id) as Array<{ id: number; user_id: number }>;
+    const ownerRow = ownerOf.get(character_id) as { owner_user_id: string | null } | undefined;
+    const ownerUserId = ownerRow?.owner_user_id ?? null;
+    const keep =
+      (ownerUserId != null ? seats.find((s) => String(s.user_id) === ownerUserId) : undefined) ?? seats[0];
+    if (!keep) continue;
+    for (const seat of seats) {
+      if (seat.id !== keep.id) unlink.run(seat.id);
+    }
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
+      ON campaign_members(character_id) WHERE character_id IS NOT NULL;
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1849,6 +1908,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
   { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+  { name: '0065_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
 ];
 
 /**

@@ -130,6 +130,7 @@ test.describe('source adapters', () => {
     expect(href('session_scheduled')).toBe('/c/7/sessions?tab=schedule');
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
+    expect(href('character_reassigned', { entityType: 'character', entityId: 11 })).toBe(expected.character);
   });
 });
 

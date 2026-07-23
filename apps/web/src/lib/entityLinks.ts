@@ -247,6 +247,10 @@ export function notificationHref(notification: Notification): string {
           : notification.type === 'quest_updated'
             ? `/c/${campaignId}/quests`
             : `/c/${campaignId}/sessions`;
+    case 'character_reassigned':
+      return notification.entityType === 'character' && validId(notification.entityId)
+        ? entityHref(campaignId, { type: 'character', id: notification.entityId })
+        : `/c/${campaignId}/characters`;
     case 'added_to_campaign':
     default:
       return `/c/${campaignId}`;

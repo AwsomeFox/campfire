@@ -5,9 +5,13 @@ import {
   ADD_MEMBER_ROLE_LABEL,
   ADD_MEMBER_SEARCH_LABEL,
   MEMBER_CHARACTER_LINK_HELP,
+  MEMBER_CHARACTER_TRANSFER_BODY,
+  MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL,
   memberAddedAnnouncement,
   memberCharacterControlLabel,
+  memberCharacterOptionLabel,
   memberCharacterSavedAnnouncement,
+  memberCharacterTransferTitle,
   memberDisplayName,
   memberRemoveLabel,
   memberRoleControlLabel,
@@ -28,8 +32,17 @@ test.describe('member control a11y vocabulary (issue #451)', () => {
 
   test('character linkage help distinguishes ownership from seat closure', () => {
     expect(MEMBER_CHARACTER_LINK_HELP).toMatch(/owner/i);
-    expect(MEMBER_CHARACTER_LINK_HELP).toMatch(/seat/i);
+    expect(MEMBER_CHARACTER_LINK_HELP).toMatch(/exclusive seat/i);
+    expect(MEMBER_CHARACTER_LINK_HELP).toMatch(/transfer/i);
     expect(MEMBER_CHARACTER_LINK_HELP).toMatch(/keeps their character/i);
+  });
+
+  test('exclusive-seat transfer copy names both players and the character (issue #819)', () => {
+    expect(memberCharacterOptionLabel('Aria', 'Alice')).toBe('Aria (Alice)');
+    expect(memberCharacterOptionLabel('Aria', null)).toBe('Aria');
+    expect(memberCharacterTransferTitle('Aria', 'Alice', 'Bob')).toBe('Transfer Aria from Alice to Bob?');
+    expect(MEMBER_CHARACTER_TRANSFER_BODY).toMatch(/loses sheet edit rights/i);
+    expect(MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL).toMatch(/Transfer character/i);
   });
 
   test('add-member dialog exposes search, role, and cancel names', () => {

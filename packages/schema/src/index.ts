@@ -1226,6 +1226,8 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #819: exclusive character seat transferred away from (or onto) this member.
+  'character_reassigned',
   'session_scheduled',
   'session_rsvp',
   'quest_updated',
@@ -2752,8 +2754,24 @@ export const CampaignMember = z.object({
   ...timestamps,
 });
 export type CampaignMember = z.infer<typeof CampaignMember>;
-export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
-export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+/**
+ * Issue #819 — exclusive character seat model: at most one campaign_members row may
+ * link a given characterId. Reassigning a seated (or otherwise owned) character to
+ * another member requires an explicit `confirmTransfer: true` so the server can
+ * atomically unlink the previous seat and move ownership; without it the write is
+ * rejected with 409 CHARACTER_SEAT_TAKEN instead of silently stealing controls.
+ */
+export const MemberCreate = z.object({
+  userId: Id,
+  role: Role,
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
+export const MemberUpdate = z.object({
+  role: Role.optional(),
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
 
 // Server-admin-only membership integrity diagnostics/recovery (#849). These
 // shapes expose operational metadata only: campaign identity/name, account ids,

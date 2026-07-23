@@ -851,6 +851,10 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
+-- Issue #819: exclusive character seat — at most one membership may link a given
+-- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0065.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
+  ON campaign_members(character_id) WHERE character_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_participant_support_campaign ON participant_support_preferences(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_participant_support_ai_consent ON participant_support_preferences(campaign_id, ai_use_consent);
 CREATE INDEX IF NOT EXISTS idx_campaign_invites_campaign ON campaign_invites(campaign_id);
