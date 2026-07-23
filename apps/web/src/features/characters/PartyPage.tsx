@@ -243,7 +243,7 @@ function CharacterCard({
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
   // <button> inside an <a> is invalid and would hijack the navigation click (#68).
   return (
-    <div className={`cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors ${isActive ? '' : 'opacity-60'}`}>
+    <div className={`cf-card cf-card-hover p-3.5 space-y-2.5 ${isActive ? '' : 'opacity-60'}`}>
       <div className="relative">
         <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
           <div className="flex items-center gap-2.5">

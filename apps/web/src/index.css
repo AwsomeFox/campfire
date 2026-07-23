@@ -118,6 +118,13 @@
      primary; status colors keep the same hues Nocturne implies via tags. */
   --cf-accent: var(--color-accent);
   --cf-accent-2: var(--color-accent-2);
+  /* Card hover border — the single source of truth for the "this card is a
+     link, consider clicking it" affordance (issue #644). List/detail cards
+     used to drift amber app-wide while active/selected states were already
+     blurple; both now read from the same accent family so hover matches
+     active/selected. Implemented as color-mix over --color-accent so a
+     personal accent or theme swap recolors hover automatically. */
+  --cf-accent-hover: color-mix(in srgb, var(--color-accent) 45%, transparent);
   --cf-success: #34d399; /* emerald — completed / explored / healthy */
   --cf-danger: var(--color-danger); /* rose — danger / failed / low HP */
   --cf-arcane: var(--color-accent-2); /* lore, magic, proposals */
@@ -592,6 +599,17 @@ h1, h2, h3, h4, h5, h6 {
   background: var(--cf-surface);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-md);
+}
+/* Card hover affordance — the ONE place a clickable card's border tints on
+   hover (issue #644). Replaces the per-screen `hover:border-amber-500/*`
+   (and Search's `hover:border-slate-600`) drift so hover, active, and
+   selected all read from the --color-accent family. Compose with
+   `transition-colors` for the fade. */
+.cf-card-hover {
+  transition: border-color 150ms ease;
+}
+.cf-card-hover:hover {
+  border-color: var(--cf-accent-hover);
 }
 
 .cf-chip {

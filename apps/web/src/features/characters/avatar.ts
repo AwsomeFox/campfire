@@ -1,4 +1,16 @@
-/** Shared initials-avatar coloring for the party roster + character sheet. */
+/**
+ * Shared initials-avatar coloring for the party roster + character sheet.
+ *
+ * Audit note (issue #644): this palette is POLYCHROMATIC BY DESIGN — six
+ * maximally distinct hues so two same-name PCs still read as different
+ * people. Amber is kept here on purpose, the way `--cf-crit` deliberately
+ * keeps amber for the natural-20 flourish: these are closed semantic hue
+ * slots, not the app "primary" the design-system accent replaced. The
+ * accent/hover drift the issue files is about CLICKABLE CARDS, not avatar
+ * identity hues, so this palette is intentionally NOT migrated to
+ * --color-accent (collapsing six hues into the blurple family would erase
+ * the distinguishability the palette exists to provide).
+ */
 export const AVATAR_PALETTE = [
   { bg: 'bg-purple-500/15', border: 'border-purple-500/60', text: 'text-purple-400' },
   { bg: 'bg-sky-500/15', border: 'border-sky-500/60', text: 'text-sky-400' },
