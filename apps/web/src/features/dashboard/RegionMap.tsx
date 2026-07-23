@@ -159,7 +159,7 @@ export function RegionMap({
       window.removeEventListener('pagehide', cancelForPageExit);
       window.removeEventListener('orientationchange', cancelForRotation);
       orientation?.removeEventListener?.('change', cancelForRotation);
-      cancelActiveDrag();
+      cancelActiveDrag(undefined, false);
     };
   }, [cancelActiveDrag]);
 
