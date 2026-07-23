@@ -2878,6 +2878,63 @@ export type AiDmTurnKind = z.infer<typeof AiDmTurnKind>;
 export const AiDmMode = z.enum(['off', 'co_dm', 'driver']);
 export type AiDmMode = z.infer<typeof AiDmMode>;
 
+/**
+ * The canonical, player-visible description of what each AI DM mode may do (issue #752).
+ * This is NON-SECRET — it is the honest provenance the trust copy is built from — and it
+ * mirrors the server-side tool authority exactly:
+ *   - Co-DM (`co-dm.service.ts`) only ever files PENDING PROPOSALS; nothing applies until
+ *     a human DM approves. `directActions` is empty by design.
+ *   - Driver (`ai-driver.service.ts`) holds the DM seat. The `directActions` list below is
+ *     the one rendered into trust copy (login, settings, the transparency note) so the copy
+ *     cannot drift from what the seat actually does; it is a description of the server's
+ *     DRIVER_LIVE_PLAY_TOOLS allow-list, not a separate grant. Canon edits (new NPCs, quests,
+ *     locations) are still forced onto the proposal path in both modes — that is `canonViaProposal`.
+ *
+ * UI copy and the policy-backed content test both read from here so the words a player sees
+ * stay anchored to the actual tool permissions.
+ */
+export interface AiDmModeCapability {
+  /** Short label for the capability as it appears in trust copy (e.g. "rolls dice"). */
+  label: string;
+  /**
+   * A keyword that MUST appear in any trust-copy sentence claiming the Driver acts directly.
+   * The content test asserts each keyword is present in the Driver-facing copy surfaces, so
+   * a copy edit can't quietly drop a capability the seat actually has (or claim one it lacks).
+   */
+  copyKeyword: string;
+}
+
+export const AI_DM_MODE_CAPABILITIES: Readonly<
+  Record<AiDmMode, { proposes: boolean; directActions: readonly AiDmModeCapability[]; canonViaProposal: boolean }>
+> = {
+  off: { proposes: false, directActions: [], canonViaProposal: false },
+  co_dm: {
+    // Co-DM only ever drafts proposals a human DM must approve — never a direct write.
+    proposes: true,
+    directActions: [],
+    canonViaProposal: true,
+  },
+  driver: {
+    // Driver holds the DM seat and resolves live play directly within its budget; canon
+    // edits still become proposals. directActions mirrors DRIVER_LIVE_PLAY_TOOLS.
+    proposes: true,
+    directActions: [
+      { label: 'narrates the scene', copyKeyword: 'narrat' },
+      { label: 'rolls dice', copyKeyword: 'roll' },
+      { label: 'applies HP and conditions', copyKeyword: 'HP' },
+      { label: 'awards XP and levels', copyKeyword: 'XP' },
+      { label: 'advances combat turns', copyKeyword: 'turn' },
+      { label: 'reveals map regions', copyKeyword: 'map' },
+      // Capabilities the seat has but the trust-copy summary does not enumerate by name.
+      // Listed so the manifest stays a complete mirror of DRIVER_LIVE_PLAY_TOOLS; their
+      // absence from player-facing prose is intentional (a summary, not an inventory).
+      { label: 'ticks quest objectives', copyKeyword: '' },
+      { label: 'jots table notes', copyKeyword: '' },
+    ],
+    canonViaProposal: true,
+  },
+};
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,

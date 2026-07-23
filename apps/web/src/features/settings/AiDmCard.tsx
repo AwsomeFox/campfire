@@ -18,7 +18,7 @@ import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/sche
 import { api, ApiError, API } from '../../lib/api';
 import { ProviderForm } from './ProviderForm';
 
-const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
+export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
     value: 'off',
     label: 'Off',
@@ -28,13 +28,13 @@ const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
     value: 'co_dm',
     label: 'Co-DM (assist)',
     blurb:
-      'The AI only proposes — every change lands in the approval queue for you to accept or reject. You run the table. Recommended.',
+      'Asks. The AI only proposes — every draft lands in your approval queue, and nothing changes until a human DM accepts or rejects it. The AI never writes to canon directly. Recommended.',
   },
   {
     value: 'driver',
     label: 'Driver',
     blurb:
-      'The AI holds the DM seat and runs the session. Requires the experimental server flag, a positive token budget, and a configured provider.',
+      'Acts. The AI holds the DM seat and runs the session directly — it narrates, rolls dice, applies HP and conditions, awards XP, advances turns, reveals map regions, and jots table notes within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for your review. Requires the experimental server flag, a positive token budget, and a configured provider.',
   },
 ];
 

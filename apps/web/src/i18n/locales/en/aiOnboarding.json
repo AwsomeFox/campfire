@@ -5,8 +5,8 @@
       "intro": "Four steps take a campaign from no AI to a working AI DM. Each step below reads its real state and links straight to the control that changes it.",
       "progress": "{{done}} of {{total}} steps done",
       "allDoneTitle": "The AI DM is ready",
-      "allDoneDriver": "The AI holds the DM seat. Players join at the Table tab.",
-      "allDoneCoDm": "The AI is co-DMing — it drafts proposals for you to approve. Nothing lands in canon until you say so.",
+      "allDoneDriver": "The AI holds the DM seat and acts directly — it narrates, rolls dice, applies HP and conditions, and runs the session within the budget you set. Players join at the Table tab.",
+      "allDoneCoDm": "The AI is co-DMing — it only proposes, and nothing lands in canon until a human DM approves it.",
       "loading": "Checking setup…",
       "actorAdmin": "Server admin",
       "actorDm": "You (the DM)",
@@ -34,9 +34,9 @@
         },
         "mode": {
           "title": "Operating mode chosen",
-          "doneCoDm": "Mode is Co-DM — the AI only proposes; you approve every change.",
-          "doneDriver": "Mode is Driver — the AI runs the session at the Table.",
-          "todo": "Pick how the AI participates. Co-DM (recommended) drafts proposals for your review; Driver hands it the DM seat."
+          "doneCoDm": "Mode is Co-DM — the AI only proposes; you approve every change before it applies.",
+          "doneDriver": "Mode is Driver — the AI acts directly as the DM, running the session at the Table.",
+          "todo": "Pick how the AI participates. Co-DM (recommended) only proposes — you approve every change before it applies. Driver hands it the DM seat to act directly within the budget you set."
         },
         "budget": {
           "title": "Token budget set",
@@ -52,7 +52,7 @@
     },
     "dashboard": {
       "hintTitle": "Try the AI Dungeon Master",
-      "hintBody": "This campaign can run an AI co-DM or a fully AI-run Driver session. A few settings turn it on.",
+      "hintBody": "This campaign can run an AI co-DM (it only proposes — you approve every change) or a Driver session (the AI acts directly as the DM). A few settings turn it on.",
       "setUp": "Set it up",
       "hide": "Not now",
       "dismiss": "Dismiss"
@@ -60,13 +60,13 @@
     "badge": {
       "coDm": "AI: Co-DM",
       "driver": "AI: Driver",
-      "coDmAria": "An AI is co-DMing this campaign — what that means",
+      "coDmAria": "An AI is co-DMing this campaign — it only proposes; a human DM approves. What that means",
       "coDmPopover": "AI Co-DM explanation",
-      "driverAria": "An AI is running this campaign — open the Table"
+      "driverAria": "An AI is running this campaign directly as the DM — open the Table"
     },
     "transparency": {
-      "title": "What the AI sees",
-      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. In Co-DM mode it can only propose changes, which the DM must approve; canon never changes without a human. In Driver mode it runs the session, and the DM (and the table) can pause it or take over at any time from the Table page."
+      "title": "What the AI sees and does",
+      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. The two modes have different authority. Co-DM asks: it only drafts proposals, and a human DM must approve every one before anything changes — the AI never writes to canon directly. Driver acts: the AI holds the DM seat and runs the session itself — narrating, rolling dice, applying HP and conditions, and resolving live play within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for DM review. In Driver mode the DM and the table can pause the AI or take the seat back at any time from the Table page."
     },
     "gate": {
       "openFix": "Fix this",
@@ -76,7 +76,7 @@
       },
       "seatDisabled": {
         "title": "The AI DM isn't switched on",
-        "body": "This campaign's AI DM seat is off. Choose a mode (Co-DM or Driver) and enable it in campaign settings."
+        "body": "This campaign's AI DM seat is off. Choose a mode in campaign settings: Co-DM (the AI only proposes — a human DM approves every change) or Driver (the AI acts directly as the DM)."
       },
       "budgetExhausted": {
         "title": "Token budget used up",
