@@ -199,15 +199,6 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
 }
 
 /**
- * All primary (non-thumbnail) attachment files for an id, anywhere under uploads,
- * returned in a stable (relPath-sorted) order.
- *
- * Returning every match — rather than the first one `readdirSync` happens to
- * yield — lets callers detect the ambiguous case where the same id exists in
- * multiple campaign directories (a realistic misplacement/duplicate failure
- * mode) and refuse to act nondeterministically on a possibly-wrong file.
- */
-/**
  * Read a campaign directory's entries for the on-disk scan/lookup paths below.
  * `ENOENT` (directory vanished between the parent listing and this read) is
  * treated as "skip" (returns `null`); any other error — e.g. EACCES/EPERM,
@@ -227,6 +218,15 @@ function readCampaignDirOrThrow(dirPath: string, dirName: string, contextSuffix:
   }
 }
 
+/**
+ * All primary (non-thumbnail) attachment files for an id, anywhere under uploads,
+ * returned in a stable (relPath-sorted) order.
+ *
+ * Returning every match — rather than the first one `readdirSync` happens to
+ * yield — lets callers detect the ambiguous case where the same id exists in
+ * multiple campaign directories (a realistic misplacement/duplicate failure
+ * mode) and refuse to act nondeterministically on a possibly-wrong file.
+ */
 function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
