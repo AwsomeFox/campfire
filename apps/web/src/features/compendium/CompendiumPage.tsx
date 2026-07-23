@@ -5,7 +5,7 @@
  * bar (AI rules lookup) and inline homebrew authoring are out of scope for
  * this pass (no backing endpoint per the BUILD spec) — search + browse only.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { RuleEntry, RuleEntryType, RulePack } from '@campfire/schema';
@@ -13,6 +13,13 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
+import {
+  COMPENDIUM_CLEAR_FILTERS_LABEL,
+  COMPENDIUM_SEARCH_ID,
+  COMPENDIUM_SEARCH_LABEL,
+  COMPENDIUM_TYPE_FILTER_LABEL,
+  compendiumResultsStatus,
+} from './compendiumA11y';
 
 const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -24,6 +31,8 @@ const TYPE_CHIPS: { key: RuleEntryType | 'all'; label: string }[] = [
   { key: 'race', label: 'Races' },
   { key: 'feat', label: 'Feats' },
 ];
+
+const TYPE_CHIP_KEYS = TYPE_CHIPS.map((c) => c.key);
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -117,6 +126,51 @@ export default function CompendiumPage() {
   // a type filter (e.g. "Monsters") the installed pack has no entries for. The
   // copy should say which (issue #242).
   const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
+  const filtersActive = type !== 'all' || query.trim().length > 0;
+  const chipRefs = useRef<Partial<Record<RuleEntryType | 'all', HTMLButtonElement | null>>>({});
+
+  const canAnnounceResults =
+    campaign !== undefined &&
+    !campaignUnresolved &&
+    !packsLoading &&
+    !noRuleSystemChosen &&
+    !noPacksInstalled;
+
+  const statusMessage = canAnnounceResults
+    ? compendiumResultsStatus({
+        loading,
+        resultCount: results ? results.length : null,
+        query: debouncedQuery,
+        typeKey: type,
+        typeLabel: activeTypeLabel,
+      })
+    : '';
+
+  function clearFilters() {
+    setQuery('');
+    setType('all');
+  }
+
+  function focusChip(key: RuleEntryType | 'all') {
+    chipRefs.current[key]?.focus();
+  }
+
+  function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, key: RuleEntryType | 'all') {
+    // Roving tabindex for the type-filter radiogroup: arrows move AND select
+    // (WAI-ARIA single-select pattern), wrapping at the ends.
+    const idx = TYPE_CHIP_KEYS.indexOf(key);
+    let nextIdx: number | null = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % TYPE_CHIP_KEYS.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      nextIdx = (idx - 1 + TYPE_CHIP_KEYS.length) % TYPE_CHIP_KEYS.length;
+    } else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = TYPE_CHIP_KEYS.length - 1;
+    if (nextIdx == null) return;
+    e.preventDefault();
+    const next = TYPE_CHIP_KEYS[nextIdx]!;
+    setType(next);
+    focusChip(next);
+  }
 
   if (!Number.isFinite(id)) {
     return (
@@ -137,27 +191,65 @@ export default function CompendiumPage() {
         </div>
       </div>
 
-      <div className="flex gap-2 flex-wrap">
-        <input
-          className="input"
-          style={{ flex: 1, minWidth: 200 }}
-          placeholder="Search monsters, spells, items…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor={COMPENDIUM_SEARCH_ID} style={{ fontSize: 12, fontWeight: 600 }}>
+          {COMPENDIUM_SEARCH_LABEL}
+        </label>
+        <div className="flex gap-2 flex-wrap items-center">
+          <input
+            id={COMPENDIUM_SEARCH_ID}
+            className="input"
+            style={{ flex: 1, minWidth: 200 }}
+            placeholder="Search monsters, spells, items…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            type="search"
+            autoComplete="off"
+          />
+          {filtersActive && (
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ fontSize: 12, minHeight: 40 }}
+              onClick={clearFilters}
+            >
+              {COMPENDIUM_CLEAR_FILTERS_LABEL}
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="flex gap-1.5 flex-wrap">
-        {chips.map((chip) => (
-          <button
-            key={chip.key}
-            onClick={() => setType(chip.key)}
-            className={chip.key === type ? 'tag tag-accent' : 'tag tag-neutral'}
-            style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
-          >
-            {chip.label}
-          </button>
-        ))}
+      <div
+        className="flex gap-1.5 flex-wrap"
+        role="radiogroup"
+        aria-label={COMPENDIUM_TYPE_FILTER_LABEL}
+      >
+        {chips.map((chip) => {
+          const checked = chip.key === type;
+          return (
+            <button
+              key={chip.key}
+              ref={(el) => {
+                chipRefs.current[chip.key] = el;
+              }}
+              type="button"
+              role="radio"
+              aria-checked={checked}
+              tabIndex={checked ? 0 : -1}
+              onClick={() => setType(chip.key)}
+              onKeyDown={(e) => onChipKeyDown(e, chip.key)}
+              className={checked ? 'tag tag-accent' : 'tag tag-neutral'}
+              style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
+            >
+              {chip.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Polite live region for search/filter result counts (issue #647). */}
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {statusMessage}
       </div>
 
       <div className="flex flex-col gap-2">
