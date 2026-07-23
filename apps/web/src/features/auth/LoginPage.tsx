@@ -17,6 +17,7 @@ import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
+import { PasswordInput } from '../../components/PasswordInput';
 import {
   AUTH_CREDENTIALS_ERROR,
   AUTH_ERROR_IDS,
@@ -183,9 +184,8 @@ function LocalLoginForm({
       </div>
       <div className="field">
         <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
-        <input
+        <PasswordInput
           id={AUTH_FIELD_IDS.password}
-          type="password"
           className="input"
           value={password}
           onChange={(e) => {

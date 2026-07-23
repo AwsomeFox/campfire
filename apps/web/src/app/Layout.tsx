@@ -15,7 +15,8 @@ import { api, ApiError, API } from '../lib/api';
 import { useFormattingLocale } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
-import { Btn, Card, TextInput } from '../components/ui';
+import { Btn, Card } from '../components/ui';
+import { PasswordInput } from '../components/PasswordInput';
 import { useDialog } from '../components/useDialog';
 import { useClearAnnouncements } from '../components/Announcer';
 import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
@@ -95,32 +96,35 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
           <form className="space-y-3" onSubmit={onSubmit}>
             <div className="field">
               <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="currentPassword"
-                type="password"
+                className="input"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 autoComplete="current-password"
+                revealNoun="current password"
               />
             </div>
             <div className="field">
               <label htmlFor="newPassword">{t('nav.newPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="newPassword"
-                type="password"
+                className="input"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 autoComplete="new-password"
+                revealNoun="new password"
               />
             </div>
             <div className="field">
               <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
-              <TextInput
+              <PasswordInput
                 id="confirmPassword"
-                type="password"
+                className="input"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 autoComplete="new-password"
+                revealNoun="confirm password"
               />
             </div>
             {error && <p className="text-sm text-rose-400">{error}</p>}

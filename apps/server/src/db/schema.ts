@@ -416,6 +416,12 @@ export const comments = sqliteTable('comments', {
   authorName: text('author_name').notNull().default(''),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  // Immutable creation-time character attribution (issue #787). character_id is
+  // deliberately a soft reference: deleting/trashed characters must not erase or
+  // rewrite historical dialogue. The copied name/avatar remain display-authoritative.
+  characterId: integer('character_id'),
+  characterName: text('character_name'),
+  characterAvatarUrl: text('character_avatar_url'),
   // Soft delete / tombstone (issue #503). NULL = live; an ISO timestamp means the
   // comment is tombstoned (body redacted in API responses, replies preserved).
   // Nullable/absent in older DBs pre-migration; see db/db.module.ts migrateCommentsTableForSoftDelete().
@@ -780,6 +786,12 @@ export const attachments = sqliteTable('attachments', {
   // New map/image uploads default hidden; portraits default visible. Migrated via
   // migrateAttachmentsTableForHidden().
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Publication state for the filesystem/SQLite recovery protocol (issue #728).
+  // A reserved row counts against quota but is never returned by attachment reads.
+  // It becomes committed only after the final file has been renamed into place and
+  // both the staged bytes and containing directory have been fsynced. Existing rows
+  // are backfilled committed by migrateAttachmentsTableForPublicationState().
+  state: text('state').notNull().default('committed'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -986,6 +998,11 @@ export const combatants = sqliteTable('combatants', {
   // Token footprint size category (issue #40, phase 2). NOT NULL DEFAULT 'medium'; added by
   // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTokenSize.
   tokenSize: text('token_size').notNull().default('medium'),
+  // Issue #466: character.updatedAt at the last acknowledged sheet↔combatant HP sync
+  // (create/add seed, live mirror, /end write-back, or reopen resync decision). Used as
+  // the compare-and-set token so a re-end cannot silently overwrite intervening sheet HP.
+  // Nullable for legacy rows; first sync after upgrade stamps it.
+  sheetSyncedUpdatedAt: text('sheet_synced_updated_at'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

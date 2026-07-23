@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
+import { AttachmentsModule } from '../attachments/attachments.module';
 import { SettingsModule } from '../settings/settings.module';
 import { BackupService } from './backup.service';
 import { BackupController } from './backup.controller';
@@ -11,7 +12,7 @@ import { BackupController } from './backup.controller';
  * (lastBackupAt / nextRunAt) introduced in issue #732.
  */
 @Module({
-  imports: [AuditModule, SettingsModule],
+  imports: [AuditModule, AttachmentsModule, SettingsModule],
   controllers: [BackupController],
   providers: [BackupService],
   exports: [BackupService],

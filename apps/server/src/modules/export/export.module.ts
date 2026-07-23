@@ -17,6 +17,7 @@ import { StorylinesModule } from '../storylines/storylines.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { CommentsModule } from '../comments/comments.module';
 import { ExportService } from './export.service';
 import { ExportController } from './export.controller';
 
@@ -40,6 +41,7 @@ import { ExportController } from './export.controller';
     TimelineModule,
     SessionZeroModule,
     InventoryModule,
+    CommentsModule,
   ],
   controllers: [ExportController],
   providers: [ExportService],

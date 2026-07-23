@@ -651,6 +651,30 @@ function migrateAttachmentsTableForHidden(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #728 migration: attachment publication became an explicit two-state
+ * protocol. Existing rows predate reservations and were already publicly readable,
+ * so they must backfill to `committed`; treating them as reservations would hide
+ * every existing map/portrait and let startup recovery delete their bytes.
+ *
+ * The CHECK keeps malformed states from becoming quota-counted but permanently
+ * invisible. BOOTSTRAP_SQL creates the companion (campaign_id, state) index after
+ * this migration runs. Fresh databases already have the modern declaration.
+ */
+function migrateAttachmentsTableForPublicationState(sqlite: Database.Database): void {
+  const hasAttachmentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'")
+    .get();
+  if (!hasAttachmentsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(attachments)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'state')) return;
+
+  sqlite.exec(
+    "ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed'))",
+  );
+}
+
+/**
  * Migration for DBs created before location nesting (issue #99): `locations.parent_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
  * migrateQuestsTableForHidden above. Existing rows get NULL (top-level), preserving
@@ -839,6 +863,25 @@ function migrateCommentsTableForEditorProvenance(sqlite: Database.Database): voi
   const has = (name: string) => columns.some((c) => c.name === name);
   if (!has('edited_at')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_at TEXT');
   if (!has('edited_by')) sqlite.exec('ALTER TABLE comments ADD COLUMN edited_by TEXT');
+}
+
+/**
+ * Issue #787: persist the speaking character as immutable historical display
+ * metadata while retaining the account author columns. Nullable ADD COLUMNs keep
+ * legacy/OOC comments valid; old `in_character=1` rows remain honest legacy posts
+ * with no invented character identity.
+ */
+function migrateCommentsTableForCharacterAttribution(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('character_id')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_id INTEGER');
+  if (!has('character_name')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_name TEXT');
+  if (!has('character_avatar_url')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_avatar_url TEXT');
 }
 
 /**
@@ -1577,6 +1620,22 @@ function migrateEncounterEventsTableForCombatantIds(sqlite: Database.Database): 
 }
 
 /**
+ * Issue #466: `combatants.sheet_synced_updated_at` stores the character.updatedAt
+ * CAS token from the last acknowledged sheet↔combatant HP sync. Plain nullable
+ * ADD COLUMN — no table rebuild. Fresh DBs never hit this path (BOOTSTRAP_SQL).
+ */
+function migrateCombatantsTableForSheetSyncedUpdatedAt(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'sheet_synced_updated_at')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN sheet_synced_updated_at TEXT');
+  }
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
@@ -1707,7 +1766,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0058_campaigns_public_invites_enabled', run: migrateCampaignsTableForPublicInvitesEnabled },
   { name: '0059_public_invites_disabled_inactive', run: migratePublicInvitesDisabledForInactiveCampaigns },
   { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
-
+  { name: '0061_combatants_sheet_synced_updated_at', run: migrateCombatantsTableForSheetSyncedUpdatedAt },
+  { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
+  { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
 ];
 
 /**

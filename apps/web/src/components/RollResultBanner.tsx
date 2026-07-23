@@ -34,8 +34,8 @@ export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismis
         type="button"
         aria-label="Dismiss roll result"
         onClick={onDismiss}
-        className="text-slate-500 hover:text-slate-300 shrink-0"
-        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14 }}
+        className="cf-dismiss-target shrink-0"
+        data-testid="roll-result-dismiss"
       >
         ✕
       </button>

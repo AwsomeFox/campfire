@@ -189,18 +189,75 @@ export class CharactersService {
 
     const touchedEncounterIds = new Set<number>();
     let campaignId = opts?.campaignId;
+    // Issue #466: when the sheet mirrors into a live combatant, stamp the sheet's
+    // current updatedAt as the CAS token so a later re-end knows this sync.
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
       await this.db
         .update(combatants)
-        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .set({
+          hpCurrent: nextCurrent,
+          hpMax: nextMax,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
         .where(eq(combatants.id, combatant.id));
       touchedEncounterIds.add(encounterId);
       campaignId ??= encCampaignId;
     }
     // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
     // without waiting for the poll (pairs with character.updated for the inline card).
+    if (campaignId != null) {
+      for (const encounterId of touchedEncounterIds) {
+        this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+      }
+    }
+  }
+
+  /**
+   * Mirror a character's conditions into linked combatants in still-live encounters
+   * (issue #486). Pair of EncountersService's combatant→sheet write-through: a sheet
+   * `set_character_conditions` / patchConditions / PATCH conditions must show up on
+   * the run-session tracker. Ended encounters keep their historical snapshot.
+   * Overwrites the combatant's conditions array wholesale (last sheet write wins);
+   * see EncountersService.updateCombatant for the full overlap-window contract.
+   */
+  private async syncActiveCombatantConditions(
+    characterId: number,
+    conditionsJson: string,
+    opts?: { campaignId?: number },
+  ): Promise<void> {
+    const rows = await this.db
+      .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
+      .from(combatants)
+      .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
+
+    const touchedEncounterIds = new Set<number>();
+    let campaignId = opts?.campaignId;
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
+      await this.db
+        .update(combatants)
+        .set({
+          conditions: conditionsJson,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
+        .where(eq(combatants.id, combatant.id));
+      touchedEncounterIds.add(encounterId);
+      campaignId ??= encCampaignId;
+    }
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
         this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
@@ -399,6 +456,10 @@ export class CharactersService {
     // combatant row (issue #50).
     if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
       await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
+    }
+    // Issue #486: PATCH conditions must also land on the live tracker.
+    if (input.conditions !== undefined) {
+      await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
     }
 
     await this.audit.log({
@@ -717,6 +778,10 @@ export class CharactersService {
       .set({ conditions: toJsonText([...current]), updatedAt: nowIso() })
       .where(eq(characters.id, id))
       .returning();
+
+    // Issue #486: sheet → live combatant so the run-session tracker shows Poisoned
+    // the moment it is applied on the sheet (or via MCP set_character_conditions).
+    await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
 
     await this.audit.log({
       actor: auditActor(user),

@@ -233,7 +233,7 @@ export function createAnnounceQueue(opts: {
     const trimmed = message.trim();
     if (!trimmed) return;
 
-    let dedupeKey = options?.dedupeKey;
+    const dedupeKey = options?.dedupeKey;
     if (dedupeKey) {
       const now = opts.scheduler.now();
       if (!rememberKey(dedupeKey, now)) return;
