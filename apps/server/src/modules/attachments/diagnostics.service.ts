@@ -211,14 +211,15 @@ function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
 ): Array<{ relPath: string; campaignDir: string }> {
-  // Missing root is an empty-storage case (callers report success:false), not 503.
-  if (!fs.existsSync(root)) return [];
-
   let campaignDirs: fs.Dirent[];
   try {
     campaignDirs = fs.readdirSync(root, { withFileTypes: true });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
+    // Missing root is an empty-storage case (callers report success:false), not 503.
+    // `existsSync` would also mask EACCES/EPERM (existing-but-unreadable root) as
+    // "missing", so check the readdir error code directly instead.
+    if (code === 'ENOENT') return [];
     throw new ServiceUnavailableException(
       `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot locate attachment files.`,
     );
