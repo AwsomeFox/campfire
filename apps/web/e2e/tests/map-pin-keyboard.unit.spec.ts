@@ -38,10 +38,27 @@ test.describe('RegionMap keyboard pin source guards (#807)', () => {
   });
 
   test('pointer drag is gated while kbMovingId is set', () => {
-    // Whitespace-tolerant: gate must refuse drag when kbMovingId is set.
+    // Whitespace-tolerant: gate must refuse drag when kbMovingId is set
+    // (combined early-return or separate check after isDm/mapImageUrl).
     expect(src).toMatch(/kbMovingId\s*!=\s*null/);
+    const combinedGate =
+      /if\s*\(\s*!isDm\s*\|\|\s*!mapImageUrl\s*\|\|\s*kbMovingId\s*!=\s*null\s*\)\s*return\s*;/.test(
+        src,
+      );
+    const splitGate =
+      /if\s*\(\s*!isDm\s*\|\|\s*!mapImageUrl\s*\)\s*return\s*;/.test(src) &&
+      /if\s*\(\s*kbMovingId\s*!=\s*null\s*\)\s*return\s*;/.test(src);
+    expect(combinedGate || splitGate).toBe(true);
+  });
+
+  test('keyboard save defers onChange until after cancel generation check', () => {
+    // refresh:false keeps late PATCH completions from reloading parent data
+    // before saveKbMove can honor Cancel/Escape via kbSaveGen.
+    expect(src).toMatch(/refresh:\s*false/);
+    expect(src).toMatch(/signal\?\.aborted/);
+    expect(src).toMatch(/if\s*\(\s*refresh\s*\)\s*onChange\(\)/);
     expect(src).toMatch(
-      /if\s*\(\s*!isDm\s*\|\|\s*!mapImageUrl\s*\|\|\s*kbMovingId\s*!=\s*null\s*\)\s*return\s*;/,
+      /gen !== kbSaveGen\.current \|\| controller\.signal\.aborted[\s\S]*?onChange\(\)/,
     );
   });
 

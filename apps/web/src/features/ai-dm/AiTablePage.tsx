@@ -52,6 +52,21 @@ import {
   type ToolEntry,
 } from './transcript';
 import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import {
+  advanceNarrationLog,
+  announceableEntryIds,
+  beginNarrationLogLive,
+  collectPreLiveAnnounceableIds,
+  formatNarrationLogAddition,
+  nextComposerStatusAnnouncement,
+  NARRATION_LOG_LIVE_REGION,
+  NARRATION_STATUS_LIVE_REGION,
+  NARRATION_VISUAL_TRANSCRIPT,
+  resolveComposerA11ySnapshot,
+  type ComposerA11ySnapshot,
+  type NarrationLogAddition,
+  type NarrationLogCursor,
+} from './narrationAccessibility';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
@@ -158,20 +173,47 @@ export default function AiTablePage() {
 
   // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
   // browser drops in behind a "joined mid-session" divider showing scene + last narration.
+  // `narrationLogLive` stays false until this phase settles so the SR log mirror does not
+  // treat the delayed seed as live additions (#1077 / Bugbot).
   const seededRef = useRef(false);
+  const [narrationLogLive, setNarrationLogLive] = useState(false);
   useEffect(() => {
-    if (seededRef.current || !isDriver) return;
     if (transcript.entries.length > 0) {
-      seededRef.current = true;
+      // Hydrated history (or seed applied on the previous commit): no further seed.
+      if (!seededRef.current) seededRef.current = true;
+      if (!narrationLogLive) setNarrationLogLive(true);
       return;
     }
-    if (session) {
-      if (session.scene || session.lastNarration) {
-        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
-      }
-      seededRef.current = true;
+    if (seededRef.current) {
+      if (!narrationLogLive) setNarrationLogLive(true);
+      return;
     }
-  }, [session, isDriver, transcript.entries.length]);
+    // Seat still loading: `isDriver` is false while data is missing, but a driver
+    // session seed may still arrive — wait before enabling the live log.
+    if (!seatQuery.isFetched) return;
+    if (!isDriver) {
+      seededRef.current = true;
+      setNarrationLogLive(true);
+      return;
+    }
+    // Driver: wait for the session read so join-context seed can land in the same
+    // settle pass as enabling the live log (empty/error session → empty baseline).
+    if (!sessionQuery.isFetched) return;
+    if (session?.scene || session?.lastNarration) {
+      dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+    }
+    seededRef.current = true;
+    // Batched with the seed dispatch so the next commit sees seeded entries + live
+    // together; the log effect then silences the baseline instead of announcing it.
+    setNarrationLogLive(true);
+  }, [
+    session,
+    isDriver,
+    transcript.entries.length,
+    seatQuery.isFetched,
+    sessionQuery.isFetched,
+    narrationLogLive,
+  ]);
 
   // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
   // stops on a 401/403 (feature off / not a member), so a non-member simply gets nothing.
@@ -232,6 +274,65 @@ export default function AiTablePage() {
         : awaiting
           ? t('table.composerLockedAwaiting')
           : null;
+
+  // #1077: SR live regions. The visible transcript mutates token-by-token, so a
+  // mirror only gains finished additions (turn.end / player / system). Status
+  // covers turn.start/end + composer lock/unlock without flooding SRs.
+  const [narrationLogMirror, setNarrationLogMirror] = useState<NarrationLogAddition[]>([]);
+  const [a11yStatus, setA11yStatus] = useState('');
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
+  // Hydrated localStorage ids on first commit — never treat as pre-live pending.
+  const mountBaselineIdsRef = useRef<Set<string> | null>(null);
+  // Finished lines that arrived while the log was held (e.g. turn.end before seed).
+  const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
+  if (mountBaselineIdsRef.current === null) {
+    mountBaselineIdsRef.current = announceableEntryIds(transcript.entries);
+  }
+
+  useEffect(() => {
+    // Delay until seed/hydration settles — an early pass on [] would pin an empty
+    // cursor and then announce the later session seed as live additions.
+    if (!narrationLogLive) {
+      // Keep early finished turns pending so the go-live silence pass cannot
+      // permanently suppress a streamed DM that completed before seeding (#1077).
+      for (const id of collectPreLiveAnnounceableIds(
+        transcript.entries,
+        mountBaselineIdsRef.current!,
+      )) {
+        pendingPreLiveIdsRef.current.add(id);
+      }
+      return;
+    }
+    if (narrationLogCursorRef.current === null) {
+      const started = beginNarrationLogLive(
+        transcript.entries,
+        pendingPreLiveIdsRef.current,
+      );
+      narrationLogCursorRef.current = started.cursor;
+      pendingPreLiveIdsRef.current.clear();
+      if (started.additions.length === 0) return;
+      setNarrationLogMirror((prev) => [...prev, ...started.additions]);
+      return;
+    }
+    const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
+    narrationLogCursorRef.current = advanced.cursor;
+    if (advanced.additions.length === 0) return;
+    setNarrationLogMirror((prev) => [...prev, ...advanced.additions]);
+  }, [transcript.entries, narrationLogLive]);
+
+  useEffect(() => {
+    // Non-streaming lock reasons already carry the localized copy; streaming uses
+    // the same "DM is narrating…" string as the composer placeholder.
+    // Viewers must not hear "Composer unlocked…" — the composer isn't shown.
+    const next = resolveComposerA11ySnapshot(streaming, streaming ? null : lockReason);
+    const message = nextComposerStatusAnnouncement(composerA11yRef.current, next, {
+      streaming: t('table.composerLockedStreaming'),
+      ready: canCompose ? t('table.composerUnlocked') : t('table.narrationReady'),
+    });
+    composerA11yRef.current = next;
+    if (message) setA11yStatus(message);
+  }, [streaming, lockReason, canCompose, t]);
 
   const placeholder = activeEncounter
     ? currentCombatantName
@@ -400,9 +501,15 @@ export default function AiTablePage() {
         />
       )}
 
-      {/* Transcript */}
+      {/* Transcript — named log landmark with aria-live=off so token deltas
+          never spam SRs. The sr-only mirror below owns polite additions. */}
       <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        <div
+          {...NARRATION_VISUAL_TRANSCRIPT}
+          className="flex-1 overflow-y-auto p-4 space-y-3"
+          aria-label={t('table.transcriptLabel')}
+          aria-busy={streaming || undefined}
+        >
           {transcript.entries.length === 0 ? (
             <EmptyState icon="campfire" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
           ) : (
@@ -418,6 +525,28 @@ export default function AiTablePage() {
           <div ref={bottomRef} />
         </div>
       </Card>
+
+      {/* #1077: polite log mirror — appends only finished entries (turn.end). */}
+      <div
+        {...NARRATION_LOG_LIVE_REGION}
+        aria-label={t('table.narrationLogLabel')}
+        className="sr-only"
+        data-testid="ai-narration-log"
+      >
+        {narrationLogMirror.map((addition) => (
+          <p key={addition.id}>{formatNarrationLogAddition(addition)}</p>
+        ))}
+      </div>
+
+      {/* #1077: turn.start/end + composer lock/unlock — same status pattern as
+          DraftWithAiButton / StuckLadder. */}
+      <div
+        {...NARRATION_STATUS_LIVE_REGION}
+        className="sr-only"
+        data-testid="ai-narration-status"
+      >
+        {a11yStatus}
+      </div>
 
       {/* Composer */}
       {canCompose ? (
