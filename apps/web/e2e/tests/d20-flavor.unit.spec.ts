@@ -1,6 +1,4 @@
 import { expect, test } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import type { DiceRoll } from '@campfire/schema';
 import {
   d20Flavor,
@@ -9,8 +7,6 @@ import {
 } from '../../src/lib/d20Flavor';
 import diceEn from '../../src/i18n/locales/en/dice.json';
 
-/** Resolve from this test file so paths stay stable regardless of cwd. */
-const WEB_ROOT = resolve(__dirname, '../..');
 
 /**
  * Issue #745 — Shared Dice Log crit/fumble flourish for ordinary d20 rolls.

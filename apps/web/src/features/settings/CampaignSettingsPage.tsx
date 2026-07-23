@@ -38,6 +38,7 @@ import {
   mutationsEnabledForRoute,
   RouteBoundLoadSequencer,
 } from '../../lib/routeBoundRecord';
+import { useUnsavedWork } from '../../lib/useUnsavedWork';
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -467,6 +468,8 @@ function GeneralCard({
 
   const metadataDirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
   const dirty = metadataDirty || dmControlsProgression !== campaign.dmControlsProgression;
+  // Issue #760: campaign switcher confirms before discarding mid-edit settings.
+  useUnsavedWork(`campaign-settings:${campaignId}`, dirty);
 
   async function save() {
     if (!name.trim()) {
