@@ -13,9 +13,10 @@ test.describe('New campaign wizard headings (#521)', () => {
   test('uses one h1, h2 step headings, focus, announcements, and document title', async ({ page }) => {
     await page.goto('/?newCampaign=1');
 
-    const pageTitle = page.getByRole('heading', { level: 1, name: 'New campaign' });
+    const wizardMain = page.locator('main[aria-labelledby="new-campaign-title"]');
+    const pageTitle = wizardMain.getByRole('heading', { level: 1, name: 'New campaign' });
     await expect(pageTitle).toBeVisible();
-    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+    await expect(wizardMain.getByRole('heading', { level: 1 })).toHaveCount(1);
 
     const detailsHeading = page.getByRole('heading', { level: 2, name: 'Campaign details' });
     await expect(detailsHeading).toBeVisible();
