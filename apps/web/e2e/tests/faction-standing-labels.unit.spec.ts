@@ -6,6 +6,9 @@
  * localization-ready label map so every standing state stays humanized and
  * consistent — and so a future locale can swap catalog strings without
  * inventing a second map.
+ *
+ * English strings live in `FACTION_STANDING_LABEL` (and the mirrored i18n
+ * catalog). Tests derive expectations from those sources — no third copy.
  */
 import { expect, test } from '@playwright/test';
 import { FACTION_STANDINGS } from '@campfire/schema';
@@ -19,14 +22,6 @@ import {
   standingVariant,
 } from '../../src/features/factions/standing';
 
-const EXPECTED_LABELS = {
-  hostile: 'Hostile',
-  unfriendly: 'Unfriendly',
-  neutral: 'Neutral',
-  friendly: 'Friendly',
-  allied: 'Allied',
-} as const;
-
 const EXPECTED_VARIANTS = {
   hostile: 'failed',
   unfriendly: 'failed',
@@ -37,20 +32,24 @@ const EXPECTED_VARIANTS = {
 
 test.describe('faction standing labels (#753)', () => {
   test('shared map covers every standing enum with a humanized label', () => {
-    expect([...FACTION_STANDINGS]).toEqual(Object.keys(EXPECTED_LABELS));
-    // Full-map snapshot: every standing → humanized label, no raw enums.
-    expect(FACTION_STANDING_LABEL).toEqual(EXPECTED_LABELS);
+    expect(Object.keys(FACTION_STANDING_LABEL)).toEqual([...FACTION_STANDINGS]);
+    for (const standing of FACTION_STANDINGS) {
+      expect(FACTION_STANDING_LABEL[standing]).toBeTruthy();
+      expect(FACTION_STANDING_LABEL[standing]).not.toBe(standing);
+    }
+  });
+
+  test('i18n catalog mirrors the shared standing label map', () => {
+    expect(factionsCatalog.factions.standing).toEqual(FACTION_STANDING_LABEL);
   });
 
   // One focused case per standing so a single-state regression names the culprit.
   for (const standing of FACTION_STANDINGS) {
     test(`standing state "${standing}" is humanized across chips, detail, and options`, () => {
-      const label = EXPECTED_LABELS[standing];
-      const catalogStanding = factionsCatalog.factions.standing;
+      const label = FACTION_STANDING_LABEL[standing];
 
       expect(factionStandingLabel(standing)).toBe(label);
       expect(factionStandingLabelKey(standing)).toBe(`factions.standing.${standing}`);
-      expect(catalogStanding[standing]).toBe(label);
       // Raw enum must never be the display string.
       expect(factionStandingLabel(standing)).not.toBe(standing);
       expect(standingVariant(standing)).toBe(EXPECTED_VARIANTS[standing]);
@@ -68,7 +67,7 @@ test.describe('faction standing labels (#753)', () => {
     const options = factionStandingOptions();
     expect(options).toHaveLength(FACTION_STANDINGS.length);
     expect(options.map((o) => o.value)).toEqual([...FACTION_STANDINGS]);
-    expect(options.map((o) => o.label)).toEqual(Object.values(EXPECTED_LABELS));
+    expect(options.map((o) => o.label)).toEqual(FACTION_STANDINGS.map((s) => FACTION_STANDING_LABEL[s]));
   });
 
   test('optional t() resolves through the i18n key with English fallback', () => {
@@ -80,5 +79,10 @@ test.describe('faction standing labels (#753)', () => {
     expect(factionStandingLabel('allied', t)).toBe('Allied');
     expect(formatStandingChip('friendly', 5, t)).toBe('Friendly · +5');
     expect(factionStandingOptions(t).find((o) => o.value === 'hostile')?.label).toBe('Hostil');
+  });
+
+  test('optional t() preserves an intentional empty translation', () => {
+    const t = () => '';
+    expect(factionStandingLabel('hostile', t)).toBe('');
   });
 });

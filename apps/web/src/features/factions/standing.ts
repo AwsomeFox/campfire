@@ -28,13 +28,14 @@ export function factionStandingLabelKey(standing: FactionStanding): `factions.st
 }
 
 /** Loose `t` shape so call sites can pass react-i18next without coupling this module. */
-type Translate = (key: string, options?: Record<string, unknown>) => string;
+type Translate = (key: string, options?: Record<string, unknown>) => string | undefined;
 
 /** Humanized standing label. Pass `t` to resolve through the i18n catalog. */
 export function factionStandingLabel(standing: FactionStanding, t?: Translate): string {
   const fallback = FACTION_STANDING_LABEL[standing] ?? standing;
   if (!t) return fallback;
-  return t(factionStandingLabelKey(standing), { defaultValue: fallback }) || fallback;
+  // Nullish-aware: an intentional empty translation (`""`) must not be replaced.
+  return t(factionStandingLabelKey(standing), { defaultValue: fallback }) ?? fallback;
 }
 
 /** Chip / badge copy: "Friendly · +12". Raw enums stay on the wire, not here. */
