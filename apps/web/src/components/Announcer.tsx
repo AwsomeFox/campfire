@@ -14,7 +14,7 @@
  * the node for a frame first), so e.g. two "1d20: 15" rolls in a row are both
  * spoken. Pass `dedupeKey` to suppress reconnect/refetch chatter.
  */
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   createAnnounceQueue,
   createBrowserAnnouncerScheduler,
@@ -74,22 +74,36 @@ function createProviderQueue(
 export function AnnounceProvider({ children }: { children: ReactNode }) {
   const [polite, setPolite] = useState('');
   const [assertive, setAssertive] = useState('');
-  // Stable lazy init — avoid mutating a ref during render (concurrent/StrictMode).
-  const [queue] = useState(() => createProviderQueue(setPolite, setAssertive));
+  // Created in effects / event handlers — never mutated during render.
+  const queueRef = useRef<AnnounceQueue | null>(null);
+
+  const ensureQueue = useCallback((): AnnounceQueue => {
+    if (queueRef.current == null) {
+      queueRef.current = createProviderQueue(setPolite, setAssertive);
+    }
+    return queueRef.current;
+  }, []);
 
   useEffect(() => {
+    const queue = ensureQueue();
+    clearLiveRegionImpl = () => queue.clear();
     return () => {
       queue.dispose();
+      queueRef.current = null;
+      clearLiveRegionImpl = () => {};
     };
-  }, [queue]);
+  }, [ensureQueue]);
 
-  const announce = queue.announce;
+  const announce = useCallback<AnnounceFn>((message, options) => {
+    ensureQueue().announce(message, options);
+  }, [ensureQueue]);
 
   const clear = useCallback<ClearFn>(() => {
-    queue.clear();
-  }, [queue]);
+    ensureQueue().clear();
+  }, [ensureQueue]);
 
-  // Keep the module-level entrypoint pointed at the mounted provider's clear.
+  // Keep the module-level entrypoint pointed at the mounted provider's clear
+  // (same render-time publish as #506 — multi-tab sign-out can race effects).
   clearLiveRegionImpl = clear;
 
   return (

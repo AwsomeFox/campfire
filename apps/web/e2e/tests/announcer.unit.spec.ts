@@ -42,12 +42,9 @@ function createHarness(opts?: { dwellMs?: number; dedupeMs?: number; recentKeysM
   const scheduler: AnnouncerScheduler = {
     nextFrame: (fn) => {
       frames.push(fn);
-      let cancelled = false;
       return () => {
-        cancelled = true;
         const idx = frames.indexOf(fn);
         if (idx >= 0) frames.splice(idx, 1);
-        void cancelled;
       };
     },
     after: (ms, fn) => {
@@ -305,5 +302,22 @@ test.describe('announce queue — reconnect dedupe (issue #839)', () => {
     h.announce('msg newest dup', { dedupeKey: `burst:${max + 11}` });
     h.flushFrames();
     expect(h.spoken.at(-1)).toEqual({ channel: 'polite', message: 'msg 0 again.' });
+  });
+
+  test('announce is a no-op after dispose so late callers cannot update regions', () => {
+    const h = createHarness({ dwellMs: 50 });
+    h.announce('before dispose');
+    h.flushFrames();
+    expect(h.current.polite).toBe('before dispose.');
+
+    h.dispose();
+    expect(h.current.polite).toBe('');
+
+    h.announce('after dispose');
+    h.announce('late assertive', { assertive: true });
+    h.flushFrames();
+    expect(h.current.polite).toBe('');
+    expect(h.current.assertive).toBe('');
+    expect(h.spoken).toEqual([{ channel: 'polite', message: 'before dispose.' }]);
   });
 });

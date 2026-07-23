@@ -131,6 +131,7 @@ export function createAnnounceQueue(opts: {
   const recentKeysMax = opts.recentKeysMax ?? ANNOUNCE_RECENT_KEYS_MAX;
   // Insertion-ordered map: re-set moves a key to the newest position (LRU).
   const recentKeys = new Map<string, number>();
+  let disposed = false;
 
   const channels: Record<AnnouncementChannel, ChannelState> = {
     polite: { pending: [], speaking: false, cancelFrame: null, cancelDwell: null },
@@ -217,6 +218,8 @@ export function createAnnounceQueue(opts: {
   }
 
   function announce(message: string, options?: AnnounceOptions): void {
+    if (disposed) return;
+
     const channel: AnnouncementChannel = options?.assertive ? 'assertive' : 'polite';
     const state = channels[channel];
 
@@ -244,13 +247,16 @@ export function createAnnounceQueue(opts: {
   }
 
   function clear(): void {
+    if (disposed) return;
     wipeChannel('polite');
     wipeChannel('assertive');
     recentKeys.clear();
   }
 
   function dispose(): void {
+    if (disposed) return;
     clear();
+    disposed = true;
   }
 
   return { announce, clear, dispose };
