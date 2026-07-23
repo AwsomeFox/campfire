@@ -71,7 +71,7 @@ async function expectMobileSemanticAndVisualOrder(page: Page): Promise<void> {
 
   // One atomic layout read after fonts settle — sequential boundingBox() calls
   // race webfont reflow and can report a false overlap between stacked regions.
-  await page.evaluate(() => document.fonts.ready);
+  await page.evaluate(() => (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready ?? Promise.resolve());
   const order = await page.evaluate(() => {
     const intro = document.querySelector('.login-intro')?.getBoundingClientRect();
     const auth = document.querySelector('.login-auth')?.getBoundingClientRect();

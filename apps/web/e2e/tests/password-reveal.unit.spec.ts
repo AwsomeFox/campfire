@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   passwordInputType,
   passwordRevealLabel,
+  passwordSpellCheck,
 } from '../../src/components/PasswordInput';
 
 /**
@@ -31,8 +32,8 @@ test.describe('password input type mapping (issue #868)', () => {
   });
 
   test('revealed text inputs default spellcheck off (credential safety)', () => {
-    // Mirrors PasswordInput: rest.spellCheck ?? false — auth forms omit the prop.
-    const spellCheck = undefined as boolean | undefined;
-    expect(spellCheck ?? false).toBe(false);
+    expect(passwordSpellCheck(undefined)).toBe(false);
+    expect(passwordSpellCheck(true)).toBe(true);
+    expect(passwordSpellCheck(false)).toBe(false);
   });
 });

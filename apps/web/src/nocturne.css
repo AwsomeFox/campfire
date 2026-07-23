@@ -256,9 +256,14 @@ textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
   min-height: 44px;
 }
 .password-input__control {
-  /* Reserve a stable gutter so value text never sits under the toggle. */
+  /* Reserve a stable gutter so value text never sits under the toggle.
+     Higher specificity beats `.cf-input` padding shorthand used by the
+     change-password dialog in Layout. */
   box-sizing: border-box;
   min-height: 44px;
+  padding: 0.65rem 3.5rem 0.65rem 0.85rem;
+}
+.password-input__control.cf-input {
   padding-right: 3.5rem;
 }
 .password-input__toggle {

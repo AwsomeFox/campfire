@@ -23,6 +23,8 @@ export type PasswordInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'ty
    * control reads as the explicit “Show password” / “Hide password” pair.
    */
   revealNoun?: string;
+  /** Stable id for the input; also wires the toggle’s aria-controls. */
+  id: string;
 };
 
 /** Accessible name for the reveal toggle (issue #868 acceptance copy). */
@@ -33,6 +35,11 @@ export function passwordRevealLabel(revealed: boolean, noun = 'password'): strin
 /** Input type for the current reveal state. */
 export function passwordInputType(revealed: boolean): 'password' | 'text' {
   return revealed ? 'text' : 'password';
+}
+
+/** Credential-safe spellcheck default when callers omit the prop. */
+export function passwordSpellCheck(spellCheck: boolean | undefined): boolean {
+  return spellCheck ?? false;
 }
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {
@@ -50,7 +57,7 @@ export const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
     const [revealed, setRevealed] = useState(false);
     const inputRef = useRef<HTMLInputElement | null>(null);
     const pendingSelection = useRef<{ start: number; end: number; focusInput: boolean } | null>(null);
-    const toggleId = id ? `${id}-reveal` : undefined;
+    const toggleId = `${id}-reveal`;
 
     // Reveal stays off after route changes (including history stack moves).
     useEffect(() => {
@@ -99,14 +106,14 @@ export const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
           onChange={onChange}
           // Always disable spellcheck for credentials unless the caller opts in.
           // When revealed, type="text" would otherwise let browsers enable it.
-          spellCheck={rest.spellCheck ?? false}
+          spellCheck={passwordSpellCheck(rest.spellCheck)}
         />
         <button
           id={toggleId}
           type="button"
           className="password-input__toggle"
           aria-label={passwordRevealLabel(revealed, revealNoun)}
-          aria-controls={id || undefined}
+          aria-controls={id}
           aria-pressed={revealed}
           disabled={disabled}
           onClick={(event) => toggleReveal(event.detail > 0)}

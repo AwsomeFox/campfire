@@ -97,7 +97,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               <label htmlFor="currentPassword">{t('nav.currentPassword')}</label>
               <PasswordInput
                 id="currentPassword"
-                className="cf-input"
+                className="input"
                 value={currentPassword}
                 onChange={(e) => setCurrentPassword(e.target.value)}
                 autoComplete="current-password"
@@ -108,7 +108,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               <label htmlFor="newPassword">{t('nav.newPassword')}</label>
               <PasswordInput
                 id="newPassword"
-                className="cf-input"
+                className="input"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 autoComplete="new-password"
@@ -119,7 +119,7 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
               <label htmlFor="confirmPassword">{t('nav.confirmNewPassword')}</label>
               <PasswordInput
                 id="confirmPassword"
-                className="cf-input"
+                className="input"
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
                 autoComplete="new-password"
