@@ -39,7 +39,6 @@ export function abortableDelay(
     }
 
     let settled = false;
-    let handle: ReturnType<typeof setTimeout> | undefined;
 
     const finish = () => {
       if (settled) return;
@@ -50,7 +49,7 @@ export function abortableDelay(
     };
 
     const onAbort = () => finish();
-    handle = clock.setTimeout(finish, ms);
+    const handle = clock.setTimeout(finish, ms);
     if (signal) {
       signal.addEventListener('abort', onAbort);
       // Cover an abort that raced between the initial check and listener attach.
