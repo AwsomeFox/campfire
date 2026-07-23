@@ -8,6 +8,7 @@ import {
   COMPENDIUM_URL_TYPE,
   applyCompendiumSearchParams,
   compendiumResultsStatus,
+  effectiveCompendiumSearchQuery,
   parseCompendiumTypeParam,
 } from '../../src/features/compendium/compendiumA11y';
 
@@ -54,6 +55,57 @@ test.describe('compendium URL filter params (issue #647)', () => {
     expect(cleared.get(COMPENDIUM_URL_Q)).toBeNull();
     expect(cleared.get(COMPENDIUM_URL_TYPE)).toBeNull();
     expect(cleared.get('tab')).toBe('keep');
+  });
+
+  test('effective search query skips debounce when URL q changes externally', () => {
+    // Typing: draft ahead of URL → keep using the debounced value.
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: 'fir',
+        committedQuery: '',
+        debouncedQuery: '',
+        urlQueryChanged: false,
+      }),
+    ).toBe('');
+
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: 'fir',
+        committedQuery: '',
+        debouncedQuery: 'fir',
+        urlQueryChanged: false,
+      }),
+    ).toBe('fir');
+
+    // External URL change (history / Link / clearFilters): snap immediately,
+    // even if the draft/debounce have not caught up yet.
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: 'fire',
+        committedQuery: '',
+        debouncedQuery: 'fire',
+        urlQueryChanged: true,
+      }),
+    ).toBe('');
+
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: 'fire',
+        committedQuery: 'goblin',
+        debouncedQuery: 'fire',
+        urlQueryChanged: true,
+      }),
+    ).toBe('goblin');
+
+    // Draft already matches URL → committed is authoritative (no debounce lag).
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: '',
+        committedQuery: '',
+        debouncedQuery: 'fire',
+        urlQueryChanged: false,
+      }),
+    ).toBe('');
   });
 });
 

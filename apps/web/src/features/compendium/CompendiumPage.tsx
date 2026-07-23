@@ -22,6 +22,7 @@ import {
   COMPENDIUM_URL_TYPE,
   applyCompendiumSearchParams,
   compendiumResultsStatus,
+  effectiveCompendiumSearchQuery,
   parseCompendiumTypeParam,
   type CompendiumUrlType,
 } from './compendiumA11y';
@@ -61,16 +62,29 @@ export default function CompendiumPage() {
   const campaignUnresolved = campaign === undefined && (campaignsLoading || campaignsError);
 
   // URL is authoritative for filters (issue #647): `type` is read directly;
-  // `q` is mirrored into local state so keystrokes stay responsive while we
-  // debounce writes back with replace (no history spam).
+  // `q` is mirrored into local draft state so keystrokes stay responsive while
+  // we debounce writes back with replace (no history spam). External URL
+  // changes (history / Link / clearFilters) snap the draft + search query
+  // immediately — debounce applies only to typing.
   const type = parseCompendiumTypeParam(searchParams.get(COMPENDIUM_URL_TYPE));
   const committedQuery = searchParams.get(COMPENDIUM_URL_Q) ?? '';
   const [query, setQuery] = useState(committedQuery);
   const debouncedQuery = useDebounced(query, 300);
-
-  useEffect(() => {
-    setQuery(committedQuery);
-  }, [committedQuery]);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const prevCommittedQueryRef = useRef(committedQuery);
+  const urlQueryChanged = committedQuery !== prevCommittedQueryRef.current;
+  if (urlQueryChanged) {
+    prevCommittedQueryRef.current = committedQuery;
+    if (query !== committedQuery) {
+      setQuery(committedQuery);
+    }
+  }
+  const searchQuery = effectiveCompendiumSearchQuery({
+    draftQuery: query,
+    committedQuery,
+    debouncedQuery,
+    urlQueryChanged,
+  });
 
   useEffect(() => {
     const trimmed = debouncedQuery.trim();
@@ -139,7 +153,7 @@ export default function CompendiumPage() {
       setError(null);
       try {
         const params = new URLSearchParams();
-        if (debouncedQuery.trim()) params.set('q', debouncedQuery.trim());
+        if (searchQuery.trim()) params.set('q', searchQuery.trim());
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
         const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
@@ -156,7 +170,7 @@ export default function CompendiumPage() {
     return () => {
       cancelled = true;
     };
-  }, [debouncedQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
+  }, [searchQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
 
   const chips = useMemo(() => TYPE_CHIPS, []);
   // Empty results have two very different causes: a search that found nothing vs.
@@ -177,7 +191,7 @@ export default function CompendiumPage() {
     ? compendiumResultsStatus({
         loading,
         resultCount: results ? results.length : null,
-        query: debouncedQuery,
+        query: searchQuery,
         typeKey: type,
         typeLabel: activeTypeLabel,
         failed: Boolean(error),
@@ -191,6 +205,11 @@ export default function CompendiumPage() {
       (prev) => applyCompendiumSearchParams(prev, { q: '', type: 'all' }),
       { replace: true },
     );
+    // Button unmounts when filtersActive becomes false. Defer past the unmount
+    // and React Router's navigation focus reset so search keeps keyboard focus.
+    requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
   }
 
   function focusChip(key: CompendiumUrlType) {
@@ -239,6 +258,7 @@ export default function CompendiumPage() {
         </label>
         <div className="flex gap-2 flex-wrap items-center">
           <input
+            ref={searchInputRef}
             id={COMPENDIUM_SEARCH_ID}
             className="input"
             style={{ flex: 1, minWidth: 200 }}
@@ -335,9 +355,9 @@ export default function CompendiumPage() {
                 </Card>
               ) : results && results.length === 0 ? (
                 <div className="card items-center text-center" style={{ padding: 24 }}>
-                  {debouncedQuery.trim() ? (
+                  {searchQuery.trim() ? (
                     <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                      Nothing matches “{debouncedQuery.trim()}”
+                      Nothing matches “{searchQuery.trim()}”
                       {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
                       {type !== 'all' ? ', or switch to All' : ''}.
                     </p>

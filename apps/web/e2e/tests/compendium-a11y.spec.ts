@@ -197,4 +197,52 @@ test.describe('Compendium accessibility (issue #647)', () => {
     const polite = page.locator('.sr-only[aria-live="polite"][role="status"]');
     await expect(polite).toHaveText('');
   });
+
+  test('clear filters searches immediately (no debounce lag) and moves focus to search', async ({
+    page,
+  }) => {
+    const { campaignId } = seed();
+    const searchFetches: Array<string | null> = [];
+    await stubCompendiumBrowse(page, FIXTURE_ENTRIES);
+    // Register after stubCompendiumBrowse so this handler wins (Playwright LIFO).
+    await page.route('**/api/v1/rules/search**', async (route) => {
+      const url = new URL(route.request().url());
+      searchFetches.push(url.searchParams.get('q'));
+      const type = url.searchParams.get('type');
+      const q = (url.searchParams.get('q') ?? '').toLowerCase();
+      let filtered = FIXTURE_ENTRIES as Array<{ type?: string; name?: string; summary?: string }>;
+      if (type) filtered = filtered.filter((e) => e.type === type);
+      if (q) {
+        filtered = filtered.filter(
+          (e) =>
+            (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q),
+        );
+      }
+      await route.fulfill({ json: filtered });
+    });
+
+    await page.goto(`/c/${campaignId}/compendium`);
+    const search = page.getByRole('searchbox', { name: COMPENDIUM_SEARCH_LABEL });
+    await search.fill('fire');
+    await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe('fire');
+    await expect(page.getByRole('link', { name: /Fire Bolt/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Goblin/ })).toHaveCount(0);
+
+    const clearBtn = page.getByRole('button', { name: COMPENDIUM_CLEAR_FILTERS_LABEL });
+    await clearBtn.focus();
+    await expect(clearBtn).toBeFocused();
+    const priorFetchCount = searchFetches.length;
+    await clearBtn.click();
+
+    // Focus must land on a stable control — the clear button unmounts.
+    await expect(search).toBeFocused();
+    await expect(search).toHaveValue('');
+    await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBeNull();
+
+    // First post-clear fetch must use empty q immediately (not the prior term for ~300ms).
+    await expect.poll(() => searchFetches.length).toBeGreaterThan(priorFetchCount);
+    expect(searchFetches[priorFetchCount]).toBeNull();
+    await expect(page.getByRole('link', { name: /Goblin/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Fire Bolt/ })).toBeVisible();
+  });
 });

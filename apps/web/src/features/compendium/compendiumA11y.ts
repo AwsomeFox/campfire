@@ -55,6 +55,26 @@ export function applyCompendiumSearchParams(
   return next;
 }
 
+/**
+ * Query used for fetch + live status.
+ *
+ * Keystrokes keep using the debounced draft. When URL `q` changes from outside
+ * the typing path (navigation, history, clearFilters), snap to the committed
+ * URL value immediately so search does not lag ~300ms behind the field/URL.
+ */
+export function effectiveCompendiumSearchQuery(opts: {
+  draftQuery: string;
+  committedQuery: string;
+  debouncedQuery: string;
+  /** True on the render where URL `q` changed vs the previous committed value. */
+  urlQueryChanged: boolean;
+}): string {
+  if (opts.urlQueryChanged || opts.draftQuery.trim() === opts.committedQuery) {
+    return opts.committedQuery;
+  }
+  return opts.debouncedQuery;
+}
+
 export function compendiumResultsStatus(opts: {
   loading: boolean;
   resultCount: number | null;
