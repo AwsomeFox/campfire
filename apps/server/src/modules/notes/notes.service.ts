@@ -468,6 +468,17 @@ export class NotesService {
       entityId: row.id,
       campaignId,
     });
+    // Initial prose tip so the first overwrite keeps real authorship (#813).
+    if (row.body !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'note',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.body,
+        user,
+      });
+    }
     await this.notifyThreadAuthors(row, user);
     await this.notifyDmsOfSharedNote(row, user);
     await this.notifyPartyOfSharedNote(row, user);
@@ -491,17 +502,18 @@ export class NotesService {
     // Optimistic concurrency (#157): a co-author's stale save 409s instead of clobbering.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
 
-    // Snapshot the PRIOR body into revision history when it changes (#157/#233) — #157
+    // Commit an immutable prose version when the body changes (#157/#233/#813) — #157
     // cited notes.service by line as the prose being destroyed, so a clobbered note is
     // recoverable. The revision-read/restore endpoints are gated on the note's OWN
     // visibility + author (RevisionsController), never a blanket dm-gate, so history is
-    // no redaction back-door. Mirrors the quests/npcs/locations record-on-change pattern.
+    // no redaction back-door. Mirrors the quests/npcs/locations commit-on-change pattern.
     if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'note',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.body,
+        nextProse: input.body,
         user,
       });
     }
