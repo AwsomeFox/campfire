@@ -7,6 +7,7 @@ import {
   formatDocumentTitle,
   isEntityDeepLinkHash,
   shouldMoveFocusOnNavigation,
+  shouldPreserveFocusInsideMain,
 } from '../../src/app/routeFocus';
 
 /**
@@ -55,6 +56,28 @@ test.describe('route focus helpers (#591)', () => {
     expect(formatDocumentTitle({ page: APP_DOCUMENT_TITLE, campaignName: 'Cinderhaven' })).toBe(
       `${APP_DOCUMENT_TITLE} · Cinderhaven`,
     );
+  });
+
+  test('shouldPreserveFocusInsideMain keeps page-managed focus inside main', () => {
+    const input = { tagName: 'INPUT' } as unknown as HTMLElement;
+    const main = {
+      contains(el: HTMLElement) {
+        return el === input;
+      },
+    } as unknown as HTMLElement;
+    const body = { tagName: 'BODY' } as unknown as HTMLElement;
+
+    const docWithInputFocus = {
+      body,
+      activeElement: input,
+    } as unknown as Document;
+    expect(shouldPreserveFocusInsideMain(main, docWithInputFocus)).toBe(true);
+
+    const docWithMainFocus = { body, activeElement: main } as unknown as Document;
+    expect(shouldPreserveFocusInsideMain(main, docWithMainFocus)).toBe(false);
+
+    const docWithBodyFocus = { body, activeElement: body } as unknown as Document;
+    expect(shouldPreserveFocusInsideMain(main, docWithBodyFocus)).toBe(false);
   });
 
   test('focusSkipDestination focuses the main landmark even when an h1 is present', () => {

@@ -43,6 +43,19 @@ export function isNaturallyFocusable(el: HTMLElement): boolean {
   return el.tabIndex >= 0;
 }
 
+/**
+ * When a destination page already placed focus on a control inside `<main>` (e.g.
+ * SearchPage autoFocus), route-change focus should not steal it. Body/main alone
+ * still get the usual h1/main move.
+ */
+export function shouldPreserveFocusInsideMain(main: HTMLElement, doc: Document): boolean {
+  const active = doc.activeElement;
+  if (active == null || typeof active !== 'object') return false;
+  const el = active as HTMLElement;
+  if (el === doc.body || el === main) return false;
+  return main.contains(el);
+}
+
 /** Prefer the page h1; fall back to the stable main landmark. */
 export function mainFocusTarget(main: HTMLElement): HTMLElement {
   const h1 = main.querySelector('h1');
@@ -164,6 +177,7 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   const focusTarget = (target: HTMLElement) => {
     publishTitle();
     frame = window.requestAnimationFrame(() => {
+      if (shouldPreserveFocusInsideMain(main, document)) return;
       focusProgrammatically(target);
     });
     observer?.disconnect();
