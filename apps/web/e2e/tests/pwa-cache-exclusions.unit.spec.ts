@@ -1,16 +1,24 @@
 /**
- * Issue #879 — PWA caching must exclude SSE streams, exports, backups, and
- * unbounded downloads; JSON/image buckets stay bounded; explicit offline packs
- * report stale/missing and survive quota eviction.
+ * Issues #879 / #730 — PWA caching must exclude SSE streams, exports, backups,
+ * credentials, and unbounded downloads; JSON/image buckets stay bounded;
+ * sensitive entries purge on logout/activate; explicit offline packs report
+ * stale/missing and survive quota eviction.
  */
 import { expect, test } from '@playwright/test';
 import {
   cacheWillUpdateImage,
   cacheWillUpdateJson,
   classifyApiResponseForCache,
+  isAllowlistedJsonApiPath,
+  isSensitiveApiPathname,
+  isSensitiveCachedRequest,
   matchApiImageCache,
   matchApiJsonCache,
   matchNetworkOnlyApi,
+  purgeSensitiveApiCacheEntries,
+  API_JSON_CACHE_NAME,
+  API_IMAGE_CACHE_NAME,
+  LEGACY_API_CACHE_NAME,
   API_JSON_MAX_BYTES,
   API_IMAGE_MAX_BYTES,
 } from '../../src/lib/pwaCachePolicy';
@@ -206,6 +214,162 @@ class MemoryCacheStorage {
     return undefined;
   }
 }
+
+test.describe('sensitive / allowlist policy (#730)', () => {
+  test('NetworkOnly covers credentials, capability tokens, invites, and user tokens', () => {
+    expect(matchNetworkOnlyApi(req('/api/v1/tokens'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/users/4/tokens'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/shared/recaps/abc'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/calendar/cf_ics_deadbeef.ics'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/calendar-feed'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/invites/join-code'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/invites'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/ai-provider'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/settings/ai-provider'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/notifications'))).toBe(true);
+    expect(matchApiJsonCache(req('/api/v1/shared/recaps/abc'))).toBe(false);
+    expect(matchApiJsonCache(req('/api/v1/users/4/tokens'))).toBe(false);
+  });
+
+  test('JSON cache is an allowlist — non-campaign GETs stay out', () => {
+    expect(isAllowlistedJsonApiPath('/api/v1/campaigns/3/summary')).toBe(true);
+    expect(isAllowlistedJsonApiPath('/api/v1/quests/9')).toBe(true);
+    expect(isAllowlistedJsonApiPath('/api/v1/rules/packs')).toBe(true);
+    expect(isAllowlistedJsonApiPath('/api/v1/notifications')).toBe(false);
+    expect(isAllowlistedJsonApiPath('/api/v1/shared/recaps/x')).toBe(false);
+    expect(matchApiJsonCache(req('/api/v1/notifications'))).toBe(false);
+    expect(matchApiJsonCache(req('/api/v1/settings/ai-provider'))).toBe(false);
+    expect(matchApiJsonCache(req('/api/v1/campaigns/3/export'))).toBe(false);
+  });
+
+  test('isSensitiveApiPathname agrees with NetworkOnly for archive/credential paths', () => {
+    for (const path of [
+      '/api/v1/backup',
+      '/api/v1/campaigns/3/export',
+      '/api/v1/campaigns/3/export/me',
+      '/api/v1/tokens',
+      '/api/v1/users/2/tokens',
+      '/api/v1/shared/recaps/t',
+      '/api/v1/calendar/tok.ics',
+    ]) {
+      expect(isSensitiveApiPathname(path)).toBe(true);
+      expect(matchNetworkOnlyApi(req(path))).toBe(true);
+      expect(matchApiJsonCache(req(path))).toBe(false);
+    }
+  });
+
+  test('cacheWillUpdate rejects Cache-Control: no-store (defense in depth)', async () => {
+    const noStore = new Response('{"ok":true}', {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': 'private, no-store',
+      },
+    });
+    expect(await cacheWillUpdateJson({ response: noStore })).toBeNull();
+    expect(classifyApiResponseForCache(noStore)).toBe('reject');
+
+    const imgNoStore = new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: {
+        'content-type': 'image/png',
+        'cache-control': 'no-store',
+      },
+    });
+    expect(await cacheWillUpdateImage({ response: imgNoStore })).toBeNull();
+  });
+
+  test('simulated download never lands in Cache Storage; offline retry has no match', async () => {
+    const memory = new MemoryCacheStorage();
+    (globalThis as { caches?: CacheStorage }).caches = memory as unknown as CacheStorage;
+    const jsonCache = await memory.open(API_JSON_CACHE_NAME);
+
+    const backupUrl = 'http://campfire.test/api/v1/backup';
+    const exportUrl = 'http://campfire.test/api/v1/campaigns/3/export';
+    const summaryUrl = 'http://campfire.test/api/v1/campaigns/3/summary';
+
+    // Policy: archives are NetworkOnly + rejected by cacheWillUpdate.
+    expect(matchNetworkOnlyApi(req('/api/v1/backup'))).toBe(true);
+    expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/export'))).toBe(true);
+
+    const backupRes = new Response(new Uint8Array([0x50, 0x4b]), {
+      status: 200,
+      headers: {
+        'content-type': 'application/zip',
+        'content-disposition': 'attachment; filename="campfire-backup.zip"',
+        'cache-control': 'private, no-store',
+      },
+    });
+    const exportRes = new Response('{"campaign":{}}', {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'content-disposition': 'attachment; filename="export.json"',
+        'cache-control': 'private, no-store',
+      },
+    });
+    expect(await cacheWillUpdateJson({ response: backupRes })).toBeNull();
+    expect(await cacheWillUpdateJson({ response: exportRes })).toBeNull();
+
+    // Even if a buggy caller tries to put them, activate/logout purge removes them.
+    await jsonCache.put(backupUrl, backupRes);
+    await jsonCache.put(exportUrl, exportRes);
+    await jsonCache.put(
+      summaryUrl,
+      new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+
+    expect(isSensitiveCachedRequest(new URL(backupUrl))).toBe(true);
+    expect(isSensitiveCachedRequest(new URL(exportUrl))).toBe(true);
+    const removed = await purgeSensitiveApiCacheEntries(memory as unknown as CacheStorage);
+    expect(removed).toBeGreaterThanOrEqual(2);
+    expect(await jsonCache.match(backupUrl)).toBeUndefined();
+    expect(await jsonCache.match(exportUrl)).toBeUndefined();
+    // Safe allowlisted JSON survives scrub.
+    expect(await jsonCache.match(summaryUrl)).toBeTruthy();
+
+    // Offline retry: NetworkOnly + empty cache ⇒ no replay of the archive.
+    expect(await jsonCache.match(backupUrl)).toBeUndefined();
+    expect(matchApiJsonCache(req('/api/v1/backup'))).toBe(false);
+  });
+
+  test('purgeSensitiveApiCacheEntries drops legacy bucket; logout clearApiCache wipes all', async () => {
+    installLocalStorage();
+    const memory = new MemoryCacheStorage();
+    (globalThis as { caches?: CacheStorage }).caches = memory as unknown as CacheStorage;
+
+    const legacy = await memory.open(LEGACY_API_CACHE_NAME);
+    await legacy.put(
+      'http://campfire.test/api/v1/backup',
+      new Response('zip', {
+        status: 200,
+        headers: { 'content-disposition': 'attachment; filename="b.zip"' },
+      }),
+    );
+    await memory.open(API_JSON_CACHE_NAME);
+    await memory.open(API_IMAGE_CACHE_NAME);
+
+    const scrubbed = await purgeSensitiveApiCacheEntries(memory as unknown as CacheStorage);
+    expect(scrubbed).toBeGreaterThanOrEqual(1);
+    expect(await memory.has(LEGACY_API_CACHE_NAME)).toBe(false);
+
+    // Re-seed then logout-style wipe (account switch / logout).
+    await memory.open(LEGACY_API_CACHE_NAME);
+    await memory.open(API_JSON_CACHE_NAME);
+    await clearApiCache();
+    expect(await memory.has(API_JSON_CACHE_NAME)).toBe(false);
+    expect(await memory.has(API_IMAGE_CACHE_NAME)).toBe(false);
+    expect(await memory.has(LEGACY_API_CACHE_NAME)).toBe(false);
+  });
+
+  test('attachment thumbs are not treated as sensitive cache keys', () => {
+    const thumb = new URL('http://campfire.test/api/v1/attachments/9?size=thumb');
+    const original = new URL('http://campfire.test/api/v1/attachments/9');
+    expect(isSensitiveCachedRequest(thumb)).toBe(false);
+    expect(isSensitiveCachedRequest(original)).toBe(true);
+    expect(matchApiImageCache(req('/api/v1/attachments/9?size=thumb'))).toBe(true);
+  });
+});
 
 test.describe('offline campaign manifest (#879)', () => {
   test.beforeEach(() => {

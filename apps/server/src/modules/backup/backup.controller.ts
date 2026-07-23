@@ -44,6 +44,8 @@ export class BackupController {
         'Content-Type': 'application/zip',
         'Content-Disposition': `attachment; filename="${this.backup.backupFilename()}"`,
         'Content-Length': String(buffer.length),
+        // Issue #730: never let browsers / the PWA Cache Storage retain a whole-server archive.
+        'Cache-Control': 'private, no-store',
       })
       .end(buffer);
   }

@@ -107,6 +107,9 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.json"/);
+    // Issue #730: campaign exports must never be storeable by HTTP / PWA caches.
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     expect(res.body.campaign.name).toBe('Export Campaign!');
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
@@ -188,6 +191,8 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-member-.*\.json"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     // Their own character + note are present.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'My Own Hero')).toBe(true);
@@ -222,6 +227,8 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/zip/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.zip"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
     // zip file magic number
     const buf = res.body as Buffer;
     expect(buf.slice(0, 2).toString('hex')).toBe('504b');
