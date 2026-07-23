@@ -32,6 +32,14 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(data.abilityMods).toEqual({ strength: 0, dexterity: 3, constitution: 1, intelligence: 0, wisdom: -1, charisma: 1 });
     expect(data.saves).toEqual({ fortitude: 5, reflex: 7, will: 3 });
     expect(data.traits).toEqual(['Goblin', 'Humanoid']);
+
+    // Adult Red Dragon covers a positive double-digit-adjacent mod set (str 9) + perception.
+    const dragon = entries.find((e) => e.name === 'Adult Red Dragon');
+    expect(dragon).toBeDefined();
+    const dragonData = JSON.parse(dragon!.dataJson!);
+    expect(dragonData.abilityMods.strength).toBe(9);
+    expect(dragonData.abilityMods.dexterity).toBe(4);
+    expect(dragonData.perception).toBe(27);
   });
 
   it('fetches sf2e section using fetchSf2eSection and maps vehicles -> item', async () => {

@@ -148,6 +148,21 @@
   --cf-difficulty-deadly-bg: #7f1d1d;
   --cf-difficulty-deadly-fg: #fecaca;
   --cf-radius: var(--radius-lg);
+
+  /* Overlay stacking (issue #791) — one documented scale for chrome, menus,
+     dialogs, notifications, and recovery. Values must stay ordered:
+       chrome (sticky headers in Layout):     Tailwind z-30
+       menus / mobile tab bar:                --cf-layer-tabbar (40)
+       dialogs / sheets (ConfirmDialog, …):   --cf-layer-dialog (50)
+       notification panel:                    --cf-layer-notification (50)
+       undo / recovery snackbar:              --cf-layer-snackbar (60)
+     Nested overlays share a tier; later DOM order wins. ConfirmDialog portals
+     to <body> so a page stacking context cannot trap it under chrome. */
+  --cf-layer-tabbar: 40;
+  --cf-layer-dialog: 50;
+  --cf-layer-notification: 50;
+  --cf-layer-snackbar: 60;
+
   color-scheme: dark;
 }
 
@@ -1099,7 +1114,7 @@ h1, h2, h3, h4, h5, h6 {
   bottom: 0;
   left: 0;
   right: 0;
-  z-index: 40;
+  z-index: var(--cf-layer-tabbar);
   background: color-mix(in srgb, var(--color-surface) 94%, transparent);
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--color-divider);

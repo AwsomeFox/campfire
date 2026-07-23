@@ -61,10 +61,11 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
     if (addedFallbackTabIndex) root?.setAttribute('tabindex', '-1');
 
     if (inertBackground) {
-      // The app's overlays are rendered near their trigger rather than through a
-      // body-level portal. Inert each sibling branch on the path to <body>, which
-      // leaves the overlay usable while removing all obscured UI from focus and
-      // the accessibility tree. Preserve pre-existing inert state for nesting.
+      // Overlays may render near their trigger or via a body-level portal
+      // (ConfirmDialog, issue #791). Inert each sibling branch on the path to
+      // <body>, which leaves the overlay usable while removing all obscured UI
+      // from focus and the accessibility tree. Preserve pre-existing inert
+      // state so nested overlays restore correctly when the top one closes.
       let current: HTMLElement | null = ref.current;
       while (current?.parentElement) {
         const parent: HTMLElement = current.parentElement;

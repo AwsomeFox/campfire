@@ -5,6 +5,7 @@
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth';
@@ -25,6 +26,7 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
+import { useAnnounce, useClearAnnouncements } from '../components/Announcer';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -305,6 +307,8 @@ function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const formattingLocale = useFormattingLocale();
+  const announce = useAnnounce();
+  const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
@@ -468,11 +472,31 @@ function LayoutContent() {
     return () => document.removeEventListener('keydown', onKey);
   }, [moreOpen]);
 
-  async function onLogout() {
+  function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
-    await logout();
-    navigate('/login');
+    // Issue #506: drop any stale live-region text (an in-flight roll/HP/turn
+    // announcement) before this account's session ends — a shared device's next
+    // user must not find leftover identity-scoped text sitting in the DOM.
+    clearAnnouncements();
+    // Commit `me = null` before navigate. logout() no longer awaits cache/network,
+    // but without flushSync a same-turn navigate('/login') can re-render LoginPage
+    // while `me` is still set — LoginPage then bounces away and drops
+    // `{ signedOut: true }`. flushSync also means we do not await logout (Copilot):
+    // announce + replace-navigate are not gated on cache/POST timing.
+    flushSync(() => {
+      void logout();
+    });
+    // A confirmation for keyboard/screen-reader users that sign-out succeeded —
+    // this live region is mounted at the app root (outside the router), so it
+    // survives the navigation below and is still there to be read on /login.
+    announce(t('nav.signedOutAnnouncement'), { assertive: true });
+    // `replace` so the protected route this tab was just on is gone from history
+    // — Back must not be able to return to it (the AuthedLayout guard would bounce
+    // it to /login anyway once `me` is null, but `replace` here avoids that extra
+    // hop and the momentary flash of a guarded redirect). Overwrites any
+    // AuthedLayout `{ from }` redirect that flushSync may have triggered.
+    navigate('/login', { replace: true, state: { signedOut: true } });
   }
 
   const displayName = me?.user.displayName || me?.user.username || '';
