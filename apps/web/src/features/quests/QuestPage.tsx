@@ -228,7 +228,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     setSavingStatus(true);
     try {
       const updated = await api.post<Quest>(`${API}/quests/${quest.id}/status`, { status });
-      setQuest({ ...quest, ...updated });
+      setQuest((q) => (q ? { ...q, ...updated } : q));
       announce(t('quests.statusChanged', { status: questStatusWord(t, status) }));
     } catch {
       // Selection is preserved (quest.status is unchanged). Surface the failure
