@@ -403,10 +403,29 @@ export default function AiTablePage() {
     const el = transcriptRef.current;
     if (!el) return;
 
-    syncTranscriptTailScroll();
-    const observer = new ResizeObserver(syncTranscriptTailScroll);
+    const sync = () => {
+      // If follow-latest is on but layout left us away from the tail (flex
+      // overflow settling on CI), allow mount pin to run again (#590 flake).
+      if (
+        followLatestRef.current &&
+        el.scrollHeight > el.clientHeight + 1 &&
+        el.scrollHeight - el.scrollTop - el.clientHeight > FEED_NEAR_BOTTOM_PX
+      ) {
+        transcriptMountScrollDoneRef.current = false;
+      }
+      syncTranscriptTailScroll();
+    };
+
+    sync();
+    const raf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(sync);
+    });
+    const observer = new ResizeObserver(sync);
     observer.observe(el);
-    return () => observer.disconnect();
+    return () => {
+      window.cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
   }, [isDriver, transcriptRevision, campaignId, syncTranscriptTailScroll]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
@@ -582,7 +601,10 @@ export default function AiTablePage() {
   }[statusKey];
 
   return (
-    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ height: 'calc(100dvh - 60px)' }}>
+    <div
+      className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3 min-h-0"
+      style={{ height: 'calc(100dvh - 60px)' }}
+    >
       {/* Header: scene, status pill, token budget, DM pause/resume */}
       <Card className="!p-4">
         <div className="flex items-start gap-3 flex-wrap">
