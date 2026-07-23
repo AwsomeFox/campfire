@@ -72,7 +72,7 @@ async function openPingFixture(page: Page) {
   expect(response.ok()).toBeTruthy();
   const original = (await response.json()) as EncounterWithCombatants;
 
-  let encounter: EncounterWithCombatants = {
+  const encounter: EncounterWithCombatants = {
     ...original,
     mapAttachmentId: MAP_ATTACHMENT_ID,
     gridSize: 10,
