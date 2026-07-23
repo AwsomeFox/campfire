@@ -1269,7 +1269,7 @@ export default function RunSessionPage() {
       {confirmReopen && (
         <ConfirmDialog
           title="Reopen this encounter?"
-          body="It returns to Running where combat left off. HP was written back to character sheets when it ended; it will write back again the next time you End."
+          body="It returns to Running where combat left off. HP was written back to character sheets when it ended. Healing, rest, or other sheet HP changes you make before the next End will be silently overwritten — that End writes combatant HP back onto the sheets again (resync direction tracked in #466)."
           confirmLabel={runControl.isPending ? 'Reopening…' : 'Reopen encounter'}
           busy={runControl.isPending}
           onConfirm={reopenEncounter}
