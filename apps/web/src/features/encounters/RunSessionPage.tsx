@@ -401,7 +401,7 @@ function DeathSaveTracker({
 }) {
   function Pips({ kind, count, color }: { kind: 'deathSaveSuccesses' | 'deathSaveFailures'; count: number; color: string }) {
     return (
-      <span style={{ display: 'inline-flex', gap: 3 }}>
+      <span style={{ display: 'inline-flex', gap: 4 }} data-testid={`death-save-${kind === 'deathSaveSuccesses' ? 'success' : 'failure'}-pips`}>
         {[0, 1, 2].map((i) => {
           const filled = i < count;
           const next = count === i + 1 ? i : i + 1; // click the highest-lit pip to clear it
@@ -409,17 +409,15 @@ function DeathSaveTracker({
             <button
               key={i}
               type="button"
+              className="cf-death-save-pip"
               aria-label={`${kind === 'deathSaveSuccesses' ? 'Success' : 'Failure'} ${i + 1} of 3${filled ? ' (marked)' : ''}`}
               aria-pressed={filled}
               disabled={!canEdit || busy}
               onClick={() => onSet({ [kind]: next })}
               style={{
-                width: 13,
-                height: 13,
-                borderRadius: '50%',
-                padding: 0,
-                border: `1.5px solid ${color}`,
-                background: filled ? color : 'transparent',
+                // Visual pip color via CSS variables; hit area is the 44×44 class (issue #428).
+                ['--cf-death-save-pip-color' as string]: color,
+                ['--cf-death-save-pip-fill' as string]: filled ? color : 'transparent',
                 cursor: canEdit && !busy ? 'pointer' : 'default',
               }}
             />
@@ -429,24 +427,27 @@ function DeathSaveTracker({
     );
   }
   return (
-    <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}>
-      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+    <div
+      style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 5, fontSize: 'var(--type-label)', flexWrap: 'wrap' }}
+      data-testid="death-save-tracker"
+    >
+      <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Saves</span>
         <Pips kind="deathSaveSuccesses" count={successes} color="var(--color-accent)" />
       </span>
-      <span style={{ display: 'inline-flex', gap: 5, alignItems: 'center' }}>
+      <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
         <span className="text-muted" style={{ letterSpacing: 0.3 }}>Fails</span>
         <Pips kind="deathSaveFailures" count={failures} color="#e5484d" />
       </span>
       {canEdit && (
         <button
           type="button"
-          className="btn btn-ghost"
+          className="btn btn-ghost cf-target-44"
           aria-label="Roll a death save"
           title="Roll a death save (nat 1 = two fails, nat 20 = revive at 1 HP)"
           disabled={busy}
           onClick={onRoll}
-          style={{ fontSize: 'var(--type-label)', minHeight: 20, padding: '1px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
+          style={{ fontSize: 'var(--type-label)', padding: '0 12px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
         >
           Roll
         </button>
@@ -1942,15 +1943,15 @@ function BattleMap({
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
     <button
       type="button"
-      className="cf-chip"
+      className="cf-map-tool"
+      data-testid={`map-tool-${value}`}
       disabled={disabled}
       title={hint}
+      aria-pressed={tool === value}
       onClick={() => changeTool(value)}
       style={{
-        cursor: disabled ? 'default' : 'pointer',
         borderColor: tool === value ? 'var(--color-accent)' : 'var(--color-divider)',
         color: tool === value ? 'var(--color-accent)' : undefined,
-        opacity: disabled ? 0.5 : 1,
       }}
     >
       {label}
@@ -1992,7 +1993,7 @@ function BattleMap({
       {mapImageUrl && (
         <>
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
-          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }}>
+          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Click the map to ping a spot for everyone')}
@@ -2000,19 +2001,19 @@ function BattleMap({
             {isDm && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-chip" style={{ cursor: 'pointer' }} title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
               </>
             )}
             <div style={{ flex: 1 }} />
             {isDm && (
               <button
                 type="button"
-                className="cf-chip"
+                className="cf-map-tool"
                 onClick={() => setGridPanelOpen((v) => !v)}
                 title="Grid & fog settings"
-                style={{ cursor: 'pointer', borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
+                style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
               >
                 Grid &amp; fog
               </button>
@@ -2047,7 +2048,7 @@ function BattleMap({
                   />
                 </label>
               )}
-              <button type="button" className="cf-chip" style={{ cursor: 'pointer', color: 'var(--color-danger, #ef4444)' }} onClick={() => removeAoe(selectedAoe.id)}>Remove</button>
+              <button type="button" className="cf-map-tool" style={{ color: 'var(--color-danger, #ef4444)' }} onClick={() => removeAoe(selectedAoe.id)}>Remove</button>
             </div>
           )}
 
@@ -2547,22 +2548,22 @@ function ApplyDamageBar({
         <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{amount}</span>
         <span className="text-muted"> — {label}</span>
       </span>
-      <div className="seg inline-flex" role="group" aria-label="Apply as">
+      <div className="seg inline-flex" role="group" aria-label="Apply as" style={{ gap: 4 }}>
         {(['damage', 'heal'] as const).map((m) => (
           <button
             key={m}
             type="button"
+            className="cf-target-44"
             aria-pressed={mode === m}
             onClick={() => setMode(m)}
             style={{
-              padding: '4px 10px',
+              padding: '0 12px',
               fontSize: 12,
               border: 0,
               background: 'transparent',
               cursor: 'pointer',
               color: mode === m ? 'var(--color-accent)' : 'var(--color-neutral-500)',
               boxShadow: mode === m ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-              minHeight: 30,
             }}
           >
             {m === 'damage' ? 'Damage' : 'Heal'}
@@ -2575,13 +2576,13 @@ function ApplyDamageBar({
       {targets.length === 0 ? (
         <span className="text-muted" style={{ fontSize: 11.5 }}>no editable targets</span>
       ) : (
-        <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {targets.map((c) => (
             <button
               key={c.id}
               type="button"
-              className="btn btn-secondary"
-              style={{ minHeight: 30, fontSize: 11.5, padding: '3px 10px' }}
+              className="btn btn-secondary cf-target-44"
+              style={{ fontSize: 12, padding: '0 12px' }}
               title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}`}
               onClick={() => onApply(c.id, delta)}
             >
@@ -2594,8 +2595,9 @@ function ApplyDamageBar({
         type="button"
         aria-label="Dismiss"
         onClick={onDismiss}
-        className="text-slate-500 hover:text-slate-300"
-        style={{ background: 'transparent', border: 0, cursor: 'pointer', fontSize: 14, marginLeft: 'auto' }}
+        className="cf-dismiss-target"
+        style={{ marginLeft: 'auto' }}
+        data-testid="apply-damage-dismiss"
       >
         ✕
       </button>
@@ -3081,11 +3083,11 @@ function CombatantRow({
           so we never render steppers pointing at a null value. Mirrors the sheet's
           ±5 / ±1 controls, incl. shift-click ×5 (issue #68). */}
       {canEdit && combatant.hpCurrent != null && (
-        <div style={{ display: 'flex', gap: 4, flex: 'none' }}>
+        <div style={{ display: 'flex', gap: 8, flex: 'none' }} data-testid="hp-steppers">
           {([-5, -1, 1, 5] as const).map((step) => (
             <button
               key={step}
-              className="btn btn-icon btn-secondary"
+              className="btn btn-icon btn-secondary cf-target-44"
               style={{ width: 44, height: 44, fontSize: step === 1 || step === -1 ? 16 : 13, fontFamily: 'var(--font-heading)' }}
               /* Optimistic: HP steppers stay live even mid-request (issue #73) — the click
                  lands instantly via setQueryData, so there's no round-trip to wait on. */
@@ -3099,11 +3101,12 @@ function CombatantRow({
       )}
       {canRemove && (
         <button
-          className="btn btn-icon btn-ghost"
-          style={{ width: 30, height: 30, fontSize: 12, flex: 'none' }}
+          className="btn btn-icon btn-ghost cf-target-44"
+          style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
           title="Remove combatant"
+          aria-label={`Remove ${combatant.name}`}
         >
           ✕
         </button>
