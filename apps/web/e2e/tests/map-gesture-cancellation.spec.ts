@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import type { Combatant, EncounterWithCombatants } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor } from './seed';
 
 type PatchCall = {
   target: 'encounter' | 'combatant';
@@ -15,10 +15,6 @@ type PointerOptions = {
 
 const MAP_ATTACHMENT_ID = 811_000;
 const AOE_ID = 'gesture-test-aoe';
-const PNG_16_9 = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAACvn2aAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARElEQVQoU2NgGAWjYBSMAgAAAQQAAAGn1v8AAAAASUVORK5CYII=',
-  'base64',
-);
 
 function encounterUrl(): string {
   const { campaignId, encounterId } = seed();
@@ -176,6 +172,7 @@ test.describe('battle-map gesture ownership and cancellation', () => {
     await dispatchPointer(token, 'pointerup', tokenEnd, mouse);
     await dispatchPointer(token, 'lostpointercapture', tokenEnd, mouse);
     await dispatchPointer(token, 'pointerup', tokenEnd, mouse);
+    await expect.poll(() => calls.length).toBe(1);
     expect(calls[0].target).toBe('combatant');
     expect((calls[0].body as { tokenX: number }).tokenX).toBeCloseTo(70, 1);
     expect((calls[0].body as { tokenY: number }).tokenY).toBeCloseTo(60, 1);

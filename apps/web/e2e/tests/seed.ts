@@ -14,3 +14,9 @@ export function seed(): SeedData {
 export function stateFor(role: 'admin' | 'dm' | 'player' | 'viewer'): string {
   return resolve(AUTH_DIR, `${role}.json`);
 }
+
+/** 16:9 aspect ratio PNG buffer matching the battle map surface aspect ratio. */
+export const PNG_16_9 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAACvn2aAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARElEQVQoU2NgGAWjYBSMAgAAAQQAAAGn1v8AAAAASUVORUSCYII=',
+  'base64',
+);

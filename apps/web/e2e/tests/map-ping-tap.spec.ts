@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import type { EncounterWithCombatants, MapPing } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor } from './seed';
 import { MAP_PING_TAP_SLOP_PX } from '../../src/features/encounters/mapPingTap';
 
 /**
@@ -16,10 +16,6 @@ type PointerOptions = {
 };
 
 const MAP_ATTACHMENT_ID = 809_000;
-const PNG_16_9 = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAACvn2aAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARElEQVQoU2NgGAWjYBSMAgAAAQQAAAGn1v8AAAAASUVORK5CYII=',
-  'base64',
-);
 
 function encounterUrl(): string {
   const { campaignId, encounterId } = seed();
