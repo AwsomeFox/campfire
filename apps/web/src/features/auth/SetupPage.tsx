@@ -10,6 +10,8 @@ import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
+import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
+import { setupBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -41,7 +43,7 @@ function FlameMark() {
 }
 
 export function SetupPage() {
-  const { status, loading, refresh: refreshAuthStatus } = useAuthStatus();
+  const { status, phase: statusPhase, refresh: refreshAuthStatus } = useAuthStatus();
   const { me, ready, refresh: refreshAuth } = useAuth();
   const navigate = useNavigate();
 
@@ -56,9 +58,33 @@ export function SetupPage() {
     if (error) focusAuthError(error);
   }, [error]);
 
+  const bootstrap = setupBootstrapSurface({
+    statusPhase,
+    setupRequired: Boolean(status?.setupRequired),
+  });
+
+  // Unknown status must not flash the first-admin form on a configured server (#801).
+  if (!submitting && bootstrap === 'recovery') {
+    return (
+      <BootstrapRecoveryScreen
+        onRetry={() => {
+          void retryAuthBootstrap(refreshAuthStatus, refreshAuth);
+        }}
+      />
+    );
+  }
+
+  if (!submitting && bootstrap === 'loading') {
+    return (
+      <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
+        <p className="text-muted">Checking server status…</p>
+      </div>
+    );
+  }
+
   // During a successful setup submit, onSubmit owns the single history-replacing
   // navigation after both auth contexts refresh. Do not race it with this guard.
-  if (!submitting && !loading && status && !status.setupRequired) {
+  if (!submitting && bootstrap === 'redirect') {
     if (!ready) {
       return (
         <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
@@ -92,12 +118,12 @@ export function SetupPage() {
         // this page still had setupRequired=true cached. Refresh that gate and
         // send this (cookie-less) loser to normal login instead of leaving a
         // bootstrap form on screen that can never succeed again.
-        try {
-          await refreshAuthStatus();
-          navigate('/login', { replace: true });
-        } catch {
+        const statusOk = await refreshAuthStatus();
+        if (!statusOk) {
           window.location.replace('/login');
+          return;
         }
+        navigate('/login', { replace: true });
         return;
       } else if (err instanceof ApiError && err.status === 429) {
         setError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
@@ -117,7 +143,14 @@ export function SetupPage() {
       // admin through /login, then refresh /auth/status so AuthedLayout no
       // longer redirects the campaign hub back to this setup screen.
       await refreshAuth();
-      await refreshAuthStatus();
+      const statusOk = await refreshAuthStatus();
+      if (!statusOk) {
+        // refreshAuthStatus no longer throws (#801); a failed status leaves the
+        // stale setupRequired=true answer in place. Hard-reload so both
+        // providers rebuild from the server instead of bouncing back to /setup.
+        window.location.replace('/');
+        return;
+      }
       navigate('/', { replace: true });
     } catch {
       // The account already exists and the one-time setup endpoint is now
