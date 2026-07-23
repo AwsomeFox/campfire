@@ -611,6 +611,14 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
   const narrow = useIsNarrowViewport();
   const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
+  // Panel unmounts on close; mark-all may still resolve after Escape/backdrop.
+  const panelMountedRef = useRef(true);
+  useEffect(() => {
+    panelMountedRef.current = true;
+    return () => {
+      panelMountedRef.current = false;
+    };
+  }, []);
   // useDialog already wires Escape-to-close, focus trap, focus restore to the
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
   // so it stays put when the panel re-renders across the breakpoint.
@@ -628,6 +636,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
 
   const handleMarkAllRead = useCallback(async () => {
     const ok = await markAllRead();
+    if (!panelMountedRef.current) return;
     setMarkAllAnnouncement(
       ok ? 'All notifications marked as read.' : "Couldn't mark all notifications as read.",
     );
