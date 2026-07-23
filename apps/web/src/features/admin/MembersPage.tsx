@@ -17,7 +17,7 @@ import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, Audit
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
-import { useCampaigns } from '../../app/CampaignContext';
+import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
@@ -288,6 +288,8 @@ function isEventPreset(expiryPreset: ExpiryPreset, maxUsesPreset: MaxUsesPreset)
 const INVITE_ROLE_SELECT_ID = 'invite-join-role';
 
 function InviteCard({ campaignId }: { campaignId: number }) {
+  const campaign = useCampaign(campaignId);
+  const { refresh: refreshCampaigns } = useCampaigns();
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
   const [role, setRole] = useState<InviteRole>('player');
   const [expiryPreset, setExpiryPreset] = useState<ExpiryPreset>('7d');
@@ -295,9 +297,12 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const [maxUsesPreset, setMaxUsesPreset] = useState<MaxUsesPreset>('unlimited');
   const [customMaxUses, setCustomMaxUses] = useState('');
   const [creating, setCreating] = useState(false);
+  const [reactivating, setReactivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const announce = useAnnounce();
+  const invitesEnabled = campaign?.publicInvitesEnabled !== false;
+  const canCreate = invitesEnabled && campaign?.status === 'active';
 
   const load = useCallback(async () => {
     try {
@@ -327,6 +332,20 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the invite.");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function reactivate() {
+    setReactivating(true);
+    setError(null);
+    try {
+      await api.put(`${API}/campaigns/${campaignId}/invites/policy`, { enabled: true });
+      await refreshCampaigns();
+      announce('Public invites re-enabled.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't re-enable invites.");
+    } finally {
+      setReactivating(false);
     }
   }
 
@@ -367,6 +386,30 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     <Card className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
 
+      {!invitesEnabled && (
+        <div
+          data-testid="invites-suspended-banner"
+          className="cf-inset border-amber-600/40 rounded px-3 py-2.5 space-y-1.5"
+        >
+          <p className="text-[12px] text-amber-200 m-0">
+            Public invites are suspended — outstanding join links return as invalid until you re-enable them.
+            Archiving or trashing a campaign suspends invites automatically; restore does not revive them.
+          </p>
+          <button
+            className="btn btn-primary"
+            style={{ minHeight: 32, fontSize: 12.5 }}
+            disabled={reactivating || campaign?.status !== 'active'}
+            aria-busy={reactivating || undefined}
+            onClick={() => void reactivate()}
+          >
+            {reactivating ? 'Re-enabling…' : 'Re-enable invites'}
+          </button>
+          {campaign?.status !== 'active' && (
+            <p className="text-muted text-[11px] m-0">Unarchive the campaign before re-enabling invites.</p>
+          )}
+        </div>
+      )}
+
       {/* Role */}
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
@@ -376,6 +419,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             className="input"
             value={role}
             onChange={(e) => setRole(e.target.value as InviteRole)}
+            disabled={!canCreate}
           >
             {inviteRoleOptions().map((opt) => (
               <option key={opt.role} value={opt.role}>
@@ -475,7 +519,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
         </p>
       </div>
 
-      <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
+      <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating || !canCreate}>
         {creating ? 'Generating…' : 'Generate invite link'}
       </button>
 
