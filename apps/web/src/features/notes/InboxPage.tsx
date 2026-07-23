@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Note } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -65,6 +65,8 @@ export default function InboxPage() {
   const cid = Number(campaignId);
   const { roleIn } = useAuth();
   const role = roleIn(cid);
+  const [searchParams] = useSearchParams();
+  const deepInboxId = Number(searchParams.get('inbox'));
 
   const [view, setView] = useState<ViewValue>('open');
   const [items, setItems] = useState<Note[]>([]);
@@ -99,6 +101,20 @@ export default function InboxPage() {
   useEffect(() => {
     if (Number.isFinite(cid) && role === 'dm') void load();
   }, [cid, role, load]);
+
+  // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
+  // only render under History, so switch the tab before EntityDeepLinkFocus runs.
+  useEffect(() => {
+    if (!Number.isFinite(deepInboxId)) return;
+    if (items.some((item) => item.id === deepInboxId)) {
+      setView('open');
+      setExpandedId(deepInboxId);
+      return;
+    }
+    if (resolvedItems.some((item) => item.id === deepInboxId)) {
+      setView('history');
+    }
+  }, [deepInboxId, items, resolvedItems]);
 
   async function resolve(item: Note, resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) {
     try {
@@ -210,7 +226,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
   const href = entityHref(campaignId, item);
   const resolvedOn = item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : null;
   return (
-    <Card className="!p-4 space-y-2.5">
+    <Card className="!p-4 space-y-2.5" {...entityTargetProps('inbox', item.id)}>
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
           {firstGrapheme(item.authorName || '?')}
