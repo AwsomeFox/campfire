@@ -12,6 +12,8 @@ import { TimelineService } from '../timeline/timeline.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { CommentsService } from '../comments/comments.service';
 import { StorylinesService } from '../storylines/storylines.service';
+import { EncountersService } from '../encounters/encounters.service';
+import { SchedulingService } from '../sessions/scheduling.service';
 
 /** Max results returned from one search (keeps a broad query bounded). */
 const DEFAULT_LIMIT = 50;
@@ -48,8 +50,9 @@ function fieldRank(field: string): number {
 
 /**
  * Campaign-wide free-text search across quests, NPCs, factions, locations,
- * characters, sessions, notes, timeline events, inventory items, discussion
- * comments and (DM-only) story arcs/beats (issues #64, #265).
+ * characters, sessions, encounters, scheduled sessions, notes, timeline events,
+ * inventory items, discussion comments and (DM-only) story arcs/beats (issues
+ * #64, #265, #843).
  *
  * SECURITY MODEL: this service never touches the database directly. It builds
  * every result from the entity services' `listForCampaign(role)` (and the notes
@@ -62,7 +65,9 @@ function fieldRank(field: string): number {
  * `listEvents(role)` (hidden dropped, dmSecret redacted); comments inherit their
  * anchor entity's visibility via `CommentsService.listForCampaign(role)` (#230);
  * story arcs/beats are DM-only prep content and are indexed ONLY for role 'dm';
- * inventory items carry no secrecy and are member-visible.
+ * inventory items carry no secrecy and are member-visible. Encounters and
+ * schedules use bounded search projections: encounter visibility and linked-label
+ * visibility are applied in SQL, while schedule search omits RSVP rows entirely.
  */
 @Injectable()
 export class SearchService {
@@ -78,6 +83,8 @@ export class SearchService {
     private readonly inventory: InventoryService,
     private readonly comments: CommentsService,
     private readonly storylines: StorylinesService,
+    private readonly encounters: EncountersService,
+    private readonly scheduling: SchedulingService,
   ) {}
 
   async search(campaignId: number, user: RequestUser, role: Role, q: string, limit = DEFAULT_LIMIT): Promise<SearchResponse> {
@@ -85,7 +92,21 @@ export class SearchService {
     if (!needle) return { query: q, results: [] };
 
     const isDm = role === 'dm';
-    const [quests, npcs, factions, locations, characters, sessions, notes, timelineEvents, items, comments, arcs] = await Promise.all([
+    const [
+      quests,
+      npcs,
+      factions,
+      locations,
+      characters,
+      sessions,
+      notes,
+      timelineEvents,
+      items,
+      comments,
+      arcs,
+      encounterHits,
+      scheduledSessionHits,
+    ] = await Promise.all([
       this.quests.listForCampaign(campaignId, role),
       this.npcs.listForCampaign(campaignId, role),
       this.factions.listForCampaign(campaignId, role),
@@ -99,6 +120,8 @@ export class SearchService {
       // Story arcs/beats are DM-only prep content (issue #27) — never fetch them
       // for a non-DM, so a player's search can't surface a planned twist.
       isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([]),
+      this.encounters.searchForCampaign(campaignId, role, needle, limit),
+      this.scheduling.searchForCampaign(campaignId, needle, limit),
     ]);
 
     const results: SearchResult[] = [];
@@ -168,6 +191,23 @@ export class SearchService {
         // trimmed it for pagination); searching the excerpt keeps this a cheap list read.
         { field: 'recap', text: s.recapExcerpt },
         { field: 'dmSecret', text: s.dmSecret },
+      ]);
+    }
+    for (const encounter of encounterHits) {
+      push('encounter', encounter.id, encounter.name, [
+        { field: 'name', text: encounter.name },
+        { field: 'location', text: encounter.locationLabel },
+        { field: 'quest', text: encounter.questLabel },
+        { field: 'session', text: encounter.sessionLabel },
+      ]);
+    }
+    for (const scheduled of scheduledSessionHits) {
+      const title = scheduled.title.trim()
+        || `Scheduled session — ${scheduled.scheduledAt.slice(0, 16).replace('T', ' ')} UTC`;
+      push('scheduled_session', scheduled.id, title, [
+        { field: 'title', text: scheduled.title },
+        { field: 'scheduledAt', text: scheduled.scheduledAt },
+        { field: 'notes', text: scheduled.notes },
       ]);
     }
     for (const note of notes) {

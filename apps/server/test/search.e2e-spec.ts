@@ -1,8 +1,9 @@
 import request from 'supertest';
-import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
+const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
 type Result = { type: string; id: number; title: string; matchedField: string; snippet: string };
 
@@ -23,6 +24,12 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
   let hiddenAnchorCommentId: number;
   let arcId: number;
   let beatId: number;
+  let visibleLocationId: number;
+  let visibleEncounterId: number;
+  let hiddenEncounterId: number;
+  let safelyLinkedEncounterId: number;
+  let scheduledSessionId: number;
+  let otherCampaignScheduleId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
@@ -61,10 +68,12 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     ).body.id;
 
     // A discovered location (default status is 'unexplored' = hidden from players).
-    await request(server)
-      .post(`/api/v1/campaigns/${campaignId}/locations`)
-      .set(dm)
-      .send({ name: 'The Vexwood Tavern', status: 'explored', body: 'A cozy inn.' });
+    visibleLocationId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'The Vexwood Tavern', status: 'explored', body: 'A cozy inn.' })
+    ).body.id;
 
     // An unexplored (DM-only) location matching the same query.
     await request(server)
@@ -148,6 +157,70 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
         .set(dm)
         .send({ title: 'Vex makes their move', body: 'The betrayal is revealed.' })
     ).body.id;
+
+    // Encounter search fixtures (#843): one visible encounter with safe linked
+    // labels, one hidden encounter, and one visible encounter whose linked quest
+    // and location are themselves hidden from non-DMs.
+    visibleEncounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({
+          name: 'Goblin Bridge Ambush',
+          questId: visibleQuestId,
+          locationId: visibleLocationId,
+          sessionId,
+        })
+    ).body.id;
+    hiddenEncounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Dragon Vault Ambush', hidden: true })
+    ).body.id;
+    const secretLinkedQuestId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Crownfall Protocol', hidden: true })
+    ).body.id;
+    const secretLinkedLocationId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Whisper Vault', status: 'unexplored' })
+    ).body.id;
+    safelyLinkedEncounterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Dawn Patrol', questId: secretLinkedQuestId, locationId: secretLinkedLocationId })
+    ).body.id;
+
+    scheduledSessionId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/schedule`)
+        .set(dm)
+        .send({
+          title: 'Saturday game',
+          scheduledAt: '2031-09-20T19:30:00.000Z',
+          notes: 'Bring level seven sheets for the bridge finale.',
+        })
+    ).body.id;
+
+    const otherCampaignId = (
+      await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Search Camp' })
+    ).body.id;
+    otherCampaignScheduleId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${otherCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          title: 'Saturday game in another campaign',
+          scheduledAt: '2031-09-20T19:30:00.000Z',
+          notes: 'Bring level seven sheets somewhere else.',
+        })
+    ).body.id;
   });
 
   afterAll(async () => {
@@ -175,6 +248,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(has('comment', hiddenAnchorCommentId)).toBe(true); // anchor visible to DM
     expect(has('arc', arcId)).toBe(true);
     expect(has('beat', beatId)).toBe(true);
+    expect(has('encounter', visibleEncounterId)).toBe(true);
   });
 
   it('player search finds visible entities but excludes every hidden one', async () => {
@@ -187,6 +261,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(has('npc', visibleNpcId)).toBe(true);
     expect(has('quest', visibleQuestId)).toBe(true);
     expect(has('session', sessionId)).toBe(true);
+    expect(has('encounter', visibleEncounterId)).toBe(true);
 
     // Hidden NPC, hidden quest, and unexplored location are absent
     expect(has('npc', hiddenNpcId)).toBe(false);
@@ -207,6 +282,79 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(has('comment', hiddenAnchorCommentId)).toBe(false);
     expect(results.some((r) => r.type === 'arc')).toBe(false);
     expect(results.some((r) => r.type === 'beat')).toBe(false);
+  });
+
+  it('hidden encounters never leak to players or viewers on exact or partial queries', async () => {
+    for (const query of ['Dragon Vault Ambush', 'Vault Amb']) {
+      const dmRes = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+        .set(dm);
+      expect(dmRes.body.results.some((r: Result) => r.type === 'encounter' && r.id === hiddenEncounterId)).toBe(true);
+
+      for (const headers of [player, viewer]) {
+        const res = await request(ctx.app.getHttpServer())
+          .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+          .set(headers);
+        expect(res.status).toBe(200);
+        expect(res.body.results.some((r: Result) => r.type === 'encounter' && r.id === hiddenEncounterId)).toBe(false);
+        expect(JSON.stringify(res.body.results).toLowerCase()).not.toContain('dragon vault ambush');
+      }
+    }
+  });
+
+  it('indexes only role-safe encounter-linked quest/location/session labels', async () => {
+    // Revealed linked context is searchable by every role.
+    for (const headers of [dm, player, viewer]) {
+      const safe = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=Vexwood`)
+        .set(headers);
+      expect(safe.body.results).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'encounter', id: visibleEncounterId, matchedField: 'location' }),
+      ]));
+    }
+
+    // The DM can use hidden prep labels; player/viewer cannot match or receive
+    // those labels through the otherwise-visible encounter's snippet.
+    for (const query of ['Crownfall', 'Whisper Vau']) {
+      const dmRes = await request(ctx.app.getHttpServer())
+        .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+        .set(dm);
+      expect(dmRes.body.results.some((r: Result) => r.type === 'encounter' && r.id === safelyLinkedEncounterId)).toBe(true);
+
+      for (const headers of [player, viewer]) {
+        const res = await request(ctx.app.getHttpServer())
+          .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+          .set(headers);
+        expect(res.body.results.some((r: Result) => r.type === 'encounter' && r.id === safelyLinkedEncounterId)).toBe(false);
+        const payload = JSON.stringify(res.body).toLowerCase();
+        expect(payload).not.toContain('crownfall protocol');
+        expect(payload).not.toContain('whisper vault');
+      }
+    }
+  });
+
+  it('searches scheduled-session title, date, time, and party-visible notes for every role', async () => {
+    const cases = [
+      { query: 'Saturday game', field: 'title' },
+      { query: '2031-09-20', field: 'scheduledAt' },
+      { query: '19:30', field: 'scheduledAt' },
+      { query: 'level seven sheets', field: 'notes' },
+    ];
+    for (const headers of [dm, player, viewer]) {
+      for (const { query, field } of cases) {
+        const res = await request(ctx.app.getHttpServer())
+          .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(query)}`)
+          .set(headers);
+        expect(res.status).toBe(200);
+        expect(res.body.results).toEqual(expect.arrayContaining([
+          expect.objectContaining({ type: 'scheduled_session', id: scheduledSessionId, matchedField: field }),
+        ]));
+        expect(res.body.results).not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ type: 'scheduled_session', id: otherCampaignScheduleId }),
+        ]));
+        expect(JSON.stringify(res.body)).not.toContain('rsvps');
+      }
+    }
   });
 
   it('dmSecret is never matched or leaked to a player', async () => {
@@ -280,5 +428,91 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(targets.some((t) => t.type === 'timeline' && t.id === hiddenEventId)).toBe(true);
     expect(targets.some((t) => t.type === 'arc' && t.id === arcId)).toBe(true);
     expect(targets.some((t) => t.type === 'beat' && t.id === beatId)).toBe(true);
+  });
+});
+
+describe('campaign search role boundaries (e2e, real cookie sessions, issue #843)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let viewerAgent: ReturnType<typeof request.agent>;
+  let outsiderAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let hiddenEncounterId: number;
+  let visibleEncounterId: number;
+  let scheduledSessionId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    const admin = request.agent(server);
+    expect((await admin.post('/api/v1/auth/setup').send({ username: 'search-admin', password: 'admin-password-1' })).status).toBe(201);
+
+    const users: Record<'dm' | 'player' | 'viewer' | 'outsider', number> = { dm: 0, player: 0, viewer: 0, outsider: 0 };
+    for (const role of Object.keys(users) as Array<keyof typeof users>) {
+      const created = await admin
+        .post('/api/v1/users')
+        .send({ username: `search-${role}`, password: `${role}-password-1`, serverRole: 'user' });
+      expect(created.status).toBe(201);
+      users[role] = created.body.id;
+    }
+
+    const login = async (role: keyof typeof users) => {
+      const agent = request.agent(server);
+      const res = await agent.post('/api/v1/auth/login').send({ username: `search-${role}`, password: `${role}-password-1` });
+      expect(res.status).toBe(201);
+      return agent;
+    };
+    dmAgent = await login('dm');
+    playerAgent = await login('player');
+    viewerAgent = await login('viewer');
+    outsiderAgent = await login('outsider');
+
+    const campaign = await dmAgent.post('/api/v1/campaigns').send({ name: 'Role-safe Search Campaign' });
+    expect(campaign.status).toBe(201);
+    campaignId = campaign.body.id;
+    expect((await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: users.player, role: 'player' })).status).toBe(201);
+    expect((await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: users.viewer, role: 'viewer' })).status).toBe(201);
+
+    visibleEncounterId = (
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Public Orchard Skirmish' })
+    ).body.id;
+    hiddenEncounterId = (
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Orchard Dragon', hidden: true })
+    ).body.id;
+    scheduledSessionId = (
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/schedule`).send({
+        title: 'Orchard follow-up',
+        scheduledAt: '2032-10-11T18:45:00.000Z',
+        notes: 'Bring the orchard map.',
+      })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('applies DM/player/viewer visibility from persisted memberships', async () => {
+    const dmResults = (await dmAgent.get(`/api/v1/campaigns/${campaignId}/search?q=Orchard`)).body.results as Result[];
+    expect(dmResults.some((r) => r.type === 'encounter' && r.id === visibleEncounterId)).toBe(true);
+    expect(dmResults.some((r) => r.type === 'encounter' && r.id === hiddenEncounterId)).toBe(true);
+    expect(dmResults.some((r) => r.type === 'scheduled_session' && r.id === scheduledSessionId)).toBe(true);
+
+    for (const agent of [playerAgent, viewerAgent]) {
+      const res = await agent.get(`/api/v1/campaigns/${campaignId}/search?q=Orchard`);
+      expect(res.status).toBe(200);
+      const results = res.body.results as Result[];
+      expect(results.some((r) => r.type === 'encounter' && r.id === visibleEncounterId)).toBe(true);
+      expect(results.some((r) => r.type === 'encounter' && r.id === hiddenEncounterId)).toBe(false);
+      expect(results.some((r) => r.type === 'scheduled_session' && r.id === scheduledSessionId)).toBe(true);
+      expect(JSON.stringify(res.body)).not.toContain('Secret Orchard Dragon');
+    }
+  });
+
+  it('rejects search for a caller outside the campaign boundary', async () => {
+    const res = await outsiderAgent.get(`/api/v1/campaigns/${campaignId}/search?q=Orchard`);
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toContain('Orchard');
   });
 });

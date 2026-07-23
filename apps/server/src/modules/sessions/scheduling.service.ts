@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { ScheduledSessionCreate, ScheduledSessionUpdate, RsvpSet } from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
@@ -108,6 +108,31 @@ export class SchedulingService {
       ...toDomain(row),
       rsvps: rsvpRows.filter((r) => r.scheduledSessionId === row.id).map(rsvpToDomain),
     }));
+  }
+
+  /**
+   * Bounded campaign-search read. Scheduled-session title, canonical ISO date/time,
+   * and party-visible notes are searchable; RSVP rows are deliberately excluded so
+   * search cannot grow with party size or expose availability snippets.
+   */
+  async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    needle = needle.trim().toLowerCase();
+    if (!needle) return [];
+    const rows = await this.db
+      .select()
+      .from(scheduledSessions)
+      .where(and(
+        eq(scheduledSessions.campaignId, campaignId),
+        or(
+          sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
+          sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,
+          sql`instr(lower(${scheduledSessions.notes}), ${needle}) > 0`,
+        ),
+      ))
+      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id))
+      .limit(boundedLimit);
+    return rows.map(toDomain);
   }
 
   /** The campaign's "next session": earliest schedule not yet in the past, or null. */

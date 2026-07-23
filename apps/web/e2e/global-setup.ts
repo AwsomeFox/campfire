@@ -106,6 +106,8 @@ export interface SeedData {
     commentId: number;
     arcId: number;
     beatId: number;
+    encounterId: number;
+    scheduledSessionId: number;
     proposalId: number;
     /** Identity-persisted mention fixtures (issue #739). */
     identity: {
@@ -423,6 +425,17 @@ export default async function globalSetup(config: FullConfig) {
   if (!deletedUnicode.ok()) {
     throw new Error(`DELETE Unicode target npc -> ${deletedUnicode.status()}: ${await deletedUnicode.text()}`);
   }
+  const navEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'DLRNAV Bridge Ambush',
+    questId: navQuest.id,
+    locationId: navLocation.id,
+    sessionId: navSession.id,
+  });
+  const navScheduledSession = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/schedule`, {
+    title: 'DLRNAV Saturday Game',
+    scheduledAt: '2032-07-24T19:30:00.000Z',
+    notes: 'DLRNAV bring level five sheets.',
+  });
   const proposed = await dm.patch(`/api/v1/sessions/${navSession.id}?proposed=true`, {
     data: { title: navSession.title },
   });
@@ -598,6 +611,8 @@ export default async function globalSetup(config: FullConfig) {
       commentId: navComment.id,
       arcId: navArc.id,
       beatId: navBeat.id,
+      encounterId: navEncounter.id,
+      scheduledSessionId: navScheduledSession.id,
       proposalId: navProposal.id,
       identity: {
         questId: identityQuest.id,

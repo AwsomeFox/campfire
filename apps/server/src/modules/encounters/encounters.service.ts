@@ -28,6 +28,16 @@ type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
 
+/** Small, role-safe projection used by campaign search (no combatants/map state). */
+export type EncounterSearchEntry = {
+  id: number;
+  campaignId: number;
+  name: string;
+  locationLabel: string;
+  questLabel: string;
+  sessionLabel: string;
+};
+
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
  * SQLITE_CONSTRAINT_* codes on a constraint violation (issue #749). The combatant
@@ -312,6 +322,71 @@ export class EncountersService {
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
     return viewerRole === undefined ? list : filterHidden(list, viewerRole);
+  }
+
+  /**
+   * Bounded search projection for encounter names and their optional where/why/when
+   * labels. Visibility is enforced in SQL: hidden encounters are absent for every
+   * non-DM, and a linked hidden quest or unexplored location becomes an empty string
+   * before both matching and returning. This avoids per-encounter lookups and never
+   * loads combatants or other live-table state.
+   */
+  async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    needle = needle.trim().toLowerCase();
+    if (!needle) return [];
+    const questLabel = role === 'dm'
+      ? sql<string>`coalesce(${quests.title}, '')`
+      : sql<string>`case when ${quests.hidden} = 0 then coalesce(${quests.title}, '') else '' end`;
+    const locationLabel = role === 'dm'
+      ? sql<string>`coalesce(${locations.name}, '')`
+      : sql<string>`case when ${locations.status} <> 'unexplored' then coalesce(${locations.name}, '') else '' end`;
+    const sessionLabel = sql<string>`case
+      when ${sessions.id} is null then ''
+      when length(trim(coalesce(${sessions.title}, ''))) > 0 then ${sessions.title}
+      else 'Session ' || ${sessions.number}
+    end`;
+
+    const rows = await this.db
+      .select({
+        id: encounters.id,
+        campaignId: encounters.campaignId,
+        name: encounters.name,
+        locationLabel,
+        questLabel,
+        sessionLabel,
+      })
+      .from(encounters)
+      .leftJoin(
+        locations,
+        and(
+          eq(locations.id, encounters.locationId),
+          eq(locations.campaignId, campaignId),
+          notDeleted(locations.deletedAt),
+        ),
+      )
+      .leftJoin(
+        quests,
+        and(eq(quests.id, encounters.questId), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)),
+      )
+      .leftJoin(
+        sessions,
+        and(eq(sessions.id, encounters.sessionId), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)),
+      )
+      .where(and(
+        eq(encounters.campaignId, campaignId),
+        role === 'dm' ? undefined : eq(encounters.hidden, false),
+        or(
+          sql`instr(lower(${encounters.name}), ${needle}) > 0`,
+          sql`instr(lower(${locationLabel}), ${needle}) > 0`,
+          sql`instr(lower(${questLabel}), ${needle}) > 0`,
+          sql`instr(lower(${sessionLabel}), ${needle}) > 0`,
+        ),
+      ))
+      .orderBy(encounters.id)
+      .limit(boundedLimit);
+
+    return rows;
   }
 
   /**

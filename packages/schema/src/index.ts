@@ -4360,6 +4360,8 @@ export const SearchResultType = z.enum([
   'location',
   'character',
   'session',
+  'encounter',
+  'scheduled_session',
   'faction',
   'note',
   // Newer content types now indexed (issue #265): timeline events, inventory
@@ -4372,10 +4374,12 @@ export const SearchResultType = z.enum([
 ]);
 export type SearchResultType = z.infer<typeof SearchResultType>;
 
-// A single hit. The service ONLY ever builds these from role-filtered lists
-// (listForCampaign(role)), so a hidden quest/npc/unexplored location, a
-// non-visible note, and every dmSecret are already stripped before a result
-// object is ever constructed — hits never leak an entity the caller can't see.
+// A single hit. The service ONLY ever builds these from role-filtered lists or
+// bounded role-filtered search queries, so a hidden quest/npc/encounter,
+// unexplored location, non-visible note, and every dmSecret are already stripped
+// before a result object is constructed — hits never leak an entity the caller
+// can't see. Encounter-linked labels are included only when that linked entity is
+// visible to the caller; scheduled-session notes are party-visible by definition.
 export const SearchResult = z.object({
   type: SearchResultType,
   id: Id,

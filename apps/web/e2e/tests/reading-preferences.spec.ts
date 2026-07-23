@@ -110,7 +110,11 @@ test.describe('semantic reading preferences', () => {
     await page.locator('html').evaluate((root) => root.setAttribute('data-reading-mode', 'large'));
 
     await page.goto(`/c/${fixture.campaignId}/sessions?session=${fixture.navigation.sessionId}`);
-    const recap = page.locator('.cf-prose').first();
+    // Scope to the Log tab panel: the Schedule tab (issue #13) also renders
+    // schedule notes through Markdown (.cf-prose) and stays mounted but hidden
+    // when the Log tab is active, so an unscoped `.first()` would match the
+    // hidden schedule-notes prose instead of the session recap.
+    const recap = page.locator('#sessions-panel-log .cf-prose').first();
     await expect(recap).toBeVisible();
     const recapType = await typography(recap);
     expect(recapType.fontSize).toBe(18);

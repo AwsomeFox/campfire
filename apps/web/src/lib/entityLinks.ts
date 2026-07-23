@@ -155,6 +155,15 @@ export function entityHref(campaignId: number, target: EntityLinkTarget): string
 
   if (type === 'campaign') return base;
 
+  // Scheduled sessions are distinct from recap/log sessions and live inside the
+  // Schedule tab. Keep both selectors in the URL so direct loads open the right
+  // surface and focus the exact game-night card after its async data arrives.
+  if (type === 'scheduled_session') {
+    return validId(id)
+      ? `${base}/sessions?tab=schedule&schedule=${id}#${entityDomId(type, id)}`
+      : `${base}/sessions?tab=schedule`;
+  }
+
   if (type === 'comment') {
     if (!validId(id) || !target.parentType || !validId(target.parentId)) return base;
     const parent = entityHref(campaignId, { type: target.parentType, id: target.parentId });

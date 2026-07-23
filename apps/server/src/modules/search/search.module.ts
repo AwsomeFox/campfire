@@ -11,6 +11,7 @@ import { TimelineModule } from '../timeline/timeline.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { CommentsModule } from '../comments/comments.module';
 import { StorylinesModule } from '../storylines/storylines.module';
+import { EncountersModule } from '../encounters/encounters.module';
 import { SearchService } from './search.service';
 import { SearchController } from './search.controller';
 
@@ -33,6 +34,7 @@ import { SearchController } from './search.controller';
     InventoryModule,
     CommentsModule,
     StorylinesModule,
+    EncountersModule,
   ],
   controllers: [SearchController],
   providers: [SearchService],
