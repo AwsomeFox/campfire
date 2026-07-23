@@ -2018,7 +2018,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
-  { name: '0068_notifications_data', run: migrateNotificationsTableForData },
+  { name: '0069_notifications_data', run: migrateNotificationsTableForData },
 ];
 
 /**
