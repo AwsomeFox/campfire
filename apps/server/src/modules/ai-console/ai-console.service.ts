@@ -20,6 +20,20 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 type AiCapsUpdateInput = z.infer<typeof AiCapsUpdate>;
 
 /**
+ * Hard per-probe ceiling for the "test all" health readout (#1061). Each provider
+ * probe is bounded independently so a single hung or pathologically slow provider
+ * can never stall the whole admin health endpoint. `testConnection` already flows
+ * through the provider's own HTTP-layer timeout; this is the OUTER guarantee that a
+ * probe always settles within a bounded window — covering any path that never
+ * reaches (or outlives) that HTTP call, and any future provider that forgets it.
+ */
+const PROBE_TIMEOUT_MS = 15_000;
+
+/** Resolved (never rejected) sentinel emitted when a probe outruns its ceiling. */
+const PROBE_TIMEOUT = Symbol('ai-console.probe-timeout');
+type ProbeTimeout = typeof PROBE_TIMEOUT;
+
+/**
  * Admin AI console (issue #315) — the server-admin cockpit over the AI program
  * (epic #308). It OWNS no metering of its own: budgets are enforced where the
  * spend happens (AiDmService meters per-seat; the server-wide cap it reads from
@@ -222,45 +236,99 @@ export class AiConsoleService {
    * AiProviderConfigService.testConnection, which builds the real provider from the
    * decrypted (in-process) config and runs a minimal generation — returning ok/error
    * only, never a credential.
+   *
+   * Every probe is bounded by {@link PROBE_TIMEOUT_MS} (#1061): a hung or slow
+   * provider yields an `{ ok: false, error: 'timeout' }` entry instead of stalling
+   * the whole health readout. Probes still run sequentially, so the endpoint's
+   * worst-case latency is (number of configured scopes × the ceiling).
    */
   async testAll(): Promise<AiProviderHealthEntry[]> {
     const out: AiProviderHealthEntry[] = [];
 
     const serverView = await this.providers.getServerView();
     if (serverView) {
-      const r = await this.providers.testConnection(null);
-      out.push({
-        scope: 'server',
-        campaignId: null,
-        campaignName: null,
-        ok: r.ok,
-        providerType: r.providerType,
-        model: r.model,
-        error: r.error,
-      });
+      const r = await this.raceProbe(this.providers.testConnection(null));
+      out.push(
+        r === PROBE_TIMEOUT
+          ? {
+              scope: 'server',
+              campaignId: null,
+              campaignName: null,
+              ok: false,
+              // On timeout the probe never returned its own type; fall back to the
+              // configured server providerType so the row is still identifiable.
+              providerType: serverView.providerType ?? '',
+              model: '',
+              error: 'timeout',
+            }
+          : {
+              scope: 'server',
+              campaignId: null,
+              campaignName: null,
+              ok: r.ok,
+              providerType: r.providerType,
+              model: r.model,
+              error: r.error,
+            },
+      );
     }
 
     // Every campaign that has its own provider override, joined to its name.
     const overrides = await this.db
-      .select({ campaignId: aiProviderConfigs.campaignId, campaignName: campaigns.name })
+      .select({
+        campaignId: aiProviderConfigs.campaignId,
+        campaignName: campaigns.name,
+        providerType: aiProviderConfigs.providerType,
+      })
       .from(aiProviderConfigs)
       .leftJoin(campaigns, eq(campaigns.id, aiProviderConfigs.campaignId))
       .where(eq(aiProviderConfigs.scope, 'campaign'));
 
     for (const o of overrides) {
       if (o.campaignId == null) continue;
-      const r = await this.providers.testConnection(o.campaignId);
-      out.push({
-        scope: 'campaign',
-        campaignId: o.campaignId,
-        campaignName: o.campaignName ?? `#${o.campaignId}`,
-        ok: r.ok,
-        providerType: r.providerType,
-        model: r.model,
-        error: r.error,
-      });
+      const campaignName = o.campaignName ?? `#${o.campaignId}`;
+      const r = await this.raceProbe(this.providers.testConnection(o.campaignId));
+      out.push(
+        r === PROBE_TIMEOUT
+          ? {
+              scope: 'campaign',
+              campaignId: o.campaignId,
+              campaignName,
+              ok: false,
+              providerType: o.providerType ?? '',
+              model: '',
+              error: 'timeout',
+            }
+          : {
+              scope: 'campaign',
+              campaignId: o.campaignId,
+              campaignName,
+              ok: r.ok,
+              providerType: r.providerType,
+              model: r.model,
+              error: r.error,
+            },
+      );
     }
 
     return out;
+  }
+
+  /**
+   * Race a single provider probe against the per-probe ceiling (#1061). Resolves
+   * with the probe's result, or the {@link PROBE_TIMEOUT} sentinel if it outruns the
+   * ceiling. Never rejects, and always clears its timer (unref'd so it never keeps
+   * the process alive) so no handle is left pending. A probe that outlives the
+   * ceiling is abandoned: its eventual result is discarded rather than awaited.
+   */
+  private raceProbe<T>(probe: Promise<T>): Promise<T | ProbeTimeout> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<ProbeTimeout>((resolve) => {
+      timer = setTimeout(() => resolve(PROBE_TIMEOUT), PROBE_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+    });
+    return Promise.race([probe, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 }
