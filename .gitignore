@@ -3,6 +3,7 @@ dist/
 build/
 coverage/
 data/
+/test-results/
 *.db
 *.db-*
 .env
