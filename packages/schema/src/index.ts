@@ -2566,11 +2566,36 @@ export const RulePackInstallJob = z.object({
 });
 export type RulePackInstallJob = z.infer<typeof RulePackInstallJob>;
 
+/** Default page size for GET /rules/search (issue #613). */
+export const RULE_SEARCH_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on rule search — clients page with `cursor`, not a huge page. */
+export const RULE_SEARCH_MAX_LIMIT = 100;
+
 export const RuleSearchQuery = z.object({
   q: z.string().max(200).default(''),
   type: RuleEntryType.optional(),
   pack: z.string().max(80).optional(), // pack slug
+  /** Page size (default 50, max 100). Omitted → default; never silently returns a truncated array. */
+  limit: z.number().int().positive().max(RULE_SEARCH_MAX_LIMIT).optional(),
+  /** Opaque stable cursor from a previous page's `nextCursor` (issue #613). */
+  cursor: z.string().max(512).optional(),
 });
+
+/**
+ * Paginated rule-search response (issue #613).
+ *
+ * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true.
+ */
+export const RuleSearchPage = z.object({
+  items: z.array(RuleEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).optional(),
+  limit: z.number().int().positive(),
+});
+export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an

@@ -17,9 +17,13 @@ export const COMPENDIUM_TYPE_FILTER_LABEL = 'Entry type';
 /** Control that resets search text and type filter together. */
 export const COMPENDIUM_CLEAR_FILTERS_LABEL = 'Clear filters';
 
-/** Browser URL keys for Compendium search / type filters. */
+/** Browser URL keys for Compendium search / type filters / pagination (issue #613). */
 export const COMPENDIUM_URL_Q = 'q';
 export const COMPENDIUM_URL_TYPE = 'type';
+/** Opaque server cursor — present when the list starts mid-result-set (paged browse). */
+export const COMPENDIUM_URL_CURSOR = 'cursor';
+
+export const COMPENDIUM_LOAD_MORE_LABEL = 'Load more';
 
 /** Type-chip values that may appear in `?type=` (excludes the default "all"). */
 export const COMPENDIUM_URL_TYPE_VALUES = [
@@ -41,10 +45,10 @@ export function parseCompendiumTypeParam(raw: string | null | undefined): Compen
     : 'all';
 }
 
-/** Merge `q` / `type` into existing search params (omit defaults). */
+/** Merge `q` / `type` / optional `cursor` into existing search params (omit defaults). */
 export function applyCompendiumSearchParams(
   prev: URLSearchParams,
-  opts: { q: string; type: CompendiumUrlType },
+  opts: { q: string; type: CompendiumUrlType; cursor?: string | null },
 ): URLSearchParams {
   const next = new URLSearchParams(prev);
   const trimmed = opts.q.trim();
@@ -52,6 +56,9 @@ export function applyCompendiumSearchParams(
   else next.delete(COMPENDIUM_URL_Q);
   if (opts.type !== 'all') next.set(COMPENDIUM_URL_TYPE, opts.type);
   else next.delete(COMPENDIUM_URL_TYPE);
+  // Changing filters clears pagination; only set cursor when explicitly provided.
+  if (opts.cursor) next.set(COMPENDIUM_URL_CURSOR, opts.cursor);
+  else next.delete(COMPENDIUM_URL_CURSOR);
   return next;
 }
 
@@ -85,6 +92,9 @@ export function compendiumResultsStatus(opts: {
   typeLabel: string;
   /** Search request failed — suppress empty/count copy (ErrorNote is the alert). */
   failed?: boolean;
+  /** Total matches available server-side (issue #613); may exceed loaded `resultCount`. */
+  totalCount?: number | null;
+  hasMore?: boolean;
 }): string {
   const q = opts.query.trim();
   if (opts.loading) return 'Searching the compendium…';
@@ -102,13 +112,20 @@ export function compendiumResultsStatus(opts: {
     }
     return 'No entries in this rule system.';
   }
-  const noun = opts.resultCount === 1 ? 'result' : 'results';
+  const loaded = opts.resultCount;
+  const total = opts.totalCount != null && opts.totalCount > loaded ? opts.totalCount : null;
+  const noun = loaded === 1 ? 'result' : 'results';
+  const countPart =
+    total != null
+      ? `Showing ${loaded} of ${total} ${total === 1 ? 'result' : 'results'}`
+      : `${loaded} ${noun}`;
+  const more = opts.hasMore ? ' More available.' : '';
   if (q && opts.typeKey !== 'all') {
-    return `${opts.resultCount} ${noun} for “${q}” in ${opts.typeLabel}.`;
+    return `${countPart} for “${q}” in ${opts.typeLabel}.${more}`;
   }
-  if (q) return `${opts.resultCount} ${noun} for “${q}”.`;
+  if (q) return `${countPart} for “${q}”.${more}`;
   if (opts.typeKey !== 'all') {
-    return `${opts.resultCount} ${noun} in ${opts.typeLabel}.`;
+    return `${countPart} in ${opts.typeLabel}.${more}`;
   }
-  return `${opts.resultCount} ${noun}.`;
+  return `${countPart}.${more}`;
 }
