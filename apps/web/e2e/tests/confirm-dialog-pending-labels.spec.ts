@@ -68,7 +68,8 @@ async function expectBusyConfirm(
   release();
   await expect(dialog).not.toHaveAttribute('aria-busy', 'true');
   await expect(dialog.getByRole('button', { name: idleLabel, exact: true })).toBeEnabled();
-  await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveText('');
+  // Live region unmounts when empty so SRs don't announce a blank status.
+  await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveCount(0);
 }
 
 test.describe('confirm dialog pending labels — slow requests (issue #793)', () => {

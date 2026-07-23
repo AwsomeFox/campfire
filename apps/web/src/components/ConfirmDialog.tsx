@@ -84,9 +84,13 @@ export function ConfirmDialog({
           {title}
         </p>
         {body && <div className="dialog-body">{body}</div>}
-        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {liveStatus}
-        </span>
+        {/* Unmount when empty — clearing a mounted role=status to '' can make
+            some screen readers announce “blank”. */}
+        {liveStatus ? (
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {liveStatus}
+          </span>
+        ) : null}
         <div className="dialog-actions">
           <Btn ghost ref={cancelRef} onClick={onCancel} disabled={busy}>
             {cancelLabel}
