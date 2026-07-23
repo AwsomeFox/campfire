@@ -107,6 +107,9 @@ export const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
           // Always disable spellcheck for credentials unless the caller opts in.
           // When revealed, type="text" would otherwise let browsers enable it.
           spellCheck={passwordSpellCheck(rest.spellCheck)}
+          autoCapitalize={rest.autoCapitalize ?? 'none'}
+          autoComplete={rest.autoComplete ?? 'current-password'}
+          {...({ autoCorrect: 'off' } as object)}
         />
         <button
           id={toggleId}
