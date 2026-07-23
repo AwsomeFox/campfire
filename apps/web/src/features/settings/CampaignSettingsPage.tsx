@@ -68,38 +68,41 @@ export default function CampaignSettingsPage() {
   // Deep-link support (#343 / #751): the AI-DM onboarding checklist links to specific
   // controls by hash (e.g. #ai-dm-provider, #ai-dm-budget). React Router doesn't
   // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
-  // own async seat load — observe the tree until the anchor exists, then scroll once.
+  // own async seat load — retry on a short interval until the anchor exists (or 10s).
   useEffect(() => {
     if (!campaign || !location.hash) return;
-    const id = decodeLocationHashId(location.hash);
-    let observer: MutationObserver | null = null;
+    const hashId = decodeLocationHashId(location.hash);
     let frame = 0;
+    let interval = 0;
     let timeout = 0;
 
     const scrollToAnchor = () => {
-      const el = document.getElementById(id);
+      const el = document.getElementById(hashId);
       if (!el) return false;
+      if (interval) window.clearInterval(interval);
+      if (timeout) window.clearTimeout(timeout);
+      interval = 0;
+      timeout = 0;
       frame = window.requestAnimationFrame(() => {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
-      observer?.disconnect();
-      if (timeout) window.clearTimeout(timeout);
       return true;
     };
 
     if (!scrollToAnchor()) {
-      observer = new MutationObserver(() => {
+      // Bounded polling avoids a subtree MutationObserver on #root, which would
+      // re-run on every interactive DOM change while waiting for AiDmCard.
+      interval = window.setInterval(() => {
         void scrollToAnchor();
-      });
-      observer.observe(document.getElementById('root') ?? document.body, {
-        childList: true,
-        subtree: true,
-      });
-      timeout = window.setTimeout(() => observer?.disconnect(), 10_000);
+      }, 50);
+      timeout = window.setTimeout(() => {
+        if (interval) window.clearInterval(interval);
+        interval = 0;
+      }, 10_000);
     }
 
     return () => {
-      observer?.disconnect();
+      if (interval) window.clearInterval(interval);
       if (timeout) window.clearTimeout(timeout);
       if (frame) window.cancelAnimationFrame(frame);
     };

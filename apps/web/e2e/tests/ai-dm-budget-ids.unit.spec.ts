@@ -5,8 +5,9 @@
  * anchor. The token-budget <input> needs its own id so <label htmlFor> and
  * document.getElementById(hash) stay unambiguous.
  *
- * Pure unit coverage (no seeded server): pins the exported ids and scans the
- * AiDmCard source so a second `id="ai-dm-budget"` cannot slip back in.
+ * Pure unit coverage via pw-unit (no seeded server / browser matrix): pins the
+ * dedicated ids module and checks AiDmCard wires those constants — runtime DOM
+ * uniqueness stays in the companion e2e spec.
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -14,9 +15,10 @@ import { resolve } from 'node:path';
 import {
   AI_DM_BUDGET_INPUT_ID,
   AI_DM_BUDGET_SECTION_ID,
-} from '../../src/features/settings/AiDmCard';
+} from '../../src/features/settings/aiDmBudgetIds';
 import { decodeLocationHashId } from '../../src/lib/decodeLocationHashId';
 
+const IDS_MODULE = resolve(__dirname, '../../src/features/settings/aiDmBudgetIds.ts');
 const AI_DM_CARD = resolve(__dirname, '../../src/features/settings/AiDmCard.tsx');
 
 test.describe('AI DM budget DOM ids (#751)', () => {
@@ -26,22 +28,22 @@ test.describe('AI DM budget DOM ids (#751)', () => {
     expect(AI_DM_BUDGET_SECTION_ID).not.toBe(AI_DM_BUDGET_INPUT_ID);
   });
 
-  test('AiDmCard source never assigns ai-dm-budget to more than one id=', () => {
+  test('ids module owns each string literal once', () => {
+    const src = readFileSync(IDS_MODULE, 'utf8');
+    expect(src.match(/=\s*['"]ai-dm-budget['"]/g)?.length ?? 0).toBe(1);
+    expect(src.match(/=\s*['"]ai-dm-budget-input['"]/g)?.length ?? 0).toBe(1);
+  });
+
+  test('AiDmCard wires shared constants (no duplicate string ids)', () => {
     const src = readFileSync(AI_DM_CARD, 'utf8');
-    // Match both id="…" literals and id={CONST} after inlining the section constant.
-    const sectionLiteralMatches = src.match(/id=["']ai-dm-budget["']/g) ?? [];
-    const inputLiteralMatches = src.match(/id=["']ai-dm-budget-input["']/g) ?? [];
-    // Section + input must be referenced via the distinct exported constants
-    // (regex keeps the check stable across harmless JSX whitespace/formatting).
+    expect(src).toMatch(/from\s+['"]\.\/aiDmBudgetIds['"]/);
     expect(src).toMatch(/id\s*=\s*\{\s*AI_DM_BUDGET_SECTION_ID\s*\}/);
     expect(src).toMatch(/id\s*=\s*\{\s*AI_DM_BUDGET_INPUT_ID\s*\}/);
     expect(src).toMatch(/htmlFor\s*=\s*\{\s*AI_DM_BUDGET_INPUT_ID\s*\}/);
-    // No leftover duplicate string ids.
-    expect(sectionLiteralMatches).toHaveLength(0);
-    expect(inputLiteralMatches).toHaveLength(0);
-    // And the two constant values themselves stay unique in the file.
-    expect(src.match(/=\s*['"]ai-dm-budget['"]/g)?.length ?? 0).toBe(1);
-    expect(src.match(/=\s*['"]ai-dm-budget-input['"]/g)?.length ?? 0).toBe(1);
+    expect(src.match(/id=["']ai-dm-budget["']/g) ?? []).toHaveLength(0);
+    expect(src.match(/id=["']ai-dm-budget-input["']/g) ?? []).toHaveLength(0);
+    expect(src.match(/=\s*['"]ai-dm-budget['"]/g) ?? []).toHaveLength(0);
+    expect(src.match(/=\s*['"]ai-dm-budget-input['"]/g) ?? []).toHaveLength(0);
   });
 
   test('decodeLocationHashId falls back when percent-encoding is malformed', () => {

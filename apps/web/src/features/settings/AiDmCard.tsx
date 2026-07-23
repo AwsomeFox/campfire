@@ -16,7 +16,10 @@
 import { useEffect, useState } from 'react';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
+
+export { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 
 export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
@@ -40,11 +43,6 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
 
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
-
-/** Deep-link hash for the Budget & usage section (onboarding checklist / gate CTAs). */
-export const AI_DM_BUDGET_SECTION_ID = 'ai-dm-budget';
-/** Distinct control id for the token-budget input — must not collide with the section anchor (#751). */
-export const AI_DM_BUDGET_INPUT_ID = 'ai-dm-budget-input';
 
 export default function AiDmCard({ campaignId }: { campaignId: number }) {
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
