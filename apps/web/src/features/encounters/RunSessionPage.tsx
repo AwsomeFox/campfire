@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -84,6 +84,14 @@ import {
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
 import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
+import {
+  armMapPingTap,
+  decideMapPingTapRelease,
+  isMapPingKeyboardActivation,
+  mapPingTapExceededSlop,
+  MAP_PING_KEYBOARD_POINT,
+  type MapPingTapArm,
+} from './mapPingTap';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -1678,11 +1686,12 @@ function aoePolygonPoints(
  *    the server additionally withholds token positions in the dark (redaction-safe),
  *  - shared circle/cone/line AoE templates (issue #238) persisted on the encounter so every
  *    client sees the same shapes (the old circle was client-local),
- *  - transient click-to-ping markers broadcast to the whole table over SSE (issue #238).
+ *  - transient tap-to-ping markers broadcast to the whole table over SSE (issue #238 / #809).
  * Grid config, fog, and AoE are DM-only PATCHes to the encounter; every change rides the existing
  * SSE `encounter.updated` signal so other clients update live (the poll is the backstop). Pings
- * ride a dedicated one-shot `encounter.ping` signal. DM may move any token; a player only their
- * own character's (canMoveToken), but any member may ping.
+ * ride a dedicated one-shot `encounter.ping` signal and publish only after a completed tap
+ * (matching pointer-up inside slop + time), never on touch-down. DM may move any token; a player
+ * only their own character's (canMoveToken), but any member may ping.
  */
 function BattleMap({
   encounter,
@@ -1720,7 +1729,8 @@ function BattleMap({
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
     | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
-    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint };
+    | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm };
 
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -1752,6 +1762,8 @@ function BattleMap({
       setAoeDrag(null);
     } else if (kind === 'fog') {
       setRevealCorners(null);
+    } else if (kind === 'ping') {
+      // Armed ping has no live preview — publish is deferred until a completed tap.
     } else {
       setRuler(null);
     }
@@ -1883,13 +1895,34 @@ function BattleMap({
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
-    if (!e.isPrimary || activeGestureRef.current) return;
+    // A palm / secondary contact cannot arm a ping, and if a ping is already armed it cancels
+    // that gesture so the interrupted primary never publishes (issue #809).
+    if (!e.isPrimary) {
+      const armed = activeGestureRef.current;
+      if (armed?.kind === 'ping') cancelActiveGesture(armed.pointerId);
+      return;
+    }
+    if (activeGestureRef.current) return;
     // Letterbox bands are inert — do not start ping/measure/reveal/deselect there (#464).
     const pct = pointerToPercent(e);
     if (!pct) return;
     if (tool === 'ping') {
-      // A ping is a one-shot gesture — broadcast immediately on press, no drag.
-      onPing(pct.x, pct.y);
+      // Arm on press; publish only from a matching completed tap (pointer-up inside slop/time).
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = {
+        kind: 'ping',
+        pointerId: e.pointerId,
+        captureTarget: e.currentTarget,
+        arm: armMapPingTap({
+          pointerId: e.pointerId,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          startedAt: performance.now(),
+          x: pct.x,
+          y: pct.y,
+        }),
+      };
       return;
     }
     if (tool === 'measure' && canMeasure) {
@@ -1911,6 +1944,13 @@ function BattleMap({
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    if (gesture.kind === 'ping') {
+      // Drag-away past tap slop cancels immediately — no publish on the eventual release.
+      if (mapPingTapExceededSlop(gesture.arm, e.clientX, e.clientY)) {
+        cancelActiveGesture(gesture.pointerId);
+      }
+      return;
+    }
     // Keep an in-flight gesture alive across the letterbox by clamping to the map edge.
     const pct = pointerToPercent(e, true);
     if (!pct) return;
@@ -1950,6 +1990,16 @@ function BattleMap({
     // gesture classes clear their transient overrides before invoking their mutation callbacks.
     if (gesture.kind !== 'measure') clearGesturePreview(gesture.kind);
 
+    if (gesture.kind === 'ping') {
+      const decision = decideMapPingTapRelease(gesture.arm, {
+        pointerId: e.pointerId,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        nowMs: performance.now(),
+      });
+      if (decision.action === 'publish') onPing(decision.x, decision.y);
+      return;
+    }
     if (gesture.kind === 'token') {
       const raw = finalPoint ?? gesture.point;
       if (raw) {
@@ -1975,6 +2025,14 @@ function BattleMap({
     // A ruler stays on screen after release so the readout can be read; it clears when the
     // next measurement starts, the tool changes, or move mode is re-entered.
     setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
+  }
+
+  function onPingKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (tool !== 'ping' || !isMapPingKeyboardActivation(e)) return;
+    e.preventDefault();
+    // Discrete keyboard activation never shares ownership with an armed pointer tap.
+    if (activeGestureRef.current) return;
+    onPing(MAP_PING_KEYBOARD_POINT.x, MAP_PING_KEYBOARD_POINT.y);
   }
 
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
@@ -2041,6 +2099,8 @@ function BattleMap({
   );
 
   function changeTool(next: MapTool) {
+    // Leaving a mode drops any armed/incomplete gesture (including an unfinished ping tap).
+    cancelActiveGesture();
     setTool(next);
     setRuler(null);
     setRevealCorners(null);
@@ -2102,7 +2162,7 @@ function BattleMap({
           <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
-            {modeBtn('ping', 'Ping', false, 'Click the map to ping a spot for everyone')}
+            {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
             {isDm && canAoe && (
               <>
@@ -2263,6 +2323,9 @@ function BattleMap({
             ref={surfaceRef}
             data-testid="battle-map-surface"
             className="relative overflow-hidden"
+            role={tool === 'ping' ? 'button' : undefined}
+            tabIndex={tool === 'ping' ? 0 : undefined}
+            aria-label={tool === 'ping' ? 'Ping the map center for everyone' : undefined}
             style={{
               margin: '8px 14px',
               aspectRatio: '16 / 9',
@@ -2274,6 +2337,7 @@ function BattleMap({
             onPointerUp={onSurfacePointerUp}
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
+            onKeyDown={tool === 'ping' ? onPingKeyDown : undefined}
           >
             <img
               src={mapImageUrl}
@@ -2607,7 +2671,7 @@ function BattleMap({
               : tool === 'reveal'
                 ? 'Click-drag to reveal a region of the map to players.'
                 : tool === 'ping'
-                  ? 'Click anywhere on the map to ping that spot for everyone.'
+                  ? 'Tap a spot on the map to ping it for everyone. Keyboard: focus the map and press Enter or Space to ping the center.'
                   : isDm
                     ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit.'
                     : 'Drag your own token to move it.'}
