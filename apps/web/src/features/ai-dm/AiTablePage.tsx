@@ -242,7 +242,17 @@ export default function AiTablePage() {
       },
       onReconnect: () => {
         if (campaignId === undefined) return;
-        // Caught up after a drop: refetch the session + the live surfaces we may have missed.
+        // Transport drop healed — refetch session + live surfaces we may have missed.
+        setStreaming(false);
+        invalidateAiDm(queryClient, campaignId);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+      },
+      // Parser recovery keeps the connection; still refetch skipped stream state.
+      onStreamRecovery: () => {
+        if (campaignId === undefined) return;
         setStreaming(false);
         invalidateAiDm(queryClient, campaignId);
         void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });

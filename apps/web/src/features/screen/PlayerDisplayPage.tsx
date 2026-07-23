@@ -211,6 +211,7 @@ export default function PlayerDisplayPage() {
     onEvent: useCallback(() => void load(), [load]),
     onReconnect: useCallback(() => void load(), [load]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
+    onStreamRecovery: useCallback(() => void load(), [load]),
   });
 
   const syncState = playerDisplaySyncState({ staleIdentity, displayStale, eventStatus });
