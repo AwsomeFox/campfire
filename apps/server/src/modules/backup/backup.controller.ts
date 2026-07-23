@@ -48,6 +48,22 @@ export class BackupController {
       .end(buffer);
   }
 
+  @Post('inspect')
+  @HttpCode(200)
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Inspect a backup archive (non-destructive)',
+    description:
+      'Server-admin only. Parses manifest.json and lists upload paths without restoring or modifying the live server.',
+  })
+  @ApiResponse({ status: 200, description: 'Manifest metadata and upload listing.' })
+  @ApiResponse({ status: 400, description: 'Malformed or invalid archive.' })
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RESTORE_BYTES } }))
+  async inspect(@UploadedFile() file: MulterFile | undefined) {
+    if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
+    return this.backup.inspect(file.buffer);
+  }
+
   @Post('restore')
   @HttpCode(200)
   @ApiConsumes('multipart/form-data')

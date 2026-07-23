@@ -34,6 +34,34 @@ server-admin session or API token):
   untouched, and the whole thing is gated behind server-admin plus the explicit
   `confirm` token so it can't fire by accident.
 
+- **`POST /api/v1/backup/inspect`** — multipart upload with the archive as field
+  `file`. **Non-destructive**: parses `manifest.json` and lists upload paths so
+  you can verify app version, schema revision, format version, creation time, and
+  contents before restoring.
+
+### Backup manifest compatibility
+
+Each archive includes a `manifest.json` with:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | **Format version** — how the zip is laid out and how fields are interpreted (integer, bumped only when the archive shape changes). |
+| `appVersion` | Campfire app semver that produced the backup. |
+| `schemaVersion` | Number of recorded DB migrations at backup time (a coarse schema revision). |
+| `createdAt` | ISO timestamp when the archive was built. |
+
+**Restore policy:**
+
+- The server accepts any format version it knows how to **migrate** forward to the
+  current layout (today: format `1`, and legacy archives with no `version` field are
+  treated as format `0` and migrated).
+- If `version` is **newer** than this server understands, restore fails with `400`
+  **before** the live database or uploads are touched. When the archive includes
+  `minCampfireVersion`, the error tells you the minimum Campfire release required.
+- Format version is independent of DB schema migrations: upgrading Campfire still runs
+  in-place migrations on boot after a restore, but you cannot restore a backup whose
+  manifest format is from a newer Campfire build until you upgrade the app.
+
 Example — download an archive with an API token:
 
 ```bash
