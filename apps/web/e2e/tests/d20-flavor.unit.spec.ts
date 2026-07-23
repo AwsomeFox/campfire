@@ -17,9 +17,9 @@ const WEB_ROOT = resolve(__dirname, '../..');
  *
  * The log used to gate on `/\bd20\b/`, which misses `1d20+5` (digit before `d`
  * is a word char). The shared helper matches `d20` with a negative lookahead
- * (excluding `d200`) and bases advantage/disadvantage flavour on KEPT dice only.
+ * (excluding `d200`) and bases advantage/disadvantage flavor on KEPT dice only.
  *
- * These specs pin the pure flavour + visual/SR announcement contract without a
+ * These specs pin the pure flavor + visual/SR announcement contract without a
  * browser; SharedDiceLog / useRoller / RollResultBanner all consume this module.
  */
 
@@ -179,7 +179,33 @@ test.describe('d20Flavor — keep-high / keep-low (issue #745)', () => {
     ).toBeNull();
   });
 
-  
+  test('pooled 2d20+5 does not crit/fumble on any face', () => {
+    expect(
+      d20Flavor(
+        roll({
+          expr: '2d20+5',
+          rolls: [20, 7],
+          terms: [
+            { term: '2d20', value: 27, rolls: [20, 7] },
+            { term: '+5', value: 5 },
+          ],
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      d20Flavor(
+        roll({
+          expr: '2d20+5',
+          rolls: [1, 14],
+          terms: [
+            { term: '2d20', value: 15, rolls: [1, 14] },
+            { term: '+5', value: 5 },
+          ],
+        }),
+      ),
+    ).toBeNull();
+  });
+
   test('compound terms with a leading +d20 still crit/fumble', () => {
     expect(
       d20Flavor(
