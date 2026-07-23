@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
+import { eq } from 'drizzle-orm';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { attachments } from '../src/db/schema';
 
 /**
  * Issue #733 — Attachment diagnostics: validate canonical owner, path, extension,
@@ -268,6 +271,46 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       expect(found.size).toBe(0);
       expect(found.checksum).toBe('');
     });
+
+    it('also flags "missing" for a row whose canonical file is absent, even if a misplaced copy exists elsewhere', async () => {
+      // Regression test for the fix where `seenOnDisk` was set for *any* file
+      // matching the id, even one in the wrong campaign dir. That masked the
+      // "missing" classification for rows whose canonical path had no file,
+      // even though the "missing" detail explicitly says "no file on disk at
+      // expected path". `seenOnDisk` is now only set when the file is at the
+      // canonical dir + extension, so "missing" and "misplaced" are reported
+      // together and each issue's own `detail` stays accurate.
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'missing-vs-misplaced.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+      const destDir = path.join(ctx.dataDir, 'uploads', String(campaign2Id));
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.renameSync(
+        path.join(srcDir, `${attachId}.png`),
+        path.join(destDir, `${attachId}.png`),
+      );
+
+      const res = await adminAgent.post('/api/v1/admin/attachments/diagnostics');
+      expect(res.status).toBe(201);
+
+      const missing = res.body.issues.find(
+        (i: { type: string; attachmentId: number }) => i.type === 'missing' && i.attachmentId === attachId,
+      );
+      const misplaced = res.body.issues.find(
+        (i: { type: string; attachmentId: number }) => i.type === 'misplaced' && i.attachmentId === attachId,
+      );
+      expect(misplaced).toBeDefined();
+      expect(missing).toBeDefined();
+      expect(missing.detail).toContain('no file on disk at expected path');
+
+      // Clean up: move back.
+      fs.renameSync(path.join(destDir, `${attachId}.png`), path.join(srcDir, `${attachId}.png`));
+    });
   });
 
   describe('duplicate detection', () => {
@@ -294,6 +337,37 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       const checksums = dups.map((d: { checksum: string }) => d.checksum);
       const uniqueChecksums = new Set(checksums);
       expect(uniqueChecksums.size).toBeLessThan(checksums.length);
+    });
+
+    it('reports the actual on-disk file size, not a stale DB row size', async () => {
+      const up1 = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'dup-size-1.png', contentType: 'image/png' });
+      expect(up1.status).toBe(201);
+      const up2 = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'dup-size-2.png', contentType: 'image/png' });
+      expect(up2.status).toBe(201);
+      const attachId1 = up1.body.id;
+
+      // Simulate stale/incorrect DB metadata: overwrite the stored `size` for
+      // one of the two rows so it no longer matches what's actually on disk.
+      const db = ctx.app.get<DrizzleDb>(DB);
+      await db.update(attachments).set({ size: 999_999 }).where(eq(attachments.id, attachId1));
+
+      const res = await adminAgent.post('/api/v1/admin/attachments/diagnostics');
+      expect(res.status).toBe(201);
+
+      const dupForRow1 = res.body.issues.find(
+        (i: { type: string; attachmentId: number }) => i.type === 'duplicate' && i.attachmentId === attachId1,
+      );
+      expect(dupForRow1).toBeDefined();
+      // Must reflect the real on-disk size (TINY_PNG's byte length), not the
+      // tampered DB row value of 999_999.
+      expect(dupForRow1.size).toBe(TINY_PNG.length);
+      expect(dupForRow1.size).not.toBe(999_999);
     });
   });
 
