@@ -398,6 +398,30 @@ function migrateCampaignsTableForStorageQuota(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the one-authoritative-live-fight invariant
+ * (issue #744): `campaigns.active_encounter_id` didn't exist. Plain nullable ADD
+ * COLUMN — no table rebuild needed, same shape as
+ * migrateCampaignsTableForMapAttachment above. The declared REFERENCES clause is
+ * omitted here (added only for fresh DBs via bootstrap) per the #69 convention —
+ * SQLite cannot ADD a foreign key to an existing table; the service layer's End
+ * clears the pointer, and ON DELETE SET NULL semantics are reproduced in
+ * EncountersService.remove(). Existing campaigns get NULL (no active fight),
+ * preserving the pre-migration behavior. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForActiveEncounter(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'active_encounter_id')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN active_encounter_id INTEGER');
+}
+
+/**
  * Migration for DBs created before XP tracking (issue #14): `characters.xp`
  * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
  * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
@@ -1517,13 +1541,9 @@ function migrateParticipantSupportPreferences(sqlite: Database.Database): void {
 }
 
 /**
- * Migration for issue #711: characters gain the four combat death/temp-HP fields
- * the encounter tracker has tracked since issue #57. `hp_temp`, `death_state`,
- * `death_save_successes`, `death_save_failures` are written by the encounters
- * service on /end so a dead PC stays dead on the sheet (and is skipped by the
- * next encounter's auto-add) instead of being silently resurrected.
- *
- * Plain ADD COLUMN with NOT NULL DEFAULT — no table rebuild needed, same shape
+ * Migration for DBs created before persistent death/temp-HP on character sheets
+ * (issue #711): `characters.hp_temp`, `death_state`, and death-save counters didn't
+ * exist. Plain ADD COLUMN with NOT NULL DEFAULT — no table rebuild needed, same shape
  * as migrateCharactersTableForStatus above. Existing rows read as alive (none)
  * with zero temp HP and zero death-save counters, which is correct for every
  * pre-#711 sheet (the death subsystem existed only on combatants before). Fresh
@@ -1618,6 +1638,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0054_combatants_unique_identity', run: migrateCombatantsUniqueIdentity },
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
+  { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
 
 ];
 
