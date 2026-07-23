@@ -25,6 +25,7 @@ import { attachments, auditLog, campaigns, characters, encounters } from '../../
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { FsDeletionService, type FsDeletionOutcome } from './fs-deletion.service';
+import { uploadsRoot } from './uploads-path';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
@@ -81,11 +82,6 @@ export function sniffImageMime(buffer: Buffer): string | null {
     return 'image/webp';
   }
   return null;
-}
-
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
 }
 
 function toDomain(row: typeof attachments.$inferSelect): Attachment {

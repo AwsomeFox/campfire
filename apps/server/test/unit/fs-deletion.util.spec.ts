@@ -54,4 +54,12 @@ describe('fs-deletion.util (issue #727)', () => {
     err.code = 'EBUSY';
     expect(errnoCode(err)).toBe('EBUSY');
   });
+
+  it('errnoCode returns empty when code is missing or non-primitive', () => {
+    expect(errnoCode(null)).toBe('');
+    expect(errnoCode('boom')).toBe('');
+    expect(errnoCode({ code: undefined })).toBe('');
+    expect(errnoCode({ code: { nested: true } })).toBe('');
+    expect(errnoCode({})).toBe('');
+  });
 });

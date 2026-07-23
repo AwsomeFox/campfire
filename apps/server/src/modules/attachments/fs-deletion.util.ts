@@ -4,8 +4,11 @@ export type FsRmSync = (target: string, options?: RmOptions) => void;
 export type FsExistsSync = (target: string) => boolean;
 
 export function errnoCode(err: unknown): string {
-  if (err && typeof err === 'object' && 'code' in err) {
-    return String((err as NodeJS.ErrnoException).code);
+  if (!err || typeof err !== 'object' || !('code' in err)) return '';
+  const code = (err as NodeJS.ErrnoException).code;
+  // Avoid String(undefined) → "undefined" (truthy) leaking into last_error.
+  if (typeof code === 'string' || typeof code === 'number' || typeof code === 'boolean') {
+    return String(code);
   }
   return '';
 }

@@ -374,9 +374,9 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
       {filesPendingNotice && (
         <p className="text-muted" style={{ margin: '8px 0 0', fontSize: 12.5 }}>
           {filesPendingNotice}{' '}
-          <a href="/admin/storage#fs-cleanup" style={{ color: 'var(--color-accent-400)' }}>
+          <Link to="/admin/storage#fs-cleanup" style={{ color: 'var(--color-accent-400)' }}>
             Open Storage
-          </a>
+          </Link>
         </p>
       )}
       {purgeTarget && (

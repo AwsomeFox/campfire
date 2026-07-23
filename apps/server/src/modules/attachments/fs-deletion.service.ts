@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import fs from 'node:fs';
-import { asc, count, eq } from 'drizzle-orm';
+import { asc, count, eq, inArray } from 'drizzle-orm';
 import type { AuditActorRole, FsCleanupSummary } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, fsDeletionQueue } from '../../db/schema';
@@ -15,6 +15,8 @@ import { uploadsAbsolutePath, uploadsRelativePath, uploadsRoot } from './uploads
 
 /** Max queue rows returned in GET /admin/storage fsCleanup.items (counts stay exact). */
 const FS_CLEANUP_SUMMARY_ITEMS_LIMIT = 100;
+/** Max drainable rows processed per boot/interval/manual drain pass (oldest first). */
+const FS_DRAIN_BATCH_LIMIT = 100;
 
 export type FsDeletionScope = 'attachment' | 'campaign_purge';
 export type FsDeletionQueueStatus = 'held' | 'pending' | 'failed';
@@ -172,15 +174,6 @@ export class FsDeletionService implements OnApplicationBootstrap {
     return { filesPending: true, pendingPaths };
   }
 
-  /** Convenience: reserve → caller deletes metadata → complete. Prefer split APIs for crash safety. */
-  async removeUploadPaths(
-    absolutePaths: string[],
-    ctx: FsDeletionAuditContext,
-  ): Promise<FsDeletionOutcome> {
-    const planned = await this.reserveUploadPaths(absolutePaths, ctx);
-    return this.completeReservedUploadPaths(planned, ctx);
-  }
-
   async listPendingSummary(): Promise<FsCleanupSummary> {
     const [pendingRow] = await this.db
       .select({ value: count() })
@@ -229,12 +222,15 @@ export class FsDeletionService implements OnApplicationBootstrap {
   private async runDrain(trigger: 'boot' | 'interval' | 'manual'): Promise<number> {
     await this.reconcileHeldRows();
 
-    const rows = await this.db.select().from(fsDeletionQueue);
+    // Bounded oldest-first batch so a broken volume cannot make every drain a full-table scan.
+    const rows = await this.db
+      .select()
+      .from(fsDeletionQueue)
+      .where(inArray(fsDeletionQueue.status, ['pending', 'failed']))
+      .orderBy(asc(fsDeletionQueue.createdAt), asc(fsDeletionQueue.id))
+      .limit(FS_DRAIN_BATCH_LIMIT);
     let cleared = 0;
     for (const row of rows) {
-      // `held` means metadata deletion has not committed — never erase live bytes.
-      if (row.status === 'held') continue;
-
       let abs: string;
       try {
         abs = uploadsAbsolutePath(row.relPath);

@@ -69,15 +69,10 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
 import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
+import { uploadsRoot } from '../attachments/uploads-path';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
-
-/** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
-}
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;

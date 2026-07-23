@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { ALLOWED_MIME_TO_EXT, GENERATED_MIME_TO_EXT } from './attachments.service';
+import { uploadsRoot } from './uploads-path';
 
 /**
  * Classification of an issue found during attachment diagnostics scan.
@@ -69,11 +70,6 @@ export interface FixResult {
   action: FixAction;
   attachmentId: number | null;
   detail: string;
-}
-
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
 }
 
 function quarantineRoot(): string {
