@@ -74,6 +74,14 @@ export class AiDmService {
    */
   private driverSessionTeardown: ((campaignId: number) => void) | null = null;
 
+  /**
+   * Per-campaign budget-spend serialization (#1058). Prevents the driver and
+   * scribe from both passing the budget gate simultaneously and making provider
+   * calls that the SQL clamp will later cap. Callers acquire before the provider
+   * call and release after metering.
+   */
+  private readonly spendLocks = new Map<number, Promise<void>>();
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -81,6 +89,27 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /**
+   * Acquire an advisory spend-lock for a campaign (#1058). Returns a release
+   * function that the caller MUST invoke after metering. This serializes
+   * provider-call + meter pairs so concurrent spenders can't both pass the
+   * budget gate before either meters.
+   */
+  async acquireSpendLock(campaignId: number): Promise<() => void> {
+    // Wait for any prior holder to release.
+    while (this.spendLocks.has(campaignId)) {
+      await this.spendLocks.get(campaignId);
+    }
+    // Plant our own lock.
+    let release!: () => void;
+    const lock = new Promise<void>((resolve) => { release = resolve; });
+    this.spendLocks.set(campaignId, lock);
+    return () => {
+      this.spendLocks.delete(campaignId);
+      release();
+    };
+  }
 
   /** Register the driver-session teardown used when the seat leaves Driver mode (#1071). */
   registerDriverSessionTeardown(fn: (campaignId: number) => void): void {
