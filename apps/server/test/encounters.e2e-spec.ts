@@ -3256,6 +3256,35 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(res.status).toBe(404);
   });
 
+  // Issue #864: CREATE must apply the same campaign-scope check PATCH already had —
+  // a foreign/missing location, quest, or session link 404s with zero partial rows.
+  it('create rejects foreign location/quest/session links with 404 and writes nothing (issue #864)', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Create Links' });
+    const otherLoc = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/locations`).set(dm).send({ name: 'Elsewhere' });
+    const otherQuest = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/quests`).set(dm).send({ title: 'Foreign' });
+    const otherSession = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/sessions`).set(dm).send({ title: 'Foreign Session' });
+
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+    expect(before.status).toBe(200);
+    const beforeCount = before.body.length;
+
+    for (const body of [
+      { name: 'Bad loc', locationId: otherLoc.body.id },
+      { name: 'Bad quest', questId: otherQuest.body.id },
+      { name: 'Bad session', sessionId: otherSession.body.id },
+      { name: 'Mixed', locationId, questId: otherQuest.body.id, sessionId },
+    ]) {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send(body);
+      expect(res.status).toBe(404);
+      // Non-enumerating: message names the kind, not whether the id exists elsewhere.
+      expect(String(res.body.message ?? res.body.error ?? '')).toMatch(/not found/i);
+    }
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+    expect(after.body.length).toBe(beforeCount);
+  });
+
   it('get_campaign_summary (REST) now includes an encounters digest', async () => {
     const server = ctx.app.getHttpServer();
     const enc = await request(server)
