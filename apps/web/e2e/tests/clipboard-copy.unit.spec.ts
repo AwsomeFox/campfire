@@ -7,6 +7,7 @@ import {
   copyFeedbackTimerArmed,
   initialCopyFeedback,
   reduceCopyFeedback,
+  selectElementText,
   writeClipboardText,
   type ClipboardEnv,
   type CopyFeedbackSnapshot,
@@ -183,5 +184,55 @@ test.describe('copy feedback reset (issue #796)', () => {
     );
     expect(feedback.status).toBe('failed');
     expect(feedback.status).not.toBe('copied');
+  });
+
+  test('text change is modeled as reset so a new URL never keeps Copied', () => {
+    // CopyControl clears feedback when `text` changes; the reducer contract for
+    // that path is `reset` (SharePanel creating a new recap link).
+    const copied = reduceCopyFeedback(initialCopyFeedback, { type: 'succeeded' });
+    expect(copied.status).toBe('copied');
+    expect(reduceCopyFeedback(copied, { type: 'reset' }).status).toBe('idle');
+  });
+});
+
+test.describe('selectElementText non-browser safety (issue #796)', () => {
+  test('null target is a no-op', () => {
+    expect(selectElementText(null)).toBe(false);
+    expect(selectElementText(undefined)).toBe(false);
+  });
+
+  test('tagName-based input detection does not throw when HTML* constructors are absent', () => {
+    // Simulates a non-browser / stripped DOM: no HTMLInputElement on globalThis.
+    const hadInput = 'HTMLInputElement' in globalThis;
+    const hadTextArea = 'HTMLTextAreaElement' in globalThis;
+    const savedInput = hadInput ? (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement : undefined;
+    const savedTextArea = hadTextArea
+      ? (globalThis as { HTMLTextAreaElement?: unknown }).HTMLTextAreaElement
+      : undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (globalThis as any).HTMLInputElement;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (globalThis as any).HTMLTextAreaElement;
+
+      const fakeInput = {
+        tagName: 'INPUT',
+        value: 'invite-link',
+        setSelectionRange(start: number, end: number) {
+          expect(start).toBe(0);
+          expect(end).toBe('invite-link'.length);
+        },
+      } as unknown as HTMLElement;
+
+      expect(() => selectElementText(fakeInput)).not.toThrow();
+      expect(selectElementText(fakeInput)).toBe(true);
+    } finally {
+      if (hadInput) {
+        (globalThis as { HTMLInputElement?: unknown }).HTMLInputElement = savedInput;
+      }
+      if (hadTextArea) {
+        (globalThis as { HTMLTextAreaElement?: unknown }).HTMLTextAreaElement = savedTextArea;
+      }
+    }
   });
 });

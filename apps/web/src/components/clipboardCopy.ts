@@ -114,24 +114,48 @@ export function copyFeedbackTimerArmed(snapshot: CopyFeedbackSnapshot): boolean 
 
 /**
  * Select the contents of an element so the user can copy manually after a
- * clipboard failure. Supports inputs/textareas (`.select()`) and arbitrary
- * elements (Selection API). Returns true when a selection was applied.
+ * clipboard failure. Supports inputs/textareas and arbitrary elements
+ * (Selection API).
+ *
+ * Uses tagName checks (not `instanceof HTMLInputElement`) so non-browser /
+ * unit-test environments where those constructors are undefined never throw.
+ * Does not move focus — callers that need selection for recovery should keep
+ * focus on the Copy control (a11y contract, invite #516).
  */
 export function selectElementText(el: HTMLElement | null | undefined): boolean {
   if (!el) return false;
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    el.focus();
-    el.select();
-    return true;
+  const tag = typeof el.tagName === 'string' ? el.tagName.toUpperCase() : '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA') {
+    const input = el as HTMLInputElement | HTMLTextAreaElement;
+    const value = typeof input.value === 'string' ? input.value : '';
+    try {
+      // setSelectionRange selects without requiring `.focus()` / `.select()`,
+      // which would steal keyboard focus from the Copy button.
+      if (typeof input.setSelectionRange === 'function') {
+        input.setSelectionRange(0, value.length);
+        return true;
+      }
+    } catch {
+      // Some input types (e.g. email/number in older engines) reject ranges.
+    }
+    if (typeof input.select === 'function') {
+      input.select();
+      return true;
+    }
+    return false;
   }
   if (typeof window === 'undefined' || typeof document === 'undefined') return false;
-  const selection = window.getSelection();
-  if (!selection) return false;
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  return true;
+  const selection = window.getSelection?.();
+  if (!selection || typeof document.createRange !== 'function') return false;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve a failure-recovery target from a ref or element id. */

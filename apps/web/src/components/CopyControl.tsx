@@ -6,6 +6,7 @@
  *   - marks success only after `writeText` resolves
  *   - on failure selects the adjacent text and announces manual-copy guidance
  *   - consistently resets "Copied!" / failure feedback after {@link COPY_FEEDBACK_MS}
+ *   - clears feedback when the copied `text` changes (stale "Copied" after URL swap)
  *
  * Pure write / feedback logic lives in `clipboardCopy.ts`; this component owns
  * the React timer, announcer, and DOM selection side effects.
@@ -82,6 +83,7 @@ export function CopyControl({
   const announce = useAnnounce();
   const [feedback, setFeedback] = useState<CopyFeedbackSnapshot>(initialCopyFeedback);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
   // Generation token so a slow write can't clobber a newer attempt's feedback.
   const generationRef = useRef(0);
 
@@ -90,6 +92,17 @@ export function CopyControl({
       if (timerRef.current != null) clearTimeout(timerRef.current);
     };
   }, []);
+
+  // When the value to copy changes (new share/invite/reset URL), drop any
+  // leftover "Copied!" so we never claim a different string was copied.
+  useEffect(() => {
+    generationRef.current += 1;
+    if (timerRef.current != null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setFeedback(initialCopyFeedback);
+  }, [text]);
 
   function armResetTimer() {
     if (timerRef.current != null) clearTimeout(timerRef.current);
@@ -110,7 +123,10 @@ export function CopyControl({
       armResetTimer();
     } else {
       setFeedback((current) => reduceCopyFeedback(current, { type: 'failed' }));
+      // Select recovery text, then restore focus to the Copy button so failure
+      // never moves keyboard focus (invite-form a11y #516 / e2e contract).
       selectElementText(resolveSelectTarget(selectRef, selectTargetId));
+      buttonRef.current?.focus({ preventScroll: true });
       announce(failureAnnouncement);
       armResetTimer();
     }
@@ -121,6 +137,7 @@ export function CopyControl({
 
   const sharedProps = {
     ...rest,
+    ref: buttonRef,
     type: 'button' as const,
     className,
     'aria-label': ariaLabel,

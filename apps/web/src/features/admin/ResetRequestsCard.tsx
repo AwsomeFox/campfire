@@ -75,7 +75,13 @@ export function ResetRequestsCard() {
         </p>
       ) : (
         <div className="space-y-2">
-          {requests.map((r) => (
+          {requests.map((r) => {
+            const approval = codes[r.id];
+            const resetUrl = approval
+              ? `${window.location.origin}/reset-password?code=${approval.code}`
+              : null;
+            const resetLinkId = `reset-link-${r.id}`;
+            return (
             <div key={r.id} className="cf-inset p-3.5 space-y-2">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div>
@@ -103,33 +109,34 @@ export function ResetRequestsCard() {
                   </Btn>
                 </div>
               </div>
-              {codes[r.id] && (
+              {approval && resetUrl && (
                 <div className="border border-amber-500/30 rounded p-2.5 space-y-1">
                   <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
-                    One-time reset code — shown once, give it to {codes[r.id].request.username} now
+                    One-time reset link — shown once, give it to {approval.request.username} now
                   </p>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <code id={`reset-code-${r.id}`} className="text-xs text-emerald-400 break-all">
-                      {codes[r.id].code}
+                    <code id={resetLinkId} className="text-xs text-emerald-400 break-all">
+                      {resetUrl}
                     </code>
                     <CopyControl
-                      text={`${window.location.origin}/reset-password?code=${codes[r.id].code}`}
-                      selectTargetId={`reset-code-${r.id}`}
+                      text={resetUrl}
+                      selectTargetId={resetLinkId}
                       label="Copy reset link"
                       ghost
                       className="!min-h-0 !py-1 text-[11px]"
                       successAnnouncement="Reset link copied to clipboard."
-                      failureAnnouncement="Copy failed. Clipboard blocked — select the code and copy it manually."
+                      failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
                     />
                   </div>
                   <p className="text-[11px] text-slate-500">
-                    Expires {new Date(codes[r.id].expiresAt).toLocaleTimeString()} · single-use · they set their own
+                    Expires {new Date(approval.expiresAt).toLocaleTimeString()} · single-use · they set their own
                     password at /reset-password.
                   </p>
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>

@@ -1931,6 +1931,9 @@ const DDB_CHARACTER_URL = (id: string) => `https://www.dndbeyond.com/characters/
  * label so they know where the sheet came from, but not the copy affordance.
  */
 function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: boolean }) {
+  // Stable DOM id for failure-recovery selection (must be above early return).
+  const sourceIdEl = useId();
+
   // Manual character (no ddbId) — honest guidance, no "soon" hand-wave.
   if (!ddbId) {
     return (
@@ -1952,7 +1955,6 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
   // (TS does not carry early-return narrowing into nested scopes reliably).
   const sourceId = ddbId;
   const isBareId = /^\d+$/.test(sourceId);
-  const sourceIdEl = `ddb-source-id-${sourceId}`;
 
   return (
     <div className="flex justify-between gap-2">
@@ -1961,21 +1963,22 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
         <span className="block">Imported from D&amp;D Beyond</span>
         <span className="block text-[11px] text-slate-500">
           One-time import — not synced.{' '}
-          {/* Hidden selectable target so a clipboard failure can still highlight the id. */}
-          <span id={sourceIdEl} className="sr-only">
-            {sourceId}
+          {/* Visible selectable target so clipboard-failure recovery highlights the id. */}
+          <span id={sourceIdEl} title="D&D Beyond character id">
+            id {sourceId}
           </span>
-          {isBareId ? (
-            <a
-              href={DDB_CHARACTER_URL(sourceId)}
-              target="_blank"
-              rel="noopener noreferrer nofollow"
-              className="underline hover:text-slate-300"
-            >
-              Source sheet ↗
-            </a>
-          ) : (
-            <span title="D&D Beyond character id">id {sourceId}</span>
+          {isBareId && (
+            <>
+              {' '}
+              <a
+                href={DDB_CHARACTER_URL(sourceId)}
+                target="_blank"
+                rel="noopener noreferrer nofollow"
+                className="underline hover:text-slate-300"
+              >
+                Source sheet ↗
+              </a>
+            </>
           )}
           {canEdit && (
             <CopyControl
