@@ -615,12 +615,16 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   // trigger, and an inert background (issue #650/#92). It runs once per mount,
   // so it stays put when the panel re-renders across the breakpoint.
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
-  // Load failures are announced by ErrorNote (role=alert). Keep the dialog
-  // description as neutral list state so screen readers don't hear the same
-  // failure twice (orchestrator review / #592).
-  const itemCountAnnouncement = markAllAnnouncement ?? (items === null
-    ? (loadError ? 'Notification list unavailable.' : 'Loading items.')
-    : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`);
+  // Stable dialog description (aria-describedby) stays on list state. Transient
+  // mark-all results go to a separate live status region so the dialog does not
+  // permanently describe itself as “All notifications marked as read.” (#592).
+  const listDescription =
+    items === null
+      ? loadError
+        ? 'Notification list unavailable.'
+        : 'Loading items.'
+      : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
+  const statusAnnouncement = markAllAnnouncement ?? listDescription;
 
   const handleMarkAllRead = useCallback(async () => {
     const ok = await markAllRead();
@@ -692,14 +696,11 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           <span className="text-sm font-semibold" style={{ fontFamily: 'var(--font-heading)' }}>
             Notifications
           </span>
-          <span
-            id={NOTIFICATIONS_COUNT_ID}
-            className="sr-only"
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-          >
-            {itemCountAnnouncement}
+          <span id={NOTIFICATIONS_COUNT_ID} className="sr-only">
+            {listDescription}
+          </span>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {statusAnnouncement}
           </span>
           <div className="flex-1" />
           {count > 0 && (

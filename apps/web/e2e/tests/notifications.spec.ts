@@ -202,6 +202,9 @@ test.describe('shared notification controller', () => {
     await expect(dialog.getByRole('status')).toHaveText('2 items.');
     await dialog.getByRole('button', { name: 'Mark all read' }).click();
     await expect(dialog.getByRole('status')).toHaveText('All notifications marked as read.');
+    // Trigger sits under inert background while the dialog is open.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
   });
 
@@ -225,6 +228,8 @@ test.describe('shared notification controller', () => {
     await expect(dialog.getByRole('status')).toHaveText('2 items.');
     await dialog.getByRole('button', { name: 'Mark all read' }).click();
     await expect(dialog.getByRole('status')).toHaveText("Couldn't mark all notifications as read.");
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
   });
 
