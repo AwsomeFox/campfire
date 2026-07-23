@@ -59,6 +59,7 @@ import {
   formatCombatLogEventSummary,
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
+import { makeActionError, type ActionErrorState } from './encounterActionError';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -497,7 +498,9 @@ export default function RunSessionPage() {
     return () => clearTimeout(timer);
   }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
 
-  const [actionError, setActionError] = useState<string | null>(null);
+  // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
+  // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
+  const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
@@ -578,6 +581,16 @@ export default function RunSessionPage() {
         : "Couldn't load this encounter."
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
+  // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
+  // poll/SSE invalidation, which must leave an actionable failure visible.
+  const refreshEncounter = useCallback(() => {
+    setActionError(null);
+    refetchEncounter();
+  }, [refetchEncounter]);
+  // Drop action errors when navigating to a different encounter.
+  useEffect(() => {
+    setActionError(null);
+  }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
   // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
@@ -684,10 +697,13 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
-  const reportError = useCallback(
-    (err: unknown) => setActionError(err instanceof ApiError ? err.message : 'That action failed.'),
-    [],
-  );
+  const reportError = useCallback((err: unknown) => {
+    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
+  }, []);
+  /** BattleMap / card rollers pass a plain string (or null to clear). */
+  const surfaceActionError = useCallback((message: string | null) => {
+    setActionError(message ? makeActionError(message) : null);
+  }, []);
 
   // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
   // These are mutually exclusive DM header actions, so one shared pending flag gating
@@ -963,18 +979,31 @@ export default function RunSessionPage() {
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
       <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/encounters`)}>
+        <Btn
+          ghost
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={() => {
+            setActionError(null);
+            navigate(`/c/${cid}/encounters`);
+          }}
+        >
           ← Back
         </Btn>
       </div>
 
       {(loadError || actionError) && (
         <ErrorNote
-          message={actionError ?? loadError ?? ''}
+          message={actionError?.message ?? loadError ?? ''}
+          context={
+            actionError
+              ? `at ${new Date(actionError.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+              : undefined
+          }
           onRetry={() => {
             setActionError(null);
             refetchEncounter();
           }}
+          onDismiss={actionError ? () => setActionError(null) : undefined}
         />
       )}
 
@@ -996,7 +1025,7 @@ export default function RunSessionPage() {
           type="button"
           className="btn btn-ghost"
           style={{ fontSize: 11.5 }}
-          onClick={refetchEncounter}
+          onClick={refreshEncounter}
           title="Refresh"
         >
           ↻ Refresh
@@ -1134,7 +1163,7 @@ export default function RunSessionPage() {
           onSetAoe={setEncounterAoe}
           onPing={sendPing}
           pings={pings}
-          onError={setActionError}
+          onError={surfaceActionError}
         />
       )}
 
@@ -1171,7 +1200,7 @@ export default function RunSessionPage() {
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
               campaignId={cid}
-              onRollError={setActionError}
+              onRollError={surfaceActionError}
               onApplyDamage={onApplyDamageRolled}
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
