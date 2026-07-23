@@ -24,6 +24,18 @@ const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
  */
 export const EXPORT_AUDIT_PAGE_SIZE = 500;
 
+/** #731: rows omitted from export vs snapshot — unit-tested for pruning/post-append semantics. */
+export function computeCampaignAuditExportTruncated(
+  total: number,
+  exported: number,
+  retainedNow: number,
+  retainedInSnapshotNow: number,
+): number {
+  const missingFromSnapshot = Math.max(0, total - exported);
+  const appendedAfterSnapshot = Math.max(0, retainedNow - retainedInSnapshotNow);
+  return missingFromSnapshot + appendedAfterSnapshot;
+}
+
 /** Metadata bundled with campaign exports so a partial audit slice never looks complete. */
 export type CampaignAuditExportMeta = {
   /** Rows retained for this campaign with id <= snapshotMaxId at capture time. */
@@ -31,9 +43,10 @@ export type CampaignAuditExportMeta = {
   /** Rows actually present in the export's `audit` array. */
   exported: number;
   /**
-   * Rows retained in the DB but omitted from this export: `total - exported` when the
-   * snapshot walk fails to collect everything, plus any rows appended after the
-   * snapshot (concurrent writes during export).
+   * Rows omitted from this export relative to what the snapshot promised:
+   * `(total - exported)` — rows at or below `cutoff.snapshotMaxId` that were not
+   * collected (e.g. retention pruning during the walk), plus any rows appended after
+   * the snapshot ceiling (`id > snapshotMaxId`, concurrent writes during export).
    */
   truncated: number;
   cutoff: {
@@ -117,9 +130,10 @@ export class AuditService implements OnApplicationBootstrap {
 
   /**
    * #731: export the full retained audit trail for a campaign from a stable snapshot.
-   * Records the max(id) ceiling first, then pages through every row with id <= that
+   * Records the max(id) ceiling first, then keyset-pages every row with id <= that
    * ceiling (newest-first, same order as GET /audit). Rows inserted after the ceiling
-   * are excluded and reflected in `meta.truncated`.
+   * are excluded from `entries` and counted in `meta.truncated` (with any snapshot
+   * rows missed because of retention pruning during the walk).
    */
   async listForCampaignExport(campaignId: number): Promise<{
     entries: Awaited<ReturnType<AuditService['listForCampaign']>>;
@@ -136,25 +150,27 @@ export class AuditService implements OnApplicationBootstrap {
     type Row = Awaited<ReturnType<AuditService['listForCampaign']>>[number];
     const entries: Row[] = [];
     if (snapshotMaxId > 0) {
-      let offset = 0;
+      let cursorBelow: number | undefined;
       while (true) {
+        const pageConditions = [eq(auditLog.campaignId, campaignId), lte(auditLog.id, snapshotMaxId)];
+        if (cursorBelow != null) pageConditions.push(lt(auditLog.id, cursorBelow));
         const page = await this.db
           .select()
           .from(auditLog)
-          .where(and(eq(auditLog.campaignId, campaignId), lte(auditLog.id, snapshotMaxId)))
+          .where(and(...pageConditions))
           .orderBy(desc(auditLog.id))
-          .limit(EXPORT_AUDIT_PAGE_SIZE)
-          .offset(offset);
+          .limit(EXPORT_AUDIT_PAGE_SIZE);
         if (!page.length) break;
         entries.push(...page);
         if (page.length < EXPORT_AUDIT_PAGE_SIZE) break;
-        offset += page.length;
+        cursorBelow = page[page.length - 1]!.id;
       }
     }
 
     const exported = entries.length;
     const retainedNow = await this.countForCampaign(campaignId);
-    const truncated = Math.max(0, retainedNow - exported);
+    const retainedInSnapshotNow = await this.countForCampaign(campaignId, snapshotMaxId);
+    const truncated = computeCampaignAuditExportTruncated(total, exported, retainedNow, retainedInSnapshotNow);
 
     const oldest = entries.length ? entries[entries.length - 1]! : null;
     return {

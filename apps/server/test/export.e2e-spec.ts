@@ -320,12 +320,12 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
     await closeTestApp(ctx);
   });
 
-  async function seedAuditRows(count: number, detailPrefix: string): Promise<void> {
+  async function seedAuditRows(count: number, detailPrefix: string, targetCampaignId = campaignId): Promise<void> {
     const base = new Date().toISOString();
     const batch: (typeof auditLog.$inferInsert)[] = [];
     for (let i = 0; i < count; i++) {
       batch.push({
-        campaignId,
+        campaignId: targetCampaignId,
         actor: 'export-dm',
         actorRole: 'dm',
         action: 'test.export.seed',
