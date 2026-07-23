@@ -473,10 +473,27 @@ export class AiDriverService {
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
-  ) {}
+  ) {
+    // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
+    this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
+  }
 
   getSession(campaignId: number): AiDmSessionState {
     return this.sessions.get(campaignId) ?? this.freshSession(campaignId);
+  }
+
+  /**
+   * Reset the in-memory driver session to fresh idle when the seat leaves Driver mode (#1071).
+   * Clears actingDm / vote / stuck / status / state (and the rest of the session snapshot) so a
+   * later re-select of Driver starts clean — not stranded behind a human_control handback.
+   * Emits a lifecycle `state` SSE so open stream clients refetch.
+   */
+  teardownSession(campaignId: number): AiDmSessionState {
+    const fresh = this.freshSession(campaignId);
+    this.sessions.set(campaignId, fresh);
+    this.lastInputs.delete(campaignId);
+    this.stream.emit({ type: 'state', campaignId, state: fresh.state });
+    return fresh;
   }
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
