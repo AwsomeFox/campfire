@@ -11,6 +11,8 @@ import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
+import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
+import { loginBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -44,7 +46,7 @@ function FlameMark() {
 }
 
 export function SignupPage() {
-  const { status, loading } = useAuthStatus();
+  const { status, phase: statusPhase, refresh: refreshStatus } = useAuthStatus();
   const { refresh } = useAuth();
   const navigate = useNavigate();
 
@@ -59,10 +61,31 @@ export function SignupPage() {
     if (error) focusAuthError(error);
   }, [error]);
 
-  if (!loading && status?.setupRequired) {
+  // Reuse the login bootstrap classifier: unknown status → recovery; fresh → setup.
+  const bootstrap = loginBootstrapSurface({
+    statusPhase,
+    setupRequired: Boolean(status?.setupRequired),
+  });
+  if (bootstrap === 'recovery') {
+    return (
+      <BootstrapRecoveryScreen
+        onRetry={() => {
+          void retryAuthBootstrap(refreshStatus, refresh);
+        }}
+      />
+    );
+  }
+  if (bootstrap === 'loading') {
+    return (
+      <div className="min-h-screen grid place-items-center p-6" aria-live="polite">
+        <p className="text-muted">Checking signup options…</p>
+      </div>
+    );
+  }
+  if (bootstrap === 'setup') {
     return <Navigate to="/setup" replace />;
   }
-  if (!loading && status && !status.signupEnabled) {
+  if (bootstrap === 'form' && status && !status.signupEnabled) {
     return <Navigate to="/login" replace />;
   }
 

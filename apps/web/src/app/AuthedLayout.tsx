@@ -2,11 +2,16 @@
  * Guards the authed subtree: redirects to /login if ready && !me, shows a
  * centered splash while the first /me fetch is in flight, and wraps children
  * in CampaignProvider so campaign-scoped nav/pages can resolve names.
+ *
+ * Bootstrap recovery (issue #801): Retry refreshes BOTH /auth/status and /me.
+ * Setup vs login is never chosen while status is unknown.
  */
 import { Navigate, Outlet, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
 import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
+import { BootstrapRecoveryScreen } from './BootstrapRecoveryScreen';
+import { authedBootstrapSurface, retryAuthBootstrap } from './authBootstrapState';
 import { GameIcon } from '../components/GameIcon';
 import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
 import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
@@ -19,24 +24,9 @@ function Splash() {
   );
 }
 
-function ConnectionErrorScreen({ onRetry }: { onRetry: () => void }) {
-  return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="card elev-sm text-center space-y-2" style={{ maxWidth: 380 }}>
-        <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="campfire" size={28} /></p>
-        <p className="font-bold text-white">Can&apos;t reach the server</p>
-        <p className="text-sm text-slate-400">Check your connection and try again.</p>
-        <button className="btn btn-primary" style={{ marginTop: 4 }} onClick={onRetry}>
-          Retry
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function AuthedLayout() {
   const { me, ready, connectionError, refresh, sessionExpired } = useAuth();
-  const { status, loading: statusLoading } = useAuthStatus();
+  const { status, phase: statusPhase, refresh: refreshStatus } = useAuthStatus();
   const location = useLocation();
   const params = useParams<{ campaignId?: string }>();
   const campaignId = parseCampaignIdParam(params.campaignId);
@@ -46,23 +36,35 @@ export function AuthedLayout() {
   // outside Layout, so campaign scope must clear here too.
   useClearAnnouncementsOnScope(me?.user.id ?? null, campaignId);
 
-  if (!ready || statusLoading) {
+  const surface = authedBootstrapSurface({
+    statusPhase,
+    setupRequired: Boolean(status?.setupRequired),
+    meReady: ready,
+    hasMe: Boolean(me),
+    connectionError,
+  });
+
+  if (surface === 'splash') {
     return <Splash />;
   }
 
-  // A cold load with the API down would otherwise land here with me=null,
-  // ready=true and bounce forever between Splash and /login on every refresh
-  // attempt. Surface a retry instead of pretending the user is logged out.
-  // Mid-session expiry is a proven 401 (not unreachable) — don't mask it here.
-  if (connectionError && !me && !sessionExpired) {
-    return <ConnectionErrorScreen onRetry={() => void refresh()} />;
+  // Mid-session expiry is a proven 401 (issue #885) — don't mask it with bootstrap
+  // recovery; send the operator to Sign in with an explanation.
+  if (surface === 'recovery' && !sessionExpired) {
+    return (
+      <BootstrapRecoveryScreen
+        onRetry={() => {
+          void retryAuthBootstrap(refreshStatus, refresh);
+        }}
+      />
+    );
   }
 
-  if (status?.setupRequired) {
+  if (surface === 'setup') {
     return <Navigate to="/setup" replace />;
   }
 
-  if (!me) {
+  if (surface === 'login' || (sessionExpired && !me)) {
     // Carry the deep link we bounced from so LoginPage can return to it after
     // sign-in (issue #148). Without this a shared `/c/1/quests/5` link lands on
     // the campaign list. `from` is a same-origin Location, validated on read.

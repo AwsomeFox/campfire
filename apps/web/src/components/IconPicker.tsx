@@ -1,9 +1,9 @@
 /**
- * IconPicker (issue #302; full-set search issue #349) — a searchable modal
- * for choosing a bundled game-icons.net entity icon. Built on the app's
- * `.dialog` primitives + the shared useDialog hook (Escape/focus-trap/
- * focus-restore), mirroring ConfirmDialog. Reusable by any entity that
- * stores an icon slug (NPCs, compendium/#305, inventory/#307).
+ * IconPicker (issue #302; full-set search issue #349; partial-library disclosure
+ * issue #847) — a searchable modal for choosing a bundled game-icons.net entity
+ * icon. Built on the app's `.dialog` primitives + the shared useDialog hook
+ * (Escape/focus-trap/focus-restore), mirroring ConfirmDialog. Reusable by any
+ * entity that stores an icon slug (NPCs, compendium/#305, inventory/#307).
  *
  * The curated ~180-icon set searches synchronously and renders instantly, no
  * different from before. On open, the picker also kicks off a dynamic import
@@ -13,11 +13,15 @@
  * query broadens the result set as the index becomes available. Each
  * rendered result tile resolves (and caches) its own svg body lazily via
  * <GameIcon>, fetching only the shard(s) actually needed for what's on
- * screen. If the index (or a shard) fails to load — e.g. offline and
- * uncached — the picker just keeps working over the curated set.
+ * screen.
+ *
+ * If the index fails to load — e.g. offline and uncached — the picker keeps
+ * offering the curated set, but discloses curated-only mode with a visible
+ * Retry that preserves the current search query (issue #847). Surface states
+ * (loading / partial / empty / complete) live in iconPickerState.ts.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Btn, TextInput } from './ui';
+import { Btn, ErrorNote, TextInput } from './ui';
 import { useDialog } from './useDialog';
 import { GameIcon } from './GameIcon';
 import {
@@ -30,6 +34,14 @@ import {
   ICON_LICENSE,
   type FullIconIndexEntry,
 } from '../lib/icons';
+import {
+  FULL_LIBRARY_FAILED_MESSAGE,
+  FULL_LIBRARY_LOADING_MESSAGE,
+  iconPickerGridEmptyMessage,
+  iconPickerSurfaceState,
+  showFullLibraryLoadingBanner,
+  showPartialLibraryBanner,
+} from './iconPickerState';
 
 /** Total tiles shown at once (curated + full-set), so a broad query can't mount thousands. */
 const RESULT_LIMIT = 240;
@@ -58,9 +70,12 @@ export function IconPicker({
   const dialogRef = useDialog<HTMLDivElement>({ onClose });
 
   // Full-set index: undefined while loading, null on failure, the array once loaded.
+  // `loadAttempt` re-runs the effect on Retry without clearing the search query.
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [fullIndex, setFullIndex] = useState<readonly FullIconIndexEntry[] | null | undefined>(undefined);
   useEffect(() => {
     let live = true;
+    setFullIndex(undefined);
     loadFullIconIndex().then(
       (entries) => live && setFullIndex(entries),
       () => live && setFullIndex(null),
@@ -68,7 +83,7 @@ export function IconPicker({
     return () => {
       live = false;
     };
-  }, []);
+  }, [loadAttempt]);
 
   const curatedResults = useMemo(() => searchIcons(query, category), [query, category]);
   const fullResults = useMemo(() => {
@@ -87,6 +102,11 @@ export function IconPicker({
     () => [...curatedResults, ...fullResults],
     [curatedResults, fullResults],
   );
+
+  const surface = iconPickerSurfaceState(fullIndex, results.length);
+  const gridEmptyMessage =
+    results.length === 0 ? iconPickerGridEmptyMessage(surface, query) : null;
+  const retryFullLibrary = () => setLoadAttempt((n) => n + 1);
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
@@ -131,9 +151,19 @@ export function IconPicker({
             ))}
           </div>
 
+          {showFullLibraryLoadingBanner(fullIndex) && (
+            <p role="status" aria-live="polite" className="text-xs text-[var(--color-neutral-500)] m-0">
+              {FULL_LIBRARY_LOADING_MESSAGE}
+            </p>
+          )}
+          {showPartialLibraryBanner(fullIndex) && (
+            <ErrorNote message={FULL_LIBRARY_FAILED_MESSAGE} onRetry={retryFullLibrary} />
+          )}
+
           <div
             className="grid gap-1.5 overflow-y-auto"
             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(56px, 1fr))', maxHeight: 320 }}
+            data-icon-picker-surface={surface}
           >
             {/* Clear affordance — sets the slug back to '' (no icon). */}
             <button
@@ -167,14 +197,9 @@ export function IconPicker({
               </button>
             ))}
 
-            {results.length === 0 && fullIndex === undefined && (
+            {gridEmptyMessage && (
               <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
-                Searching the full icon library…
-              </p>
-            )}
-            {results.length === 0 && fullIndex !== undefined && (
-              <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
-                No icons match “{query}”.
+                {gridEmptyMessage}
               </p>
             )}
           </div>
@@ -185,7 +210,6 @@ export function IconPicker({
               Credits
             </a>{' '}
             for artist attribution.
-            {fullIndex === null && ' Couldn’t load the full icon library — showing the curated set only.'}
           </p>
         </div>
         <div className="dialog-actions">

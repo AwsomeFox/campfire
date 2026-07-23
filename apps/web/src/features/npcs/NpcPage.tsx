@@ -11,7 +11,7 @@ import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
+import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
@@ -21,6 +21,13 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
+import {
+  DmPrivacyGroup,
+  LabeledField,
+  NPC_EDITOR_ID_PREFIX,
+  NPC_FIELD_NAMES,
+  labeledFieldIds,
+} from '../../components/LabeledField';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { initials } from '../../lib/avatarText';
 
@@ -73,6 +80,7 @@ export default function NpcPage() {
   const [pickingIcon, setPickingIcon] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
@@ -135,6 +143,7 @@ export default function NpcPage() {
       hidden: npc.hidden,
     });
     setSaveError(null);
+    setFieldErrors({});
   }
 
   function startEdit() {
@@ -145,7 +154,8 @@ export default function NpcPage() {
 
   // Non-DM members suggest an edit (issue #240): same form, but the fields that
   // aren't theirs to touch (DM secret, hidden) are omitted, and Save routes the
-  // change through the proposal queue.
+  // change through the proposal queue. Field ids/names stay identical in propose
+  // mode so accessible names do not drift when DM-only controls are hidden (#777).
   function startPropose() {
     fillForm();
     setProposeDone(false);
@@ -173,9 +183,14 @@ export default function NpcPage() {
   }
 
   async function save() {
-    if (!form.name.trim()) return;
+    if (!form.name.trim()) {
+      setFieldErrors({ name: 'Name is required.' });
+      document.getElementById(labeledFieldIds(NPC_EDITOR_ID_PREFIX, NPC_FIELD_NAMES.name).controlId)?.focus();
+      return;
+    }
     setSaving(true);
     setSaveError(null);
+    setFieldErrors({});
     setConflict(false);
     try {
       if (proposeMode) {
@@ -217,8 +232,11 @@ export default function NpcPage() {
         // clobber, and prompt a reload of the latest before saving again.
         setConflict(true);
         setSaveError(err.message || "This NPC changed since you opened it — reload the latest before saving so you don't erase the other edit.");
+      } else if (err instanceof ApiError) {
+        setFieldErrors(err.fieldMessages());
+        setSaveError(err.message);
       } else {
-        setSaveError(err instanceof ApiError ? err.message : "Couldn't save changes.");
+        setSaveError("Couldn't save changes.");
       }
     } finally {
       setSaving(false);
@@ -228,6 +246,7 @@ export default function NpcPage() {
   async function reloadLatest() {
     if (!npc) return;
     setSaveError(null);
+    setFieldErrors({});
     setConflict(false);
     try {
       const fresh = await api.get<Npc>(`${API}/npcs/${id}`);
@@ -467,63 +486,102 @@ export default function NpcPage() {
       )}
 
       {editing && (
-        <Card className="space-y-3">
+        <Card
+          className="space-y-3"
+          role="region"
+          aria-label={proposeMode ? 'Suggest NPC edit' : 'Edit NPC'}
+          aria-describedby={saveError ? `${NPC_EDITOR_ID_PREFIX}-form-error` : undefined}
+        >
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
               <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
             </p>
           )}
-          {saveError && <ErrorNote message={saveError} />}
+          {saveError && (
+            <div id={`${NPC_EDITOR_ID_PREFIX}-form-error`}>
+              <ErrorNote message={saveError} />
+            </div>
+          )}
           {/* Editor dropdowns are auxiliary (#697): a locations/factions outage leaves the
               dropdowns short but the rest of the form usable; retry reloads only the failed list. */}
           {locationsPanel.error && <ErrorNote message={locationsPanel.error} onRetry={locationsPanel.retry} />}
           {factionsPanel.error && <ErrorNote message={factionsPanel.error} onRetry={factionsPanel.retry} />}
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Role</label>
-              <TextInput value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Disposition</label>
-              <TextInput value={form.disposition} onChange={(e) => setForm({ ...form, disposition: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Location</label>
-              <select
-                className="cf-select"
-                value={form.locationId}
-                onChange={(e) => setForm({ ...form, locationId: e.target.value })}
-              >
-                <option value="">Unknown / none</option>
-                {locations.map((l) => (
-                  <option key={l.id} value={l.id}>
-                    {l.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Faction</label>
-              <select
-                className="cf-select"
-                value={form.factionId}
-                onChange={(e) => setForm({ ...form, factionId: e.target.value })}
-              >
-                <option value="">None</option>
-                {factions.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+            <LabeledField
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              name={NPC_FIELD_NAMES.name}
+              label="Name"
+              value={form.name}
+              onChange={(e) => {
+                setForm({ ...form, name: e.target.value });
+                setFieldErrors((current) => {
+                  if (!current.name) return current;
+                  const next = { ...current };
+                  delete next.name;
+                  return next;
+                });
+              }}
+              error={fieldErrors.name}
+              disabled={saving}
+              describedBy={saveError ? `${NPC_EDITOR_ID_PREFIX}-form-error` : undefined}
+            />
+            <LabeledField
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              name={NPC_FIELD_NAMES.role}
+              label="Role"
+              value={form.role}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}
+              error={fieldErrors.role}
+              disabled={saving}
+            />
+            <LabeledField
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              name={NPC_FIELD_NAMES.disposition}
+              label="Disposition"
+              value={form.disposition}
+              onChange={(e) => setForm({ ...form, disposition: e.target.value })}
+              error={fieldErrors.disposition}
+              disabled={saving}
+            />
+            <LabeledField
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              name={NPC_FIELD_NAMES.locationId}
+              as="select"
+              label="Location"
+              value={form.locationId}
+              onChange={(e) => setForm({ ...form, locationId: e.target.value })}
+              error={fieldErrors.locationId}
+              disabled={saving}
+            >
+              <option value="">Unknown / none</option>
+              {locations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </LabeledField>
+            <LabeledField
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              name={NPC_FIELD_NAMES.factionId}
+              as="select"
+              label="Faction"
+              value={form.factionId}
+              onChange={(e) => setForm({ ...form, factionId: e.target.value })}
+              error={fieldErrors.factionId}
+              disabled={saving}
+            >
+              <option value="">None</option>
+              {factions.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </LabeledField>
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Icon</label>
+          <div className="space-y-1" role="group" aria-labelledby={`${NPC_EDITOR_ID_PREFIX}-icon-label`}>
+            <p id={`${NPC_EDITOR_ID_PREFIX}-icon-label`} className="text-[10px] text-slate-300 font-bold uppercase tracking-wide m-0">
+              Icon
+            </p>
             <div className="flex items-center gap-3">
               <div className="h-11 w-11 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-sm text-[var(--color-neutral-400)] shrink-0 overflow-hidden">
                 <GameIcon
@@ -544,21 +602,30 @@ export default function NpcPage() {
               )}
             </div>
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-          </div>
+          <LabeledField
+            idPrefix={NPC_EDITOR_ID_PREFIX}
+            name={NPC_FIELD_NAMES.body}
+            as="textarea"
+            label="Description (markdown)"
+            value={form.body}
+            onChange={(e) => setForm({ ...form, body: e.target.value })}
+            error={fieldErrors.body}
+            disabled={saving}
+            minHeight={140}
+          />
           {!proposeMode && (
-            <>
-              <div className="space-y-1">
-                <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
-                <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-              </div>
-              <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-                <input type="checkbox" checked={form.hidden} onChange={(e) => setForm({ ...form, hidden: e.target.checked })} />
-                <span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players (whole NPC, not just the secret)</span>
-              </label>
-            </>
+            <DmPrivacyGroup
+              idPrefix={NPC_EDITOR_ID_PREFIX}
+              entityLabel="NPC"
+              dmSecret={form.dmSecret}
+              onDmSecretChange={(e) => setForm({ ...form, dmSecret: e.target.value })}
+              hidden={form.hidden}
+              onHiddenChange={(e) => setForm({ ...form, hidden: e.target.checked })}
+              dmSecretError={fieldErrors.dmSecret}
+              hiddenError={fieldErrors.hidden}
+              disabled={saving}
+              describedBy={saveError ? `${NPC_EDITOR_ID_PREFIX}-form-error` : undefined}
+            />
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (

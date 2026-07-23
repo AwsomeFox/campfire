@@ -21,6 +21,7 @@ import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { firstGrapheme } from '../../lib/avatarText';
 import {
@@ -322,7 +323,6 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const [creating, setCreating] = useState(false);
   const [reactivating, setReactivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<number | null>(null);
   const announce = useAnnounce();
   const invitesEnabled = campaign?.publicInvitesEnabled !== false;
   const canCreate = invitesEnabled && campaign?.status === 'active';
@@ -379,24 +379,6 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't revoke the invite.");
-    }
-  }
-
-  async function copy(invite: CampaignInvite) {
-    try {
-      await navigator.clipboard.writeText(inviteLinkFor(invite.code));
-      setCopiedId(invite.id);
-      // `error` is shared across create/revoke/copy for this card, so only
-      // clear it here if it's the copy-failure message we set below —
-      // otherwise a successful copy could silently dismiss an unrelated
-      // create/revoke failure that's still unresolved.
-      setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
-      announce(INVITE_COPY_SUCCESS);
-      setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
-    } catch {
-      setCopiedId((current) => (current === invite.id ? null : current));
-      announce(INVITE_COPY_FAILURE);
-      setError(INVITE_COPY_FAILURE);
     }
   }
 
@@ -547,10 +529,10 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       </button>
 
       {/* Copy failures are already announced via the polite live region
-          (`announce(INVITE_COPY_FAILURE)` in `copy()`); giving this paragraph
-          role="alert" too would announce the same message a second time,
-          assertively. Create/revoke failures have no other announcement path,
-          so they keep role="alert" here. */}
+          (CopyControl → useAnnounce); giving this paragraph role="alert" too
+          would announce the same message a second time, assertively.
+          Create/revoke failures have no other announcement path, so they keep
+          role="alert" here. */}
       {error && (
         <p
           className="text-xs text-rose-400 m-0"
@@ -586,15 +568,31 @@ function InviteCard({ campaignId }: { campaignId: number }) {
               ? ` · ${invite.maxUses - invite.useCount} of ${invite.maxUses} remaining`
               : ` · used ${invite.useCount}×`}
           </span>
-          <button
-            type="button"
+          <CopyControl
+            text={inviteLinkFor(invite.code)}
+            selectTargetId={linkFieldId}
+            label="Copy link"
+            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
+            successAnnouncement={INVITE_COPY_SUCCESS}
+            failureAnnouncement={INVITE_COPY_FAILURE}
+            // Card-level error paragraph owns the visible failure copy (and the
+            // #516 e2e assertion); skip the control's inline failure line.
+            showFailureMessage={false}
+            unstyled
             className="btn btn-primary"
             style={{ minHeight: 36 }}
-            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
-            onClick={() => copy(invite)}
-          >
-            {copiedId === invite.id ? 'Copied!' : 'Copy link'}
-          </button>
+            onResult={(outcome) => {
+              // `error` is shared across create/revoke/copy for this card, so
+              // only clear it on success if it's the copy-failure message —
+              // otherwise a successful copy could silently dismiss an unrelated
+              // create/revoke failure that's still unresolved.
+              if (outcome.ok) {
+                setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
+              } else {
+                setError(INVITE_COPY_FAILURE);
+              }
+            }}
+          />
           <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
             Revoke
           </button>
