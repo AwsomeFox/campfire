@@ -35,6 +35,11 @@ describe('jest coverageThreshold (#562)', () => {
     if (threshold === undefined) {
       throw new Error('coverageThreshold must be defined');
     }
+    const global = threshold.global;
+    expect(global).toBeDefined();
+    if (global === undefined) {
+      throw new Error('coverageThreshold.global must be defined');
+    }
     const carveOuts = [
       './src/modules/auth/',
       './src/modules/rules/',
@@ -53,7 +58,7 @@ describe('jest coverageThreshold (#562)', () => {
       expect(entry.functions).toBeGreaterThan(0);
       expect(entry.lines).toBeGreaterThan(0);
       // Carve-outs must be below the global floor (otherwise they are not carve-outs).
-      expect(entry.branches).toBeLessThan(threshold.global.branches);
+      expect(entry.branches).toBeLessThan(global.branches);
     }
   });
 });
