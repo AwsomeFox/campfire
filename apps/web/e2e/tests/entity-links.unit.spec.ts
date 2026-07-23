@@ -154,6 +154,7 @@ test.describe('source adapters', () => {
     expect(href('proposal_resolved')).toBe('/c/7/proposals');
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
+    expect(href('character_reassigned', { entityType: 'character', entityId: 11 })).toBe(expected.character);
     expect(href('recap_share_enabled')).toBe('/c/7');
     expect(href('recap_share_extended')).toBe('/c/7');
   });

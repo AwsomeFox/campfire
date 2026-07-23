@@ -120,6 +120,8 @@ function typeIcon(type: Notification['type']): string {
       return 'top-hat';
     case 'added_to_campaign':
       return 'campfire';
+    case 'character_reassigned':
+      return 'meeple';
     case 'session_scheduled':
       return 'calendar';
     case 'session_rsvp':

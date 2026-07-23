@@ -37,9 +37,13 @@ import {
   ADD_MEMBER_ROLE_LABEL,
   ADD_MEMBER_SEARCH_LABEL,
   MEMBER_CHARACTER_LINK_HELP,
+  MEMBER_CHARACTER_TRANSFER_BODY,
+  MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL,
   memberAddedAnnouncement,
   memberCharacterControlLabel,
+  memberCharacterOptionLabel,
   memberCharacterSavedAnnouncement,
+  memberCharacterTransferTitle,
   memberDisplayName,
   memberRemoveLabel,
   memberRoleControlLabel,
@@ -166,7 +170,10 @@ export default function MembersPage() {
         charactersLoading={charactersPanel.loading}
         charactersError={charactersPanel.error}
         onRetryCharacters={charactersPanel.retry}
-        onChange={load}
+        onChange={() => {
+          void load();
+          charactersPanel.retry();
+        }}
       />
 
       <Card className="space-y-3">
@@ -791,6 +798,7 @@ function MembersCard({
               key={m.id}
               campaignId={campaignId}
               member={m}
+              members={members}
               characters={characters}
               charactersLoading={charactersLoading}
               charactersUnavailable={charactersUnavailable}
@@ -811,6 +819,7 @@ function MembersCard({
 function MemberRow({
   campaignId,
   member,
+  members,
   characters,
   charactersLoading,
   charactersUnavailable,
@@ -820,6 +829,7 @@ function MemberRow({
 }: {
   campaignId: number;
   member: CampaignMember;
+  members: CampaignMember[];
   characters: Character[];
   charactersLoading: boolean;
   charactersUnavailable: boolean;
@@ -832,6 +842,11 @@ function MemberRow({
   const [savingChar, setSavingChar] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [pendingTransfer, setPendingTransfer] = useState<{
+    characterId: number;
+    characterName: string;
+    fromName: string;
+  } | null>(null);
   const name = memberDisplayName(member);
 
   async function changeRole(role: Role) {
@@ -850,21 +865,67 @@ function MemberRow({
     }
   }
 
-  async function changeCharacter(characterId: number | null) {
+  async function changeCharacter(characterId: number | null, confirmTransfer = false) {
     setSavingChar(true);
     onError(null);
     try {
-      await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { characterId });
+      await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, {
+        characterId,
+        ...(confirmTransfer ? { confirmTransfer: true } : {}),
+      });
       const linkedName = characterId != null ? characters.find((c) => c.id === characterId)?.name ?? null : null;
       announce(memberCharacterSavedAnnouncement(name, linkedName));
+      setPendingTransfer(null);
       onChange();
     } catch (err) {
+      // Server-enforced exclusive seat (issue #819): open the transfer confirm when
+      // the DM skipped the local check (stale roster) or raced another assignment.
+      if (
+        err instanceof ApiError &&
+        err.status === 409 &&
+        err.code === 'CHARACTER_SEAT_TAKEN' &&
+        characterId != null &&
+        !confirmTransfer
+      ) {
+        const char = characters.find((c) => c.id === characterId);
+        const holder = members.find((m) => m.id !== member.id && m.characterId === characterId);
+        setPendingTransfer({
+          characterId,
+          characterName: char?.name ?? `Character ${characterId}`,
+          fromName: holder ? memberDisplayName(holder) : 'another member',
+        });
+        return;
+      }
       const msg = err instanceof ApiError ? err.message : "Couldn't link character.";
       onError(msg);
       announce(msg, { assertive: true });
+      setPendingTransfer(null);
     } finally {
       setSavingChar(false);
     }
+  }
+
+  function requestCharacterChange(nextCharacterId: number | null) {
+    if (nextCharacterId == null) {
+      void changeCharacter(null);
+      return;
+    }
+    const seatHolder = members.find((m) => m.id !== member.id && m.characterId === nextCharacterId);
+    const char = characters.find((c) => c.id === nextCharacterId);
+    const ownerHolder =
+      !seatHolder && char?.ownerUserId != null && char.ownerUserId !== String(member.userId)
+        ? members.find((m) => String(m.userId) === char.ownerUserId) ?? null
+        : null;
+    const from = seatHolder ?? ownerHolder;
+    if (from || (char?.ownerUserId != null && char.ownerUserId !== String(member.userId) && !seatHolder)) {
+      setPendingTransfer({
+        characterId: nextCharacterId,
+        characterName: char?.name ?? `Character ${nextCharacterId}`,
+        fromName: from ? memberDisplayName(from) : 'another member',
+      });
+      return;
+    }
+    void changeCharacter(nextCharacterId);
   }
 
   async function remove() {
@@ -890,7 +951,8 @@ function MemberRow({
   // membership pointer is normally kept in sync, but a direct DM ownerUserId change
   // (PATCH /characters/:id) leaves it stale, which read as a contradiction (issue
   // #274): sheet says "played by Pete" while Members said "— unlinked —". Fall back
-  // to the owned character so both surfaces agree.
+  // to the owned character so both surfaces agree. Exclusive-seat assignment (#819)
+  // prevents two membership rows from claiming the same characterId.
   const linkedCharacter = characters.find((c) => c.id === member.characterId);
   const ownedCharacter = characters.find(
     (c) => c.ownerUserId != null && c.ownerUserId === String(member.userId),
@@ -930,7 +992,7 @@ function MemberRow({
         className="cf-select !min-h-0 !py-1 text-xs"
         style={{ width: 130 }}
         value={character?.id ?? ''}
-        disabled={savingChar || charactersLoading || charactersUnavailable}
+        disabled={savingChar || charactersLoading || charactersUnavailable || !!pendingTransfer}
         aria-label={memberCharacterControlLabel(name)}
         aria-describedby={characterLinkHelpId}
         title={
@@ -938,14 +1000,17 @@ function MemberRow({
             ? "Character roster didn't load — retry above before changing links."
             : MEMBER_CHARACTER_LINK_HELP
         }
-        onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
+        onChange={(e) => requestCharacterChange(e.target.value ? Number(e.target.value) : null)}
       >
         <option value="">— unlinked —</option>
-        {characters.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
+        {characters.map((c) => {
+          const holder = members.find((m) => m.id !== member.id && m.characterId === c.id);
+          return (
+            <option key={c.id} value={c.id}>
+              {memberCharacterOptionLabel(c.name, holder ? memberDisplayName(holder) : null)}
+            </option>
+          );
+        })}
       </select>
       <button
         type="button"
@@ -962,6 +1027,16 @@ function MemberRow({
           busy={removing}
           onConfirm={remove}
           onCancel={() => setConfirmingRemove(false)}
+        />
+      )}
+      {pendingTransfer && (
+        <ConfirmDialog
+          title={memberCharacterTransferTitle(pendingTransfer.characterName, pendingTransfer.fromName, name)}
+          body={MEMBER_CHARACTER_TRANSFER_BODY}
+          confirmLabel={MEMBER_CHARACTER_TRANSFER_CONFIRM_LABEL}
+          busy={savingChar}
+          onConfirm={() => void changeCharacter(pendingTransfer.characterId, true)}
+          onCancel={() => setPendingTransfer(null)}
         />
       )}
     </div>
