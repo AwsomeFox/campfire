@@ -11,6 +11,7 @@
  * Audit log kept (existing functionality, not in this design block).
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -189,7 +190,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [copyAnnouncement, setCopyAnnouncement] = useState('');
+  const announce = useAnnounce();
 
   const load = useCallback(async () => {
     try {
@@ -230,10 +231,10 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       await navigator.clipboard.writeText(inviteLinkFor(invite.code));
       setCopiedId(invite.id);
-      setCopyAnnouncement(INVITE_COPY_SUCCESS);
+      announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
-      setCopyAnnouncement(INVITE_COPY_FAILURE);
+      announce(INVITE_COPY_FAILURE);
       setError('Clipboard blocked — copy the link from the field instead.');
     }
   }
@@ -241,9 +242,6 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   return (
     <Card className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
-      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {copyAnnouncement}
-      </span>
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
           <label htmlFor={INVITE_ROLE_SELECT_ID}>Joins as</label>
