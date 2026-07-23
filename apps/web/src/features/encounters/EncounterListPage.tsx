@@ -10,7 +10,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Btn, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
   ENCOUNTER_CREATE_PREFIX,
@@ -22,6 +22,7 @@ import {
   ENCOUNTER_SESSION_HELP,
   ENCOUNTER_SESSION_LABEL,
 } from '../../components/formFieldLabels';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { GameIcon } from '../../components/GameIcon';
 import {
@@ -110,7 +111,7 @@ export default function EncounterListPage() {
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
           {encounters.map((enc) => (
-            <EncounterCard key={enc.id} campaignId={id} encounter={enc} />
+            <EncounterCard key={enc.id} campaignId={id} encounter={enc} showHidden={isDm} />
           ))}
         </div>
       )}
@@ -118,7 +119,15 @@ export default function EncounterListPage() {
   );
 }
 
-function EncounterCard({ campaignId, encounter }: { campaignId: number; encounter: Encounter }) {
+function EncounterCard({
+  campaignId,
+  encounter,
+  showHidden,
+}: {
+  campaignId: number;
+  encounter: Encounter;
+  showHidden?: boolean;
+}) {
   return (
     <Link
       to={`/c/${campaignId}/encounters/${encounter.id}`}
@@ -139,6 +148,13 @@ function EncounterCard({ campaignId, encounter }: { campaignId: number; encounte
             Round {encounter.round}
           </span>
         )}
+        {showHidden && encounter.hidden && (
+          <Chip variant="failed">
+            <span className="inline-flex items-center gap-1">
+              <GameIcon slug="sight-disabled" size={12} /> Hidden
+            </span>
+          </Chip>
+        )}
       </div>
     </Link>
   );
@@ -152,6 +168,8 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #754: Preparing encounters default to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
 
   // Optional where/why/when links (issue #126). Loaded lazily so opening the form
   // doesn't block on three list fetches — empty selects just show "— none —".
@@ -189,13 +207,15 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     setSaving(true);
     setError(null);
     try {
+      const hidden = audienceToHidden(audience);
       const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, {
         name: trimmed,
         locationId: locationId ? Number(locationId) : undefined,
         questId: questId ? Number(questId) : undefined,
         sessionId: sessionId ? Number(sessionId) : undefined,
+        hidden,
       });
-      navigate(`/c/${campaignId}/encounters/${created.id}`);
+      navigate(`/c/${campaignId}/encounters/${created.id}`, { state: { justCreatedVisible: !hidden } });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the encounter.");
       setSaving(false);
@@ -302,6 +322,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
             ))}
           </Field>
         </div>
+        <AudienceField value={audience} onChange={setAudience} entityLabel="encounter" name="encounter-audience" />
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
             Cancel

@@ -451,7 +451,8 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   });
 
   it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
-    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon' });
+    // #754: omit defaults to DM-only (no completion ping); create visible for this case.
+    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon', hidden: false });
     expect(quest.status).toBe(201);
 
     const done = await dm.post(`/api/v1/quests/${quest.body.id}/status`).send({ status: 'completed' });

@@ -56,7 +56,8 @@ describe('factions (e2e) — issue #221', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/factions`)
       .set(dm)
-      .send({ name: 'The Cult of the Deep', dmSecret: 'Fronted by the harbormaster' });
+      // #754: omit defaults to DM-only; this case tests dmSecret redaction, so create visible.
+      .send({ name: 'The Cult of the Deep', dmSecret: 'Fronted by the harbormaster', hidden: false });
     expect(createRes.status).toBe(201);
     const factionId = createRes.body.id;
 

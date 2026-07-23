@@ -196,7 +196,11 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);
 
-    const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' });
+    // #754: omit defaults to DM-only and skips the create SSE tip; pass false to observe the event.
+    const createRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Ambush', hidden: false });
     expect(createRes.status).toBe(201);
     const encounterId = createRes.body.id;
 
@@ -465,7 +469,7 @@ describe('campaign events SSE (e2e, real auth)', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .set('Cookie', adminCookie)
-      .send({ name: 'Cookie Fight' });
+      .send({ name: 'Cookie Fight', hidden: false });
     expect(createRes.status).toBe(201);
 
     const event = await conn.waitFor((e) => e.type === 'encounter.updated' && e.encounterId === createRes.body.id);
@@ -551,7 +555,7 @@ describe('campaign events SSE revocation teardown (e2e, real auth) — issue #52
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .set('Cookie', dmCookie)
-      .send({ name: 'Baseline Fight' });
+      .send({ name: 'Baseline Fight', hidden: false });
     expect(createRes.status).toBe(201);
 
     // Both members receive the normal encounter.updated tick — confirms the revocation
@@ -604,7 +608,7 @@ describe('campaign events SSE revocation teardown (e2e, real auth) — issue #52
     const nextEncounter = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .set('Cookie', dmCookie)
-      .send({ name: 'After Revoke Fight' });
+      .send({ name: 'After Revoke Fight', hidden: false });
     expect(nextEncounter.status).toBe(201);
     const stillFlowing = await bystanderConn.waitFor(
       (e) => e.type === 'encounter.updated' && e.encounterId === nextEncounter.body.id,

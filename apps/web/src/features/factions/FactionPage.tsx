@@ -15,6 +15,7 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
 import {
   DmPrivacyGroup,
@@ -215,6 +216,19 @@ export default function FactionPage() {
       </div>
 
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      {isDm && !faction.hidden && (
+        <VisibleToPlayersBar
+          onHide={async () => {
+            await api.patch(`${API}/factions/${id}`, { hidden: true });
+            setFaction({ ...faction, hidden: true });
+          }}
+          onUndoHide={async () => {
+            await api.patch(`${API}/factions/${id}`, { hidden: false });
+            setFaction({ ...faction, hidden: false });
+          }}
+        />
+      )}
 
       {!editing && (
         <>

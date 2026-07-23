@@ -1246,7 +1246,8 @@ export class CampaignsService {
             body: str(f.body),
             goals: str(f.goals),
             dmSecret: str(f.dmSecret),
-            hidden: boolOf(f.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: boolOf(f.hidden ?? true),
             reputation: intOr(f.reputation, 0),
             standing: str(f.standing, 'neutral'),
             createdAt: ts,
@@ -1311,7 +1312,8 @@ export class CampaignsService {
             factionId: factionSrc != null ? (factionMap.get(factionSrc) ?? null) : null,
             body: str(n.body),
             dmSecret: str(n.dmSecret),
-            hidden: boolOf(n.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: boolOf(n.hidden ?? true),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -1336,7 +1338,8 @@ export class CampaignsService {
             giverNpcId: giverSrc != null ? (npcMap.get(giverSrc) ?? null) : null,
             reward: str(q.reward),
             dmSecret: str(q.dmSecret),
-            hidden: boolOf(q.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: boolOf(q.hidden ?? true),
             sortOrder: intOr(q.sortOrder, 0),
             createdAt: ts,
             updatedAt: ts,
@@ -1533,6 +1536,8 @@ export class CampaignsService {
             gridUnit: typeof e.gridUnit === 'string' ? e.gridUnit : null,
             gridSnap: boolOf(e.gridSnap),
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: boolOf(e.hidden ?? true),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,
@@ -1778,7 +1783,8 @@ export class CampaignsService {
             era: str(ev.era),
             sortIndex: intOr(ev.sortIndex, 0),
             dmSecret: str(ev.dmSecret),
-            hidden: boolOf(ev.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: boolOf(ev.hidden ?? true),
             createdAt: ts,
             updatedAt: ts,
           })

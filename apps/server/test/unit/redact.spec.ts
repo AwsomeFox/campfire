@@ -1,5 +1,5 @@
 import type { Role } from '@campfire/schema';
-import { redactSecret, redactSecrets, isVisibleTo, filterHidden } from '../../src/common/redact';
+import { redactSecret, redactSecrets, isVisibleTo, filterHidden, resolveCreateHidden } from '../../src/common/redact';
 
 /**
  * Unit tests for DM-secret stripping and hidden-entity gating (issue #79).
@@ -66,5 +66,19 @@ describe('redact — isVisibleTo / filterHidden (issue #42 whole-entity secrecy)
 
   it('filterHidden keeps everything for a dm', () => {
     expect(filterHidden([hidden, shown], 'dm')).toEqual([hidden, shown]);
+  });
+});
+
+describe('redact — resolveCreateHidden (issue #754 private-by-default prep)', () => {
+  it('omitted / undefined defaults to DM-only', () => {
+    expect(resolveCreateHidden(undefined)).toBe(true);
+  });
+
+  it('explicit false is an intentional public create', () => {
+    expect(resolveCreateHidden(false)).toBe(false);
+  });
+
+  it('explicit true stays DM-only', () => {
+    expect(resolveCreateHidden(true)).toBe(true);
   });
 });

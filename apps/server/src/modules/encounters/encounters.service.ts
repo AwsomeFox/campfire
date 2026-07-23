@@ -9,7 +9,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
-import { filterHidden, isVisibleTo } from '../../common/redact';
+import { filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
@@ -1103,8 +1103,8 @@ export class EncountersService {
           locationId: input.locationId ?? null,
           questId: input.questId ?? null,
           sessionId: input.sessionId ?? null,
-          // Entity-level secrecy (issue #262): start hidden (DM prep) when requested.
-          hidden: input.hidden ?? false,
+          // Private-by-default prep (#754 / #262): omit → DM-only; pass false to reveal at create.
+          hidden: resolveCreateHidden(input.hidden),
           endedAt: null,
           createdAt: ts,
           updatedAt: ts,
@@ -1165,7 +1165,12 @@ export class EncountersService {
       detail: `${partyRows.length} party member(s) auto-added`,
     });
 
-    this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
+    // #754: a DM-only prep create must not tip players via SSE (existence leak by id).
+    // Live updates for still-hidden encounters continue to emit from later writes so
+    // multi-DM prep stays in sync; those clients refetch and 404 harmlessly if non-DM.
+    if (!encounterRow.hidden) {
+      this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
+    }
 
     return this.getWithCombatantsOrThrow(encounterRow.id, role);
   }
@@ -1386,8 +1391,8 @@ export class EncountersService {
         name,
         locationId: input.locationId ?? undefined,
         questId: input.questId ?? undefined,
-        // Default hidden (DM prep, #262) unless the caller explicitly opts out.
-        hidden: input.hidden ?? true,
+        // Default hidden (DM prep, #262/#754) unless the caller explicitly opts out.
+        hidden: resolveCreateHidden(input.hidden),
       },
       user,
       role,

@@ -42,7 +42,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/npcs`)
         .set(dm)
-        .send({ name: 'Vexley the Innkeeper', body: 'Owes the party 50 gold.', dmSecret: 'Vex is a spy for the crown.' })
+        .send({ name: 'Vexley the Innkeeper', body: 'Owes the party 50 gold.', dmSecret: 'Vex is a spy for the crown.', hidden: false })
     ).body.id;
 
     // A hidden NPC that mentions the same query in its (visible-to-DM) name.
@@ -57,7 +57,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/quests`)
         .set(dm)
-        .send({ title: 'Find the Vex ledger', body: 'Recover the innkeeper debt records.' })
+        .send({ title: 'Find the Vex ledger', body: 'Recover the innkeeper debt records.', hidden: false })
     ).body.id;
 
     hiddenQuestId = (
@@ -104,7 +104,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/factions`)
         .set(dm)
-        .send({ name: 'The Vex Cartel', kind: 'guild', body: 'A smuggling ring.' })
+        .send({ name: 'The Vex Cartel', kind: 'guild', body: 'A smuggling ring.', hidden: false })
     ).body.id;
 
     // A visible + a hidden timeline event, both matching "Vex".
@@ -112,7 +112,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/timeline`)
         .set(dm)
-        .send({ title: 'The Vex Uprising', inWorldDate: 'Year 90 DR', body: 'The cartel rose to power.' })
+        .send({ title: 'The Vex Uprising', inWorldDate: 'Year 90 DR', body: 'The cartel rose to power.', hidden: false })
     ).body.id;
     hiddenEventId = (
       await request(server)
@@ -170,6 +170,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
           questId: visibleQuestId,
           locationId: visibleLocationId,
           sessionId,
+          hidden: false,
         })
     ).body.id;
     hiddenEncounterId = (
@@ -194,7 +195,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/encounters`)
         .set(dm)
-        .send({ name: 'Dawn Patrol', questId: secretLinkedQuestId, locationId: secretLinkedLocationId })
+        .send({ name: 'Dawn Patrol', questId: secretLinkedQuestId, locationId: secretLinkedLocationId, hidden: false })
     ).body.id;
 
     scheduledSessionId = (
@@ -475,7 +476,7 @@ describe('campaign search role boundaries (e2e, real cookie sessions, issue #843
     expect((await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: users.viewer, role: 'viewer' })).status).toBe(201);
 
     visibleEncounterId = (
-      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Public Orchard Skirmish' })
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Public Orchard Skirmish', hidden: false })
     ).body.id;
     hiddenEncounterId = (
       await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Orchard Dragon', hidden: true })

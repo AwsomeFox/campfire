@@ -476,8 +476,8 @@ export const Quest = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
   // every non-DM read (list/get/summary/export) — not merely dmSecret-redacted.
-  // Default false = visible; the DM sets it true to prep future content, then
-  // "reveals" by patching it back to false.
+  // Stored default false = visible when present; CREATE paths default omitted
+  // `hidden` to DM-only (issue #754) — pass false only for an intentional public create.
   hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
   ...timestamps,
@@ -633,6 +633,7 @@ export const Npc = z.object({
   iconSlug: z.string().max(80).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
@@ -661,6 +662,7 @@ export const Faction = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42) — see Npc.hidden. A hidden faction is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   // Party standing/reputation. `reputation` is a numeric score (-100 hostile →
   // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
@@ -920,6 +922,7 @@ export const TimelineEvent = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
   // from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
@@ -3913,7 +3916,7 @@ export const EncounterCreate = z.object({
   locationId: Id.nullable().optional(),
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
-  // Entity-level secrecy (issue #262) — start an encounter hidden (DM prep). Default false.
+  // Entity-level secrecy (issue #262/#754) — omit defaults to DM-only prep; pass false to create visible.
   hidden: z.boolean().optional(),
 });
 // Edit an encounter's name, its location/quest/session links (issue #126), and/or its
