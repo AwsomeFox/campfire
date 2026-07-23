@@ -307,7 +307,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // Every property of every tool must advertise SOME concrete type — no bare `{}`.
     for (const tool of tools) {
       const props = (tool.inputSchema.properties ?? {}) as Record<string, Record<string, unknown>>;
-      for (const [name, schema] of Object.entries(props)) {
+      for (const [, schema] of Object.entries(props)) {
         const typed =
           'type' in schema || 'enum' in schema || 'const' in schema || 'anyOf' in schema || 'oneOf' in schema || 'allOf' in schema || '$ref' in schema;
         expect(typed).toBe(true);

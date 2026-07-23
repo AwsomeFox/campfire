@@ -18,13 +18,7 @@ import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } 
 import type { Attachment, AttachmentKind } from '@campfire/schema';
 import { API, ApiError } from '../lib/api';
 import { Btn } from './ui';
-import {
-  initialUploadState,
-  isPreviewUncommitted,
-  reduceUpload,
-  visiblePreview,
-  type UploadEvent,
-} from './imageUploadState';
+import { initialUploadState, isPreviewUncommitted, reduceUpload, visiblePreview } from './imageUploadState';
 
 const ACCEPTED_MIME = ['image/png', 'image/jpeg', 'image/webp'];
 const MAX_BYTES = 32 * 1024 * 1024;

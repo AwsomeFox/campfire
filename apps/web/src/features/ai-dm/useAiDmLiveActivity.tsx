@@ -111,6 +111,9 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       onReconnect: () => {
         if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
       },
+      onStreamRecovery: () => {
+        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+      },
     },
     { enabled },
   );

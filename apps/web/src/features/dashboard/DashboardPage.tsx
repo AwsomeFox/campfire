@@ -125,6 +125,10 @@ export default function DashboardPage() {
       void load();
       void refreshLiveEncounter();
     }, [load, refreshLiveEncounter]),
+    onStreamRecovery: useCallback(() => {
+      void load();
+      void refreshLiveEncounter();
+    }, [load, refreshLiveEncounter]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 

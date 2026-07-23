@@ -279,6 +279,59 @@ describe('attachments (e2e)', () => {
       expect(Buffer.compare(res.body, TINY_PNG)).toBe(0);
     });
 
+    // Issue #630: Content-Disposition must keep an ASCII filename= fallback and
+    // put Unicode in RFC 5987 filename* — never percent-encode into filename=.
+    describe('Content-Disposition filename encoding (issue #630)', () => {
+      async function uploadAndGetDisposition(filename: string): Promise<{
+        stored: string;
+        disposition: string;
+      }> {
+        const server = ctx.app.getHttpServer();
+        const up = await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/attachments`)
+          .set(dm)
+          .field('kind', 'image')
+          .attach('file', TINY_PNG, { filename, contentType: 'image/png' });
+        expect(up.status).toBe(201);
+        const get = await request(server).get(`/api/v1/attachments/${up.body.id}/file`).set(dm);
+        expect(get.status).toBe(200);
+        return { stored: up.body.filename, disposition: String(get.headers['content-disposition']) };
+      }
+
+      it('ASCII names use a plain quoted filename=', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('me.png');
+        expect(stored).toBe('me.png');
+        expect(disposition).toBe('inline; filename="me.png"');
+        expect(disposition).not.toContain('filename*');
+      });
+
+      it('quoted names escape quotes in filename=', async () => {
+        const { disposition } = await uploadAndGetDisposition('photo "quote".png');
+        expect(disposition).toBe('inline; filename="photo \\"quote\\".png"');
+      });
+
+      it('commas stay inside the quoted filename=', async () => {
+        const { disposition } = await uploadAndGetDisposition('a,b.png');
+        expect(disposition).toBe('inline; filename="a,b.png"');
+      });
+
+      it('Unicode names get ASCII fallback + UTF-8 filename*', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('файл.png');
+        expect(stored).toBe('файл.png');
+        expect(disposition).toContain('filename="____.png"');
+        expect(disposition).toContain("filename*=UTF-8''%D1%84%D0%B0%D0%B9%D0%BB.png");
+        expect(disposition).not.toMatch(/filename="%/);
+      });
+
+      it('CJK / emoji names round-trip via filename*', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('地図🎉.png');
+        expect(stored).toBe('地図🎉.png');
+        expect(disposition).toMatch(/^inline; filename="/);
+        expect(disposition).toContain("filename*=UTF-8''");
+        expect(disposition).toContain(encodeURIComponent('地図🎉.png'));
+      });
+    });
+
     it('GET on a nonexistent attachment id is 404', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/attachments/999999/file`).set(viewer);
