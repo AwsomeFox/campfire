@@ -129,6 +129,10 @@ async function openPingFixture(page: Page) {
   await page.goto(encounterUrl());
   const surface = page.getByTestId('battle-map-surface');
   await expect(surface).toBeVisible();
+  await page.waitForFunction(() => {
+    const img = document.querySelector<HTMLImageElement>('[data-testid="battle-map-surface"] img');
+    return img != null && img.complete && img.naturalWidth > 0;
+  });
   await expect.poll(async () => {
     const box = await surface.boundingBox();
     return box && box.width > 100 && box.height > 100;

@@ -153,6 +153,10 @@ async function openGestureFixture(page: Page) {
   const token = page.getByTestId(`map-token-${tokenId}`);
   const aoe = page.getByTestId(`map-aoe-${AOE_ID}`);
   await expect(surface).toBeVisible();
+  await page.waitForFunction(() => {
+    const img = document.querySelector<HTMLImageElement>('[data-testid="battle-map-surface"] img');
+    return img != null && img.complete && img.naturalWidth > 0;
+  });
   await expect.poll(async () => {
     const box = await surface.boundingBox();
     return box && box.width > 100 && box.height > 100;
