@@ -7,6 +7,7 @@ import {
   SF2E_ADAPTER_ID,
   SF2E_PACK_SLUG,
   ruleSystemAdapter,
+  resolveAbilityModifier,
   pf2eProficiencyBonus,
   pf2eLevelBasedDC,
   pf2eSimpleDC,
@@ -62,8 +63,25 @@ describe('Pf2eAdapter — ability modifier', () => {
     [12, 1],
     [18, 4],
     [20, 5],
-  ])('score %i -> modifier %i', (score, mod) => {
+  ])('character score %i -> modifier %i (score conversion stays on characters)', (score, mod) => {
     expect(Pf2eAdapter.abilityModifier(score)).toBe(mod);
+    expect(resolveAbilityModifier(Pf2eAdapter, score, 'score')).toBe(mod);
+  });
+
+  it.each([
+    [0, 0],
+    [-1, -1],
+    [3, 3],
+    [9, 9],
+    [12, 12],
+  ])('creature modifier %i is consumed as-is (no second conversion)', (mod, expected) => {
+    expect(resolveAbilityModifier(Pf2eAdapter, mod, 'modifier')).toBe(expected);
+  });
+
+  it('does not re-apply the score formula to a typical creature DEX mod (the #767 bug)', () => {
+    // DEX +3 stored as 3 must stay +3; floor((3-10)/2) = -4 was the broken rendering.
+    expect(resolveAbilityModifier(Pf2eAdapter, 3, 'modifier')).toBe(3);
+    expect(Pf2eAdapter.abilityModifier(3)).toBe(-4);
   });
 });
 
@@ -173,6 +191,15 @@ describe('Pf2eAdapter — initiative (Perception, not DEX)', () => {
     // WIS 16 -> +3; DEX is deliberately ignored (that would be the 5e rule).
     expect(Pf2eAdapter.initiativeModifier({ WIS: 16, DEX: 20 })).toBe(3);
     expect(Pf2eAdapter.initiativeModifier({ wisdom: 14 })).toBe(2);
+    expect(Pf2eAdapter.initiativeModifier({ WIS: 16 }, 'score')).toBe(3);
+  });
+
+  it('uses a creature WIS modifier as-is when representation is modifier (no double conversion)', () => {
+    // wisdom: 5 is a PF2e creature mod (+5), not a score of 5 (which would become -3).
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: 5 }, 'modifier')).toBe(5);
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: 0 }, 'modifier')).toBe(0);
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: -1 }, 'modifier')).toBe(-1);
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: 12 }, 'modifier')).toBe(12);
   });
 
   it('returns 0 when no Perception/WIS is present', () => {
@@ -208,11 +235,23 @@ describe('Pf2eAdapter — statblock mapping', () => {
     expect(mapped.size).toBe('Huge');
   });
 
-  it('surfaces ability MODS as abilityScores and folds in Perception for initiative', () => {
+  it('surfaces ability MODS as abilityScores with modifier representation and folds in Perception', () => {
     const mapped = Pf2eAdapter.mapStatblock(data);
+    expect(mapped.abilityRepresentation).toBe('modifier');
     expect(mapped.abilityScores).toEqual({ strength: 9, dexterity: 4, wisdom: 5, perception: 27 });
-    // The mapped statblock feeds initiativeModifier in the combat path — Perception wins.
-    expect(Pf2eAdapter.initiativeModifier(mapped.abilityScores)).toBe(27);
+    // Combat path passes representation so modifiers are consumed exactly once; Perception wins.
+    expect(Pf2eAdapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation)).toBe(27);
+  });
+
+  it('keeps zero / negative / positive / double-digit creature mods intact through the map', () => {
+    const mapped = Pf2eAdapter.mapStatblock({
+      level: 1,
+      abilityMods: { strength: 0, dexterity: 3, wisdom: -1, charisma: 12 },
+      perception: 4,
+    });
+    expect(mapped.abilityRepresentation).toBe('modifier');
+    expect(mapped.abilityScores).toMatchObject({ strength: 0, dexterity: 3, wisdom: -1, charisma: 12, perception: 4 });
+    expect(Pf2eAdapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation)).toBe(4);
   });
 
   it('resolves monster max HP (rounded), or null when unavailable/non-positive', () => {

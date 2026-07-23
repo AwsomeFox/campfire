@@ -358,6 +358,10 @@ textarea.input { min-height: 90px; line-height: 1.45; resize: vertical; }
 /* — dialog — */
 .dialog-backdrop {
   position: fixed; inset: 0; display: grid; place-items: center;
+  /* Above chrome / tab bar; below recovery snackbar (issue #791). */
+  z-index: var(--cf-layer-dialog, 50);
+  /* Capture hits so sticky header / tab bar cannot receive clicks underneath. */
+  pointer-events: auto;
   padding: var(--space-4);
   background: color-mix(in srgb, var(--color-neutral-900) 50%, transparent);
 }

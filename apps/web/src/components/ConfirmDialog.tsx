@@ -8,10 +8,13 @@
  * - focus trap: Tab/Shift+Tab cycle within the dialog while open
  * - Escape closes (calls onCancel), unless `busy` is true
  * - clicking the backdrop closes, unless `busy` is true
+ * - portals to `document.body` above navigation chrome (issue #791)
+ * - inert background so obscured UI is removed from focus / pointer targets
  * - busy state keeps an action-specific pending label (issue #793) and announces
  *   it once via a polite live region
  */
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Btn } from './ui';
 import { useDialog } from './useDialog';
 import { resolveBusyConfirmLabel } from './confirmDialogLabel';
@@ -49,8 +52,14 @@ export function ConfirmDialog({
   const busyLabel = resolveBusyConfirmLabel(confirmLabel, pendingLabel);
   const confirmText = busy ? busyLabel : confirmLabel;
 
-  // Escape-to-close (suppressed while busy), focus trap, and focus restore.
-  const dialogRef = useDialog<HTMLDivElement>({ onClose: onCancel, disabled: busy, autoFocus: false });
+  // Escape-to-close (suppressed while busy), focus trap, focus restore, and an
+  // inert background so mobile chrome under the portal cannot be activated.
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onCancel,
+    disabled: busy,
+    autoFocus: false,
+    inertBackground: true,
+  });
 
   // Initial focus on Cancel — the safe default for a destructive confirmation.
   useEffect(() => {
@@ -69,8 +78,10 @@ export function ConfirmDialog({
     wasBusy.current = busy;
   }, [busy, busyLabel]);
 
-  return (
-    <div className="dialog-backdrop" onClick={() => !busy && onCancel()}>
+  // Portal above #root so sticky header / tab-bar stacking contexts cannot paint
+  // over the backdrop. Nested ConfirmDialogs keep open order via DOM order.
+  return createPortal(
+    <div className="dialog-backdrop" data-overlay="dialog" onClick={() => !busy && onCancel()}>
       <div
         ref={dialogRef}
         className="dialog"
@@ -95,11 +106,14 @@ export function ConfirmDialog({
           <Btn ghost ref={cancelRef} onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </Btn>
-          <Btn danger={danger} onClick={onConfirm} busy={busy} disabled={confirmDisabled}>
+          {/* Explicit busy||confirmDisabled — Btn also ORs busy into disabled; keep
+              both so double-submit prevention stays obvious at the call site. */}
+          <Btn danger={danger} onClick={onConfirm} busy={busy} disabled={busy || confirmDisabled}>
             {confirmText}
           </Btn>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -10,8 +10,10 @@ import {
  *
  * Label resolution is a pure helper so RunSessionPage's four confirm actions
  * (and the grammatical fallback for other callers) can be pinned without a
- * browser. The companion Playwright spec holds slow network requests to assert
- * the rendered busy label, aria-busy, and one-shot live announcement.
+ * browser. Run via `pw-unit.config.ts` (no browser project matrix) — not the
+ * seeded e2e config — so this file executes once. The companion Playwright
+ * spec holds slow network requests to assert the rendered busy label,
+ * aria-busy, and one-shot live announcement.
  */
 test.describe('confirm dialog pending labels (issue #793)', () => {
   test.describe('RunSessionPage actions — explicit pendingLabel wins', () => {
@@ -63,6 +65,14 @@ test.describe('confirm dialog pending labels (issue #793)', () => {
 
     test('Move to Trash → Moving to Trash…', () => {
       expect(derivePendingLabel('Move to Trash')).toBe('Moving to Trash…');
+    });
+
+    test('Disable and revoke all → Disabling and revoking all…', () => {
+      expect(derivePendingLabel('Disable and revoke all')).toBe('Disabling and revoking all…');
+    });
+
+    test('Save or discard → Saving or discarding…', () => {
+      expect(derivePendingLabel('Save or discard')).toBe('Saving or discarding…');
     });
 
     test('already-progressive labels are left alone', () => {

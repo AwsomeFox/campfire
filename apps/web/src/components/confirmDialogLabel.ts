@@ -25,10 +25,29 @@ export function derivePendingLabel(confirmLabel: string): string {
   if (/…$/.test(label)) return label;
   if (/\.\.\.$/.test(label)) return `${label.slice(0, -3)}…`;
 
-  const [verb, ...restParts] = label.split(/\s+/);
+  // Compound imperatives: gerundify each coordinated clause so
+  // "Disable and revoke all" → "Disabling and revoking all…" (not
+  // "Disabling and revoke all…").
+  const coordinated = label.split(/(\s+(?:and|or)\s+)/i);
+  if (coordinated.length > 1) {
+    const parts = coordinated.map((part, index) => {
+      if (index % 2 === 1) return part; // keep the " and " / " or " separator
+      return gerundifyClause(part);
+    });
+    return `${parts.join('')}…`;
+  }
+
+  return `${gerundifyClause(label)}…`;
+}
+
+/** Progressive form of one imperative clause ("End encounter" → "Ending encounter"). */
+function gerundifyClause(clause: string): string {
+  const trimmed = clause.trim();
+  if (!trimmed) return trimmed;
+  const [verb, ...restParts] = trimmed.split(/\s+/);
   const rest = restParts.join(' ');
   const gerund = verbToGerund(verb);
-  return rest ? `${gerund} ${rest}…` : `${gerund}…`;
+  return rest ? `${gerund} ${rest}` : gerund;
 }
 
 /**
