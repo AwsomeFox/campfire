@@ -153,8 +153,8 @@ test.describe('shared notification controller', () => {
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     await expect(dialog.getByRole('alert')).toHaveText(/Couldn't load notifications\./);
-    await expect(dialog.getByRole('status')).toHaveText("Couldn't load notifications.");
-    await expect(dialog).toHaveAccessibleDescription("Couldn't load notifications.");
+    // Dialog description stays neutral; ErrorNote owns the failure alert (#592).
+    await expect(dialog).toHaveAccessibleDescription('Notification list unavailable.');
     await expect(dialog.getByRole('button', { name: 'Retry' })).toBeVisible();
   });
 
