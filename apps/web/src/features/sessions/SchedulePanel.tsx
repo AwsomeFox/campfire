@@ -350,6 +350,7 @@ function ScheduleItem({
             className="sr-only"
             role="status"
             aria-live="polite"
+            aria-atomic="true"
           >
             {rsvpSaving ? RSVP_SAVING_STATUS : rsvpStatusSummary(displayRsvp)}
           </span>
