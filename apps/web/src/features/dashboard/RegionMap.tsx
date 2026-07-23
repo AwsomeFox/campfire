@@ -18,6 +18,15 @@ export { clampPercentInt };
 const VIEW_W = 500;
 const VIEW_H = 260;
 
+type MapPoint = { x: number; y: number };
+/** Owning pointer for an in-flight pin drag (#808). Commit only from a matching pointerup. */
+type ActivePinDrag = {
+  pointerId: number;
+  captureTarget: Element;
+  locationId: number;
+  point: MapPoint | null;
+};
+
 // Status tones follow the app's existing chip convention (see cf-chip-* in index.css):
 // accent for "current" (matches the legend dot below), the emerald success family for
 // "explored" (same #10b981/#34d399 pairing as cf-chip-completed), and the neutral ramp
@@ -68,8 +77,13 @@ export function RegionMap({
   // Mirrors retryActionRef for render — hide Retry when there is nothing to replay.
   const [canRetry, setCanRetry] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
-  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [dragPos, setDragPos] = useState<MapPoint | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const activeDragRef = useRef<ActivePinDrag | null>(null);
+  // A successful pointerup normally causes lostpointercapture immediately afterwards. Keep the
+  // released id long enough to identify that expected notification; any earlier capture loss is
+  // an interruption and must roll the drag back without PATCHing (#808).
+  const successfulPointerUpRef = useRef<number | null>(null);
   // Last failed write so Retry re-issues that request (not a no-op clear).
   const retryActionRef = useRef<(() => Promise<unknown>) | null>(null);
   const retryInFlight = useRef(false);
@@ -101,6 +115,54 @@ export function RegionMap({
   /** Bumped on cancel/escape so in-flight saveKbMove ignores its result. */
   const kbSaveGen = useRef(0);
   const kbSaveAbort = useRef<AbortController | null>(null);
+
+  const clearDragPreview = useCallback(() => {
+    setDraggingId(null);
+    setDragPos(null);
+  }, []);
+
+  const cancelActiveDrag = useCallback(
+    (pointerId?: number, clearPreview = true) => {
+      const drag = activeDragRef.current;
+      if (!drag || (pointerId != null && drag.pointerId !== pointerId)) return;
+
+      // Clear ownership before releasing capture because releasePointerCapture may synchronously
+      // dispatch lostpointercapture. That follow-up must observe an already-cancelled drag.
+      activeDragRef.current = null;
+      successfulPointerUpRef.current = null;
+      if (clearPreview) clearDragPreview();
+      try {
+        if (drag.captureTarget.hasPointerCapture?.(drag.pointerId)) {
+          drag.captureTarget.releasePointerCapture?.(drag.pointerId);
+        }
+      } catch {
+        // The browser may already have dropped capture while backgrounding or unmounting.
+      }
+    },
+    [clearDragPreview],
+  );
+
+  useEffect(() => {
+    const cancelWhenHidden = () => {
+      if (document.visibilityState === 'hidden') cancelActiveDrag();
+    };
+    const cancelForPageExit = () => cancelActiveDrag();
+    const cancelForRotation = () => cancelActiveDrag();
+    const orientation = globalThis.screen?.orientation;
+
+    document.addEventListener('visibilitychange', cancelWhenHidden);
+    window.addEventListener('pagehide', cancelForPageExit);
+    window.addEventListener('orientationchange', cancelForRotation);
+    orientation?.addEventListener?.('change', cancelForRotation);
+    return () => {
+      document.removeEventListener('visibilitychange', cancelWhenHidden);
+      window.removeEventListener('pagehide', cancelForPageExit);
+      window.removeEventListener('orientationchange', cancelForRotation);
+      orientation?.removeEventListener?.('change', cancelForRotation);
+      cancelActiveDrag();
+    };
+  }, [cancelActiveDrag]);
+
 
   const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
 
@@ -341,7 +403,7 @@ export function RegionMap({
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -350,31 +412,65 @@ export function RegionMap({
   }
 
   function onPinPointerDown(e: ReactPointerEvent<HTMLDivElement>, locationId: number) {
-    if (!isDm || !mapImageUrl) return;
+    // Only the primary pointer may own a drag; ignore secondary touches and nested starts (#808).
+    if (!e.isPrimary || activeDragRef.current || !isDm || !mapImageUrl) return;
     // Keyboard move panel owns this pin — ignore pointer drag so Save cannot
     // overwrite a just-dragged position with stale kbPos (or vice versa).
     if (kbMovingId != null) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const point = pointerToPercent(e);
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeDragRef.current = { pointerId: e.pointerId, captureTarget, locationId, point };
     setDraggingId(locationId);
-    setDragPos(pointerToPercent(e));
+    setDragPos(point);
   }
 
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
+    const drag = activeDragRef.current;
+    if (!e.isPrimary || !drag || drag.pointerId !== e.pointerId) return;
     const pct = pointerToPercent(e);
-    if (pct) setDragPos(pct);
+    if (!pct) return;
+    drag.point = pct;
+    setDragPos(pct);
   }
 
+  // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
+  // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
-    const pct = pointerToPercent(e) ?? dragPos;
-    const id = draggingId;
-    setDraggingId(null);
-    setDragPos(null);
+    const drag = activeDragRef.current;
+    if (!e.isPrimary || !drag || drag.pointerId !== e.pointerId) return;
+    const finalPoint = pointerToPercent(e);
+    successfulPointerUpRef.current = e.pointerId;
+    activeDragRef.current = null;
+    // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
+    // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
+    // is already cleared, so a synchronous lostpointercapture can only acknowledge this success.
+    try {
+      if (drag.captureTarget.hasPointerCapture?.(drag.pointerId)) {
+        drag.captureTarget.releasePointerCapture?.(drag.pointerId);
+      }
+    } catch {
+      // The browser may already have released capture as part of pointerup dispatch.
+    }
+    clearDragPreview();
+    const pct = finalPoint ?? drag.point;
     if (!pct) return;
-    void savePinPercent(id, pct.x, pct.y);
+    void savePinPercent(drag.locationId, pct.x, pct.y);
+  }
+
+  function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    cancelActiveDrag(e.pointerId);
+  }
+
+  function onSurfaceLostPointerCapture(e: ReactPointerEvent<HTMLDivElement>) {
+    if (successfulPointerUpRef.current === e.pointerId) {
+      successfulPointerUpRef.current = null;
+      return;
+    }
+    cancelActiveDrag(e.pointerId);
   }
 
   return (
@@ -418,10 +514,13 @@ export function RegionMap({
 
       <div
         ref={surfaceRef}
+        data-testid="region-map-surface"
         className="relative overflow-hidden h-56 md:h-64"
         style={{ margin: '8px 14px', touchAction: draggingId != null ? 'none' : undefined }}
         onPointerMove={onSurfacePointerMove}
         onPointerUp={onSurfacePointerUp}
+        onPointerCancel={onSurfacePointerCancel}
+        onLostPointerCapture={onSurfaceLostPointerCapture}
       >
         {mapImageUrl ? (
           <img src={mapImageUrl} alt="Campaign map" className="absolute inset-0 w-full h-full object-cover" />
@@ -459,6 +558,7 @@ export function RegionMap({
                     opacity: isDragging ? 0.85 : 1,
                     zIndex: isDragging || isKbMoving ? 10 : 1,
                   }}
+                  data-testid={`map-pin-${loc.id}`}
                   onPointerDown={(e) => onPinPointerDown(e, loc.id)}
                 >
                   <Link
