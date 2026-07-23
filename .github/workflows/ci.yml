@@ -3,7 +3,19 @@ name: CI
 on:
   push:
     branches: [main]
+    # Doc-only / non-code changes don't need the full build + test + browser
+    # matrix. Anything under these paths (and nothing else) short-circuits CI.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'design/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'design/**'
+      - 'LICENSE'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,9 +25,50 @@ permissions:
   contents: read
 
 jobs:
-  # Lint + typecheck gate. Root `npm run lint` runs each workspace's flat
-  # ESLint config (hard-fail; no `--if-present`). `npm run typecheck` builds
-  # schema then runs `tsc --noEmit` in every workspace.
+  # ---------------------------------------------------------------------------
+  # Build once, share everywhere. Installs deps (cached) and builds every
+  # workspace's dist a single time, then publishes schema/server/web dist as an
+  # artifact. Downstream jobs download it instead of rebuilding — this removes
+  # the ~4 redundant `npm run build` invocations the matrix + coverage + e2e
+  # jobs used to each perform.
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          # ABI-sensitive native deps (better-sqlite3, sharp) — key on the Node
+          # major so a 22.x cache is never restored onto a 24.x runner.
+          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Build (schema + server + web)
+        run: npm run build
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            packages/schema/dist
+            apps/server/dist
+            apps/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  # Lint + typecheck + version-sync gate. Independent of `build` so it fails
+  # fast. `npm run typecheck` builds schema then runs `tsc --noEmit` everywhere.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -24,40 +77,59 @@ jobs:
         with:
           node-version: '24.x'
           cache: npm
-      - run: npm ci
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
       # Issue #432: every version surface (workspace package.json, docs, and the
       # historically-hardcoded auth/MCP/OpenAPI leftovers) must agree.
       - run: npm run check:version
       - run: npm run lint
       - run: npm run typecheck
 
-  # Primary gate for PRs — DO NOT weaken. Builds schema + server + web
-  # (`npm run build`) and runs the full server suite: unit (test/unit/*.spec.ts)
-  # + e2e (test/*.e2e-spec.ts) via `npm test`.
-  build-test:
+  # Node 22 (older supported LTS) compatibility gate. Rebuilds schema + server +
+  # web on 22.x to catch version-specific compile/build breaks. The full server
+  # suite is exercised once, with coverage, in the `coverage` job on 24.x — so it
+  # is intentionally NOT re-run here (previously it ran on both 22.x and 24.x AND
+  # again under coverage: three times for the same suite).
+  build-test-22:
+    name: build-test (22.x)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22.x, 24.x]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: '22.x'
           cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
-      # PWA dist contract (manifest, service worker, icons) against apps/web/dist
-      # produced by the root `npm run build` above (schema + server + web).
-      - run: npm run test:pwa:dist -w apps/web
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-22x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Compatibility build (schema + server + web)
+        run: npm run build
 
-  # Re-runs the server unit + e2e suites with coverage instrumentation and
-  # publishes the report as a build artifact (lcov + HTML). Kept separate from
-  # build-test so the PR gate stays fast and unchanged. The schema package must
-  # be built first because the server compiles against @campfire/schema's dist.
-  coverage:
+  # Node 24 build-output gate: validates the PWA dist contract (manifest,
+  # service worker, icons) against the shared web build produced by `build`,
+  # without rebuilding.
+  build-test-24:
+    name: build-test (24.x)
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,8 +137,56 @@ jobs:
         with:
           node-version: '24.x'
           cache: npm
-      - run: npm ci
-      - run: npm run build -w packages/schema
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+      # Contract check runs against the downloaded apps/web/dist (no rebuild).
+      - run: npm run test:pwa:dist -w apps/web
+
+  # Authoritative server test gate: the full unit (test/unit/*.spec.ts) + e2e
+  # (test/*.e2e-spec.ts) suite, run exactly once, with coverage instrumentation.
+  # `test:cov` runs `nest build` internally, so it only needs the schema dist
+  # (server compiles against @campfire/schema) — supplied by the `build` artifact.
+  coverage:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          cache: npm
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
       - run: npm run test:cov
       - name: Upload coverage report
         if: always()
@@ -76,13 +196,13 @@ jobs:
           path: apps/server/coverage/
           if-no-files-found: warn
 
-  # Browser E2E (Playwright). The root `test:e2e` script builds schema + server +
-  # web and runs the Playwright suite (apps/web/e2e) against the real server
-  # serving the built SPA on one origin, with a seeded per-role backend.
-  # E2E typecheck and the Playwright run are both required gates (#574). Typecheck
-  # needs packages/schema built first (@campfire/schema types live in gitignored
-  # dist/). The browser is installed explicitly (npm ci does not fetch it).
+  # Browser E2E (Playwright). Consumes the shared schema + server + web dist and
+  # runs the suite against the real built server serving the built SPA on one
+  # origin (see apps/web/e2e/server.mjs). Uses `test:e2e:nobuild` so it does NOT
+  # rebuild — the previous job rebuilt schema explicitly AND again inside the
+  # `test:e2e` script (a double build in one job).
   e2e-web:
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,13 +210,36 @@ jobs:
         with:
           node-version: '24.x'
           cache: npm
-      - run: npm ci
-      - run: npm run build -w packages/schema
-      # Type-check Playwright sources before installing the browser / running the suite.
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+            packages/*/node_modules
+          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install
+        if: steps.modcache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: .
+      # Type-check Playwright sources before running the suite.
       - run: npm run test:e2e:typecheck -w apps/web
-      # Chromium only — the suite runs a single headless project (see playwright.config.ts).
+      # Cache the Chromium download; key on the lockfile (pins @playwright/test).
+      - name: Cache Playwright browsers
+        id: pwcache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      # Always run install so the OS deps (--with-deps) are present; on a browser
+      # cache hit the Chromium binary download itself is skipped.
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      - run: npm run test:e2e:nobuild
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,4 +247,3 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report/
           if-no-files-found: ignore
-
