@@ -23,6 +23,9 @@ export default tseslint.config(
       '@typescript-eslint/no-empty-function': 'off',
       '@typescript-eslint/no-empty-object-type': 'off',
       'no-empty': ['error', { allowEmptyCatch: true }],
+      // Conflicts with the common `let x = 0; try { x = ... } catch { continue; }`
+      // pattern (safe default + skip-on-failure). Prefer keeping the default.
+      'no-useless-assignment': 'off',
       // A handful of modules deliberately use runtime `require()` (optional/
       // conditional CJS interop with better-sqlite3 native bindings, reading
       // package.json for version info, etc.) — long predates this lint gate
