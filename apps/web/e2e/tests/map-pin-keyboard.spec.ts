@@ -77,8 +77,8 @@ test.describe('map pin keyboard positioning', () => {
       await expect(xInput).toBeVisible();
       await expect(yInput).toBeVisible();
 
-      // Focus the X input and use arrow keys
-      await xInput.focus();
+      // Move activates focus into the panel — arrows work without a manual focus call.
+      await expect(xInput).toBeFocused();
       await page.keyboard.press('ArrowRight');
       await expect(xInput).toHaveValue('51');
 
@@ -88,6 +88,156 @@ test.describe('map pin keyboard positioning', () => {
 
       await page.keyboard.press('ArrowLeft');
       await expect(xInput).toHaveValue('55');
+    });
+
+    test('Move focuses the positioning panel for immediate arrow keys', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await pinSeedLocation(page, navigation.locationId, 40, 60);
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
+      await expect(moveBtn).toBeVisible();
+      await moveBtn.click();
+
+      const xInput = mapCard.getByLabel('Horizontal position (%)');
+      await expect(xInput).toBeFocused();
+      await page.keyboard.press('ArrowUp');
+      await expect(mapCard.getByLabel('Vertical position (%)')).toHaveValue('59');
+    });
+
+    test('fractional pin seeds round to integer percents', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await pinSeedLocation(page, navigation.locationId, 42.6, 17.4);
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
+      await expect(moveBtn).toBeVisible();
+      await moveBtn.click();
+
+      const xInput = mapCard.getByLabel('Horizontal position (%)');
+      const yInput = mapCard.getByLabel('Vertical position (%)');
+      // Seeded 42.6/17.4 must open as integer percents (not fractional state).
+      await expect(xInput).toHaveValue('43');
+      await expect(yInput).toHaveValue('17');
+
+      // Arrow steps stay on the integer grid (not 43.6 → 44.6).
+      await expect(xInput).toBeFocused();
+      await xInput.press('ArrowRight');
+      await expect(xInput).toHaveValue('44');
+    });
+
+    test('coordinate inputs store rounded integers', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await pinSeedLocation(page, navigation.locationId);
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
+      await expect(moveBtn).toBeVisible();
+      await moveBtn.click();
+
+      const xInput = mapCard.getByLabel('Horizontal position (%)');
+      await xInput.fill('42.5');
+      await expect(xInput).toHaveValue('43');
+      await page.keyboard.press('ArrowRight');
+      await expect(xInput).toHaveValue('44');
+    });
+
+    test('Cancel aborts an in-flight keyboard save', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await pinSeedLocation(page, navigation.locationId, 50, 50);
+
+      let patchAttempts = 0;
+      await page.route(`**/api/v1/locations/${navigation.locationId}`, async (route) => {
+        if (route.request().method() === 'PATCH') {
+          patchAttempts += 1;
+          // Stall so Cancel can fire while Saving… is shown. Never forward to the
+          // server — AbortController should cancel the client fetch first; if the
+          // route later settles, aborting keeps mapX/mapY at the seed.
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            await route.abort('failed');
+          } catch {
+            /* request already settled by client abort */
+          }
+          return;
+        }
+        await route.continue();
+      });
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
+      await expect(moveBtn).toBeVisible();
+      await moveBtn.click();
+
+      const xInput = mapCard.getByLabel('Horizontal position (%)');
+      await expect(xInput).toBeFocused();
+      await page.keyboard.press('ArrowRight'); // 50 → 51
+      await expect(xInput).toHaveValue('51');
+
+      await mapCard.getByRole('button', { name: 'Save' }).click();
+      await expect(mapCard.getByRole('button', { name: 'Saving…' })).toBeVisible();
+      await mapCard.getByRole('button', { name: 'Cancel' }).click();
+
+      await expect(mapCard.getByLabel('Horizontal position (%)')).not.toBeVisible();
+      const announcer = mapCard.getByTestId('pin-move-announcer');
+      await expect(announcer).toContainText(/cancelled/i);
+      await expect(announcer).not.toContainText(/saved/i);
+
+      // Delayed route may still be pending; seed coords must not change.
+      await expect
+        .poll(async () => {
+          const res = await page.context().request.get(`/api/v1/locations/${navigation.locationId}`);
+          const body = await res.json();
+          return Number(body.mapX) === 50 && Number(body.mapY) === 50;
+        })
+        .toBe(true);
+      expect(patchAttempts).toBe(1);
+    });
+
+    test('pointer drag is disabled while keyboard move is active', async ({ page }) => {
+      const { campaignId, navigation } = seed();
+      await ensureCampaignMap(page, campaignId);
+      await pinSeedLocation(page, navigation.locationId, 20, 20);
+
+      await page.goto(`/c/${campaignId}`);
+      const mapCard = page.getByTestId('dashboard-map');
+      await expect(mapCard.getByRole('img', { name: 'Campaign map' })).toBeVisible();
+
+      const moveBtn = mapCard.getByRole('button', { name: /Move .+ pin/ }).first();
+      await expect(moveBtn).toBeVisible();
+      await moveBtn.click();
+      const xInput = mapCard.getByLabel('Horizontal position (%)');
+      await expect(xInput).toHaveValue('20');
+
+      const pinLink = mapCard.locator(`a[href="/c/${campaignId}/locations/${navigation.locationId}"]`);
+      const pin = pinLink.locator('xpath=..');
+      const surface = mapCard.locator('.relative.overflow-hidden').first();
+      const box = await surface.boundingBox();
+      const start = await pin.boundingBox();
+      expect(box && start).toBeTruthy();
+      if (!box || !start) return;
+
+      const fromX = start.x + start.width / 2;
+      const fromY = start.y + start.height / 2;
+      const toX = box.x + box.width * 0.7;
+      const toY = box.y + box.height * 0.7;
+
+      await page.mouse.move(fromX, fromY);
+      await page.mouse.down();
+      await page.mouse.move(toX, toY, { steps: 8 });
+      await page.mouse.up();
+
+      // Keyboard panel stays open; stored seed and kb inputs are unchanged by the drag.
+      await expect(xInput).toBeVisible();
+      await expect(xInput).toHaveValue('20');
+      const res = await page.context().request.get(`/api/v1/locations/${navigation.locationId}`);
+      const body = await res.json();
+      expect(Number(body.mapX)).toBe(20);
+      expect(Number(body.mapY)).toBe(20);
     });
 
     test('labels are associated with fields', async ({ page }) => {
