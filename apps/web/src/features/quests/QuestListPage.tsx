@@ -16,7 +16,6 @@ import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 
 // "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
 // times read consistently across the app.
@@ -154,7 +153,6 @@ export default function QuestListPage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <h3 style={{ margin: '4px 0 0' }}>{t('quests.title')}</h3>
         <div style={{ flex: 1 }} />
-        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
         {isDm && (
           <Link to={`/c/${cid}/quests/new`} className="btn btn-primary" style={{ fontSize: 13 }}>
             {t('quests.newQuest')}
