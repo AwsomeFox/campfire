@@ -70,11 +70,21 @@ export function AnnounceProvider({ children }: { children: ReactNode }) {
 
   // Playwright specs (issue #434) seed + assert via these hooks; production UI
   // never reads them. Cleared on unmount so a hot reload cannot leave a stale fn.
+  // Also cancel pending announce() frames — otherwise a rAF scheduled just before
+  // unmount (hot reload / test teardown) can still call setState after unmount.
   useEffect(() => {
     const w = window as AnnouncerTestWindow;
     w.__campfireAnnounce = announce;
     w.__campfireClearAnnouncements = clear;
     return () => {
+      if (politeRafRef.current != null) {
+        cancelAnimationFrame(politeRafRef.current);
+        politeRafRef.current = null;
+      }
+      if (assertiveRafRef.current != null) {
+        cancelAnimationFrame(assertiveRafRef.current);
+        assertiveRafRef.current = null;
+      }
       delete w.__campfireAnnounce;
       delete w.__campfireClearAnnouncements;
     };
