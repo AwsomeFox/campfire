@@ -601,7 +601,7 @@ export class CampaignsService {
    *    reference (quest parent/giver, npc location/faction, combatant
    *    character, note/comment entity link, campaign currentLocationId)
    *    remapped to the cloned rows' new ids. Encounter runtime combat state
-   *    (status/round/turn/current combatant/endedAt, combatant HP/conditions/
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
    *    initiative) is reset to a fresh 'preparing' fight — issue #548.
    *  - 'template': prep only — quests/npcs/locations/factions copied but play
    *    state stripped: quest statuses reset to 'available', objectives

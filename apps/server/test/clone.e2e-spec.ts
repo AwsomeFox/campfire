@@ -227,6 +227,9 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(encDetail.body.endedAt).toBeNull();
     const goblin = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Goblin');
     expect(goblin).toBeDefined();
+    if (goblin === undefined) {
+      throw new Error('expected Goblin combatant on cloned encounter');
+    }
     expect(goblin.hpCurrent).toBe(goblin.hpMax);
     expect(goblin.conditions).toEqual([]);
     const hero = encDetail.body.combatants.find((c: { name: string }) => c.name === 'Hero');
@@ -347,6 +350,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(runningDetail.body.currentCombatantId).toBeNull();
     expect(runningDetail.body.endedAt).toBeNull();
     const clonedBrawler = runningDetail.body.combatants.find((c: { name: string }) => c.name === 'Brawler');
+    expect(clonedBrawler).toBeDefined();
+    if (clonedBrawler === undefined) {
+      throw new Error('expected Brawler combatant on cloned encounter');
+    }
     expect(clonedBrawler.hpCurrent).toBe(30);
     expect(clonedBrawler.hpMax).toBe(30);
     expect(clonedBrawler.conditions).toEqual([]);
