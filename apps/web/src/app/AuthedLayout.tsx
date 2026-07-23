@@ -8,6 +8,7 @@ import { useAuth } from './auth';
 import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
 import { GameIcon } from '../components/GameIcon';
+import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
 
 function Splash() {
   return (
@@ -36,6 +37,11 @@ export function AuthedLayout() {
   const { me, ready, connectionError, refresh } = useAuth();
   const { status, loading: statusLoading } = useAuthStatus();
   const location = useLocation();
+
+  // Issue #434: wipe app-root live-region text on identity change and when this
+  // authed tree unmounts (sign-out → /login, including cast-to-TV routes that
+  // sit outside Layout). Campaign switches are handled in Layout.
+  useClearAnnouncementsOnScope(me?.user.id ?? null);
 
   if (!ready || statusLoading) {
     return <Splash />;

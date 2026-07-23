@@ -15,6 +15,8 @@ import { useFormattingLocale } from '../lib/format';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
+import { useClearAnnouncements } from '../components/Announcer';
+import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
 import {
   NotificationsBell,
   NotificationsPanel,
@@ -307,6 +309,7 @@ export function Layout() {
 function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
+  const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
@@ -323,6 +326,10 @@ function LayoutContent() {
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
   );
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Issue #434: clear encounter/dice live-region text when the signed-in user or
+  // active campaign changes, and again when this chrome unmounts (→ /login).
+  useClearAnnouncementsOnScope(me?.user.id ?? null, campaignId);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
   // trusting a once-per-session flag.
@@ -473,6 +480,10 @@ function LayoutContent() {
   async function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
+    // Synchronous wipe before the public /login route paints — the app-root
+    // Announcer outlives this Layout, so unmount alone is not enough to keep
+    // prior campaign announcements out of the authentication DOM (issue #434).
+    clearAnnouncements();
     await logout();
     navigate('/login');
   }
