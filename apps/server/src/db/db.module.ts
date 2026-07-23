@@ -1771,6 +1771,24 @@ function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before notification deep-links could focus a specific
+ * comment (issue #446): `notifications.comment_id` didn't exist. Plain nullable
+ * ADD COLUMN — no table rebuild. Existing rows stay null (parent-entity link only).
+ * Fresh DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForCommentId(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'comment_id')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN comment_id INTEGER');
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1848,6 +1866,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
   { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
   { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+  { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
 ];
 
 /**
