@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   danger_level TEXT NOT NULL DEFAULT 'low',
   dm_controls_progression INTEGER NOT NULL DEFAULT 0,
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
+  public_invites_enabled INTEGER NOT NULL DEFAULT 1,
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
