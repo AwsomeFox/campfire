@@ -289,24 +289,62 @@ test.describe('Player Display controls', () => {
     await expect(controls).toHaveCSS('pointer-events', 'auto');
   });
 
-  test('reveals hidden controls on focus and does not hide them while focus remains inside', async ({ page }) => {
+  test('auto-hidden controls are inert until Tab reveals them; activation persists while focused', async ({
+    page,
+  }) => {
+    // Issue #595 — opacity-only hide left Exit/Fullscreen tabbable while invisible.
     await page.clock.install();
     await openPlayerDisplay(page);
     const controls = playerDisplayControls(page);
     const exit = page.getByRole('button', { name: 'Exit player display' });
+    const fullscreen = page.getByRole('button', { name: /fullscreen/i });
+    const exitDom = controls.locator('button').first();
 
     await page.clock.fastForward(3_501);
     await expect(controls).toHaveCSS('pointer-events', 'none');
+    await expect(controls).toHaveAttribute('inert', '');
+    // Programmatic focus must not stick while the stack is inert.
+    await exitDom.evaluate((button) => (button as HTMLButtonElement).focus());
+    await expect(exitDom).not.toBeFocused();
 
-    await exit.focus();
-    await expect(exit).toBeFocused();
+    // Tab is the accessible keyboard reveal for the same keystroke.
+    await page.keyboard.press('Tab');
+    await expect(controls).not.toHaveAttribute('inert');
     await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await expect(exit).toBeFocused();
+    await expect(exit).toHaveCSS('outline-width', '3px');
+
+    // Persistence: never auto-hide while focus remains inside the stack.
     await page.clock.fastForward(10_000);
     await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await expect(controls).not.toHaveAttribute('inert');
+    await expect(exit).toBeFocused();
 
-    await exit.evaluate((button) => (button as HTMLButtonElement).blur());
+    // Activate Fullscreen via keyboard, then return focus and confirm we stay usable.
+    await page.keyboard.press('Tab');
+    await expect(fullscreen).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(fullscreen).toHaveAttribute('aria-pressed', 'true');
+    await fullscreen.focus();
+    await page.clock.fastForward(10_000);
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await expect(controls).not.toHaveAttribute('inert');
+
+    await fullscreen.evaluate((button) => (button as HTMLButtonElement).blur());
     await page.clock.fastForward(3_501);
     await expect(controls).toHaveCSS('pointer-events', 'none');
+    await expect(controls).toHaveAttribute('inert', '');
+  });
+
+  test('keeps fullscreen recovery notice usable (never inert) while guidance is shown', async ({ page }) => {
+    const fullscreen = await openPlayerDisplay(page, 'unsupported');
+    const controls = playerDisplayControls(page);
+
+    await expect(fullscreen).toBeDisabled();
+    await expect(fullscreenNotice(page)).toBeVisible();
+    await expect(controls).not.toHaveAttribute('inert');
+    await expect(controls).toHaveCSS('pointer-events', 'auto');
+    await expect(page.getByRole('button', { name: 'Exit player display' })).toBeVisible();
   });
 
   test('touch input restores controls in a reduced-motion mobile viewport and stays axe-clean', async ({ browser }) => {

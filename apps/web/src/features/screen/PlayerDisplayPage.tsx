@@ -14,7 +14,7 @@
  * Live: refetches on encounter SSE events (issue #4) for snappy combat, plus a
  * slow poll to catch location/quest/party edits that don't emit an event.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   CampaignSummary,
@@ -377,6 +377,9 @@ export default function PlayerDisplayPage() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      // Drop inert synchronously so this same Tab keystroke can land on Exit /
+      // Fullscreen before React re-renders visibility (issue #595).
+      controlsRef.current?.removeAttribute('inert');
       ping(event);
       if (event.key !== 'Escape' || event.defaultPrevented || event.repeat) return;
 
@@ -455,12 +458,22 @@ export default function PlayerDisplayPage() {
     ? fullscreenNotice
     : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
   const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
+  // Auto-hidden controls must leave the sequential focus / a11y tree until a
+  // keyboard or pointer reveal — opacity alone left Exit/Fullscreen tabbable
+  // while invisible (issue #595). Fullscreen notices force visibility so
+  // recovery guidance stays reachable.
+  useLayoutEffect(() => {
+    const node = controlsRef.current;
+    if (!node) return;
+    if (keepControlsVisible) node.removeAttribute('inert');
+    else node.setAttribute('inert', '');
+  }, [keepControlsVisible]);
   const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
   const operatorControls = (
     <div
       ref={controlsRef}
       className="cf-screen-control-stack"
-      style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
+      data-visible={keepControlsVisible ? 'true' : 'false'}
     >
       <div className="cf-screen-controls">
         <button
@@ -806,13 +819,26 @@ const SCREEN_CSS = `
   right: 14px;
   width: min(420px, calc(100vw - 28px));
   z-index: 20;
+  opacity: 1;
+  pointer-events: auto;
   transition: opacity 0.4s ease;
+}
+/* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
+   reveal painted even before React flips data-visible (issue #595). */
+.cf-screen-control-stack[data-visible="false"]:not(:focus-within) {
+  opacity: 0;
+  pointer-events: none;
 }
 .cf-screen-controls {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+/* Strong focus ring for cast controls at high zoom / shared-TV distances. */
+.cf-screen-controls .btn:focus-visible {
+  outline: 3px solid var(--color-accent-2, var(--color-accent));
+  outline-offset: 4px;
 }
 .cf-screen-fullscreen-notice {
   margin: 8px 0 0 auto;
