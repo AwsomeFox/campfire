@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -25,7 +25,6 @@ import {
   crToXp,
   generateEncounterGroup,
   hpBandFor,
-  parseCr,
   redactEncounterEventsForViewer,
   sortCombatants,
   turnIndexFor,
@@ -1028,20 +1027,27 @@ export class EncountersService {
   }
 
   /**
-   * Compute a read-only 5e difficulty band for an encounter (issue #58). Pulls the PC
-   * levels from the character-combatants' linked character sheets and the monster CRs
-   * from the monster-combatants' linked rule entries (dataJson.challengeRating), then
-   * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
+   * Compute a read-only difficulty estimate for an encounter (issues #58 + #429). Pulls the
+   * PC levels from character-combatants and monster CRs from linked rule entries, then
+   * asks the campaign's RuleSystemAdapter to own the math/labels/support status. Homebrew
+   * and non-5e systems return an explicit unsupported result; manual enemies with no CR/XP
+   * return unknown ("Unknown—add XP/CR") instead of a misleading Trivial band.
    */
   async getDifficulty(encounterId: number, viewerRole?: Role): Promise<EncounterDifficulty> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    // Entity-level secrecy (issue #262): a hidden encounter's 5e difficulty (monsterCount +
+    // Entity-level secrecy (issue #262): a hidden encounter's difficulty (monsterCount +
     // adjustedXp) is DM-only prep — deny a non-DM the same way the roster read does (404, so
     // existence isn't leaked). undefined role is DM-facing and always allowed.
     if (viewerRole !== undefined && !isVisibleTo({ hidden: encounterRow.hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
-    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const [campaignRow] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, encounterRow.campaignId))
+      .limit(1);
+    const ruleSystem = campaignRow?.ruleSystem ?? null;
+    const adapter = ruleSystemAdapter(ruleSystem);
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -1060,7 +1066,7 @@ export class EncountersService {
 
     // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
     // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
-    // (0 XP) rather than being dropped, so the monster COUNT still drives the multiplier.
+    // rather than being dropped, so missing data can surface as unknown (issue #429).
     const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
     const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
@@ -1077,7 +1083,10 @@ export class EncountersService {
     }
     const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
-    return computeEncounterDifficulty(partyLevels, monsterCrs);
+    return estimateEncounterDifficultyForRuleSystem(ruleSystem, {
+      partyLevels,
+      monsterChallengeRatings: monsterCrs,
+    });
   }
 
   /**
