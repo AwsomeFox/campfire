@@ -2925,9 +2925,12 @@ export const Proposal = z.object({
   entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
-  // The target entity's state captured at propose time (update proposals only; null for
+  // The target entity's state captured at propose time (update/delete proposals; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
-  // changes between propose and review.
+  // changes between propose and review. Persisted as the full DM-review snapshot
+  // (dmSecret included). Non-DM proposer egress (create response, self-view list, MCP,
+  // member export) projects a redacted/omitted view so dmSecret and unrevealed entities
+  // never leak through the approval queue (issue #817).
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
   // Human-readable attribution: the display name of the USER who submitted, even when
   // the write came in over a PAT (resolved to the token's owning user — issue #124).

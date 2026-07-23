@@ -446,7 +446,12 @@ export class CampaignsService {
     return toDomain(row);
   }
 
-  async update(id: number, input: CampaignUpdateInput, user: RequestUser): Promise<Campaign> {
+  async update(
+    id: number,
+    input: CampaignUpdateInput,
+    user: RequestUser,
+    opts?: { revokeInvites?: boolean },
+  ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
@@ -473,6 +478,70 @@ export class CampaignsService {
         .set({ hidden: false, updatedAt: nowIso() })
         .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, id)));
     }
+
+    const archiving =
+      existing.status === 'active' && input.status !== undefined && input.status !== 'active';
+
+    // Atomic archive+revoke: status, invite suspension, and invite-row deletion
+    // commit together so a failed archive never leaves invites permanently gone
+    // while the campaign stays active (#857 Bugbot).
+    if (archiving && opts?.revokeInvites) {
+      const ts = nowIso();
+      const { row, revoked, wasEnabled } = this.db.transaction((tx) => {
+        const before = tx
+          .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        const row = tx
+          .update(campaigns)
+          .set({ ...input, publicInvitesEnabled: false, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        const deleted = tx
+          .delete(campaignInvites)
+          .where(eq(campaignInvites.campaignId, id))
+          .returning({ id: campaignInvites.id })
+          .all();
+        return {
+          row,
+          revoked: deleted.length,
+          wasEnabled: Boolean(before?.publicInvitesEnabled),
+        };
+      });
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.update',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+      });
+      if (wasEnabled) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'invite.suspend',
+          entityType: 'campaign',
+          entityId: id,
+          campaignId: id,
+          detail: JSON.stringify({ reason: 'archive' }),
+        });
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'invite.revoke_all',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ revoked }),
+      });
+      return toDomain(row);
+    }
+
     const [row] = await this.db
       .update(campaigns)
       .set({ ...input, updatedAt: nowIso() })
@@ -488,7 +557,7 @@ export class CampaignsService {
     });
     // Archive (active → paused/completed) suspends public invites. Restore/
     // unarchive never flips the flag back — deliberate reactivation required (#857).
-    if (existing.status === 'active' && input.status !== undefined && input.status !== 'active') {
+    if (archiving) {
       await this.invites.suspendForCampaign(id, user, 'archive');
       const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
       return toDomain(fresh ?? row);
@@ -1689,12 +1758,71 @@ export class CampaignsService {
    * second step purge() runs the real cascade + fs.rm. A no-op if already trashed
    * (getOrThrow without includeDeleted 404s a trashed campaign).
    */
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, opts?: { revokeInvites?: boolean }): Promise<void> {
     await this.getOrThrow(id);
+    const ts = nowIso();
+
+    // Atomic trash+revoke: suspension, trash stamp, and invite-row deletion
+    // commit together so a failed trash never leaves invites permanently gone
+    // while the campaign stays live (#857 Bugbot).
+    if (opts?.revokeInvites) {
+      const { revoked, wasEnabled } = this.db.transaction((tx) => {
+        const before = tx
+          .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        tx.update(campaigns)
+          .set({ publicInvitesEnabled: false, deletedAt: ts, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .run();
+        const deleted = tx
+          .delete(campaignInvites)
+          .where(eq(campaignInvites.campaignId, id))
+          .returning({ id: campaignInvites.id })
+          .all();
+        return {
+          revoked: deleted.length,
+          wasEnabled: Boolean(before?.publicInvitesEnabled),
+        };
+      });
+      if (wasEnabled) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'invite.suspend',
+          entityType: 'campaign',
+          entityId: id,
+          campaignId: id,
+          detail: JSON.stringify({ reason: 'trash' }),
+        });
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'invite.revoke_all',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ revoked }),
+      });
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.delete',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: 'soft-delete (trashed)',
+      });
+      return;
+    }
+
     // Suspend invites before stamping deletedAt so a concurrent preview/accept
     // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
     await this.invites.suspendForCampaign(id, user, 'trash');
-    await this.db.update(campaigns).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(campaigns.id, id));
+    await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(eq(campaigns.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { createAiEvalHarness, dm, player, viewer, type AiEvalHarness } from './ai-eval-harness';
 import { mcpToolsToAiSchemas } from '../src/modules/ai-dm/providers/tool-registry';
+import { AiProviderError } from '../src/modules/ai-dm/providers/errors';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
 
@@ -371,5 +372,71 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     const resumed = await h.sendMessage(campaignId, { input: 'again' });
     expect(resumed.status).toBe(201);
     expect(resumed.body.narration).toBe('Clean seat after mid-turn teardown.');
+  });
+});
+
+/**
+ * Issue #1046 — a provider streaming failure must emit turn.end with provider_error so
+ * every SSE client's composer unlocks, and park the seat in awaiting_players for retry.
+ */
+describe('ai-dm driver — provider streaming failure unlocks composers (#1046)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-provider-error-model' });
+    await h.enableExperimental();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('emits turn.end with provider_error, audits, and parks awaiting_players', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Error');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    // Mid-stream 500: yield one token, then throw (the repro in the issue).
+    h.script({
+      text: 'The mist thickens around you…',
+      streamChunks: 4,
+      throwAfterChunks: 1,
+      throwError: new AiProviderError('server', 'mock: upstream HTTP 500', {
+        provider: 'mock',
+        status: 500,
+      }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We press on.' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end).toBeDefined();
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    // Partial narration reached clients before the failure.
+    expect(events.some((e) => e.type === 'narration.delta')).toBe(true);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.status).toBe('idle');
+    expect(session.body.state).toBe('awaiting_players');
+    expect(session.body.stuck?.reason).toBe('provider_error');
+
+    const audit = await h.getAudit(campaignId);
+    const actions = audit.body.map((e: { action: string }) => e.action);
+    expect(actions).toContain('ai-dm.driver.provider_error');
+
+    // Composer unlocked + seat released: a follow-up turn must not 409.
+    h.script({ text: 'The mist clears. The table can retry.' });
+    const again = await h.sendMessage(campaignId, { input: 'retry' });
+    expect(again.status).not.toBe(409);
+    expect(again.status).toBe(201);
+    expect(again.body.stopReason).toBe('complete');
   });
 });
