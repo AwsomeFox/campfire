@@ -102,7 +102,10 @@ test.describe('combat log accessibility — remote clients', () => {
 
       const damaged = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpDelta: -1 } },
+        // actorId: null opts out of issue #620's current-turn attribution so this test
+        // asserts the unattributed phrasing deterministically — without it, a party
+        // member winning initiative would render "X to Secret Ash Hound: took 1 damage".
+        { data: { hpDelta: -1, actorId: null } },
       );
       expect(damaged.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: took 1 damage');
@@ -142,7 +145,8 @@ test.describe('combat log accessibility — remote clients', () => {
 
       const defeated = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpSet: 0 } },
+        // actorId: null — see the damage patch above (deterministic unattributed phrasing).
+        { data: { hpSet: 0, actorId: null } },
       );
       expect(defeated.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: dropped to 0 HP');
@@ -167,7 +171,8 @@ test.describe('combat log accessibility — remote clients', () => {
 
       const damaged = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpDelta: -2 } },
+        // actorId: null — deterministic unattributed phrasing (see the first test).
+        { data: { hpDelta: -2, actorId: null } },
       );
       expect(damaged.ok()).toBe(true);
       const conditioned = await dmPage.request.patch(
