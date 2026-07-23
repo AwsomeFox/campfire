@@ -28,7 +28,7 @@
  *    added by callers via `levelInitiativeBonus` (monsters carry a flat Initiative in
  *    their statblock instead, surfaced from dataJson).
  */
-import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from '../index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from '../index';
 import { initModDescThenSortOrderAsc } from '../initiative-tiebreak';
 
 /** Family id of the 13th Age (Archmage Engine) adapter. Matches the importer's pack slug family. */
@@ -109,9 +109,20 @@ export interface Archmage13aRuleSystemAdapter extends RuleSystemAdapter {
   levelInitiativeBonus(level: number): number;
 }
 
+/** 13th Age presentation — Level (not CR); creature type often carries a combat Role. */
+export const ARCHMAGE_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Role' },
+};
+
 export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   id: ARCHMAGE_ADAPTER_ID,
   label: '13th Age',
+  presentation: ARCHMAGE_STATBLOCK_PRESENTATION,
   // Same ability-score → modifier curve as 5e: floor((score - 10) / 2).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);

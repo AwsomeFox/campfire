@@ -1,0 +1,98 @@
+{
+  "dnd5e": {
+    "rating": "Challenge",
+    "ratingShort": "CR",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Challenge 2"
+  },
+  "open-legend": {
+    "rating": "Level",
+    "ratingShort": null,
+    "defense": "Guard",
+    "defenseShort": null,
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Attributes",
+    "actions": "Actions",
+    "creatureType": "Descriptor",
+    "ratingLine": "Level 3"
+  },
+  "pf2e": {
+    "rating": "Level",
+    "ratingShort": null,
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Traits",
+    "ratingLine": "Level 3"
+  },
+  "sf2e": {
+    "rating": "Level",
+    "ratingShort": null,
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Traits",
+    "ratingLine": "Level 3"
+  },
+  "pathfinder-1e": {
+    "rating": "Challenge Rating",
+    "ratingShort": "CR",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Challenge Rating 2"
+  },
+  "starfinder-1e": {
+    "rating": "Challenge Rating",
+    "ratingShort": "CR",
+    "defense": "Kinetic Armor Class",
+    "defenseShort": "KAC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Challenge Rating 2"
+  },
+  "archmage": {
+    "rating": "Level",
+    "ratingShort": null,
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Role",
+    "ratingLine": "Level 3"
+  },
+  "osr": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  }
+}
