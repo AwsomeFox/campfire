@@ -15,7 +15,7 @@
  * compendium reader and in-combat card share the complete presentation.
  */
 import { Fragment, useId, type CSSProperties } from 'react';
-import { ruleSystemAdapter } from '@campfire/schema';
+import { resolveAbilityModifier, ruleSystemAdapter, type AbilityRepresentation } from '@campfire/schema';
 
 interface NamedEntry {
   name: string;
@@ -34,8 +34,13 @@ export interface MonsterStatblock {
   armorClass: string | null;
   hitPoints: string | null;
   speed: string | null;
-  /** [label, score, modifier] per ability, only for abilities that were present. */
-  abilities: Array<{ label: string; score: number; mod: string }>;
+  /**
+   * Per-ability display values. `value` is the stored number from the adapter;
+   * `mod` is the signed modifier string used for rolls/display. `representation`
+   * controls whether the UI shows score+mod (5e), signed mod only (PF2e), or the
+   * native value (Open Legend) — see issue #767.
+   */
+  abilities: Array<{ label: string; value: number; mod: string; representation: AbilityRepresentation }>;
   specialAbilities: NamedEntry[];
   actions: NamedEntry[];
   legendaryActions: NamedEntry[];
@@ -161,14 +166,23 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
   // exactly for imported/Open5e monsters, which store camelCase fields.
   const adapter = ruleSystemAdapter(ruleSystem);
   const mapped = adapter.mapStatblock(d);
+  const representation: AbilityRepresentation = mapped.abilityRepresentation ?? 'score';
 
   const scores = mapped.abilityScores;
   const abilities: MonsterStatblock['abilities'] = [];
   if (scores && typeof scores === 'object') {
     for (const { label, keys } of ABILITIES) {
       const raw = keys.map((k) => scores[k]).find((v) => v !== undefined && v !== null);
-      const score = typeof raw === 'number' ? raw : Number(raw);
-      if (Number.isFinite(score)) abilities.push({ label, score, mod: signed(adapter.abilityModifier(score)) });
+      const value = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(value)) continue;
+      // Consume the stored value exactly once: scores convert; modifiers/native stay as-is.
+      const modValue = resolveAbilityModifier(adapter, value, representation);
+      abilities.push({
+        label,
+        value,
+        mod: representation === 'native' ? String(modValue) : signed(modValue),
+        representation,
+      });
     }
   }
 
@@ -314,8 +328,15 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
             <Fragment key={a.label}>
               <div>
                 <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'var(--color-accent-300, var(--color-text))' }}>{a.label}</div>
-                <div style={{ fontSize: 14 }}>{a.score}</div>
-                <div className="text-muted" style={{ fontSize: 12 }}>{a.mod}</div>
+                {a.representation === 'modifier' || a.representation === 'native' ? (
+                  // PF2e creatures list signed modifiers; Open Legend lists native attribute values.
+                  <div style={{ fontSize: 14 }}>{a.mod}</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 14 }}>{a.value}</div>
+                    <div className="text-muted" style={{ fontSize: 12 }}>{a.mod}</div>
+                  </>
+                )}
               </div>
             </Fragment>
           ))}
