@@ -334,6 +334,11 @@ CREATE TABLE IF NOT EXISTS comments (
   author_name TEXT NOT NULL DEFAULT '',
   body TEXT NOT NULL,
   in_character INTEGER NOT NULL DEFAULT 0,
+  -- Immutable in-character attribution snapshot (issue #787). character_id is a
+  -- soft reference by design; the historical name/avatar survive character removal.
+  character_id INTEGER,
+  character_name TEXT,
+  character_avatar_url TEXT,
   -- Soft delete / tombstone (issue #503). NULL = live; a timestamp tombstones the
   -- row (body redacted, replies preserved). deleted_by records the actor. See
   -- db/schema.ts for column docs. The parent_id ON DELETE CASCADE above only ever

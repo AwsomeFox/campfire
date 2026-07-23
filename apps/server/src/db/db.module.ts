@@ -866,6 +866,25 @@ function migrateCommentsTableForEditorProvenance(sqlite: Database.Database): voi
 }
 
 /**
+ * Issue #787: persist the speaking character as immutable historical display
+ * metadata while retaining the account author columns. Nullable ADD COLUMNs keep
+ * legacy/OOC comments valid; old `in_character=1` rows remain honest legacy posts
+ * with no invented character identity.
+ */
+function migrateCommentsTableForCharacterAttribution(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('character_id')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_id INTEGER');
+  if (!has('character_name')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_name TEXT');
+  if (!has('character_avatar_url')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_avatar_url TEXT');
+}
+
+/**
  * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
  * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` / `grid_snap` / `fog`.
  * Plain nullable/defaulted ADD COLUMNs. Existing encounters get NULL grid (no grid) and
@@ -1828,7 +1847,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
   { name: '0061_combatants_sheet_synced_updated_at', run: migrateCombatantsTableForSheetSyncedUpdatedAt },
   { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
+<<<<<<< HEAD
   { name: '0063_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+=======
+  { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
+>>>>>>> origin/main
 ];
 
 /**

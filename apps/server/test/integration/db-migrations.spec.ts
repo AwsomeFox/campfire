@@ -80,7 +80,15 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
       // 0045 (issue #503): comments gain the tombstone columns — soft delete without
       // destroying other members' replies (deleted_at) + who pulled the trigger (deleted_by).
-      expect(columnNames(sqlite, 'comments')).toEqual(expect.arrayContaining(['deleted_at', 'deleted_by']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining([
+          'deleted_at',
+          'deleted_by',
+          'character_id',
+          'character_name',
+          'character_avatar_url',
+        ]),
+      );
 
       // 0040 (issue #310): the ai_provider_configs table is created as a NEW table
       // by the migration, with the encrypted-key + scope columns present.
@@ -192,11 +200,22 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         sqlite.prepare('SELECT visibility, ai_use_consent FROM participant_support_preferences').get(),
       ).toEqual({ visibility: 'facilitator', ai_use_consent: 0 });
       const legacyRoot = sqlite
-        .prepare("SELECT body, parent_id, deleted_at, deleted_by FROM comments WHERE parent_id IS NULL")
-        .get() as { body: string; parent_id: number | null; deleted_at: string | null; deleted_by: string | null };
+        .prepare("SELECT body, parent_id, deleted_at, deleted_by, character_id, character_name, character_avatar_url FROM comments WHERE parent_id IS NULL")
+        .get() as {
+          body: string;
+          parent_id: number | null;
+          deleted_at: string | null;
+          deleted_by: string | null;
+          character_id: number | null;
+          character_name: string | null;
+          character_avatar_url: string | null;
+        };
       expect(legacyRoot.body).toBe('Legacy root comment');
       expect(legacyRoot.deleted_at).toBeNull();
       expect(legacyRoot.deleted_by).toBeNull();
+      expect(legacyRoot.character_id).toBeNull();
+      expect(legacyRoot.character_name).toBeNull();
+      expect(legacyRoot.character_avatar_url).toBeNull();
       const legacyReply = sqlite
         .prepare("SELECT body, parent_id FROM comments WHERE body = 'Legacy reply that must survive'")
         .get() as { body: string; parent_id: number };
@@ -307,10 +326,17 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
       expect(MIGRATION_NAMES).toContain('0060_encounter_events_combatant_ids');
       expect(MIGRATION_NAMES).toContain('0062_attachments_publication_state');
-      expect(MIGRATION_NAMES).toContain('0063_encounter_links_campaign_scope');
+<<<<<<< HEAD
+      expect(MIGRATION_NAMES).toContain('0064_encounter_links_campaign_scope');
+=======
+      expect(MIGRATION_NAMES).toContain('0063_comments_character_attribution');
+>>>>>>> origin/main
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining(['character_id', 'character_name', 'character_avatar_url']),
+      );
 
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');
@@ -607,7 +633,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
         )
         .run(now, now);
-      legacy.prepare("DELETE FROM __migrations WHERE name = '0063_encounter_links_campaign_scope'").run();
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0064_encounter_links_campaign_scope'").run();
     } finally {
       legacy.close();
     }

@@ -64,6 +64,7 @@ function buildService(entities: {
     { listRecapsForCampaign: async () => entities.sessions ?? [] } as any, // sessions
     { listForCampaign: async () => entities.characters ?? [] } as any, // characters
     { listForCampaign: noop as any } as any, // notes
+    { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members
     { listForCampaign: noop as any } as any, // audit
     { listForCampaign: noop as any } as any, // proposals
