@@ -11,7 +11,9 @@
  *
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
- * offline. A 401/403 stops the loop entirely (no access — retrying won't help).
+ * offline. Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
+ * — the TCP/HTTP connection stayed up. A 401/403 stops the loop entirely
+ * (no access — retrying won't help).
  */
 import { useEffect, useRef } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
@@ -20,8 +22,14 @@ import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
   onEvent: (event: CampaignEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch to catch up. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes (buffer overrun) while
+   * the connection stays up. Distinct from {@link onReconnect}; wire the same
+   * catch-up refetch when UI state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
   /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
   onStatusChange?: (status: CampaignEventsStatus) => void;
 }
@@ -169,9 +177,9 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
             for (const signal of signals) {
               if (signal.kind === 'recovered') {
                 // Parser discarded mid-stream bytes — connection stays up, but
-                // UI may have missed events; mark catch-up and refetch now.
+                // UI may have missed events. Not a transport reconnect.
                 needsCatchUp = true;
-                if (!disposed) handlersRef.current.onReconnect?.();
+                if (!disposed) handlersRef.current.onStreamRecovery?.();
                 continue;
               }
               const data = signal.message.data;

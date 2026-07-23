@@ -377,10 +377,10 @@ export class OAuthController {
     const cookies = (req as Request & { cookies?: Record<string, string> }).cookies;
     const token = cookies?.[SESSION_COOKIE_NAME];
     if (!token) return null;
-    const user = await this.auth.resolveSessionUser(token);
+    const resolved = await this.auth.resolveSessionUser(token);
     // Only real, numeric-id users can be bound to a token (dev/header users never reach here).
-    if (!user || !/^\d+$/.test(user.id)) return null;
-    return user;
+    if (!resolved || !/^\d+$/.test(resolved.user.id)) return null;
+    return resolved.user;
   }
 
   private parseRole(value: string | undefined): Role {
