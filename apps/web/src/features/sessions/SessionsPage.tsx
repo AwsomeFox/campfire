@@ -1457,7 +1457,9 @@ function AddRecapForm({
   async function publish() {
     const nextErrors = validateRecapFields({ title, playedAt, recap });
     setFieldErrors(nextErrors);
-    setError(null);
+    // Keep an existing API failure banner until validation passes and we actually
+    // attempt a publish — a failed client check must not drop formErrorId from
+    // the title's aria-describedby.
     const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
     if (invalidId) {
       document.getElementById(invalidId)?.focus();
@@ -1465,6 +1467,7 @@ function AddRecapForm({
     }
 
     setSaving(true);
+    setError(null);
     try {
       const created = await api.post<Session>(`${API}/campaigns/${campaignId}/sessions`, {
         number: nextNumber,
