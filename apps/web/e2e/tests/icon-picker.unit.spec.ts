@@ -2,8 +2,10 @@ import { expect, test } from '@playwright/test';
 import {
   FULL_LIBRARY_FAILED_MESSAGE,
   FULL_LIBRARY_LOADING_MESSAGE,
+  FULL_LIBRARY_PARTIAL_EMPTY_MESSAGE,
   FULL_LIBRARY_SEARCHING_MESSAGE,
   fullLibraryStatus,
+  iconPickerGridEmptyMessage,
   iconPickerSurfaceState,
   noIconsMatchMessage,
   showFullLibraryLoadingBanner,
@@ -31,6 +33,7 @@ test.describe('icon picker surface states (issue #847)', () => {
     expect(showPartialLibraryBanner(undefined)).toBe(false);
     expect(FULL_LIBRARY_LOADING_MESSAGE).toMatch(/loading/i);
     expect(FULL_LIBRARY_SEARCHING_MESSAGE).toMatch(/searching/i);
+    expect(iconPickerGridEmptyMessage('loading', 'sword')).toBe(FULL_LIBRARY_SEARCHING_MESSAGE);
   });
 
   test('partial: full index failed — disclose curated-only mode even when tiles match', () => {
@@ -44,6 +47,16 @@ test.describe('icon picker surface states (issue #847)', () => {
     expect(showFullLibraryLoadingBanner(null)).toBe(false);
     expect(FULL_LIBRARY_FAILED_MESSAGE).toMatch(/curated/i);
     expect(FULL_LIBRARY_FAILED_MESSAGE).toMatch(/couldn't load|couldn’t load/i);
+    // Zero curated matches must show failure/Retry empty copy — never a
+    // definitive "No icons match …" while the full library is unavailable.
+    expect(iconPickerGridEmptyMessage('partial', 'treasury')).toBe(
+      FULL_LIBRARY_PARTIAL_EMPTY_MESSAGE,
+    );
+    expect(iconPickerGridEmptyMessage('partial', 'treasury')).toMatch(/retry/i);
+    expect(iconPickerGridEmptyMessage('partial', 'treasury')).not.toMatch(/no icons match/i);
+    expect(iconPickerGridEmptyMessage('partial', 'treasury')).not.toBe(
+      noIconsMatchMessage('treasury'),
+    );
   });
 
   test('empty: full index ready and the query matched nothing', () => {
@@ -53,6 +66,7 @@ test.describe('icon picker surface states (issue #847)', () => {
     expect(showFullLibraryLoadingBanner(READY_INDEX)).toBe(false);
     expect(noIconsMatchMessage('dragon')).toContain('dragon');
     expect(noIconsMatchMessage('dragon')).toMatch(/no icons match/i);
+    expect(iconPickerGridEmptyMessage('empty', 'dragon')).toBe(noIconsMatchMessage('dragon'));
   });
 
   test('complete: full index ready with at least one match', () => {
@@ -60,6 +74,7 @@ test.describe('icon picker surface states (issue #847)', () => {
     expect(iconPickerSurfaceState(READY_INDEX, 40)).toBe('complete');
     expect(showPartialLibraryBanner(READY_INDEX)).toBe(false);
     expect(showFullLibraryLoadingBanner(READY_INDEX)).toBe(false);
+    expect(iconPickerGridEmptyMessage('complete', 'sword')).toBeNull();
   });
 
   test('curated results remain available offline (partial still reports match counts)', () => {

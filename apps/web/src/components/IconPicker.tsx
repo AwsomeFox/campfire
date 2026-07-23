@@ -37,9 +37,8 @@ import {
 import {
   FULL_LIBRARY_FAILED_MESSAGE,
   FULL_LIBRARY_LOADING_MESSAGE,
-  FULL_LIBRARY_SEARCHING_MESSAGE,
+  iconPickerGridEmptyMessage,
   iconPickerSurfaceState,
-  noIconsMatchMessage,
   showFullLibraryLoadingBanner,
   showPartialLibraryBanner,
 } from './iconPickerState';
@@ -105,6 +104,8 @@ export function IconPicker({
   );
 
   const surface = iconPickerSurfaceState(fullIndex, results.length);
+  const gridEmptyMessage =
+    results.length === 0 ? iconPickerGridEmptyMessage(surface, query) : null;
   const retryFullLibrary = () => setLoadAttempt((n) => n + 1);
 
   return (
@@ -196,14 +197,9 @@ export function IconPicker({
               </button>
             ))}
 
-            {results.length === 0 && surface === 'loading' && (
+            {gridEmptyMessage && (
               <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
-                {FULL_LIBRARY_SEARCHING_MESSAGE}
-              </p>
-            )}
-            {results.length === 0 && (surface === 'empty' || surface === 'partial') && (
-              <p className="text-sm text-[var(--color-neutral-500)] col-span-full py-6 text-center">
-                {noIconsMatchMessage(query)}
+                {gridEmptyMessage}
               </p>
             )}
           </div>

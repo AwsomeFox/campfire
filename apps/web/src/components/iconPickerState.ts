@@ -47,6 +47,30 @@ export function noIconsMatchMessage(query: string): string {
   return `No icons match “${query}”.`;
 }
 
+/**
+ * Grid empty copy when the full library failed and curated search matched nothing.
+ * Must not read as a definitive "no such icon" — Retry may still find matches.
+ */
+export const FULL_LIBRARY_PARTIAL_EMPTY_MESSAGE =
+  "Couldn't load the full icon library — Retry to search all icons.";
+
+/**
+ * Copy for the results-grid empty placeholder, or null when no empty placeholder
+ * should render (matches present / complete surface).
+ *
+ * Partial + zero curated matches uses failure/Retry copy — never
+ * `noIconsMatchMessage` — so curated-only mode is not mistaken for an empty catalog.
+ */
+export function iconPickerGridEmptyMessage(
+  surface: IconPickerSurfaceState,
+  query: string,
+): string | null {
+  if (surface === 'loading') return FULL_LIBRARY_SEARCHING_MESSAGE;
+  if (surface === 'partial') return FULL_LIBRARY_PARTIAL_EMPTY_MESSAGE;
+  if (surface === 'empty') return noIconsMatchMessage(query);
+  return null;
+}
+
 export function fullLibraryStatus(
   fullIndex: readonly unknown[] | null | undefined,
 ): FullLibraryStatus {
