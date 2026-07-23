@@ -17,7 +17,7 @@
 // `StarfinderAdapter` with a two-line change. See #275 (candidate rulesets), #70 (the
 // RuleSystemAdapter seam), #295-300 (sibling rulesets following the same pattern).
 
-import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 
 /** Family id of the Starfinder 1e adapter. Matches the rule-pack slug the importer stamps, so a
  *  campaign whose `ruleSystem` is set to the installed Starfinder pack resolves to this adapter. */
@@ -151,9 +151,24 @@ export interface StarfinderRuleSystemAdapter extends RuleSystemAdapter {
  * SP+HP pool and EAC/KAC), with `armorClasses()`/`hitPointsBreakdown()` for surfaces that
  * need the full sci-fi detail the single-slot RuleSystemAdapter interface can't carry.
  */
+/**
+ * Starfinder presentation — CR for rating; the generic defense slot carries KAC, so the
+ * accessible label is Kinetic Armor Class (short KAC). EAC remains available via
+ * `armorClasses()` for surfaces that show both.
+ */
+export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge Rating', short: 'CR' },
+  defense: { full: 'Kinetic Armor Class', short: 'KAC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
 export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',
+  presentation: STARFINDER_STATBLOCK_PRESENTATION,
   // Same d20 ability-modifier formula as 5e/PF1e.
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);

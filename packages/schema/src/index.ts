@@ -1630,11 +1630,77 @@ export interface MonsterStatblockData {
   reactions?: unknown;
 }
 
+/**
+ * One user-facing statblock label (issue #763). `full` is the accessible term shown by
+ * default; `short` is an optional visual abbreviation (e.g. AC, HD, CR) for compact
+ * surfaces that still expose `full` via tooltip / screen-reader text.
+ */
+export interface StatblockPresentationLabel {
+  /** Full accessible term (e.g. "Armor Class", "Guard", "Hit Dice"). */
+  readonly full: string;
+  /** Optional short visual form (e.g. "AC", "HD"). Omit when the full term is always shown. */
+  readonly short?: string;
+}
+
+/**
+ * Adapter-native presentation metadata for the shared StatBlock renderer (issue #763).
+ * Mechanical fields stay generic (`challengeRating` / `armorClass`); labels are what the
+ * UI says — Level / Hit Dice / Guard instead of hardcoded "Challenge" / "Armor Class".
+ */
+export interface StatblockPresentation {
+  /** Difficulty / threat rating (Challenge, Level, Hit Dice, Rating, …). */
+  readonly rating: StatblockPresentationLabel;
+  /** Primary defense number (Armor Class, Guard, Kinetic Armor Class, Defense, …). */
+  readonly defense: StatblockPresentationLabel;
+  /** Hit-point / vitality pool label. */
+  readonly hitPoints: StatblockPresentationLabel;
+  /** Ability-score / attribute block label. */
+  readonly abilities: StatblockPresentationLabel;
+  /** Actions / attacks section heading. */
+  readonly actions: StatblockPresentationLabel;
+  /** Creature-type / traits / descriptor / role label. */
+  readonly creatureType: StatblockPresentationLabel;
+}
+
+/**
+ * Neutral labels for unknown / homebrew rule systems (issue #763). Mechanical mapping may
+ * still fall back to the 5e adapter, but the UI must not claim "Challenge" / "Armor Class"
+ * for a pack that never defined those terms.
+ */
+export const NEUTRAL_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Rating' },
+  defense: { full: 'Defense' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** D&D 5e / Open5e SRD presentation — Challenge + Armor Class. */
+export const DND5E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge', short: 'CR' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** Pick the visible form of a presentation label (`short` when requested and present). */
+export function statblockLabelText(label: StatblockPresentationLabel, preferShort = false): string {
+  return preferShort && label.short ? label.short : label.full;
+}
+
 export interface RuleSystemAdapter {
   /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
+  /**
+   * User-facing statblock field labels for this system (issue #763). The shared StatBlock
+   * renderer reads these instead of hardcoding "Challenge" / "Armor Class".
+   */
+  readonly presentation: StatblockPresentation;
   /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
@@ -1751,6 +1817,7 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  presentation: DND5E_STATBLOCK_PRESENTATION,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -1936,9 +2003,20 @@ function openLegendAgility(abilities: Record<string, unknown> | null | undefined
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
+/** Open Legend presentation — Level + Guard (not Challenge / Armor Class). */
+export const OPEN_LEGEND_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Guard' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Attributes' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Descriptor' },
+};
+
 export const OpenLegendAdapter: RuleSystemAdapter = {
   id: OPEN_LEGEND_ADAPTER_ID,
   label: 'Open Legend',
+  presentation: OPEN_LEGEND_STATBLOCK_PRESENTATION,
   // Open Legend attributes are used directly (no floor((score-10)/2) offset) — an attribute
   // both indexes the dice table and, where a flat value is wanted, IS that value.
   abilityModifier(score: number): number {
@@ -2201,9 +2279,20 @@ export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
   degreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess;
 }
 
+/** PF2e / SF2e presentation — Level + Armor Class; creature type is Traits. */
+export const PF2E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Traits' },
+};
+
 export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
+  presentation: PF2E_STATBLOCK_PRESENTATION,
   // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
   // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {
@@ -2351,6 +2440,34 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
   if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
   return Dnd5eAdapter;
+}
+
+/**
+ * Resolve statblock presentation labels for a campaign's `ruleSystem` (issue #763).
+ *
+ * Unlike {@link ruleSystemAdapter}, unknown / empty / homebrew slugs do **not** inherit
+ * the 5e "Challenge" / "Armor Class" copy — they return {@link NEUTRAL_STATBLOCK_PRESENTATION}
+ * ("Rating" / "Defense") so a homebrew pack isn't mislabeled with 5e jargon. Registered
+ * adapters (including explicit 5e) return their native `presentation`.
+ */
+export function statblockPresentation(ruleSystem?: string | null): StatblockPresentation {
+  if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem].presentation;
+  return NEUTRAL_STATBLOCK_PRESENTATION;
+}
+
+/**
+ * Unique registered adapters (by family id), stable order — for snapshot / parity tests
+ * that must cover every system once (issue #763).
+ */
+export function listRuleSystemAdapters(): RuleSystemAdapter[] {
+  const seen = new Set<string>();
+  const out: RuleSystemAdapter[] = [];
+  for (const adapter of Object.values(ADAPTERS)) {
+    if (seen.has(adapter.id)) continue;
+    seen.add(adapter.id);
+    out.push(adapter);
+  }
+  return out;
 }
 
 /**
