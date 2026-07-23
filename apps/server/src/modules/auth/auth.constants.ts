@@ -22,3 +22,10 @@ export const OIDC_FLOW_COOKIE_NAME = 'campfire_oidc_flow';
  */
 export const OIDC_RETURN_COOKIE_NAME = 'campfire_oidc_return';
 export const OIDC_FLOW_COOKIE_MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes — login -> callback should be fast
+
+/**
+ * Admin-only end-to-end OIDC diagnostic flow (issue #848). Cookie value is a
+ * random handle referencing server-side pending state — never carries secrets.
+ */
+export const OIDC_TEST_FLOW_COOKIE_NAME = 'campfire_oidc_test_flow';
+export const OIDC_TEST_FLOW_COOKIE_MAX_AGE_MS = 5 * 60 * 1000;
