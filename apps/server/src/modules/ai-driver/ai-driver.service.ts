@@ -1440,11 +1440,11 @@ export class AiDriverService {
       return { query, result: renderNoRuleSystem(query) };
     }
 
-    const results = await this.rules.search({ q: query, pack: pack.slug }, 5);
-    if (results.length === 0) {
+    const page = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    if (page.items.length === 0) {
       return { query, result: renderNoMatch(query, pack) };
     }
-    return { query, result: renderRulesAnswer(query, pack, results) };
+    return { query, result: renderRulesAnswer(query, pack, page.items) };
   }
 
   /**
