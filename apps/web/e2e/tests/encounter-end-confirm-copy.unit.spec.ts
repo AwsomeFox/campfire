@@ -31,6 +31,8 @@ test.describe('End encounter confirmation copy (issue #475)', () => {
     expect(body).toMatch(/death state/i);
     expect(body).toMatch(/Reopen/);
     expect(body).toMatch(/resume/i);
-    expect(body).toMatch(/overwrite/i);
+    // #466: End copy must say conflicts are resolved on Reopen, not silently overwritten.
+    expect(body).toMatch(/conflict/i);
+    expect(body).toMatch(/not silently overwrite/i);
   });
 });
