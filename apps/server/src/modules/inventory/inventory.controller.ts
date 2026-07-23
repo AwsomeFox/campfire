@@ -84,9 +84,17 @@ export class InventoryController {
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update an inventory item', description: 'player role required; character items only by dm or the owning player. May also move the item (ownerType/characterId) — moving requires write access at both the source and the destination.' })
+  @ApiOperation({
+    summary: 'Update an inventory item',
+    description:
+      'player role required; character items only by dm or the owning player. May also move the item (ownerType/characterId) — moving requires write access at both the source and the destination. ' +
+      'Quantity (issue #782): prefer `{ qtyDelta, idempotencyKey }` for atomic +/- (retries with the same key replay the committed item); ' +
+      'an absolute `{ qty }` reconciliation requires `expectedUpdatedAt` (CAS) and returns 409 with the live item on conflict.',
+  })
   @ApiResponse({ status: 200, description: 'Updated item.' })
+  @ApiResponse({ status: 400, description: 'qty without expectedUpdatedAt, qtyDelta without idempotencyKey, both qty shapes, or a delta that would go negative.' })
   @ApiResponse({ status: 403, description: 'Not the dm or the owning player of the item\'s character.' })
+  @ApiResponse({ status: 409, description: 'Absolute qty CAS mismatch (INVENTORY_QTY_CONFLICT) or idempotency key reused with a different payload.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: InventoryItemUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');

@@ -47,6 +47,7 @@ export class SessionAuthGuard implements CanActivate {
     ]);
 
     const req = context.switchToHttp().getRequest<Request & { user?: RequestUser; tokenContext?: TokenContext }>();
+    if (req.user) return true;
 
     const authHeader = req.headers['authorization'];
     if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {

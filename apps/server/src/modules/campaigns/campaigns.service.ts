@@ -43,6 +43,7 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiScribeConfigs,
   encounterEvents,
   auditLog,
   participantSupportPreferences,
@@ -67,15 +68,11 @@ import { InvitesService } from '../membership/invites.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
+import { uploadsRoot } from '../attachments/uploads-path';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
-
-/** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
-}
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -263,6 +260,7 @@ export class CampaignsService {
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
     private readonly invites: InvitesService,
+    private readonly fsDeletion: FsDeletionService,
   ) {}
 
   /**
@@ -600,7 +598,9 @@ export class CampaignsService {
    *    (+combatants), and discussion threads, with every intra-campaign
    *    reference (quest parent/giver, npc location/faction, combatant
    *    character, note/comment entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids.
+   *    remapped to the cloned rows' new ids. Encounter runtime combat state
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
+   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
    *  - 'template': prep only — quests/npcs/locations/factions copied but play
    *    state stripped: quest statuses reset to 'available', objectives
    *    unchecked, locations back to 'unexplored', and sessions/notes/
@@ -645,6 +645,12 @@ export class CampaignsService {
     const combatantRows = encounterIds.length
       ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
       : [];
+
+    // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
 
     const ts = nowIso();
     const newId = this.db.transaction((tx) => {
@@ -878,16 +884,19 @@ export class CampaignsService {
             .values({
               campaignId: cloneId,
               name: e.name,
-              status: e.status,
-              round: e.round,
-              turnIndex: e.turnIndex,
+              // Fresh fights only — never copy live/ended combat runtime (issue #548).
+              status: 'preparing',
+              round: 0,
+              turnIndex: 0,
+              currentCombatantId: null,
               // Where/why/when links (issue #126/#864): remap through the clone maps.
               // A dangling/cross-campaign source link drops to null rather than copying
               // a stale foreign id into the new campaign.
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
-              endedAt: e.endedAt,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              endedAt: null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -896,20 +905,23 @@ export class CampaignsService {
           encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
-                initiative: c.initiative,
+                initiative: null,
                 initMod: c.initMod,
-                hpCurrent: c.hpCurrent,
+                hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
-                conditions: c.conditions,
+                conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
@@ -987,6 +999,34 @@ export class CampaignsService {
             tx.update(campaigns).set({ currentLocationId }).where(eq(campaigns.id, cloneId)).run();
           }
         }
+      }
+
+      // AI seat + scribe config (issue #1078): carry the DM's hand-authored steering
+      // and trigger settings across clone; reset runtime counters to zero.
+      if (aiSeatRow) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cloneId,
+          mode: aiSeatRow.mode,
+          enabled: aiSeatRow.enabled,
+          model: aiSeatRow.model,
+          instructions: aiSeatRow.instructions,
+          tokenBudget: aiSeatRow.tokenBudget,
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigRow) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cloneId,
+          postSession: aiScribeConfigRow.postSession,
+          cron: aiScribeConfigRow.cron,
+          budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
       }
 
       return cloneId;
@@ -1090,6 +1130,10 @@ export class CampaignsService {
     const treasurySrc = asRec(doc.treasury);
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
+
+    // Issue #1078: AI seat + scribe config from the export document.
+    const aiSeatSrc = asRec(doc.aiSeat);
+    const aiScribeConfigSrc = asRec(doc.aiScribeConfig);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -1836,6 +1880,33 @@ export class CampaignsService {
         }
       }
 
+      // AI seat + scribe config (issue #1078): restore from export with counters zeroed.
+      if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cid,
+          mode: str(aiSeatSrc.mode, 'off'),
+          enabled: boolOf(aiSeatSrc.enabled),
+          model: str(aiSeatSrc.model),
+          instructions: str(aiSeatSrc.instructions),
+          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigSrc && Object.keys(aiScribeConfigSrc).length > 0) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cid,
+          postSession: boolOf(aiScribeConfigSrc.postSession),
+          cron: boolOf(aiScribeConfigSrc.cron),
+          budgetPerRun: Math.max(0, intOr(aiScribeConfigSrc.budgetPerRun, 2000)),
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+
       // Issue #725: fold the importer's dm membership AND the import audit row
       // INTO the same transaction as the entity rows. Previously these ran AFTER
       // the commit, so a failure here (a disabled user, a DB error) left a
@@ -2171,8 +2242,23 @@ export class CampaignsService {
    * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
    * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
    */
-  async purge(id: number, user: RequestUser): Promise<void> {
+  async purge(id: number, user: RequestUser): Promise<FsDeletionOutcome> {
     await this.getOrThrow(id, { includeDeleted: true });
+
+    const auditCtx = {
+      scope: 'campaign_purge' as const,
+      auditPrefix: 'campaign.purge',
+      actor: auditActor(user),
+      actorRole: 'dm' as const,
+      campaignId: id,
+      entityType: 'campaign',
+      entityId: id,
+    };
+    await this.fsDeletion.auditRequested(auditCtx);
+
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    const plannedFsCleanup = await this.fsDeletion.reserveUploadPaths([campaignUploadsDir], auditCtx);
+
 
     // This hand-rolled cascade is the ONLY teardown mechanism on databases created
     // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
@@ -2251,26 +2337,9 @@ export class CampaignsService {
       tx.delete(campaigns).where(eq(campaigns.id, id)).run();
     });
 
-    // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
-    // are already gone (source of truth), so a failure here just leaves an orphaned
-    // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
-    // Synchronous wipe: the e2e purge assertion reads the directory immediately after
-    // the HTTP response returns. Async fs.rm raced that check on Node 22.x CI.
-    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    try {
-      fs.rmSync(campaignUploadsDir, { recursive: true, force: true });
-    } catch {
-      /* best-effort — DB rows are already gone; a stray directory is harmless */
-    }
+    await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.purge',
-      entityType: 'campaign',
-      entityId: id,
-      campaignId: id,
-    });
+    return this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {

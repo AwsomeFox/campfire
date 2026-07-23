@@ -36,6 +36,8 @@ export interface MockResponse {
   finishReason?: AiFinishReason;
   /** How many text chunks `stream()` splits `text` into (default 3). */
   streamChunks?: number;
+  /** When false, omit text deltas and only emit the final `done` (simulates done-only narration). */
+  streamTextDeltas?: boolean;
   /**
    * After yielding this many text chunks, throw {@link throwError} (#1046).
    * Defaults to 0 (throw before any chunk) when `throwError` is set.
@@ -112,7 +114,7 @@ export class MockAiProvider implements AiProvider {
     const result = this.build(req, canned);
     // Chunk the text so streaming consumers get multiple deltas, deterministically.
     const nChunks = Math.max(1, canned.streamChunks ?? 3);
-    const parts = splitEven(result.text, nChunks);
+    const parts = canned.streamTextDeltas === false ? [] : splitEven(result.text, nChunks);
     const throwAfter = canned.throwError ? (canned.throwAfterChunks ?? 0) : undefined;
     let yielded = 0;
     if (throwAfter === 0 && canned.throwError) throw canned.throwError;

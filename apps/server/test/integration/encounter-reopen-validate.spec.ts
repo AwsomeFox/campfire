@@ -8,6 +8,7 @@ import { CampaignEventsService } from '../../src/modules/events/campaign-events.
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import type { RequestUser } from '../../src/common/user.types';
 import { makeTempDataDir } from './fixtures';
@@ -30,7 +31,7 @@ describe('encounter reopen turn-pointer validation (issue #489, service layer)',
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm, audit);
-    const attachments = new AttachmentsService(orm, audit);
+    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
     return { orm, encountersService };
   }

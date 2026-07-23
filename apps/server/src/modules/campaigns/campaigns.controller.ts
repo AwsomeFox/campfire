@@ -167,14 +167,15 @@ export class CampaignsController {
     description:
       'dm role required. The deliberate, IRREVERSIBLE second step (issue #116): hard-cascades every child table AND wipes the campaign\'s on-disk upload directory. Works on a live or already-trashed campaign. This is the ONLY path that destroys data + files.',
   })
-  @ApiResponse({ status: 200, description: 'Permanently purged (rows + files removed).' })
+  @ApiResponse({ status: 200, description: 'Metadata removed; filesystem erasure verified unless filesPending is true.' })
   async purge(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    return this.campaigns.purge(id, user);
+    const outcome = await this.campaigns.purge(id, user);
+    return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }
 
   @Post(':id/clone')
-  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, characters, sessions, notes and encounters with all cross-references remapped; mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored) and strips play state. Members, attachments, tokens, audit history and proposals are never copied." })
+  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, characters, sessions, notes and encounters with all cross-references remapped; cloned encounters reset to 'preparing' with round and turnIndex reset to 0, currentCombatantId and endedAt cleared, and combatants restored to full HP (hpCurrent = hpMax) with conditions and initiative cleared (issue #548); encounter hidden is preserved (issue #262). mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored) and strips play state. Members, attachments, tokens, audit history and proposals are never copied." })
   @ApiResponse({ status: 201, description: 'The newly created campaign.' })
   @ApiResponse({ status: 403, description: 'Not a dm of the source campaign.' })
   async clone(@Param('id', ParseIntPipe) id: number, @Body() body: CampaignCloneDto, @CurrentUser() user: RequestUser) {

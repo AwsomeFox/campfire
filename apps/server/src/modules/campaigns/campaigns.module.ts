@@ -10,6 +10,7 @@ import { EncountersModule } from '../encounters/encounters.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
+import { AttachmentsModule } from '../attachments/attachments.module';
 import { CampaignsService } from './campaigns.service';
 import { CampaignsController } from './campaigns.controller';
 
@@ -26,6 +27,7 @@ import { CampaignsController } from './campaigns.controller';
     InventoryModule,
     TimelineModule,
     CommentsModule,
+    AttachmentsModule,
   ],
   controllers: [CampaignsController],
   providers: [CampaignsService],

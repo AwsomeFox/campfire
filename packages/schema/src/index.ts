@@ -25,6 +25,11 @@ import {
   unsupportedEncounterDifficulty,
   type EncounterDifficultyInput,
 } from './encounter-difficulty';
+import {
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
+  type InitiativeTiebreakCombatant,
+} from './initiative-tiebreak';
 
 export {
   DifficultyBand,
@@ -38,8 +43,11 @@ export {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
 };
 export type { EncounterDifficultyInput };
+export type { InitiativeTiebreakCombatant };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -878,6 +886,9 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
 
+// Schedule notification metadata + locale-aware copy (issue #820).
+export * from './scheduleNotifications';
+
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
@@ -1242,7 +1253,8 @@ export const CommentUpdate = z.object({
 // campaign, the next session gets scheduled (session_scheduled) or a member
 // RSVPs to one (session_rsvp), a quest is completed or revealed to the party
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
-// the DM approves/rejects it (proposal_resolved). Read via
+// the DM approves/rejects it (proposal_resolved), or a member posts to the DM
+// scribe inbox (inbox_submitted, issue #832). Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
 export const NotificationType = z.enum([
@@ -1260,6 +1272,8 @@ export const NotificationType = z.enum([
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
+  // Issue #832: a player (or any member) posted to the DM scribe inbox.
+  'inbox_submitted',
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
@@ -1280,6 +1294,12 @@ export const Notification = z.object({
    * inside the parent entity's discussion thread (`entityType`/`entityId`).
    */
   commentId: Id.nullable().default(null),
+  /**
+   * Issue #820: optional structured event payload (JSON object). Schedule
+   * lifecycle pings store {@link ScheduleNotificationData} here so clients can
+   * localize the start instant instead of trusting a UTC date baked into title.
+   */
+  data: z.record(z.string(), z.unknown()).nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -1662,6 +1682,14 @@ export interface RuleSystemAdapter {
     representation?: AbilityRepresentation,
     level?: number,
   ): number;
+  /**
+   * Compare two combatants with equal initiative totals for running-order sort (issue #611).
+   * Return negative if `a` should act before `b`. Called only after initiative totals match
+   * (or both are null). 5e: higher DEX/`initMod` first, then `sortOrder` ascending as a
+   * stable fallback (no roll-off prompt — DM may manually reorder). PF2e: preserve
+   * roll/add order via `sortOrder` only (do not re-sort by DEX).
+   */
+  initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
@@ -1765,6 +1793,10 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     const dex = dnd5eDexScore(abilities);
     return dex === null ? 0 : resolveAbilityModifier(this, dex, representation);
   },
+  // Issue #611: on equal initiative totals, higher DEX (stored as initMod) goes first.
+  // Equal DEX falls back to sortOrder (stable insertion order). A DM roll-off / reorder
+  // UI is out of scope for this PR — the DM can manually set initiative or reorder.
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
@@ -1959,6 +1991,9 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
     // Agility is already the native attribute value (no score→mod conversion).
     return openLegendAgility(abilities);
   },
+  // Open Legend initiative is Agility-monotonic; on a tied total, higher Agility (initMod)
+  // goes first, then sortOrder — same shape as the 5e DEX-desc default (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: OPEN_LEGEND_BANES_BOONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const attributes = (d.attributes ?? d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
@@ -2244,6 +2279,9 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     }
     return wisMod;
   },
+  // Issue #611: PF2e keeps tied combatants in preserved roll/add order (sortOrder).
+  // Do NOT re-sort by DEX/initMod after equal initiative totals.
+  initiativeTiebreak: sortOrderAscTiebreak,
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
@@ -2528,11 +2566,36 @@ export const RulePackInstallJob = z.object({
 });
 export type RulePackInstallJob = z.infer<typeof RulePackInstallJob>;
 
+/** Default page size for GET /rules/search (issue #613). */
+export const RULE_SEARCH_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on rule search — clients page with `cursor`, not a huge page. */
+export const RULE_SEARCH_MAX_LIMIT = 100;
+
 export const RuleSearchQuery = z.object({
   q: z.string().max(200).default(''),
   type: RuleEntryType.optional(),
   pack: z.string().max(80).optional(), // pack slug
+  /** Page size (default 50, max 100). Omitted → default; never silently returns a truncated array. */
+  limit: z.number().int().positive().max(RULE_SEARCH_MAX_LIMIT).optional(),
+  /** Opaque stable cursor from a previous page's `nextCursor` (issue #613). */
+  cursor: z.string().max(512).optional(),
 });
+
+/**
+ * Paginated rule-search response (issue #613).
+ *
+ * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true.
+ */
+export const RuleSearchPage = z.object({
+  items: z.array(RuleEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).optional(),
+  limit: z.number().int().positive(),
+});
+export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an
@@ -4405,7 +4468,20 @@ export const InventoryItem = z.object({
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;
 export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
-export const InventoryItemUpdate = InventoryItemCreate.partial();
+// Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
+// +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
+// absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
+// form cannot clobber a concurrent increment. Other item fields (name/notes/icon/
+// owner move) stay on the same PATCH. Server enforces the qty/qtyDelta exclusivity
+// and the CAS / idempotency requirements — kept as optional fields here so MCP
+// `InventoryItemUpdate.shape` still spreads cleanly.
+export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
+  qtyDelta: z.number().int().optional(),
+  expectedUpdatedAt: IsoDate.optional(),
+  // Client-generated per-action key (UUID). Required with qtyDelta; optional on an
+  // absolute qty set so a lost-response retry can replay the committed item.
+  idempotencyKey: z.string().min(1).max(128).optional(),
+});
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
 const Coin = z.number().int().nonnegative();
@@ -4774,6 +4850,34 @@ export const StorageOrphans = z.object({
 });
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
+export const FsCleanupPendingItem = z.object({
+  id: z.number().int().positive(),
+  relPath: z.string(),
+  scope: z.enum(['attachment', 'campaign_purge']),
+  // `held` = reserved before metadata commit; drain must not erase until armed.
+  status: z.enum(['held', 'pending', 'failed']),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  updatedAt: IsoDate,
+});
+export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
+
+export const FsCleanupSummary = z.object({
+  pendingCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  /** Total rows in fs_deletion_queue (items may be truncated for the admin UI). */
+  queueCount: z.number().int().nonnegative(),
+  items: z.array(FsCleanupPendingItem),
+});
+export type FsCleanupSummary = z.infer<typeof FsCleanupSummary>;
+
+/** Response when metadata is removed but filesystem erasure may still be in flight (issue #727). */
+export const PermanentDeletionResult = z.object({
+  filesPending: z.boolean(),
+  pendingPaths: z.array(z.string()).optional(),
+});
+export type PermanentDeletionResult = z.infer<typeof PermanentDeletionResult>;
+
 export const StorageStats = z.object({
   totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
   committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
@@ -4783,6 +4887,7 @@ export const StorageStats = z.object({
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,
+  fsCleanup: FsCleanupSummary,
 });
 export type StorageStats = z.infer<typeof StorageStats>;
 

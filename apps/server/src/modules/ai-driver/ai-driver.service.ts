@@ -80,6 +80,18 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
  */
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
+/**
+ * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
+ * (#1057) to abort early when a concurrent lever fires mid-turn. TS narrows `session.state`
+ * inside the loop (where the initial guard proved it was `running`), so a plain comparison is
+ * flagged as TS2367; this helper performs a runtime-safe check on the mutable property that
+ * cannot be narrowed away, because the lever handlers mutate the object between await points.
+ */
+function isFrozen(session: AiDmSessionState): boolean {
+  const s: string = session.state;
+  return s === 'paused' || s === 'human_control';
+}
+
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
 export type AiDmStuckReason =
   | 'tool_error' // a tool call errored (surfaced by the turn loop's stop reason)
@@ -158,6 +170,14 @@ export interface AiDmSessionState {
    */
   detached?: boolean;
 }
+
+/**
+ * Safety bound on the number of concurrently-active (unconsumed) secret-read approvals a single
+ * campaign session may hold (#1059). Consumed approvals are deleted on use, and same-{tool,entityId}
+ * grants replace in place, so this cap only bites when a DM stacks many DISTINCT pending approvals;
+ * the oldest is then evicted to keep the in-memory session map bounded.
+ */
+const MAX_ACTIVE_SECRET_READ_APPROVALS = 50;
 
 /**
  * A DM-granted, narrowly-scoped approval for the autonomous seat to read ONE secret entity
@@ -260,6 +280,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // scene / exploration
   'reveal_map_region',
   'check_objective',
+  'set_npc_disposition',
   // table notes the DM jots during play
   'add_note',
 ]);
@@ -736,7 +757,10 @@ export class AiDriverService {
       for (let step = 0; step < maxSteps; step++) {
         // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
         // before the next provider call so we cannot interleave with a replacement session.
-        if (session.detached) {
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'; abort early so the AI doesn't burn further budget,
+        // stream narration, or execute tool calls against a table that's now human-owned.
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           break;
         }
@@ -766,7 +790,7 @@ export class AiDriverService {
           maxTokens,
           tools: toolSchemas,
         });
-        if (aborted || session.detached) {
+        if (aborted || session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           if (text) finalNarration = text;
           break;
@@ -781,7 +805,19 @@ export class AiDriverService {
         // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
         // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
         // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
-        const usage = result?.usage.totalTokens ?? 0;
+        let usage = result?.usage.totalTokens ?? 0;
+        // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+        // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+        // rather than silently fail-open on budget enforcement.
+        const outputText = text || result?.text || '';
+        if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
+          const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
+          // ~4 chars per token is a conservative English-language estimate.
+          usage = Math.max(1, Math.ceil(outputChars / 4));
+          this.logger.warn(
+            `Provider did not report streaming usage for step ${steps} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+          );
+        }
         const servedModel = result?.model || execModel;
         const metered = await this.aiDm.meterTurn(campaignId, usage, {
           actor,
@@ -792,7 +828,7 @@ export class AiDriverService {
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached) {
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           if (text) finalNarration = text;
           break;
@@ -822,7 +858,7 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached) {
+        if (session.detached || isFrozen(session)) {
           stopReason = 'aborted';
           break;
         }
@@ -1109,7 +1145,10 @@ export class AiDriverService {
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
       // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
       if (approvedSecret) {
-        approvedSecret.consumed = true;
+        // Single-use: remove the approval the moment its DM-scoped read completes, so it can't be
+        // replayed to re-leak the secret AND so consumed approvals don't accumulate unboundedly in
+        // the in-memory session map over a long campaign (#1059).
+        this.consumeApproval(session, approvedSecret);
         await this.audit.log({
           actor,
           actorRole: 'dm',
@@ -1262,7 +1301,21 @@ export class AiDriverService {
     }
     const session = this.ensureSession(campaignId);
     session.secretReadApprovals = session.secretReadApprovals ?? {};
+    const approvals = session.secretReadApprovals;
     const key = approvalKey(tool, entityId);
+    // Bound the active approvals per campaign (#1059): a NEW key that would exceed the cap evicts
+    // the oldest approval (by grant time) so a DM stacking distinct grants can't grow memory without
+    // limit. Re-granting an existing {tool, entityId} replaces in place and never trips the cap.
+    if (!(key in approvals)) {
+      const keysByAge = Object.keys(approvals).sort((a, b) => approvals[a].grantedAt.localeCompare(approvals[b].grantedAt));
+      while (keysByAge.length >= MAX_ACTIVE_SECRET_READ_APPROVALS) {
+        const oldest = keysByAge.shift()!;
+        delete approvals[oldest];
+        this.logger.warn(
+          `secret-read approvals at cap (${MAX_ACTIVE_SECRET_READ_APPROVALS}) for campaign ${campaignId}; evicted oldest ${oldest}`,
+        );
+      }
+    }
     // Replace any prior approval for the same {tool, entityId} (the new one is unconsumed).
     const approval: AiDmSecretReadApproval = {
       tool,
@@ -1312,6 +1365,16 @@ export class AiDriverService {
       this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
     }
     return session;
+  }
+
+  /**
+   * Consume a single-use secret-read approval (#557): mark it consumed AND remove it from the
+   * session map so it can neither be replayed nor accumulate as dead state over time (#1059).
+   */
+  private consumeApproval(session: AiDmSessionState, approval: AiDmSecretReadApproval): void {
+    approval.consumed = true;
+    const approvals = session.secretReadApprovals;
+    if (approvals) delete approvals[approvalKey(approval.tool, approval.entityId)];
   }
 
   /** Look up an unconsumed approval for {tool, entityId}, or null (issue #557). */
@@ -1399,11 +1462,11 @@ export class AiDriverService {
       return { query, result: renderNoRuleSystem(query) };
     }
 
-    const results = await this.rules.search({ q: query, pack: pack.slug }, 5);
-    if (results.length === 0) {
+    const page = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    if (page.items.length === 0) {
       return { query, result: renderNoMatch(query, pack) };
     }
-    return { query, result: renderRulesAnswer(query, pack, results) };
+    return { query, result: renderRulesAnswer(query, pack, page.items) };
   }
 
   /**

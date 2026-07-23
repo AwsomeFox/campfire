@@ -282,10 +282,11 @@ export class AttachmentsController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Delete an attachment', description: 'Requires campaign membership; the service layer further restricts to the uploader or a dm.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiResponse({ status: 200, description: 'Metadata removed; filesystem erasure verified unless filesPending is true.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
-    await this.attachmentsService.remove(id, user, role);
+    const outcome = await this.attachmentsService.remove(id, user, role);
+    return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }
 }
