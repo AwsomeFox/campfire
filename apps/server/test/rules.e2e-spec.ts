@@ -1423,6 +1423,10 @@ describe('rules / rule packs — Starfinder 2e install (e2e, fake AoN server)', 
  * Live smoke test (issue #346 acceptance): proves the Open Legend DEFAULT source actually
  * resolves against the real GitHub-hosted core-rules repo, with NO `url` override. Skipped by
  * default (it needs network); run with RUN_LIVE_RULES_SMOKE=1 to exercise the live source.
+ *
+ * Intentional `describe.skip` when unset — tracked so this is not a silent pending:
+ * - #346: Open Legend live source wiring / acceptance smoke
+ * - #568 / #578: keep the opt-in gate documented (do not delete or convert to a bare skip)
  */
 const liveSmoke = process.env.RUN_LIVE_RULES_SMOKE === '1' ? describe : describe.skip;
 liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #346)', () => {
