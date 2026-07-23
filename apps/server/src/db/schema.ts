@@ -907,7 +907,8 @@ export const inventoryItems = sqliteTable('inventory_items', {
 // Issue #782: per-action idempotency for inventory quantity writes. A client-generated
 // key records the committed item JSON so a lost-response retry returns the same
 // result without re-applying a qtyDelta. Fingerprint binds the key to one operation
-// (delta:+1 / set:5@…) — reuse with a different payload is a 409.
+// (qty + accompanying mutable fields) — reuse with a different payload is a 409.
+// Rows are pruned opportunistically on write once past the TTL window (created_at).
 export const inventoryQtyIdempotency = sqliteTable('inventory_qty_idempotency', {
   key: text('key').primaryKey(),
   itemId: integer('item_id').notNull(),

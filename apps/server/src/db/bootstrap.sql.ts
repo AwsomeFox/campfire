@@ -698,6 +698,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
 );
 
 -- Issue #782: per-action idempotency for inventory quantity deltas / CAS sets.
+-- Pruned by created_at TTL on write; idx_inventory_qty_idempotency_created keeps that cheap.
 CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
   key TEXT PRIMARY KEY,
   item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
@@ -920,6 +921,7 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
 `;
 
 /**

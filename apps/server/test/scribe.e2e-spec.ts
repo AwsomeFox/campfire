@@ -111,12 +111,48 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     expect(seat.body.turnCount).toBe(1);
     expect(seat.body.lastTurnAt).not.toBeNull();
 
+    // Config + job log reads (covers controller getConfig/jobs + service.listJobs).
+    const cfg = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe`).set(dm);
+    expect(cfg.status).toBe(200);
+    expect(cfg.body.budgetPerRun).toBeGreaterThan(0);
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs`).set(dm);
+    expect(jobs.status).toBe(200);
+    expect(jobs.body.some((j: { status: string; trigger: string }) => j.status === 'succeeded' && j.trigger === 'on_demand')).toBe(
+      true,
+    );
+
     // Approving the proposal is what finally publishes the recap (co-DM discipline).
     const approve = await request(harness.server).post(`${API}/proposals/${proposal.id}/approve`).set(dm).send({});
     expect(approve.status).toBe(201);
     const after = await request(harness.server).get(`${API}/campaigns/${campaignId}/sessions`).set(dm);
     expect(after.body).toHaveLength(1);
     expect(after.body[0].recapExcerpt).toContain('cracked the vault');
+  });
+
+  it('records a failed job when seat metering throws (#1055)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Meter Fail');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The wizard sealed the rift.');
+
+    const { AiDmService } = await import('../src/modules/ai-dm/ai-dm.service');
+    const aiDm = harness.ctx.app.get(AiDmService);
+    const spy = jest.spyOn(aiDm, 'meterTurn').mockRejectedValueOnce(new Error('injected metering failure'));
+
+    harness.script({ text: 'The rift closed with a whisper of spent magic.' });
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('failed');
+    expect(run.body.job.detail).toMatch(/metering error: injected metering failure/);
+    expect(run.body.proposalIds).toHaveLength(0);
+
+    // Metering threw before counters advanced — seat activity stays untouched.
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(0);
+    expect(seat.body.turnCount).toBe(0);
+    expect(seat.body.lastTurnAt).toBeNull();
+
+    spy.mockRestore();
   });
 
   it('is idempotent: a re-run while a recap proposal is pending is a no-op that returns the same proposal', async () => {
@@ -139,7 +175,7 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     expect(proposals.body).toHaveLength(1);
   });
 
-  it('dry run previews the recap without filing a proposal', async () => {
+  it('dry run previews the recap without filing a proposal, but still meters the seat (#1055)', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Dry Run');
     await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
@@ -153,6 +189,12 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
 
     const proposals = await request(harness.server).get(`${API}/campaigns/${campaignId}/proposals`).set(dm);
     expect(proposals.body).toHaveLength(0);
+
+    // Dry-run still burned provider tokens — meterTurn must bump turnCount/lastTurnAt.
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBeGreaterThan(0);
+    expect(seat.body.turnCount).toBe(1);
+    expect(seat.body.lastTurnAt).not.toBeNull();
   });
 
   it('is gated: with the experimental flag off, a run is disabled and files nothing', async () => {

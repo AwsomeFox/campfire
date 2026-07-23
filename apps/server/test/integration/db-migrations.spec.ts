@@ -332,6 +332,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0066_entity_revisions_version_authorship');
       expect(MIGRATION_NAMES).toContain('0067_campaign_members_exclusive_character');
       expect(MIGRATION_NAMES).toContain('0068_inventory_qty_idempotency');
+      expect(MIGRATION_NAMES).toContain('0069_inventory_qty_idempotency_created_at');
+      expect(
+        (sqlite.pragma('index_list(inventory_qty_idempotency)') as Array<{ name: string }>).map((index) => index.name),
+      ).toEqual(expect.arrayContaining(['idx_inventory_qty_idempotency_item', 'idx_inventory_qty_idempotency_created']));
       expect(columnNames(sqlite, 'entity_revisions')).toEqual(
         expect.arrayContaining([
           'author_source',

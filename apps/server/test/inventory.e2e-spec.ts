@@ -375,8 +375,54 @@ describe('inventory & treasury (e2e)', () => {
       expect(misuse.status).toBe(409);
       expect(misuse.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
 
+      // Same qtyDelta but different accompanying fields must also 409 — fingerprint
+      // covers name/notes/move/icon so a "corrected" retry cannot silently drop them.
+      const differentFields = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, name: 'Torch bundle (lit)', notes: 'smoky' });
+      expect(differentFields.status).toBe(409);
+      expect(differentFields.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
       const live = await request(server).get(`/api/v1/inventory/${id}`).set(dm);
       expect(live.body.qty).toBe(2);
+      expect(live.body.name).toBe('Torch bundle');
+    });
+
+    it('prunes expired inventory_qty_idempotency rows on the next qty write (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Oil flask', qty: 1 });
+      const id = created.body.id as number;
+      const key = 'oil-ttl-replay';
+
+      const first = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: 1, idempotencyKey: key });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Age the idempotency row past the TTL window, then touch qty again — prune
+      // runs inside the write tx, so the stale key is gone and a "retry" re-applies.
+      const { DB } = await import('../src/db/db.module');
+      const { inventoryQtyIdempotency } = await import('../src/db/schema');
+      const { eq } = await import('drizzle-orm');
+      const {
+        INVENTORY_QTY_IDEMPOTENCY_TTL_MS,
+      } = await import('../src/modules/inventory/inventory.service');
+      const db = ctx.app.get(DB);
+      const stale = new Date(Date.now() - INVENTORY_QTY_IDEMPOTENCY_TTL_MS - 60_000).toISOString();
+      db.update(inventoryQtyIdempotency)
+        .set({ createdAt: stale })
+        .where(eq(inventoryQtyIdempotency.key, key))
+        .run();
+
+      const afterTtl = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key });
+      expect(afterTtl.status).toBe(200);
+      expect(afterTtl.body.qty).toBe(3);
     });
 
     it('absolute qty CAS: stale expectedUpdatedAt returns 409 with current item (#782)', async () => {

@@ -1941,6 +1941,14 @@ function migrateInventoryQtyIdempotencyTable(sqlite: Database.Database): void {
   `);
 }
 
+/** Issue #782: created_at index so TTL prune-on-write is a range scan, not a table scan. */
+function migrateInventoryQtyIdempotencyCreatedAtIndex(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created
+      ON inventory_qty_idempotency(created_at);
+  `);
+}
+
 /**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
@@ -2023,6 +2031,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
   { name: '0068_inventory_qty_idempotency', run: migrateInventoryQtyIdempotencyTable },
+  { name: '0069_inventory_qty_idempotency_created_at', run: migrateInventoryQtyIdempotencyCreatedAtIndex },
 ];
 
 /**

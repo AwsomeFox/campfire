@@ -3065,7 +3065,8 @@ export class McpToolsService {
       'player: update an inventory item\'s name/notes/icon, or MOVE it by changing ownerType/characterId. Character ' +
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
         'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
-        'requires expectedUpdatedAt (CAS) and 409s on conflict.',
+        'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +
+        'without changing the item.',
       { itemId: Id.describe('Inventory item id — from list_inventory'), ...InventoryItemUpdate.shape },
       async ({ itemId, ...fields }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);

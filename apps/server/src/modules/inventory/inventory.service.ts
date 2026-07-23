@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { InventoryItem, Treasury, Role } from '@campfire/schema';
@@ -17,10 +17,32 @@ type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
 
-/** Bind an idempotency key to one qty operation so key reuse with a different payload 409s. */
+/**
+ * How long qty idempotency rows are honored before opportunistic prune-on-write
+ * drops them (issue #782). Retries after this window may re-apply; keep larger
+ * than any realistic lost-response retry, short enough the table stays bounded.
+ */
+export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Bind an idempotency key to one qty operation *and* its accompanying mutable
+ * fields so key reuse with a different payload 409s (qty, move, name, notes, icon).
+ */
 function qtyFingerprint(input: InventoryItemUpdateInput): string {
-  if (input.qtyDelta !== undefined) return `delta:${input.qtyDelta}`;
-  return `set:${input.qty}@${input.expectedUpdatedAt ?? ''}`;
+  const qtyPart =
+    input.qtyDelta !== undefined
+      ? `delta:${input.qtyDelta}`
+      : `set:${input.qty}@${input.expectedUpdatedAt ?? ''}`;
+  // Deterministic JSON with explicit nulls for omitted fields — undefined must
+  // not collapse into "absent key" vs "present null" differences across retries.
+  const restPart = JSON.stringify({
+    name: input.name ?? null,
+    notes: input.notes ?? null,
+    iconSlug: input.iconSlug ?? null,
+    ownerType: input.ownerType ?? null,
+    characterId: input.characterId ?? null,
+  });
+  return `${qtyPart}|${restPart}`;
 }
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
@@ -199,6 +221,11 @@ export class InventoryService {
     try {
       this.db.transaction((tx) => {
         if (idempotencyKey && fingerprint) {
+          // Opportunistic TTL prune (issue #782): drop rows older than the replay
+          // window so the table cannot grow unbounded. Indexed on created_at.
+          const cutoff = new Date(Date.now() - INVENTORY_QTY_IDEMPOTENCY_TTL_MS).toISOString();
+          tx.delete(inventoryQtyIdempotency).where(lt(inventoryQtyIdempotency.createdAt, cutoff)).run();
+
           const [prior] = tx
             .select()
             .from(inventoryQtyIdempotency)
@@ -556,6 +583,11 @@ export class InventoryService {
  * Throwing rolls the (synchronous better-sqlite3) transaction back; the outer try/catch in
  * patchTreasury catches this exact class and translates it into a 409 with the live values.
  * Kept private to this file so the Nest exception layer never sees it directly.
+ *
+ * Deliberately NOT merged with {@link InventoryQtyConflictMarker}: each CAS path
+ * catches a distinct class (`instanceof`) and attaches a different `current` snapshot
+ * shape (Treasury vs InventoryItem). A shared generic would save ~6 lines but force a
+ * typed payload / dual catch mapping for little gain.
  */
 class TreasuryConflictMarker extends Error {
   constructor() {
@@ -566,7 +598,8 @@ class TreasuryConflictMarker extends Error {
 
 /**
  * Internal sentinel for inventory absolute-qty CAS mismatch (issue #782). Same
- * roll-back-then-409 pattern as {@link TreasuryConflictMarker}.
+ * roll-back-then-409 pattern as {@link TreasuryConflictMarker}; kept as a separate
+ * class so `instanceof` can discriminate the two CAS flows (see note above).
  */
 class InventoryQtyConflictMarker extends Error {
   constructor() {
