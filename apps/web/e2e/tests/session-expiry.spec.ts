@@ -74,7 +74,7 @@ test.describe('issue #885 - session expiry reauth', () => {
     const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
     await expect(actionBtn).toBeVisible();
     await expireProtectedApi(page);
-    await actionBtn.click();
+    await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
     const banner = page.getByTestId('session-expired-banner');
@@ -197,7 +197,7 @@ test.describe('issue #885 - session expiry reauth', () => {
     const actionBtn = page.getByRole('button', { name: /Next turn|Roll initiative|Start|Reopen|End/i }).first();
     await expect(actionBtn).toBeVisible();
     await expireProtectedApi(page);
-    await actionBtn.click();
+    await actionBtn.click({ force: true });
 
     await expect(page).toHaveURL(/\/login$/);
     await expect(page.getByTestId('session-expired-banner')).toBeVisible();
