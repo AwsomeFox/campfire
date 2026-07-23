@@ -10,7 +10,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
+import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
   ENCOUNTER_CREATE_PREFIX,
