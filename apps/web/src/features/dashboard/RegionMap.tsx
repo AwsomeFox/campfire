@@ -54,9 +54,13 @@ export function RegionMap({
 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [retryPending, setRetryPending] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  // Last failed write so Retry re-issues that request (not a no-op clear).
+  const retryActionRef = useRef<(() => Promise<unknown>) | null>(null);
+  const retryInFlight = useRef(false);
 
   // Keyboard-accessible pin positioning state (#807)
   const [kbMovingId, setKbMovingId] = useState<number | null>(null);
@@ -155,12 +159,14 @@ export function RegionMap({
 
   async function handleMapUpload(attachment: Attachment) {
     setBusy(true);
-    setError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: attachment.id });
+      setError(null);
+      retryActionRef.current = null;
       onChange();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't save the map.");
+      retryActionRef.current = () => handleMapUpload(attachment);
     } finally {
       setBusy(false);
     }
@@ -168,12 +174,14 @@ export function RegionMap({
 
   async function handleMapRemove() {
     setBusy(true);
-    setError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: null });
+      setError(null);
+      retryActionRef.current = null;
       onChange();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't remove the map.");
+      retryActionRef.current = () => handleMapRemove();
     } finally {
       setBusy(false);
     }
@@ -182,13 +190,14 @@ export function RegionMap({
   /** "Replace map" button path — bare upload (no dropzone UI), then wire the new attachment id. */
   async function uploadMapFile(file: File) {
     setBusy(true);
-    setError(null);
     try {
       const attachment = await uploadAttachment(campaignId, 'map', file);
+      // handleMapUpload owns busy/error for the campaign patch; avoid double-finally races.
+      setBusy(false);
       await handleMapUpload(attachment);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
-    } finally {
+      retryActionRef.current = () => uploadMapFile(file);
       setBusy(false);
     }
   }
@@ -200,11 +209,28 @@ export function RegionMap({
         mapX: Math.max(0, Math.min(100, xPct)),
         mapY: Math.max(0, Math.min(100, yPct)),
       });
+      setError(null);
+      retryActionRef.current = null;
       onChange();
       return true;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      retryActionRef.current = () => savePinPercent(locationId, xPct, yPct);
       return false;
+    }
+  }
+
+  async function handleRetry() {
+    if (retryInFlight.current || busy || kbSaving) return;
+    const action = retryActionRef.current;
+    if (!action) return;
+    retryInFlight.current = true;
+    setRetryPending(true);
+    try {
+      await action();
+    } finally {
+      retryInFlight.current = false;
+      setRetryPending(false);
     }
   }
 
@@ -265,7 +291,11 @@ export function RegionMap({
 
       {error && (
         <div style={{ padding: '8px 14px 0' }}>
-          <ErrorNote message={error} onRetry={() => setError(null)} />
+          <ErrorNote
+            message={error}
+            pending={retryPending || busy || kbSaving}
+            onRetry={() => void handleRetry()}
+          />
         </div>
       )}
 

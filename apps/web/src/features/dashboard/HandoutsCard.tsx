@@ -9,7 +9,7 @@
  *  - Players/viewers see only revealed maps/images (portraits are omitted — those
  *    live on character cards).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Attachment, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
@@ -26,15 +26,24 @@ export function HandoutsCard({
   const isDm = role === 'dm';
   const [items, setItems] = useState<Attachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
+  // Dedupes overlapping load/retry clicks without putting `loading` in load's deps.
+  const loadInFlight = useRef(false);
 
   const load = useCallback(async () => {
+    if (loadInFlight.current) return;
+    loadInFlight.current = true;
+    setLoading(true);
     try {
       const list = await api.get<Attachment[]>(`${API}/campaigns/${campaignId}/attachments`);
       setItems(list);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
+    } finally {
+      loadInFlight.current = false;
+      setLoading(false);
     }
   }, [campaignId]);
 
@@ -59,7 +68,7 @@ export function HandoutsCard({
   const visible = (items ?? []).filter((a) => (isDm ? true : a.kind !== 'portrait'));
 
   return (
-    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+    <div className="card elev-sm" data-testid="dashboard-handouts" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px' }}>
         <span className="card-kicker">Handouts</span>
         <div style={{ flex: 1 }} />
@@ -68,7 +77,7 @@ export function HandoutsCard({
 
       {error && (
         <div style={{ padding: '0 14px 8px' }}>
-          <ErrorNote message={error} onRetry={() => setError(null)} />
+          <ErrorNote message={error} pending={loading} onRetry={() => void load()} />
         </div>
       )}
 
