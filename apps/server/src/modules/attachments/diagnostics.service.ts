@@ -447,7 +447,12 @@ export class DiagnosticsService {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: 'Attachment row not found' };
     }
 
-    this.assertAccessible(root);
+    // Match scan/quarantine: a missing uploads root is an empty-storage case
+    // (report success:false), not a 503. Only assert accessibility when the
+    // directory exists but may be unreadable.
+    if (fs.existsSync(root)) {
+      this.assertAccessible(root);
+    }
     const located = findPrimaryAttachmentFilesOnDisk(root, req.attachmentId);
     if (located.length === 0) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: 'File not found on disk in any campaign directory' };

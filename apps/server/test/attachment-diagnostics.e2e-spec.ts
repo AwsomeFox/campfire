@@ -640,6 +640,35 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
     });
   });
 
+
+  describe('relink with missing uploads root', () => {
+    it('returns success:false (not 503) when the uploads directory is absent', async () => {
+      // Create a DB row without relying on an on-disk file, then remove the
+      // entire uploads tree so relink sees the same empty-storage case the
+      // scan tolerates (issues reported as missing, not 503).
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'missing-root-relink.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const uploadsRoot = path.join(ctx.dataDir, 'uploads');
+      fs.rmSync(uploadsRoot, { recursive: true, force: true });
+      expect(fs.existsSync(uploadsRoot)).toBe(false);
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'relink' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(false);
+      expect(fixRes.body.detail).toMatch(/not found/i);
+
+      // Restore an empty uploads root so later tests can recreate dirs.
+      fs.mkdirSync(uploadsRoot, { recursive: true });
+    });
+  });
+
   describe('quarantine move failure -> 503', () => {
     it('maps an unwritable quarantine destination to 503 instead of 500', async () => {
       // Create an orphan file to quarantine under a made-up campaign dir.
