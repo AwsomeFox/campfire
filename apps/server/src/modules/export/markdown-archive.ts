@@ -15,8 +15,17 @@ export const MARKDOWN_ARCHIVE_FORMAT_VERSION = 1;
 /** Secrecy profile for the DM-facing markdown archive (dmSecret fields included). */
 export const MARKDOWN_ARCHIVE_SECRECY_PROFILE = 'dm-full';
 
-/** Max grapheme-ish length of a display stem before truncation (bytes of UTF-16 code units). */
+/** Max Unicode code points in a display stem before truncation. */
 export const ARCHIVE_STEM_MAX = 80;
+
+function truncateStemByCodePoints(stem: string, max: number): string {
+  const parts: string[] = [];
+  for (const cp of stem) {
+    parts.push(cp);
+    if (parts.length >= max) break;
+  }
+  return parts.join('');
+}
 
 /**
  * Characters that are unsafe in zip entry names across common unzip tools /
@@ -29,8 +38,10 @@ const UNSAFE_FILENAME_CHARS = /[<>:"/\\|?*\u0000-\u001f\u007f]/g;
  *
  * Unlike {@link slugify}, this keeps CJK / Arabic / emoji / mixed-case letters so
  * two records that only differed by case or script stay visually distinct. Path
- * separators and Windows-forbidden characters are replaced; empty / punctuation-
- * only names fall back to `untitled`. Collision safety comes from the stable
+ * separators and Windows-forbidden characters are replaced; whitespace-only names
+ * and names that sanitize to empty (e.g. Windows-forbidden `?`) fall back to
+ * `untitled` — other punctuation-only stems like `!!!` are kept. Collision safety
+ * comes from the stable
  * record id appended by {@link archiveRecordFilename}, not from this stem.
  */
 export function archiveDisplayStem(name: string): string {
@@ -44,14 +55,14 @@ export function archiveDisplayStem(name: string): string {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   const stem = cleaned || 'untitled';
-  if (stem.length <= ARCHIVE_STEM_MAX) return stem;
-  return stem.slice(0, ARCHIVE_STEM_MAX).replace(/[\s.-]+$/g, '') || 'untitled';
+  if ([...stem].length <= ARCHIVE_STEM_MAX) return stem;
+  return truncateStemByCodePoints(stem, ARCHIVE_STEM_MAX).replace(/[\s.-]+$/g, '') || 'untitled';
 }
 
 /**
  * Collision-proof deterministic markdown filename: `{stem}__{type}-{id}.md`.
  * The typed id makes the path unique even when stems collide (duplicates,
- * case-only variants, punctuation-only names that all become `untitled`).
+ * case-only variants, or punctuation-only stems that share the same display text).
  */
 export function archiveRecordFilename(
   type: string,
