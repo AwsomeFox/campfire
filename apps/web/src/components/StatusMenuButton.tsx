@@ -20,8 +20,9 @@
  *  - Home / End jump to the first / last option.
  *  - Enter / Space commits the focused option.
  *  - Escape closes and returns focus to the trigger.
- *  - Tab from an open popup commits the focused option and moves on; a click
- *    outside dismisses without committing.
+ *  - Tab from an open popup commits the focused option and moves on: the menu
+ *    closes immediately (without restoring focus) before the async save
+ *    settles; a click outside dismisses without committing.
  *
  * The popup is anchored to the trigger and clamped to the viewport so it stays
  * on screen at high zoom / on narrow viewports. Selection is preserved when a
@@ -96,6 +97,10 @@ export function StatusMenuButton<V extends string>({
   const listboxRef = useRef<HTMLUListElement>(null);
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
   const commitInFlight = useRef(false);
+  // Latched when the menu closes without restoring focus (outside click, Tab,
+  // in-flight dismiss). An in-flight commit's completion must honor this so
+  // focus is not yanked back to the trigger after the user has moved on.
+  const suppressFocusRestore = useRef(false);
 
   // Keep the active index in sync with the committed selection while closed so
   // re-opening always starts the keyboard journey on the current value.
@@ -109,13 +114,19 @@ export function StatusMenuButton<V extends string>({
   }, []);
 
   const openMenu = useCallback(() => {
+    suppressFocusRestore.current = false;
     setOpen(true);
     setActiveIndex(selectedIndex);
   }, [selectedIndex]);
 
   const closeMenu = useCallback((restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) buttonRef.current?.focus();
+    if (!restoreFocus) {
+      suppressFocusRestore.current = true;
+      return;
+    }
+    if (suppressFocusRestore.current) return;
+    buttonRef.current?.focus();
   }, []);
 
   // Move the DOM focus to the active option whenever it changes while open.
@@ -272,7 +283,9 @@ export function StatusMenuButton<V extends string>({
         break;
       case 'Tab':
         // Tab commits the focused option and lets the user keep moving —
-        // matches native <select> behavior on Windows/Linux.
+        // matches native <select> behavior on Windows/Linux. Close happens
+        // immediately inside commit (restoreFocus: false) so aria-expanded
+        // flips and Escape/outside listeners detach while focus moves on.
         void commit(options[index], { restoreFocus: false });
         break;
       case 'Escape':
@@ -291,27 +304,44 @@ export function StatusMenuButton<V extends string>({
   }
 
   async function commit(option: StatusMenuOption<V>, opts?: { restoreFocus?: boolean }) {
-    const finish = (restoreFocus: boolean) => closeMenu(restoreFocus);
+    const restoreFocus = opts?.restoreFocus ?? true;
+    const finish = () => {
+      const shouldRestore = restoreFocus && !suppressFocusRestore.current;
+      closeMenu(shouldRestore);
+    };
     if (option.value === value) {
       // Selecting the already-selected option is a no-op apart from closing.
       // This must run before the in-flight guard below: dismissing on the
       // current value (Escape-style) should always close the menu, even
       // while an earlier save for a different option is still pending.
-      finish(opts?.restoreFocus !== false);
+      finish();
       return;
     }
-    if (commitInFlight.current) return;
+    if (commitInFlight.current) {
+      // Duplicate activation while a save is pending: close without focus so
+      // the menu doesn't hang open looking unresponsive.
+      closeMenu(false);
+      return;
+    }
     commitInFlight.current = true;
     try {
+      // Tab (restoreFocus: false): close immediately so aria-expanded flips and
+      // Escape/outside listeners detach while focus continues to the next
+      // control. Enter/Space keep the menu open until onSelect settles
+      // (unless the user dismisses in the meantime, which latches
+      // suppressFocusRestore so finish() does not yank focus back).
+      if (!restoreFocus) {
+        closeMenu(false);
+      }
       await onSelect(option.value);
-      finish(opts?.restoreFocus !== false);
+      finish();
     } catch {
       // The caller's onSelect is expected to surface its own failure UI. The
       // selection is preserved (value is unchanged), and we surface a spoken
       // failure when an announcer was supplied so screen reader users learn
       // the save did not stick.
       if (announceFailure && failureMessage) announceFailure(failureMessage);
-      finish(opts?.restoreFocus !== false);
+      finish();
     } finally {
       commitInFlight.current = false;
     }

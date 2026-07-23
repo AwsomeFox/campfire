@@ -183,6 +183,44 @@ test.describe('quest status picker accessibility', () => {
       await context.close();
     }
   });
+
+  test('outside-click during a pending save does not refocus the trigger', async ({ page }) => {
+    const { semantic: fixture } = seed();
+    await page.goto(`/c/${fixture.campaignId}/quests/${fixture.quests.active.id}`);
+
+    // Hold the status POST open so we can dismiss while the save is in flight.
+    let releaseSave!: () => void;
+    const saveHeld = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    await page.route(`**/api/v1/quests/${fixture.quests.active.id}/status`, async (route) => {
+      await saveHeld;
+      await route.continue();
+    });
+
+    const trigger = page.getByRole('button', { name: /^Quest status:/ });
+    const heading = page.getByRole('heading', { name: fixture.quests.active.title });
+    await trigger.click();
+    const listbox = page.getByRole('listbox');
+    await expect(listbox).toBeVisible();
+
+    // Start a commit, then click outside before the save settles.
+    await listbox.getByRole('option', { name: 'Completed' }).click();
+    await heading.click();
+    await expect(listbox).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    // Outside-click dismiss must not restore focus to the trigger — and the
+    // pending save's completion must not yank it back later either.
+    await expect(trigger).not.toBeFocused();
+
+    releaseSave();
+    await expect(
+      page.locator('[data-semantic="quest-status"][data-semantic-value="completed"]'),
+    ).toHaveCount(2);
+    await expect(trigger).not.toBeFocused();
+
+    await page.unroute(`**/api/v1/quests/${fixture.quests.active.id}/status`);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -303,11 +341,30 @@ test.describe('location status picker accessibility', () => {
       expect(box!.x).toBeGreaterThanOrEqual(0);
       expect(box!.x + box!.width).toBeLessThanOrEqual(320);
 
-      // Tab commits the focused option (Current) and leaves the menu.
+      // Hold the discover POST so we can assert the menu closes on Tab before
+      // the async commit settles (aria-expanded must flip immediately).
+      let releaseSave!: () => void;
+      const saveHeld = new Promise<void>((resolve) => {
+        releaseSave = resolve;
+      });
+      await page.route(`**/api/v1/locations/${fixture.locationId}/discover`, async (route) => {
+        await saveHeld;
+        await route.continue();
+      });
+
+      // Tab commits the focused option (Current) and leaves the menu immediately.
       await listbox.getByRole('option', { name: 'Current' }).focus();
       await page.keyboard.press('Tab');
       await expect(listbox).toHaveCount(0);
+      await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+      // Focus continues past the picker — do not yank it back to the trigger.
+      await expect(trigger).not.toBeFocused();
+
+      releaseSave();
       await expect(page.locator('h1 + *').filter({ hasText: 'Current' })).toBeVisible();
+      await expect(trigger).not.toBeFocused();
+
+      await page.unroute(`**/api/v1/locations/${fixture.locationId}/discover`);
 
       // The status picker itself must stay axe-clean at 400% zoom. Scope the
       // scan to the menu region so a pre-existing RevisionHistoryPanel
