@@ -177,6 +177,11 @@ export default function AiTablePage() {
   // treat the delayed seed as live additions (#1077 / Bugbot).
   const seededRef = useRef(false);
   const [narrationLogLive, setNarrationLogLive] = useState(false);
+  // When viewer→driver reseeds after the log already went live, re-baseline so join
+  // context is silenced instead of announced as live additions.
+  const silenceSeedBaselineRef = useRef(false);
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (transcript.entries.length > 0) {
       // Hydrated history (or seed applied on the previous commit): no further seed.
@@ -192,14 +197,27 @@ export default function AiTablePage() {
     // session seed may still arrive — wait before enabling the live log.
     if (!seatQuery.isFetched) return;
     if (!isDriver) {
-      seededRef.current = true;
-      setNarrationLogLive(true);
+      // Do NOT set seededRef — a later seat switch into driver with an empty
+      // transcript must still run session join-context seeding (#1077 recovery).
+      if (!narrationLogLive) setNarrationLogLive(true);
       return;
     }
     // Driver: wait for the session read so join-context seed can land in the same
     // settle pass as enabling the live log (empty/error session → empty baseline).
     if (!sessionQuery.isFetched) return;
     if (session?.scene || session?.lastNarration) {
+      // If SR log already went live (viewer → driver), hold the live region and
+      // re-baseline so join-context seed is silenced rather than announced.
+      if (narrationLogLive) {
+        narrationLogCursorRef.current = null;
+        pendingPreLiveIdsRef.current.clear();
+        silenceSeedBaselineRef.current = true;
+        setNarrationLogLive(false);
+        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+        seededRef.current = true;
+        // Next pass (entries.length > 0) re-enables live and silences the seed.
+        return;
+      }
       dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
     }
     seededRef.current = true;
@@ -280,12 +298,9 @@ export default function AiTablePage() {
   // covers turn.start/end + composer lock/unlock without flooding SRs.
   const [narrationLogMirror, setNarrationLogMirror] = useState<NarrationLogAddition[]>([]);
   const [a11yStatus, setA11yStatus] = useState('');
-  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
   const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
   // Hydrated localStorage ids on first commit — never treat as pre-live pending.
   const mountBaselineIdsRef = useRef<Set<string> | null>(null);
-  // Finished lines that arrived while the log was held (e.g. turn.end before seed).
-  const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
   if (mountBaselineIdsRef.current === null) {
     mountBaselineIdsRef.current = announceableEntryIds(transcript.entries);
   }
@@ -294,6 +309,8 @@ export default function AiTablePage() {
     // Delay until seed/hydration settles — an early pass on [] would pin an empty
     // cursor and then announce the later session seed as live additions.
     if (!narrationLogLive) {
+      // Viewer→driver reseed hold: do not mark seed lines as pre-live pending.
+      if (silenceSeedBaselineRef.current) return;
       // Keep early finished turns pending so the go-live silence pass cannot
       // permanently suppress a streamed DM that completed before seeding (#1077).
       for (const id of collectPreLiveAnnounceableIds(
@@ -305,10 +322,11 @@ export default function AiTablePage() {
       return;
     }
     if (narrationLogCursorRef.current === null) {
-      const started = beginNarrationLogLive(
-        transcript.entries,
-        pendingPreLiveIdsRef.current,
-      );
+      const pending = silenceSeedBaselineRef.current
+        ? new Set<string>()
+        : pendingPreLiveIdsRef.current;
+      silenceSeedBaselineRef.current = false;
+      const started = beginNarrationLogLive(transcript.entries, pending);
       narrationLogCursorRef.current = started.cursor;
       pendingPreLiveIdsRef.current.clear();
       if (started.additions.length === 0) return;
@@ -534,7 +552,23 @@ export default function AiTablePage() {
         data-testid="ai-narration-log"
       >
         {narrationLogMirror.map((addition) => (
-          <p key={addition.id}>{formatNarrationLogAddition(addition)}</p>
+          <p key={addition.id}>
+            {formatNarrationLogAddition(addition, {
+              // Same localized copy as the visible transcript (not English fallback).
+              formatSystem: (a) =>
+                systemText(
+                  {
+                    id: a.id,
+                    kind: 'system',
+                    variant: a.variant,
+                    text: a.text,
+                    data: a.data,
+                    at: '',
+                  },
+                  t,
+                ),
+            })}
+          </p>
         ))}
       </div>
 
@@ -722,7 +756,7 @@ function TranscriptRow({
   );
 }
 
-/** Localized text for a system/divider transcript line. */
+/** Localized text for a system/divider transcript line (visible + SR mirror). */
 function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknown>) => string): string {
   switch (entry.variant) {
     case 'divider':
@@ -741,6 +775,10 @@ function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknow
       return t('table.systemTakeover');
     case 'vote':
       return t('table.systemVote', { action: entry.data?.action ?? '' });
+    case 'rules':
+      return entry.text
+        ? t('table.systemRules', { text: entry.text })
+        : t('table.systemRulesEmpty');
     case 'info':
     default:
       return t('table.systemInfo', { state: entry.data?.state ?? '' });
