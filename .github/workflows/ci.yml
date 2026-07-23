@@ -42,8 +42,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      # PWA dist contract (manifest, service worker, icons) after the web build above.
-      - run: npm run test:pwa -w apps/web
+      # PWA dist contract (manifest, service worker, icons) against apps/web/dist
+      # produced by the root `npm run build` above (schema + server + web).
+      - run: npm run test:pwa:dist -w apps/web
 
   # Re-runs the server unit + e2e suites with coverage instrumentation and
   # publishes the report as a build artifact (lcov + HTML). Kept separate from
@@ -68,12 +69,13 @@ jobs:
           path: apps/server/coverage/
           if-no-files-found: warn
 
-  # Browser E2E (Playwright). Guarded: no Playwright project exists yet (tracked
-  # in #81) — now implemented: the root `test:e2e` script builds schema + server +
+  # Browser E2E (Playwright). The root `test:e2e` script builds schema + server +
   # web and runs the Playwright suite (apps/web/e2e) against the real server
-  # serving the built SPA on one origin, with a seeded per-role backend. The
-  # `--if-present` guard is kept so the job still no-ops if the script is ever
-  # removed. The browser is installed explicitly (npm ci does not fetch it).
+  # serving the built SPA on one origin, with a seeded per-role backend.
+  # E2E typecheck is a required gate (#574) and needs packages/schema built first
+  # (@campfire/schema types live in gitignored dist/). The Playwright run keeps
+  # `--if-present` so that step can no-op if the script is ever removed. The
+  # browser is installed explicitly (npm ci does not fetch it).
   e2e-web:
     runs-on: ubuntu-latest
     steps:
@@ -83,6 +85,7 @@ jobs:
           node-version: '24.x'
           cache: npm
       - run: npm ci
+      - run: npm run build -w packages/schema
       # Type-check Playwright sources before installing the browser / running the suite.
       - run: npm run test:e2e:typecheck -w apps/web
       # Chromium only — the suite runs a single headless project (see playwright.config.ts).
