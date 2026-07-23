@@ -8,24 +8,31 @@ import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
  * The service is driven directly with inert stubs (grant/list/revoke/consume touch only the audit
  * log, the SSE stream, and the in-memory session map — no DB / provider), so no Nest bootstrap.
  */
+// Cast helpers tied to the real signatures so stubs can't silently drift from the source shapes.
+type Ctor = ConstructorParameters<typeof AiDriverService>;
+type Granter = Parameters<AiDriverService['grantSecretReadApproval']>[1];
+
 describe('AiDriverService — secret-read approvals are bounded (#1059)', () => {
   const CAMPAIGN = 1;
-  const dmUser = { id: 'dm-1' } as never;
+  const dmUser = { id: 'dm-1' } as unknown as Granter;
 
   function makeService() {
     const audit = { log: jest.fn().mockResolvedValue(undefined) };
     const stream = { emit: jest.fn() };
     const aiDm = { registerDriverSessionTeardown: jest.fn() };
+    // Only aiDm (constructor teardown hook), audit, and stream are touched by the approval
+    // lifecycle; the remaining deps are unused here. Casts are pinned to ConstructorParameters
+    // so a signature change surfaces as a compile error rather than a silent `never`.
     const svc = new AiDriverService(
-      aiDm as never, // aiDm
-      undefined as never, // mcpTools
-      audit as never,
-      stream as never,
-      undefined as never, // notifications
-      undefined as never, // supportPreferences
-      undefined as never, // resolver
-      undefined as never, // campaigns
-      undefined as never, // rules
+      aiDm as unknown as Ctor[0],
+      undefined as unknown as Ctor[1], // mcpTools
+      audit as unknown as Ctor[2],
+      stream as unknown as Ctor[3],
+      undefined as unknown as Ctor[4], // notifications
+      undefined as unknown as Ctor[5], // supportPreferences
+      undefined as unknown as Ctor[6], // resolver
+      undefined as unknown as Ctor[7], // campaigns
+      undefined as unknown as Ctor[8], // rules
     );
     return { svc, audit, stream };
   }
