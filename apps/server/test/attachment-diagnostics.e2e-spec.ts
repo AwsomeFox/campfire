@@ -664,6 +664,63 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
   });
 
 
+  describe('unreadable campaign subdirectory during fix', () => {
+    it('maps an unreadable campaign dir to 503 for relink (not a false not-found)', async () => {
+      // chmod-based permission revocation is unreliable on Windows.
+      if (process.platform === 'win32') return;
+
+      // Use a dedicated campaign (not the shared fixtures) so that a chmod
+      // left in a bad state can't leak into unrelated tests.
+      const camp = await adminAgent.post('/api/v1/campaigns').send({ name: 'Diagnostics Unreadable Subdir' });
+      expect(camp.status).toBe(201);
+      const isolatedCampaignId = camp.body.id;
+
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${isolatedCampaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', TINY_PNG, { filename: 'unreadable-subdir-relink.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      // Make the attachment's own campaign directory unreadable. Without
+      // fail-closed lookup, readdir would skip it and report a false not-found;
+      // with the fix it must map to 503 when EACCES is observable.
+      const campaignDir = path.join(ctx.dataDir, 'uploads', String(isolatedCampaignId));
+      const previousMode = fs.statSync(campaignDir).mode & 0o7777;
+      try {
+        fs.chmodSync(campaignDir, 0);
+      } catch {
+        // Restricted filesystems may refuse chmod — skip rather than fail the suite.
+        // Still clean up the isolated campaign so later tests don't see residual rows/files.
+        await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
+        fs.rmSync(campaignDir, { recursive: true, force: true });
+        return;
+      }
+
+      try {
+        const fixRes = await adminAgent
+          .post('/api/v1/admin/attachments/diagnostics/fix')
+          .send({ attachmentId: attachId, action: 'relink' });
+        // If the process can still read the dir (e.g. running as root), chmod
+        // is ineffective — assert the fix succeeds rather than masking a
+        // success:false "not found".
+        if (fixRes.status === 503) {
+          expect(String(fixRes.body.message)).toMatch(/unreadable|inaccessible|not accessible/i);
+        } else {
+          expect(fixRes.status).toBe(201);
+          expect(fixRes.body.success).toBe(true);
+        }
+      } finally {
+        // Fail fast if restore fails so the suite stops with a clear cause.
+        // The campaign dir is isolated above, so this cannot poison shared fixtures.
+        fs.chmodSync(campaignDir, previousMode);
+        // Best-effort cleanup of the isolated campaign (and its uploads dir).
+        await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
+        fs.rmSync(campaignDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('relink with missing uploads root', () => {
     it('returns success:false (not 503) when the uploads directory is absent', async () => {
       // Create a DB row without relying on an on-disk file, then remove the
