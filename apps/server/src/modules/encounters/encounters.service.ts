@@ -11,6 +11,7 @@ import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
@@ -31,6 +32,7 @@ import {
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import { AttachmentsService } from '../attachments/attachments.service';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
@@ -66,9 +68,7 @@ function clampPercent(value: number): number {
  * fog is a display aid, never a reason to fail a whole encounter read.
  */
 function parseFog(text: string | null): FogState | null {
-  if (text == null) return null;
-  const parsed = FogState.safeParse(fromJsonText<unknown>(text, null));
-  return parsed.success ? parsed.data : null;
+  return parseFogState(text);
 }
 
 /**
@@ -208,6 +208,7 @@ export class EncountersService {
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
     private readonly revisions: RevisionsService,
+    private readonly attachmentsService: AttachmentsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -327,6 +328,17 @@ export class EncountersService {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
+  }
+
+  /**
+   * Lightweight encounter domain mapping for GET /encounters/:id/map.
+   * Applies the same hidden-entity gate as getWithCombatantsOrThrow without joining combatants.
+   */
+  encounterForMapOrThrow(row: typeof encounters.$inferSelect, viewerRole: Role): Encounter {
+    if (!isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${row.id} not found`);
+    }
+    return encounterToDomain(row);
   }
 
   /**
@@ -725,9 +737,29 @@ export class EncountersService {
           );
         }
       }
-      // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
+      // Fog of war (issue #40 / #463): withhold the position of any token in an
+      // unrevealed region. Encounter JSON still degrades invalid fog to `null` for
+      // the fog field itself, but token coordinates must fail closed the same way
+      // the map-byte path does — otherwise a corrupt fog row would leak monster
+      // positions while the image stayed fully masked. Sibling fog protection is
+      // mirrored here too: when another encounter still conceals the shared map,
+      // this fight's tokens must not float on a fully masked board.
       const fog = parseFog(row.fog);
-      if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
+      const invalidFog = row.fog !== null && fog === null;
+      // Sibling protection applies whenever THIS encounter does not itself conceal
+      // pixels — including fog enabled but fully revealed (no rectangles masked).
+      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+      const siblingProtects =
+        !invalidFog &&
+        !ownFogConceals &&
+        row.mapAttachmentId != null &&
+        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
+      if (invalidFog || siblingProtects) {
+        const concealAll: FogState = { enabled: true, revealed: [] };
+        list = list.map((c) => redactTokenInFog(c, concealAll));
+      } else if (fog?.enabled) {
+        list = list.map((c) => redactTokenInFog(c, fog));
+      }
     }
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
@@ -882,6 +914,41 @@ export class EncountersService {
     const rowsChanged = (result as unknown as { changes?: number }).changes ?? 0;
     if (rowsChanged === 0) {
       return this.getWithCombatantsOrThrow(encounterId, role);
+    }
+
+    // If this update activates fog over a map that had previously been revealed as
+    // a handout, restage the raw attachment immediately. The raw-file route also
+    // checks fog dynamically (defense in depth), so even a failure here cannot leak
+    // source pixels; this keeps the attachment metadata/UI consistent as well.
+    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
+      // Reusing the campaign region-map attachment as a fogged battle map would
+      // block players from GET /attachments/:id/file (RegionMap has no fog-safe
+      // alternate). Clone the bytes onto a dedicated battle-map row and retarget
+      // this encounter so the shared campaign background stays player-visible.
+      const [campaign] = await this.db
+        .select({ mapAttachmentId: campaigns.mapAttachmentId })
+        .from(campaigns)
+        .where(eq(campaigns.id, encounterRow.campaignId))
+        .limit(1);
+      if (campaign?.mapAttachmentId === effectiveMapId) {
+        const clone = await this.attachmentsService.duplicate(effectiveMapId, user, role, {
+          filenamePrefix: 'battle-',
+        });
+        await this.db
+          .update(encounters)
+          .set({ mapAttachmentId: clone.id, updatedAt: nowIso() })
+          .where(eq(encounters.id, encounterId));
+        effectiveMapId = clone.id;
+      }
+
+      const attachment = await this.attachmentsService.getRowOrThrow(effectiveMapId);
+      // Only hide attachments that belong to this encounter's campaign — never
+      // side-effect another campaign's row if a stale/cross-campaign id slipped through.
+      if (attachment.campaignId === encounterRow.campaignId && !attachment.hidden) {
+        await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
+      }
     }
 
     await this.audit.log({
