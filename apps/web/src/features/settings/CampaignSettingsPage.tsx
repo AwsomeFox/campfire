@@ -589,10 +589,14 @@ function StatusCard({
     setError(null);
     const from = campaign.status;
     try {
-      if (isArchivingTransition(from, value) && revokeInvitesOnArchive) {
-        await api.delete(`${API}/campaigns/${campaignId}/invites`);
-      }
-      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
+      // Revoke+archive in one server transaction via query flag — never revoke
+      // client-side before the status change, or a failed archive permanently
+      // destroys invite rows while the campaign stays active (#857 Bugbot).
+      const revokeQs =
+        isArchivingTransition(from, value) && revokeInvitesOnArchive ? '?revokeInvites=true' : '';
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}${revokeQs}`, {
+        status: value,
+      });
       onSaved(updated);
       // Announce via the app-root live region (survives the card re-rendering
       // into the archived state) so a screen reader hears the lock land.
@@ -1114,10 +1118,11 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
     setDeleting(true);
     setError(null);
     try {
-      if (revokeInvitesOnTrash) {
-        await api.delete(`${API}/campaigns/${campaign.id}/invites`);
-      }
-      await api.delete(`${API}/campaigns/${campaign.id}`);
+      // Revoke+trash in one server transaction via query flag — never revoke
+      // client-side before trash, or a failed trash permanently destroys invite
+      // rows while the campaign stays live (#857 Bugbot).
+      const revokeQs = revokeInvitesOnTrash ? '?revokeInvites=true' : '';
+      await api.delete(`${API}/campaigns/${campaign.id}${revokeQs}`);
       onDeleted();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete campaign.");
