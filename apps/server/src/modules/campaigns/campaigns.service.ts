@@ -65,6 +65,7 @@ import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { sanitizeAttachmentFilename } from '../attachments/filename';
 
 /** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
 function uploadsRoot(): string {
@@ -1584,7 +1585,6 @@ export class CampaignsService {
       // files were renamed away (consumed); on failure the tx rolled back and
       // the staged files are orphans. Either way nothing should remain here.
       cleanupStagingDir(stagingDir);
-      stagingDir = null;
     }
   }
 
@@ -1672,7 +1672,7 @@ export class CampaignsService {
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
-        filename: str(a.filename, `attachment-${srcId}`).slice(0, 255),
+        filename: sanitizeAttachmentFilename(str(a.filename, `attachment-${srcId}`)),
         mime,
         bytes,
       });

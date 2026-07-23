@@ -1,5 +1,4 @@
 import request from 'supertest';
-import type { Server } from 'node:http';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
