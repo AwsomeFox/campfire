@@ -1,7 +1,7 @@
 /**
  * Service-worker runtime-cache housekeeping (issue #268) + offline-identity
  * survival (issue #579) + restore-safety namespacing (issue #723) + bounded
- * cache buckets (issue #879).
+ * cache buckets (issue #879) + sensitive-entry purge (issue #730).
  *
  * The PWA service worker (see apps/web/vite.config.ts) caches safe `/api` JSON
  * GETs (and optional attachment thumbs) under bounded global buckets so
@@ -45,7 +45,7 @@
 
 import type { ServerInstance } from '@campfire/schema';
 import { clearAllOfflineManifestMeta } from './offlineCampaignManifest';
-import { MANAGED_API_CACHE_NAMES } from './pwaCachePolicy';
+import { MANAGED_API_CACHE_NAMES, purgeSensitiveApiCacheEntries } from './pwaCachePolicy';
 
 /** localStorage key under which the last-known Me snapshot is persisted. */
 const ME_SNAPSHOT_KEY = 'cf.meSnapshot';
@@ -114,8 +114,14 @@ function openPurgeChannel(): BroadcastChannel | null {
  */
 export async function clearApiCache(): Promise<void> {
   if (typeof globalThis.caches !== 'undefined') {
-    // Wipe JSON + image buckets and the pre-#879 legacy name so an upgraded
-    // worker cannot leave sensitive export/backup entries behind after logout.
+    // Issue #730: scrub sensitive URLs first (covers partial / in-flight writes),
+    // then wipe JSON + image buckets and the pre-#879 legacy name so logout /
+    // account switch cannot leave export/backup/credential entries behind.
+    try {
+      await purgeSensitiveApiCacheEntries(globalThis.caches);
+    } catch {
+      /* best-effort */
+    }
     for (const name of MANAGED_API_CACHE_NAMES) {
       try {
         await globalThis.caches.delete(name);

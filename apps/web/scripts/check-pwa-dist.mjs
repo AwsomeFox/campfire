@@ -97,6 +97,23 @@ if (existsSync(join(dist, "sw.js"))) {
     sw.includes("/api/v1/backup"),
     "sw.js should exclude /api/v1/backup from runtime caching",
   );
+  // Issue #730: activate purge script + no-store / allowlist markers.
+  check(
+    existsSync(join(dist, "sw-sensitive-purge.js")),
+    "missing sw-sensitive-purge.js (activate purge for sensitive caches)",
+  );
+  check(
+    sw.includes("sw-sensitive-purge.js") || /importScripts/i.test(sw),
+    "sw.js should importScripts sw-sensitive-purge.js for activate hygiene",
+  );
+  check(
+    sw.includes("no-store") || sw.includes("bno-store"),
+    "sw.js should reject Cache-Control: no-store in cacheWillUpdate",
+  );
+  check(
+    sw.includes("/api/v1/shared/") || sw.includes("shared/"),
+    "sw.js should NetworkOnly-exclude capability shared/ recap URLs",
+  );
 }
 
 // 4. index.html wires up the manifest, theme-color and apple-touch-icon.

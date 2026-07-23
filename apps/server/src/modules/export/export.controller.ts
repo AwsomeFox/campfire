@@ -44,6 +44,8 @@ export class ExportController {
         .set({
           'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${filename}"`,
+          // Issue #730: exports must not enter HTTP or PWA caches.
+          'Cache-Control': 'private, no-store',
         })
         .end(zipBuffer);
       return;
@@ -56,6 +58,8 @@ export class ExportController {
       .set({
         'Content-Type': 'application/json',
         'Content-Disposition': `attachment; filename="${filename}"`,
+        // Issue #730: exports must not enter HTTP or PWA caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(JSON.stringify(data));
   }
@@ -86,6 +90,8 @@ export class ExportController {
       .set({
         'Content-Type': 'application/json',
         'Content-Disposition': `attachment; filename="${filename}"`,
+        // Issue #730: member exports must not enter HTTP or PWA caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(JSON.stringify(data));
   }
