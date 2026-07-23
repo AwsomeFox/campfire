@@ -159,6 +159,14 @@ export interface AiDmSessionState {
 }
 
 /**
+ * Safety bound on the number of concurrently-active (unconsumed) secret-read approvals a single
+ * campaign session may hold (#1059). Consumed approvals are deleted on use, and same-{tool,entityId}
+ * grants replace in place, so this cap only bites when a DM stacks many DISTINCT pending approvals;
+ * the oldest is then evicted to keep the in-memory session map bounded.
+ */
+const MAX_ACTIVE_SECRET_READ_APPROVALS = 50;
+
+/**
  * A DM-granted, narrowly-scoped approval for the autonomous seat to read ONE secret entity
  * under the DM principal during narration (issue #557). Single-use: consumed the first time
  * the matching `{tool, entityId}` call runs, and audited both at grant and at use.
@@ -1099,7 +1107,10 @@ export class AiDriverService {
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
       // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
       if (approvedSecret) {
-        approvedSecret.consumed = true;
+        // Single-use: remove the approval the moment its DM-scoped read completes, so it can't be
+        // replayed to re-leak the secret AND so consumed approvals don't accumulate unboundedly in
+        // the in-memory session map over a long campaign (#1059).
+        this.consumeApproval(session, approvedSecret);
         await this.audit.log({
           actor,
           actorRole: 'dm',
@@ -1252,7 +1263,21 @@ export class AiDriverService {
     }
     const session = this.ensureSession(campaignId);
     session.secretReadApprovals = session.secretReadApprovals ?? {};
+    const approvals = session.secretReadApprovals;
     const key = approvalKey(tool, entityId);
+    // Bound the active approvals per campaign (#1059): a NEW key that would exceed the cap evicts
+    // the oldest approval (by grant time) so a DM stacking distinct grants can't grow memory without
+    // limit. Re-granting an existing {tool, entityId} replaces in place and never trips the cap.
+    if (!(key in approvals)) {
+      const keysByAge = Object.keys(approvals).sort((a, b) => approvals[a].grantedAt.localeCompare(approvals[b].grantedAt));
+      while (keysByAge.length >= MAX_ACTIVE_SECRET_READ_APPROVALS) {
+        const oldest = keysByAge.shift()!;
+        delete approvals[oldest];
+        this.logger.warn(
+          `secret-read approvals at cap (${MAX_ACTIVE_SECRET_READ_APPROVALS}) for campaign ${campaignId}; evicted oldest ${oldest}`,
+        );
+      }
+    }
     // Replace any prior approval for the same {tool, entityId} (the new one is unconsumed).
     const approval: AiDmSecretReadApproval = {
       tool,
@@ -1302,6 +1327,16 @@ export class AiDriverService {
       this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
     }
     return session;
+  }
+
+  /**
+   * Consume a single-use secret-read approval (#557): mark it consumed AND remove it from the
+   * session map so it can neither be replayed nor accumulate as dead state over time (#1059).
+   */
+  private consumeApproval(session: AiDmSessionState, approval: AiDmSecretReadApproval): void {
+    approval.consumed = true;
+    const approvals = session.secretReadApprovals;
+    if (approvals) delete approvals[approvalKey(approval.tool, approval.entityId)];
   }
 
   /** Look up an unconsumed approval for {tool, entityId}, or null (issue #557). */
