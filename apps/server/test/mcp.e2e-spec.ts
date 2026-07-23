@@ -1134,6 +1134,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerC = await mcpClient(viewerToken);
     const viewerRes = await viewerC.callTool({ name: 'list_encounter_events', arguments: { encounterId: hidden.id } });
     expect(viewerRes.isError).toBe(true);
+    expect(parseResult(viewerRes)).toMatchObject({ error: { status: 404 } });
   });
 
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {

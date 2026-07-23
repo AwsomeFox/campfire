@@ -826,9 +826,16 @@ export class McpToolsService {
         const encounters = await Promise.all(
           encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
         );
-        // Include the per-encounter combat-log event trail (issue #1068) so the recap author
-        // sees WHAT HAPPENED in each fight. DM-only tool → full DM view (no role redaction).
-        const events = await Promise.all(encounterList.map((e) => this.encounters.listEvents(e.id)));
+        // Combat-log events only matter for encounters that were run (issue #1068). DM-only tool
+        // → full DM view (no role redaction).
+        const foughtEncounterIds = new Set(
+          encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
+        );
+        const events = await Promise.all(
+          encounterList.map((e) =>
+            foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
+          ),
+        );
         const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
         const source = {
           resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
