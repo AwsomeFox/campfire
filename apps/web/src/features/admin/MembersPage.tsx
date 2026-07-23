@@ -20,6 +20,12 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  INVITE_COPY_FAILURE,
+  INVITE_COPY_SUCCESS,
+  inviteLinkFieldLabel,
+  inviteRoleOptions,
+} from './inviteRoleOptions';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -175,12 +181,15 @@ function expiresIn(iso: string): string {
  * Anyone with a link self-onboards at the chosen role via /join/<code> (see
  * features/auth/JoinPage.tsx) — revoke a link here if it leaks.
  */
+const INVITE_ROLE_SELECT_ID = 'invite-join-role';
+
 function InviteCard({ campaignId }: { campaignId: number }) {
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
   const [role, setRole] = useState<InviteRole>('player');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [copyAnnouncement, setCopyAnnouncement] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -221,21 +230,34 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       await navigator.clipboard.writeText(inviteLinkFor(invite.code));
       setCopiedId(invite.id);
+      setCopyAnnouncement(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
+      setCopyAnnouncement(INVITE_COPY_FAILURE);
       setError('Clipboard blocked — copy the link from the field instead.');
     }
   }
 
   return (
-    <Card className="space-y-2.5">
+    <Card className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {copyAnnouncement}
+      </span>
       <div className="flex gap-2 flex-wrap items-end">
         <div className="field" style={{ minWidth: 110 }}>
-          <label>Joins as</label>
-          <select className="input" value={role} onChange={(e) => setRole(e.target.value as InviteRole)}>
-            <option value="player">player</option>
-            <option value="viewer">viewer</option>
+          <label htmlFor={INVITE_ROLE_SELECT_ID}>Joins as</label>
+          <select
+            id={INVITE_ROLE_SELECT_ID}
+            className="input"
+            value={role}
+            onChange={(e) => setRole(e.target.value as InviteRole)}
+          >
+            {inviteRoleOptions().map((opt) => (
+              <option key={opt.role} value={opt.role}>
+                {opt.description}
+              </option>
+            ))}
           </select>
         </div>
         <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={create} disabled={creating}>
@@ -245,28 +267,44 @@ function InviteCard({ campaignId }: { campaignId: number }) {
 
       {error && <p className="text-xs text-rose-400 m-0">{error}</p>}
 
-      {invites.map((invite) => (
+      {invites.map((invite) => {
+        const linkFieldId = `invite-link-${invite.id}`;
+        return (
         <div key={invite.id} className="flex gap-2 flex-wrap items-center">
-          <input
-            className="input"
-            style={{ flex: 1, minWidth: 190 }}
-            readOnly
-            value={inviteLinkFor(invite.code)}
-            onFocus={(e) => e.currentTarget.select()}
-          />
+          <div className="field !mb-0" style={{ flex: 1, minWidth: 190 }}>
+            <label className="sr-only" htmlFor={linkFieldId}>
+              {inviteLinkFieldLabel(invite.role)}
+            </label>
+            <input
+              id={linkFieldId}
+              className="input"
+              style={{ width: '100%' }}
+              readOnly
+              aria-readonly="true"
+              value={inviteLinkFor(invite.code)}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+          </div>
           <span className={`cf-chip ${ROLE_CHIP[invite.role]}`}>{ROLE_LABEL[invite.role]}</span>
           <span className="text-muted text-[11px] whitespace-nowrap">
             {expiresIn(invite.expiresAt)} · used {invite.useCount}
             {invite.maxUses != null ? `/${invite.maxUses}` : '×'}
           </span>
-          <button className="btn btn-primary" style={{ minHeight: 36 }} onClick={() => copy(invite)}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ minHeight: 36 }}
+            aria-label={`Copy ${inviteLinkFieldLabel(invite.role)}`}
+            onClick={() => copy(invite)}
+          >
             {copiedId === invite.id ? 'Copied!' : 'Copy link'}
           </button>
           <button className="btn btn-ghost" style={{ minHeight: 36, fontSize: 12.5 }} onClick={() => revoke(invite.id)}>
             Revoke
           </button>
         </div>
-      ))}
+        );
+      })}
 
       <p className="text-muted text-[11.5px] m-0">
         Anyone with a link creates their own account (or signs in) and joins as the chosen role — no server
