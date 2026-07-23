@@ -179,6 +179,22 @@ test.describe('d20Flavor — keep-high / keep-low (issue #745)', () => {
     ).toBeNull();
   });
 
+  
+  test('compound terms with a leading +d20 still crit/fumble', () => {
+    expect(
+      d20Flavor(
+        roll({
+          expr: '1d4+1d20',
+          rolls: [2, 20],
+          terms: [
+            { term: '1d4', value: 2, rolls: [2] },
+            { term: '+1d20', value: 20, rolls: [20] },
+          ],
+        }),
+      ),
+    ).toBe('crit');
+  });
+
   test('a coincidental 1 on a damage die does not fumble a d20 attack', () => {
     expect(
       d20Flavor(
