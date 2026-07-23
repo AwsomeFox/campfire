@@ -55,12 +55,31 @@ export function RegionMap({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
+  // Mirrors retryActionRef for render — hide Retry when there is nothing to replay.
+  const [canRetry, setCanRetry] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   // Last failed write so Retry re-issues that request (not a no-op clear).
   const retryActionRef = useRef<(() => Promise<unknown>) | null>(null);
   const retryInFlight = useRef(false);
+
+  function clearMapError() {
+    setError(null);
+    retryActionRef.current = null;
+    setCanRetry(false);
+  }
+
+  function setMapError(message: string, retry: (() => Promise<unknown>) | null) {
+    setError(message);
+    retryActionRef.current = retry;
+    setCanRetry(retry != null);
+  }
+
+  /** DmMapUploader / ImageUpload errors: update the alert and drop any prior write retry. */
+  function handleUploaderError(message: string) {
+    setMapError(message, null);
+  }
 
   // Keyboard-accessible pin positioning state (#807)
   const [kbMovingId, setKbMovingId] = useState<number | null>(null);
@@ -157,18 +176,21 @@ export function RegionMap({
 
   const mapImageUrl = campaign.mapAttachmentId ? attachmentFileUrl(campaign.mapAttachmentId) : null;
 
-  async function handleMapUpload(attachment: Attachment) {
-    setBusy(true);
+  async function handleMapUpload(attachment: Attachment, options?: { manageBusy?: boolean }) {
+    // uploadMapFile owns busy for the full upload+patch path; skip nested toggles.
+    const manageBusy = options?.manageBusy ?? true;
+    if (manageBusy) setBusy(true);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: attachment.id });
-      setError(null);
-      retryActionRef.current = null;
+      clearMapError();
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the map.");
-      retryActionRef.current = () => handleMapUpload(attachment);
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't save the map.",
+        () => handleMapUpload(attachment),
+      );
     } finally {
-      setBusy(false);
+      if (manageBusy) setBusy(false);
     }
   }
 
@@ -176,12 +198,13 @@ export function RegionMap({
     setBusy(true);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: null });
-      setError(null);
-      retryActionRef.current = null;
+      clearMapError();
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't remove the map.");
-      retryActionRef.current = () => handleMapRemove();
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't remove the map.",
+        () => handleMapRemove(),
+      );
     } finally {
       setBusy(false);
     }
@@ -192,12 +215,13 @@ export function RegionMap({
     setBusy(true);
     try {
       const attachment = await uploadAttachment(campaignId, 'map', file);
-      // handleMapUpload owns busy/error for the campaign patch; avoid double-finally races.
-      setBusy(false);
-      await handleMapUpload(attachment);
+      await handleMapUpload(attachment, { manageBusy: false });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
-      retryActionRef.current = () => uploadMapFile(file);
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't upload the map.",
+        () => uploadMapFile(file),
+      );
+    } finally {
       setBusy(false);
     }
   }
@@ -209,13 +233,14 @@ export function RegionMap({
         mapX: Math.max(0, Math.min(100, xPct)),
         mapY: Math.max(0, Math.min(100, yPct)),
       });
-      setError(null);
-      retryActionRef.current = null;
+      clearMapError();
       onChange();
       return true;
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
-      retryActionRef.current = () => savePinPercent(locationId, xPct, yPct);
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't move the pin.",
+        () => savePinPercent(locationId, xPct, yPct),
+      );
       return false;
     }
   }
@@ -294,14 +319,18 @@ export function RegionMap({
           <ErrorNote
             message={error}
             pending={retryPending || busy || kbSaving}
-            onRetry={() => void handleRetry()}
+            onRetry={canRetry ? () => void handleRetry() : undefined}
           />
         </div>
       )}
 
       {isDm && !mapImageUrl && (
         <div style={{ padding: '8px 14px 0' }}>
-          <DmMapUploader campaignId={campaignId} onUploaded={handleMapUpload} onError={setError} />
+          <DmMapUploader
+            campaignId={campaignId}
+            onUploaded={handleMapUpload}
+            onError={handleUploaderError}
+          />
         </div>
       )}
 

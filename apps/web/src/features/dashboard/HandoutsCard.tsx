@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Attachment, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { shareInFlightRef } from '../../lib/shareInFlight';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
@@ -28,23 +29,23 @@ export function HandoutsCard({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
-  // Dedupes overlapping load/retry clicks without putting `loading` in load's deps.
-  const loadInFlight = useRef(false);
+  // Concurrent load()/Retry callers share one promise so `await load()` never
+  // resolves before the in-flight attachments fetch settles (#691).
+  const loadInFlight = useRef<Promise<void> | null>(null);
 
-  const load = useCallback(async () => {
-    if (loadInFlight.current) return;
-    loadInFlight.current = true;
-    setLoading(true);
-    try {
-      const list = await api.get<Attachment[]>(`${API}/campaigns/${campaignId}/attachments`);
-      setItems(list);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
-    } finally {
-      loadInFlight.current = false;
-      setLoading(false);
-    }
+  const load = useCallback(() => {
+    return shareInFlightRef(loadInFlight, async () => {
+      setLoading(true);
+      try {
+        const list = await api.get<Attachment[]>(`${API}/campaigns/${campaignId}/attachments`);
+        setItems(list);
+        setError(null);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
+      } finally {
+        setLoading(false);
+      }
+    });
   }, [campaignId]);
 
   useEffect(() => {

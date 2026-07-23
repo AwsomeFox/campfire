@@ -77,6 +77,7 @@ test.describe('issue #691 - dashboard error retry', () => {
 
     const retry = alert.getByRole('button', { name: 'Retry' });
     await expect(retry).toBeVisible();
+    await expect(retry).toBeEnabled();
     expect(attempts).toBe(1);
 
     await retry.click();
@@ -123,9 +124,61 @@ test.describe('issue #691 - dashboard error retry', () => {
 
     const retry = alert.getByRole('button', { name: 'Retry' });
     await expect(retry).toBeVisible();
+    await expect(retry).toBeEnabled();
     await retry.click();
 
     await expect.poll(() => pinAttempts).toBe(2);
     await expect(mapCard.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('RegionMap map-uploader error clears a stale pin Retry action', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    // Clear any map left by prior cases so DmMapUploader (not MapUploadButton) owns the input.
+    const clearMap = await page.context().request.patch(`/api/v1/campaigns/${campaignId}`, {
+      data: { mapAttachmentId: null },
+    });
+    expect(clearMap.ok()).toBeTruthy();
+    await pinSeedLocation(page, navigation.locationId);
+
+    let pinAttempts = 0;
+    await page.route(`**/api/v1/locations/${navigation.locationId}`, async (route) => {
+      if (route.request().method() !== 'PATCH') {
+        return route.fallback();
+      }
+      pinAttempts += 1;
+      return route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Pin save unavailable' }),
+      });
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    const mapCard = page.getByTestId('dashboard-map');
+    await expect(mapCard).toBeVisible();
+
+    await mapCard.getByRole('button', { name: /Move .+ pin/ }).first().click();
+    await mapCard.getByLabel('Horizontal position (%)').fill('55');
+    await mapCard.getByRole('button', { name: 'Save' }).click();
+
+    const alert = mapCard.getByRole('alert');
+    await expect(alert).toContainText(/Pin save unavailable|Couldn't move the pin/i);
+    await expect(alert.getByRole('button', { name: 'Retry' })).toBeEnabled();
+    expect(pinAttempts).toBe(1);
+
+    // Validation failure updates the alert via onError but must not keep the pin retry.
+    const gif = Buffer.from(
+      'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+      'base64',
+    );
+    await mapCard.locator('input[type="file"]').setInputFiles({
+      name: 'not-a-map.gif',
+      mimeType: 'image/gif',
+      buffer: gif,
+    });
+
+    await expect(alert).toContainText(/Unsupported file type/i);
+    await expect(alert.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+    expect(pinAttempts).toBe(1);
   });
 });
