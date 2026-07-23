@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import type { Combatant, EncounterWithCombatants } from '@campfire/schema';
-import { PNG_16_9, seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
 
 type PatchCall = {
   target: 'encounter' | 'combatant';
@@ -160,6 +160,10 @@ async function openGestureFixture(page: Page) {
 
 test.describe('battle-map gesture ownership and cancellation', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
 
   test('normal mouse, stylus, and touch releases commit exactly one final-coordinate PATCH', async ({ page }) => {
     const { surface, token, aoe, calls } = await openGestureFixture(page);

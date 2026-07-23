@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import type { EncounterWithCombatants, MapPing } from '@campfire/schema';
-import { PNG_16_9, seed, stateFor } from './seed';
+import { PNG_16_9, seed, stateFor, restoreSeedEncounter } from './seed';
 import { MAP_PING_TAP_SLOP_PX } from '../../src/features/encounters/mapPingTap';
 
 /**
@@ -136,6 +136,10 @@ async function openPingFixture(page: Page) {
 
 test.describe('battle-map ping tap completion', () => {
   test.use({ storageState: stateFor('dm') });
+
+  test.beforeEach(async ({ page }) => {
+    await restoreSeedEncounter(page);
+  });
 
   test('ordinary mouse and touch taps publish exactly one ping at the press coordinates', async ({ page }) => {
     const { surface, pings } = await openPingFixture(page);
