@@ -3,11 +3,11 @@ import { ApiExcludeController } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { Role } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
-import type { RequestUser } from '../../common/user.types';
+import { minRole, type RequestUser } from '../../common/user.types';
 import { AuthService } from '../auth/auth.service';
 import { SESSION_COOKIE_NAME } from '../auth/auth.constants';
 import { RoleResolver } from '../membership/role-resolver.service';
-import { OAuthService, OAUTH_SCOPES_SUPPORTED, type ClientRow } from './oauth.service';
+import { OAuthService, OAUTH_SCOPES_SUPPORTED, narrowRoleToScope, roleScopeFromScope, type ClientRow } from './oauth.service';
 
 /**
  * Absolute base URL of this server, used to build spec-required absolute
@@ -225,7 +225,12 @@ export class OAuthController {
       return;
     }
 
-    const role = this.parseRole(body.role);
+    // Issue #680: the advertised scope enforces authority. The consent form's
+    // role selector may only NARROW the requested scope further — never widen
+    // past it. So scope=viewer with role=dm on the form yields a viewer-scoped
+    // token, not a DM one. A request with no role scope ('mcp' only, or absent)
+    // is capped at viewer (least privilege), matching the metadata contract.
+    const role = narrowRoleToScope(this.parseRole(body.role), body.scope);
     let campaignId: number | null = null;
     if (body.campaign_id && body.campaign_id.trim() !== '') {
       const parsed = Number(body.campaign_id);
@@ -380,7 +385,10 @@ export class OAuthController {
 
   private parseRole(value: string | undefined): Role {
     const parsed = Role.safeParse(value);
-    return parsed.success ? parsed.data : 'dm';
+    // Issue #680: least-privilege default. The advertised scope caps authority,
+    // so an absent/invalid form value cannot fall through to 'dm' anymore —
+    // it lands at viewer and can only be widened by an explicit scope request.
+    return parsed.success ? parsed.data : 'viewer';
   }
 
   private parseBasicAuth(req: Request): { clientId: string; clientSecret: string } | null {
@@ -416,6 +424,33 @@ export class OAuthController {
       : `<div class="field"><label>Username<input name="username" autocomplete="username" required></label></div>
          <div class="field"><label>Password<input name="password" type="password" autocomplete="current-password" required></label></div>`;
     const errBlock = error ? `<p class="err">${esc(error)}</p>` : '';
+    // Issue #680: the advertised scope caps authority. The role selector offers
+    // ONLY the roles at or below what the requested scope permits, defaulting
+    // to that cap (the user may narrow further). A request with no role scope
+    // ('mcp' only, or absent) lands at viewer — the form cannot widen past it.
+    const scopeCap = roleScopeFromScope(p.scope);
+    const roleOptions: Array<{ value: Role; label: string }> = [
+      { value: 'dm', label: 'DM (full — capped by your membership)' },
+      { value: 'player', label: 'Player' },
+      { value: 'viewer', label: 'Viewer (read-only)' },
+    ];
+    const offered = roleOptions.filter((option) => minRole(option.value, scopeCap) === option.value);
+    const roleBlock =
+      offered.length > 1
+        ? `<div class="field"><label>Role cap
+           <select name="role">
+             ${offered
+               .map(
+                 (option) =>
+                   `<option value="${option.value}"${option.value === scopeCap ? ' selected' : ''}>${esc(option.label)}</option>`,
+               )
+               .join('')}
+           </select></label>
+           <p class="muted">The token can never exceed your own role in each campaign or the scope <code>${esc(p.scope || 'mcp')}</code> you granted; this only lowers it further.</p>
+         </div>`
+        : `<div class="field"><input type="hidden" name="role" value="${scopeCap}">
+           <p class="muted">Role cap fixed at <strong>${esc(scopeCap)}</strong> by the requested scope <code>${esc(p.scope || 'mcp')}</code>. The token can never exceed your own role in each campaign.</p>
+         </div>`;
     return this.htmlShell(
       'Connect to Campfire',
       `<h1>Connect to Campfire</h1>
@@ -425,14 +460,7 @@ export class OAuthController {
          ${hidden('response_type')}${hidden('client_id')}${hidden('redirect_uri')}${hidden('code_challenge')}
          ${hidden('code_challenge_method')}${hidden('state')}${hidden('scope')}${hidden('resource')}
          ${loginBlock}
-         <div class="field"><label>Role cap
-           <select name="role">
-             <option value="dm" selected>DM (full — capped by your membership)</option>
-             <option value="player">Player</option>
-             <option value="viewer">Viewer (read-only)</option>
-           </select></label>
-           <p class="muted">The token can never exceed your own role in each campaign; this only lowers it further.</p>
-         </div>
+         ${roleBlock}
          <div class="field"><label>Restrict to campaign id (optional)<input name="campaign_id" inputmode="numeric" placeholder="all campaigns"></label></div>
          <div class="actions">
            <button type="submit" name="decision" value="approve" class="primary">Approve</button>

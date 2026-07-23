@@ -14,7 +14,7 @@ import {
   hashOpaqueToken,
   pkceS256Challenge,
 } from '../../common/crypto';
-import type { RequestUser, TokenContext } from '../../common/user.types';
+import { minRole, type RequestUser, type TokenContext } from '../../common/user.types';
 
 /** Authorization code lifetime — short, per OAuth 2.1 (single-use, redeemed seconds later). */
 const AUTH_CODE_TTL_MS = 10 * 60 * 1000;
@@ -26,6 +26,56 @@ const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const OAUTH_PURGE_INTERVAL_MS = 60 * 60 * 1000;
 
 export const OAUTH_SCOPES_SUPPORTED = ['mcp', 'dm', 'player', 'viewer'] as const;
+
+/**
+ * The widest authority a connector can ever hold when no narrowing scope is
+ * requested. Issue #680: this is the LEAST-privilege role, not 'dm' — the
+ * advertised scope (consented to on the screen the user sees) is what enforces
+ * authority, so an OAuth grant with NO role scope ('mcp' only, or absent)
+ * yields a read-only token. The previous 'dm' default meant a token that
+ * REPORTED scope=viewer (or no role scope at all) could still carry DM
+ * authority, defeating the consent screen entirely.
+ */
+const DEFAULT_OAUTH_ROLE_SCOPE: Role = 'viewer';
+
+/**
+ * Derives the enforced authority (Campfire role cap) from the OAuth `scope`
+ * string the client REQUESTED and the user CONSENTED to. Issue #680: this is
+ * the single source of truth — the consent form's role selector may only
+ * NARROW the granted role further, never widen it past the requested scope.
+ *
+ * `scope` is a space-separated list (RFC 6749 §3.3). Role scopes
+ * ('dm'|'player'|'viewer') are intersected to the most-permissive one present;
+ * 'mcp' is a non-authoritative connector scope (it grants MCP access, not
+ * campaign authority) and is ignored here. With no role scope in the request
+ * the caller falls back to the least-privilege viewer cap, so a token that
+ * reports only 'mcp' can never write canon.
+ */
+export function roleScopeFromScope(scope: string | null | undefined): Role {
+  if (!scope) return DEFAULT_OAUTH_ROLE_SCOPE;
+  const tokens = scope.split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  let resolved: Role | null = null;
+  for (const token of tokens) {
+    const parsed = Role.safeParse(token);
+    if (!parsed.success) continue;
+    resolved = resolved === null ? parsed.data : minRole(resolved, parsed.data);
+  }
+  return resolved ?? DEFAULT_OAUTH_ROLE_SCOPE;
+}
+
+/**
+ * Narrows a consent-form role selection by the authority the REQUESTED scope
+ * permits. Issue #680: the form's role dropdown is a further cap on top of the
+ * advertised scope, not an independent source of authority — so a request for
+ * scope=viewer with role=dm on the consent form yields a viewer-scoped token,
+ * never a DM one. `requested` defaults to least-privilege viewer when the form
+ * omits it, mirroring roleScopeFromScope.
+ */
+export function narrowRoleToScope(requested: Role | undefined, scope: string | null | undefined): Role {
+  const form = requested ?? DEFAULT_OAUTH_ROLE_SCOPE;
+  const cap = roleScopeFromScope(scope);
+  return minRole(form, cap);
+}
 
 export interface RegisteredClient {
   clientId: string;
@@ -430,10 +480,18 @@ export class OAuthService implements OnApplicationBootstrap {
       name: owner.displayName || owner.username,
       serverRole: owner.serverRole as RequestUser['serverRole'],
     };
+    // Issue #680: the enforced role cap is derived from the OAuth `scope` the
+    // user consented to (single source of truth — advertised scopes must match
+    // enforced authority). `roleScope` is retained as the historical grant of
+    // record but can no longer WIDEN past the scope: legacy rows minted before
+    // this fix (where scope was absent but roleScope defaulted to 'dm') fall
+    // back to the stored roleScope so existing connectors keep working, while
+    // any row carrying a scope is bounded by it.
+    const scopeCap = row.scope ? roleScopeFromScope(row.scope) : this.parseRole(row.roleScope);
     const tokenContext: TokenContext = {
       tokenId: row.id,
       name: `oauth:${row.clientId}`,
-      scope: this.parseRole(row.roleScope),
+      scope: minRole(scopeCap, this.parseRole(row.roleScope)),
       // OAuth connector tokens have no write-mode dimension of their own (the
       // consent flow only grants a role scope) — 'direct' preserves existing
       // connector behavior (issue #158 adds write-mode to PATs, not OAuth grants).
