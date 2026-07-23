@@ -19,6 +19,34 @@ import { AiProviderConfigService } from '../ai-provider-config/ai-provider-confi
 
 type AiCapsUpdateInput = z.infer<typeof AiCapsUpdate>;
 
+/** Per-probe timeout so a hanging provider never wedges testAll (#1061). */
+const TEST_PROBE_TIMEOUT_MS = 15_000;
+
+interface ProbeResult {
+  ok: boolean;
+  providerType: string | null;
+  model: string | null;
+  error: string | null;
+}
+
+async function probeWithTimeout(
+  fn: () => Promise<ProbeResult>,
+  timeoutMs: number = TEST_PROBE_TIMEOUT_MS,
+): Promise<ProbeResult> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<ProbeResult>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, providerType: null, model: null, error: 'timeout' }),
+      timeoutMs,
+    );
+  });
+  try {
+    return await Promise.race([fn(), timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
 /**
  * Admin AI console (issue #315) — the server-admin cockpit over the AI program
  * (epic #308). It OWNS no metering of its own: budgets are enforced where the
@@ -228,7 +256,7 @@ export class AiConsoleService {
 
     const serverView = await this.providers.getServerView();
     if (serverView) {
-      const r = await this.providers.testConnection(null);
+      const r = await probeWithTimeout(() => this.providers.testConnection(null));
       out.push({
         scope: 'server',
         campaignId: null,
@@ -249,7 +277,7 @@ export class AiConsoleService {
 
     for (const o of overrides) {
       if (o.campaignId == null) continue;
-      const r = await this.providers.testConnection(o.campaignId);
+      const r = await probeWithTimeout(() => this.providers.testConnection(o.campaignId!));
       out.push({
         scope: 'campaign',
         campaignId: o.campaignId,
