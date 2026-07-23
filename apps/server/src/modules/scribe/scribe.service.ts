@@ -288,7 +288,22 @@ export class ScribeService implements OnApplicationBootstrap {
       });
     }
 
-    // 5. Resolve the provider (configured #310 -> #309 factory; else the injected seam).
+    // 5. Acquire per-campaign spend lock (#1058) so concurrent driver+scribe
+    //    can't both pass budget gate before either meters.
+    const releaseSpendLock = await this.aiDm.acquireSpendLock(campaignId);
+
+    // 5b. Re-check budget INSIDE the lock to prevent TOCTOU races.
+    const seatAfterLock = await this.aiDm.getSeat(campaignId);
+    const remainingAfterLock = seatAfterLock.tokenBudget - seatAfterLock.tokensUsed;
+    if (remainingAfterLock <= 0) {
+      releaseSpendLock();
+      return this.record(campaignId, trigger, user, 'over_budget', {
+        detail: `budget exhausted after lock acquisition (${seatAfterLock.tokensUsed}/${seatAfterLock.tokenBudget})`,
+        sourceHash,
+      });
+    }
+
+    // 6. Resolve the provider (configured #310 -> #309 factory; else the injected seam).
     const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
     const budgetPerRun = (await this.getConfig(campaignId)).budgetPerRun;
     const maxTokens = Math.min(budgetPerRun, remaining);
@@ -333,6 +348,7 @@ export class ScribeService implements OnApplicationBootstrap {
         providerName = this.fallbackProvider.name;
       }
     } catch (err) {
+      releaseSpendLock();
       return this.record(campaignId, trigger, user, 'failed', {
         detail: `provider error: ${err instanceof Error ? err.message : String(err)}`,
         sourceHash,
@@ -341,6 +357,7 @@ export class ScribeService implements OnApplicationBootstrap {
 
     tokensUsed = Math.max(0, Math.floor(tokensUsed));
     if (!text.trim()) {
+      releaseSpendLock();
       return this.record(campaignId, trigger, user, 'failed', { detail: 'provider returned empty recap', sourceHash, tokensUsed, provider: providerName });
     }
 
@@ -355,6 +372,9 @@ export class ScribeService implements OnApplicationBootstrap {
         .where(eq(aiDmSeats.campaignId, campaignId))
         .run();
     });
+
+    // Release the spend lock now that metering is committed (#1058).
+    releaseSpendLock();
 
     // 7. Dry run: preview only — metered (a real call was made) but nothing filed.
     if (dryRun) {
