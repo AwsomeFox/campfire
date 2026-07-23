@@ -81,7 +81,7 @@ test.describe('auth form error accessibility (issue #449)', () => {
 
     const username = page.getByLabel('Username');
     const password = page.getByLabel('Password', { exact: true });
-    const confirm = page.getByLabel('Confirm password');
+    const confirm = page.getByLabel('Confirm password', { exact: true });
     await username.fill('first-admin');
     await password.fill('correct-horse');
     await confirm.fill('wrong-battery');
@@ -116,7 +116,7 @@ test.describe('auth form error accessibility (issue #449)', () => {
     await page.goto('/login');
 
     const username = page.getByLabel('Username');
-    const password = page.getByLabel('Password');
+    const password = page.getByLabel('Password', { exact: true });
     await username.fill('returning-player');
     await password.fill('incorrect-password');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -141,19 +141,19 @@ test.describe('auth form error accessibility (issue #449)', () => {
     await mockSignedOutLogin(page, { loginStatus: 429 });
     await page.goto('/login');
     await page.getByLabel('Username').fill('returning-player');
-    await page.getByLabel('Password').fill('any-password');
+    await page.getByLabel('Password', { exact: true }).fill('any-password');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
     const rateAlert = page.locator('#login-error');
     await expect(rateAlert).toHaveText(AUTH_RATE_LIMIT_ERROR);
     await expect(rateAlert).toBeFocused();
     await expect(page.getByLabel('Username')).not.toHaveAttribute('aria-invalid', 'true');
-    await expect(page.getByLabel('Password')).not.toHaveAttribute('aria-invalid', 'true');
+    await expect(page.getByLabel('Password', { exact: true })).not.toHaveAttribute('aria-invalid', 'true');
 
     await mockSignedOutLogin(page, { loginStatus: 403, localLoginEnabled: false });
     await page.goto('/login');
     await page.getByLabel('Username').fill('returning-player');
-    await page.getByLabel('Password').fill('any-password');
+    await page.getByLabel('Password', { exact: true }).fill('any-password');
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
     const disabledAlert = page.locator('#login-error');
@@ -167,7 +167,7 @@ test.describe('auth form error accessibility (issue #449)', () => {
     await page.goto('/login');
 
     const username = page.getByLabel('Username');
-    const password = page.getByLabel('Password');
+    const password = page.getByLabel('Password', { exact: true });
     await username.fill('keyboard-user');
     await password.fill('bad-password');
     await password.press('Enter');

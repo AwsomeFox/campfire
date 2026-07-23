@@ -39,7 +39,7 @@ async function signIn(page: Page, who: keyof typeof CREDS) {
     await localToggle.first().click();
   }
   await page.getByLabel('Username').fill(CREDS[who].username);
-  await page.getByLabel('Password').fill(CREDS[who].password);
+  await page.getByLabel('Password', { exact: true }).fill(CREDS[who].password);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await page.waitForURL((url) => !url.pathname.startsWith('/login'));
 }
