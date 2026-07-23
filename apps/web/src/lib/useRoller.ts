@@ -13,7 +13,7 @@ import { useCallback, useState } from 'react';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
-import { d20Flavor } from './d20Flavor';
+import { d20Flavor as getD20Flavor } from './d20Flavor';
 
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
@@ -39,7 +39,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
-        const flavor = d20Flavor(result);
+        const flavor = getD20Flavor(result);
         announce(
           `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
             (flavor === 'crit' ? ' — natural 20!' : flavor === 'fumble' ? ' — natural 1.' : ''),

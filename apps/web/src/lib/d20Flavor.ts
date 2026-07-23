@@ -47,7 +47,7 @@ function isPooledMultiD20Expr(expr: string): boolean {
 export function d20Flavor(r: Pick<DiceRoll, 'expr' | 'rolls' | 'kept' | 'terms'>): D20Flavor | null {
   if (!/d20(?!\d)/i.test(r.expr)) return null;
   let dice: number[];
-  if (r.terms) {
+  if (r.terms && r.terms.length > 0) {
     // Gather kept (or single-die) faces from attack-style d20 terms only.
     dice = [];
     for (const t of r.terms) {
