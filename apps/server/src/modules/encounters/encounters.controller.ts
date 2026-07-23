@@ -172,8 +172,10 @@ export class EncountersController {
   @ApiResponse({ status: 201, description: 'Ping broadcast.' })
   async ping(@Param('id', ParseIntPipe) id: number, @Body() body: MapPingDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId, { write: true });
-    this.encounters.pingMap(id, row.campaignId, body);
+    // Role drives hidden-encounter secrecy (issue #869): a non-DM must not learn a
+    // prepared fight exists via ping — 404, matching roster/events/difficulty.
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
     return { ok: true };
   }
 
@@ -181,9 +183,10 @@ export class EncountersController {
   @ApiOperation({
     summary: "List an encounter's persistent combat log",
     description:
-      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Member-visible; details record only HP deltas, never a monster’s exact HP totals.',
+      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Hidden encounters 404 for non-DMs; hidden NPC identities are masked via current role-aware projection (issue #869). Details record only HP deltas / name-free outcomes, never a monster’s exact HP totals.',
   })
   @ApiResponse({ status: 200, description: 'Encounter events in chronological order.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
   async events(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
