@@ -24,7 +24,7 @@
  * page leaves clearly-marked seams for them (see the `session.stuck` / `session.state`
  * region below) and renders only a minimal fallback for the gated/off states.
  */
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -67,6 +67,11 @@ import {
   type NarrationLogAddition,
   type NarrationLogCursor,
 } from './narrationAccessibility';
+import {
+  followLatestAfterUserScroll,
+  isFeedNearBottom,
+  unreadAfterFeedGrowth,
+} from './feedScrollFollow';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
@@ -284,11 +289,65 @@ export default function AiTablePage() {
     { enabled: campaignId !== undefined && isDriver },
   );
 
-  // Auto-scroll to the newest entry as the transcript grows / streams.
+  // Auto-scroll only while the reader is pinned to the tail (#590).
+  const transcriptRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const [followLatest, setFollowLatest] = useState(true);
+  const [unreadBelow, setUnreadBelow] = useState(0);
+  const prevEntryCountRef = useRef(transcript.entries.length);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
+    followLatestRef.current = followLatest;
+  }, [followLatest]);
+
+  const transcriptRevision = useMemo(() => {
+    const last = transcript.entries[transcript.entries.length - 1];
+    const tail =
+      last?.kind === 'dm' && last.status === 'streaming'
+        ? `${last.id}:${dmEntryText(last).length}`
+        : (last?.id ?? '');
+    return `${transcript.entries.length}:${tail}`;
   }, [transcript.entries]);
+
+  useEffect(() => {
+    const prev = prevEntryCountRef.current;
+    const next = transcript.entries.length;
+    prevEntryCountRef.current = next;
+    setUnreadBelow((unread) => unreadAfterFeedGrowth(unread, followLatestRef.current, prev, next));
+  }, [transcript.entries.length]);
+
+  const handleTranscriptScroll = useCallback(() => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+    const pin = followLatestAfterUserScroll(near);
+    followLatestRef.current = pin;
+    setFollowLatest(pin);
+    if (pin) setUnreadBelow(0);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    setFollowLatest(true);
+    setUnreadBelow(0);
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = transcriptRef.current;
+    if (!el) return;
+    const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+    if (near) {
+      followLatestRef.current = true;
+      setFollowLatest(true);
+      setUnreadBelow(0);
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+      return;
+    }
+    followLatestRef.current = false;
+    setFollowLatest(false);
+  }, [transcriptRevision]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
@@ -463,7 +522,7 @@ export default function AiTablePage() {
   }[statusKey];
 
   return (
-    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ minHeight: 'calc(100dvh - 60px)' }}>
+    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ height: 'calc(100dvh - 60px)' }}>
       {/* Header: scene, status pill, token budget, DM pause/resume */}
       <Card className="!p-4">
         <div className="flex items-start gap-3 flex-wrap">
@@ -533,12 +592,16 @@ export default function AiTablePage() {
 
       {/* Transcript — named log landmark with aria-live=off so token deltas
           never spam SRs. The sr-only mirror below owns polite additions. */}
-      <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
+      <Card className="!p-0 flex-1 flex flex-col overflow-hidden relative">
         <div
+          ref={transcriptRef}
           {...NARRATION_VISUAL_TRANSCRIPT}
+          onScroll={handleTranscriptScroll}
           className="flex-1 overflow-y-auto p-4 space-y-3"
           aria-label={t('table.transcriptLabel')}
           aria-busy={streaming || undefined}
+          tabIndex={0}
+          style={{ overflowAnchor: 'none' }}
         >
           {transcript.entries.length === 0 ? (
             <EmptyState icon="campfire" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
@@ -554,6 +617,13 @@ export default function AiTablePage() {
           )}
           <div ref={bottomRef} />
         </div>
+        {!followLatest && unreadBelow > 0 && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
+            <Btn type="button" onClick={jumpToLatest} data-testid="transcript-jump-latest">
+              {t('table.jumpToLatestUnread', { count: unreadBelow })}
+            </Btn>
+          </div>
+        )}
       </Card>
 
       {/* #1077: polite log mirror — appends only finished entries (turn.end). */}

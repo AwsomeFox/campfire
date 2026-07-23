@@ -10,7 +10,7 @@
  * refresh. When the SSE event stream lands (issue #4) the poll can be swapped for
  * a push without touching the rendering below.
  */
-import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError, getWithHeaders } from '../../lib/api';
@@ -20,7 +20,13 @@ import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
-import { d20Flavor, d20FlourishI18nKey, d20TotalClasses } from '../../lib/d20Flavor';
+import { d20Flavor, d20TotalClasses } from '../../lib/d20Flavor';
+import {
+  advanceDiceRollAnnouncements,
+  DICE_LOG_LIVE_REGION,
+  formatDiceRollAnnouncementBatch,
+  type DiceRollAnnouncementCursor,
+} from './diceLogAccessibility';
 
 const POLL_MS = 5000;
 
@@ -51,6 +57,27 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
   const exprId = useId();
+  const rollAnnouncementRef = useRef<{
+    campaignId: number;
+    cursor: DiceRollAnnouncementCursor;
+  } | null>(null);
+
+  // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
+  useEffect(() => {
+    const previous = rollAnnouncementRef.current;
+    const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+    const advanced = advanceDiceRollAnnouncements(rolls, cursor);
+    rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+
+    const message = formatDiceRollAnnouncementBatch(advanced.appendedRolls, t);
+    if (!message) return;
+    const appended = advanced.appendedRolls;
+    const firstId = appended[0]!.id;
+    const lastId = appended[appended.length - 1]!.id;
+    announce(message, {
+      dedupeKey: `dice-roll:${campaignId}:${appended.length}:${firstId}:${lastId}`,
+    });
+  }, [rolls, campaignId, announce, t]);
 
   const load = useCallback(async () => {
     try {
@@ -99,25 +126,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         // Prepend own roll immediately (dedupe by id — the next poll returns it too).
         setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
         setJustRolledId(result.id); // triggers the tumble/crit/fumble animation (issue #67)
-        // Announce the result — the roll feed is otherwise visual-only (issue #93),
-        // calling out kept dice, DC success/fail, and a natural 20 / natural 1.
-        const flavor = d20Flavor(result);
-        const flourishKey = d20FlourishI18nKey(flavor);
-        const flourish = flourishKey ? t(flourishKey) : '';
-        const keptSaid = result.kept ? t('dice.announceKept', { kept: result.kept.join(', ') }) : '';
-        const checkSaid =
-          result.dc != null ? (result.success ? t('dice.announceSuccess', { dc: result.dc }) : t('dice.announceFail', { dc: result.dc })) : '';
-        announce(
-          t('dice.announceRoll', {
-            label: result.label ? `${result.label} ` : '',
-            expr: result.expr,
-            total: result.total,
-            rolls: result.rolls.join(', '),
-            kept: keptSaid,
-            check: checkSaid,
-            flourish,
-          }),
-        );
+        // Roll speech is owned by the ID cursor effect above (local + remote).
         return result;
       } catch (err) {
         const message = err instanceof ApiError ? err.message : t('dice.rollError');
@@ -128,7 +137,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         setRolling(false);
       }
     },
-    [campaignId, limit, announce],
+    [campaignId, limit, announce, t],
   );
 
   async function rollFromInput(e: FormEvent) {
@@ -161,15 +170,18 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         </form>
       </details>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
-      {rolls.length === 0 ? (
-        <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-          {compact
-            ? t('dice.emptyCompact')
-            : t('dice.emptyFull')}
-        </p>
-      ) : (
-        <div className="flex flex-col gap-1">
-          {rolls.map((r) => {
+      <div
+        {...DICE_LOG_LIVE_REGION}
+        aria-label={compact ? t('dice.dice') : t('dice.diceLogFeedLabel')}
+        data-testid="shared-dice-log"
+        className="flex flex-col gap-1"
+      >
+        {rolls.length === 0 ? (
+          <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+            {compact ? t('dice.emptyCompact') : t('dice.emptyFull')}
+          </p>
+        ) : (
+          rolls.map((r) => {
             const flavor = d20Flavor(r);
             const fresh = r.id === justRolledId;
             const totalClass = d20TotalClasses(flavor, fresh);
@@ -224,9 +236,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               </span>
             </div>
             );
-          })}
-        </div>
-      )}
+          })
+        )}
+      </div>
       {/* #614: disclose the durable retention policy honestly. Hidden on the
           compact dashboard widget (no room) and until the first fetch resolves
           `retention`; null means "keep everything", a number is the cap. */}
