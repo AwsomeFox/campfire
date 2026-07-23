@@ -16,12 +16,11 @@ import { useAuth } from '../../app/auth';
 import { adminRulesHref } from '../../lib/adminNavigation';
 import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
+import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-
-const DANGER_LEVELS: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -258,11 +257,8 @@ function GeneralCard({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
-  const dirty =
-    name !== campaign.name ||
-    description !== campaign.description ||
-    dangerLevel !== campaign.dangerLevel ||
-    dmControlsProgression !== campaign.dmControlsProgression;
+  const metadataDirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
+  const dirty = metadataDirty || dmControlsProgression !== campaign.dmControlsProgression;
 
   async function save() {
     if (!name.trim()) {
@@ -292,35 +288,17 @@ function GeneralCard({
   return (
     <div className="card elev-sm">
       <span className="card-kicker">Campaign</span>
-      <div className="field">
-        <label htmlFor="settings-name">Name</label>
-        <input id="settings-name" className="input" value={name} onChange={(e) => setName(e.target.value)} />
-      </div>
-      <div className="field">
-        <label htmlFor="settings-desc">Description</label>
-        <textarea
-          id="settings-desc"
-          className="input"
-          style={{ minHeight: 64 }}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-        />
-      </div>
-      <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor="settings-danger">Danger level</label>
-        <select
-          id="settings-danger"
-          className="input"
-          value={dangerLevel}
-          onChange={(e) => setDangerLevel(e.target.value as DangerLevel)}
-        >
-          {DANGER_LEVELS.map((level) => (
-            <option key={level} value={level}>
-              {level.charAt(0).toUpperCase() + level.slice(1)}
-            </option>
-          ))}
-        </select>
-      </div>
+      <CampaignMetadataFields
+        idPrefix="settings"
+        name={name}
+        description={description}
+        dangerLevel={dangerLevel}
+        onNameChange={setName}
+        onDescriptionChange={setDescription}
+        onDangerLevelChange={setDangerLevel}
+        error={error}
+        disabled={saving}
+      />
       <div className="field">
         <label className="flex gap-2 items-center" style={{ cursor: 'pointer' }}>
           <input
@@ -335,7 +313,6 @@ function GeneralCard({
           award XP and level up their own characters.
         </p>
       </div>
-      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
         <button className="btn btn-primary" disabled={saving || !dirty} onClick={save}>
           {saving ? 'Saving…' : 'Save changes'}
