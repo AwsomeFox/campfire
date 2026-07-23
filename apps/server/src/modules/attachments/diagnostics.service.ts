@@ -311,7 +311,7 @@ export class DiagnosticsService {
           totalDiskFiles++;
           const filePath = path.join(dirPath, entry.name);
           const relPath = `${dir.name}/${entry.name}`;
-          let size: number;
+          let size = 0;
           try {
             size = fs.statSync(filePath).size;
           } catch {

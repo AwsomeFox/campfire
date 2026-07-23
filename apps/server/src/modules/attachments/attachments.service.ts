@@ -750,12 +750,13 @@ export class AttachmentsService {
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const filePath = path.join(dirPath, entry.name);
-        let size: number;
+        // Default 0 for definite assignment; catch continues so the value is unused
+        // on the failure path (skip rather than misclassify as a 0-byte orphan).
+        let size = 0;
         try {
           size = fs.statSync(filePath).size;
         } catch {
-          // Default to 0 when the file vanishes between readdir and stat.
-          size = 0;
+          continue;
         }
         totalBytes += size;
         // Leading integer is the attachment id (`12.png`, `12.thumb.png`).
