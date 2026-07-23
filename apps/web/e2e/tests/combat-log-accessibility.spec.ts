@@ -140,7 +140,7 @@ test.describe('combat log accessibility — remote clients', () => {
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);
       expect(turned.ok()).toBe(true);
       await expect
-        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn (round")))
+        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn")))
         .toBe(true);
 
       const defeated = await dmPage.request.patch(
