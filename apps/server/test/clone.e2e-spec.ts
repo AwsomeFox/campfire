@@ -21,6 +21,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
   let playerAgent: ReturnType<typeof request.agent>;
   let campaignId: number;
   let locationId: number;
+  let factionId: number;
   let npcId: number;
   let questId: number;
   let sessionId: number;
@@ -48,7 +49,15 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     await dmAgent.post(`/api/v1/locations/${locationId}/discover`).send({ status: 'explored' });
     await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ currentLocationId: locationId });
 
-    const npcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/npcs`).send({ name: 'Bartender', locationId, dmSecret: 'secretly a lich' });
+    const factionRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/factions`)
+      .send({ name: 'Harbor Guild', kind: 'guild', goals: 'Control the docks', dmSecret: 'front for smugglers' });
+    expect(factionRes.status).toBe(201);
+    factionId = factionRes.body.id;
+
+    const npcRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/npcs`)
+      .send({ name: 'Bartender', locationId, factionId, dmSecret: 'secretly a lich' });
     npcId = npcRes.body.id;
 
     const questRes = await dmAgent
@@ -116,6 +125,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/comments`)
       .send({ entityType: 'session', entityId: session.body.id, parentId: comment.body.id, body: 'A threaded reply.' });
+    const factionComment = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'faction', entityId: factionId, body: 'Faction intrigue stays on clone.' });
+    expect(factionComment.status).toBe(201);
   });
 
   afterAll(async () => {
@@ -143,10 +156,17 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(clone.currentLocationId).toBe(locs.body[0].id);
 
     // NPCs copied with locationId remapped.
+    const clonedFactions = await dmAgent.get(`/api/v1/campaigns/${clone.id}/factions`);
+    expect(clonedFactions.body.length).toBe(1);
+    expect(clonedFactions.body[0].id).not.toBe(factionId);
+    expect(clonedFactions.body[0].name).toBe('Harbor Guild');
+    expect(clonedFactions.body[0].dmSecret).toBe('front for smugglers');
+
     const clonedNpcs = await dmAgent.get(`/api/v1/campaigns/${clone.id}/npcs`);
     expect(clonedNpcs.body.length).toBe(1);
     expect(clonedNpcs.body[0].id).not.toBe(npcId);
     expect(clonedNpcs.body[0].locationId).toBe(locs.body[0].id);
+    expect(clonedNpcs.body[0].factionId).toBe(clonedFactions.body[0].id);
     expect(clonedNpcs.body[0].dmSecret).toBe('secretly a lich');
 
     // Quests copied with giverNpcId remapped, status + objectives preserved.
@@ -228,6 +248,18 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     });
     expect(reply.parentId).toBe(spoken.id);
 
+    // Faction-anchored discussion must remap through factionMap (not be dropped).
+    const clonedFactionComments = await dmAgent
+      .get(`/api/v1/campaigns/${clone.id}/comments`)
+      .query({ entityType: 'faction', entityId: clonedFactions.body[0].id });
+    expect(clonedFactionComments.status).toBe(200);
+    expect(clonedFactionComments.body).toHaveLength(1);
+    expect(clonedFactionComments.body[0]).toMatchObject({
+      entityType: 'faction',
+      entityId: clonedFactions.body[0].id,
+      body: 'Faction intrigue stays on clone.',
+    });
+
     // Members are NOT copied — the source player has no access to the clone.
     const playerView = await playerAgent.get(`/api/v1/campaigns/${clone.id}`);
     expect(playerView.status).toBe(403);
@@ -251,6 +283,9 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const clonedNpcs = await dmAgent.get(`/api/v1/campaigns/${clone.id}/npcs`);
     expect(clonedNpcs.body.length).toBe(1);
     expect(clonedNpcs.body[0].locationId).toBe(locs.body[0].id);
+    const clonedFactions = await dmAgent.get(`/api/v1/campaigns/${clone.id}/factions`);
+    expect(clonedFactions.body.length).toBe(1);
+    expect(clonedNpcs.body[0].factionId).toBe(clonedFactions.body[0].id);
     const clonedQuests = await dmAgent.get(`/api/v1/campaigns/${clone.id}/quests`);
     expect(clonedQuests.body.length).toBe(1);
     expect(clonedQuests.body[0].status).toBe('available');

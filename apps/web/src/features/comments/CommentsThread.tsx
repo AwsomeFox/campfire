@@ -335,8 +335,29 @@ function ComposeBox({
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Keep the selection inside the live owned roster. Ownership can change while the
+  // compose box is open (delete/transfer + thread reload); a stale id would otherwise
+  // still enable Post and hit a confusing server 404.
+  const selectedCharacterId =
+    characterId != null && ownedCharacters.some((character) => character.id === characterId)
+      ? characterId
+      : null;
+
+  useEffect(() => {
+    if (!inCharacter) return;
+    if (ownedCharacters.length === 0) {
+      setInCharacter(false);
+      setCharacterId(null);
+      return;
+    }
+    if (selectedCharacterId == null) {
+      setCharacterId(ownedCharacters[0]!.id);
+    }
+  }, [inCharacter, ownedCharacters, selectedCharacterId]);
+
   async function post() {
     if (!body.trim()) return;
+    if (inCharacter && selectedCharacterId == null) return;
     setPosting(true);
     setError(null);
     try {
@@ -346,7 +367,7 @@ function ComposeBox({
         parentId: parentId ?? undefined,
         body,
         inCharacter,
-        characterId: inCharacter ? characterId : undefined,
+        characterId: inCharacter ? selectedCharacterId : undefined,
       });
       setBody('');
       setInCharacter(false);
@@ -380,7 +401,11 @@ function ComposeBox({
             onChange={(e) => {
               const checked = e.target.checked;
               setInCharacter(checked);
-              setCharacterId(checked ? (characterId ?? ownedCharacters[0]?.id ?? null) : null);
+              setCharacterId(
+                checked
+                  ? (selectedCharacterId ?? ownedCharacters[0]?.id ?? null)
+                  : null,
+              );
             }}
           />
           In character
@@ -390,8 +415,15 @@ function ComposeBox({
             <span className="whitespace-nowrap">Speaking as</span>
             <select
               className="cf-select !min-h-0 !py-1.5 text-xs flex-1 min-w-0"
-              value={characterId ?? ''}
-              onChange={(e) => setCharacterId(Number(e.target.value))}
+              value={selectedCharacterId ?? ''}
+              onChange={(e) => {
+                const next = Number(e.target.value);
+                setCharacterId(
+                  Number.isInteger(next) && ownedCharacters.some((character) => character.id === next)
+                    ? next
+                    : null,
+                );
+              }}
               aria-label="Speaking character"
             >
               {ownedCharacters.map((character) => (
@@ -408,7 +440,7 @@ function ComposeBox({
         <Btn
           className="!min-h-0 !py-1 text-xs self-end sm:self-auto"
           onClick={post}
-          disabled={posting || !body.trim() || (inCharacter && characterId == null)}
+          disabled={posting || !body.trim() || (inCharacter && selectedCharacterId == null)}
         >
           {posting ? 'Posting…' : 'Post'}
         </Btn>

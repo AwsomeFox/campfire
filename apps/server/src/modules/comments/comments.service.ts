@@ -448,9 +448,16 @@ export class CommentsService {
     if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {
       throw new BadRequestException('In-character attribution is immutable after posting');
     }
+    // Persona attribution is immutable, so an empty payload or an inCharacter-only
+    // echo must not bump updatedAt / stamp editedAt as if the body changed.
+    if (input.body === undefined) {
+      throw new BadRequestException('Comment update must include a body change');
+    }
+    if (input.body === existing.body) {
+      throw new BadRequestException('Comment update must change the body');
+    }
     const ts = nowIso();
-    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts };
-    if (input.body !== undefined) patch.body = input.body;
+    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts, body: input.body };
     if (moderatorEdit) {
       patch.editedAt = ts;
       patch.editedBy = auditActor(user);

@@ -488,14 +488,16 @@ export class CampaignsService {
    * campaign templates / cloning). Two modes:
    *
    *  - 'full' (default): faithful duplicate — quests (+objectives), npcs,
-   *    locations, characters, sessions, notes and encounters (+combatants),
-   *    with every intra-campaign reference (quest parent/giver, npc location,
-   *    combatant character, note entity link, campaign currentLocationId)
+   *    locations, factions, characters, sessions, notes, encounters
+   *    (+combatants), and discussion threads, with every intra-campaign
+   *    reference (quest parent/giver, npc location/faction, combatant
+   *    character, note/comment entity link, campaign currentLocationId)
    *    remapped to the cloned rows' new ids.
-   *  - 'template': prep only — quests/npcs/locations copied but play state
-   *    stripped: quest statuses reset to 'available', objectives unchecked,
-   *    locations back to 'unexplored', and sessions/notes/characters/
-   *    encounters/session-count/current-location not copied at all.
+   *  - 'template': prep only — quests/npcs/locations/factions copied but play
+   *    state stripped: quest statuses reset to 'available', objectives
+   *    unchecked, locations back to 'unexplored', and sessions/notes/
+   *    characters/encounters/comments/session-count/current-location not
+   *    copied at all.
    *
    * Never copied in either mode: members (only the caller becomes dm — cloning
    * must not silently grant other users access to the new campaign), api
@@ -516,8 +518,9 @@ export class CampaignsService {
 
     // Read everything up front — only the writes need the transaction. Trashed
     // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
-    const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows, commentRows] = await Promise.all([
+    const [locationRows, factionRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows, commentRows] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
+      this.db.select().from(factions).where(eq(factions.campaignId, id)),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
@@ -589,6 +592,30 @@ export class CampaignsService {
         }
       }
 
+      // Factions before npcs — an npc's factionId points at one, and comment/note
+      // anchors on factions need the remapped ids available for full-clone copy.
+      const factionMap = new Map<number, number>();
+      for (const f of factionRows) {
+        const [row] = tx
+          .insert(factions)
+          .values({
+            campaignId: cloneId,
+            name: f.name,
+            kind: f.kind,
+            body: f.body,
+            goals: f.goals,
+            dmSecret: f.dmSecret,
+            hidden: f.hidden,
+            reputation: f.reputation,
+            standing: f.standing,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        factionMap.set(f.id, row.id);
+      }
+
       const npcMap = new Map<number, number>();
       for (const n of npcRows) {
         const [row] = tx
@@ -599,6 +626,7 @@ export class CampaignsService {
             role: n.role,
             disposition: n.disposition,
             locationId: n.locationId != null ? (locMap.get(n.locationId) ?? null) : null,
+            factionId: n.factionId != null ? (factionMap.get(n.factionId) ?? null) : null,
             body: n.body,
             dmSecret: n.dmSecret,
             hidden: n.hidden, // entity-level secrecy (issue #42) is preserved on clone
@@ -699,6 +727,7 @@ export class CampaignsService {
         const entityMaps: Record<string, Map<number, number>> = {
           quest: questMap,
           npc: npcMap,
+          faction: factionMap,
           location: locMap,
           character: charMap,
           session: sessionMap,
@@ -777,11 +806,13 @@ export class CampaignsService {
         // Attachment-backed avatars cannot: clone deliberately skips attachment bytes
         // (see mapAttachmentId null above), so local `/attachments/:id/file` snapshots
         // are dropped while safe remote HTTPS portraits are preserved.
-        // Threads whose anchor is not part of the clone (for example a type this
-        // older clone surface does not copy) are skipped.
+        // Every EntityType that clone materializes gets a remap map. Campaign is
+        // handled inline; faction was previously omitted and silently dropped
+        // faction-anchored threads even though import/export round-trips them.
         const commentEntityMaps: Record<string, Map<number, number>> = {
           quest: questMap,
           npc: npcMap,
+          faction: factionMap,
           location: locMap,
           character: charMap,
           session: sessionMap,

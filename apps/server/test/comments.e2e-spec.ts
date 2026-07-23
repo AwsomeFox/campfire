@@ -228,6 +228,106 @@ describe('comments / threaded discussion (e2e)', () => {
     expect(result.body.characterAvatarUrl).toBeNull();
   });
 
+  it('validates absolute attachment portrait URLs instead of treating them as remote HTTPS', async () => {
+    const server = ctx.app.getHttpServer();
+    const tinyPng = Buffer.from(
+      '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+        '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+      'hex',
+    );
+    const portrait = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(authorPlayer)
+      .field('kind', 'portrait')
+      .attach('file', tinyPng, { filename: 'ic.png', contentType: 'image/png' });
+    expect(portrait.status).toBe(201);
+    const absolutePortrait = `https://cdn.example.test/api/v1/attachments/${portrait.body.id}/file`;
+
+    const character = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({ name: 'Absolute Portrait', portraitUrl: absolutePortrait });
+    expect(character.status).toBe(201);
+
+    const ok = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({
+        ...anchor(),
+        body: 'Absolute attachment avatar must normalize and validate.',
+        inCharacter: true,
+        characterId: character.body.id,
+      });
+    expect(ok.status).toBe(201);
+    // Stored as the canonical relative route after campaign/kind/visibility checks.
+    expect(ok.body.characterAvatarUrl).toBe(`/api/v1/attachments/${portrait.body.id}/file`);
+
+    // A hidden map attachment must not sneak through as a "remote" HTTPS URL.
+    const hiddenMap = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .set(dm)
+      .field('kind', 'map')
+      .attach('file', tinyPng, { filename: 'map.png', contentType: 'image/png' });
+    expect(hiddenMap.status).toBe(201);
+    const badCharacter = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(authorPlayer)
+      .send({
+        name: 'Hidden Map Voice',
+        portraitUrl: `https://cdn.example.test/api/v1/attachments/${hiddenMap.body.id}/file`,
+      });
+    const dropped = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({
+        ...anchor(),
+        body: 'Unsafe absolute attachment avatar dropped.',
+        inCharacter: true,
+        characterId: badCharacter.body.id,
+      });
+    expect(dropped.status).toBe(201);
+    expect(dropped.body.characterAvatarUrl).toBeNull();
+  });
+
+  it('rejects no-op comment updates that would only bump updatedAt/editedAt', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .set(authorPlayer)
+      .send({ ...anchor(), body: 'Leave me alone', inCharacter: false });
+    expect(created.status).toBe(201);
+    const id = created.body.id;
+    const before = await request(server).get(`/api/v1/comments/${id}`).set(authorPlayer);
+    expect(before.status).toBe(200);
+
+    const empty = await request(server).patch(`/api/v1/comments/${id}`).set(authorPlayer).send({});
+    expect(empty.status).toBe(400);
+    const echoFlag = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(authorPlayer)
+      .send({ inCharacter: false });
+    expect(echoFlag.status).toBe(400);
+    const sameBody = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(authorPlayer)
+      .send({ body: 'Leave me alone' });
+    expect(sameBody.status).toBe(400);
+
+    // Moderator no-ops must not stamp editedAt either.
+    const dmNoop = await request(server)
+      .patch(`/api/v1/comments/${id}`)
+      .set(dm)
+      .send({ inCharacter: false });
+    expect(dmNoop.status).toBe(400);
+
+    const after = await request(server).get(`/api/v1/comments/${id}`).set(authorPlayer);
+    expect(after.status).toBe(200);
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+    expect(after.body.editedAt).toBeNull();
+    expect(after.body.editedBy).toBeNull();
+    expect(after.body.body).toBe('Leave me alone');
+  });
+
   it('author-or-DM edit permission', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)
