@@ -6,7 +6,7 @@
  * Everyone: see what's coming, one-tap RSVP.
  */
 import { useCallback, useEffect, useId, useMemo, useReducer, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
   endSessionDurationMinutes,
@@ -28,6 +28,11 @@ import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { viewerRsvpIds } from '../../lib/dashboardRsvp';
+import {
+  cancelledScheduleDetailCopy,
+  clearCancelledScheduleDetail,
+  readCancelledScheduleDetail,
+} from '../../lib/scheduleNotificationCopy';
 import { RsvpChooser } from './RsvpChooser';
 import {
   initialRsvpSaveState,
@@ -52,12 +57,25 @@ import {
 } from './schedulePanelA11y';
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
-  useFormattingLocale();
+  const formattingLocale = useFormattingLocale();
   const { me } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(false);
+
+  // Issue #820: cancelled-night deep link from the notifications bell.
+  const cancelledIdRaw = searchParams.get('cancelled');
+  const cancelledId = cancelledIdRaw && /^\d+$/.test(cancelledIdRaw) ? Number(cancelledIdRaw) : null;
+  const cancelledDetail = useMemo(
+    () => (cancelledId ? readCancelledScheduleDetail(cancelledId) : null),
+    [cancelledId],
+  );
+  const cancelledCopy = useMemo(
+    () => cancelledScheduleDetailCopy(cancelledDetail, formattingLocale),
+    [cancelledDetail, formattingLocale],
+  );
 
   // RSVP rows store the server-side user id: String(users.id) for real users,
   // `dev:<name>` on the DEV_AUTH header path. Match either (shared with #785).
@@ -118,9 +136,46 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     );
   }
 
+  function dismissCancelledDetail() {
+    if (cancelledId != null) clearCancelledScheduleDetail(cancelledId);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('cancelled');
+    setSearchParams(nextParams, { replace: true });
+  }
+
   return (
     <div className="space-y-4" style={{ maxWidth: 720 }}>
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      {cancelledId != null && (
+        <Card
+          id={`cancelled-schedule-${cancelledId}`}
+          data-entity-type="cancelled_schedule"
+          data-entity-id={cancelledId}
+        >
+          <div className="flex items-start gap-2.5">
+            <span className="flex leading-none pt-0.5 text-[var(--color-neutral-400)]">
+              <GameIcon slug="calendar" size={18} />
+            </span>
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="text-sm font-semibold m-0" style={{ fontFamily: 'var(--font-heading)' }}>
+                {cancelledCopy.heading}
+              </p>
+              {cancelledCopy.when && (
+                <p className="text-xs m-0" style={{ color: 'var(--color-neutral-300)' }}>
+                  Was planned for {cancelledCopy.when}
+                </p>
+              )}
+              <p className="text-xs m-0" style={{ color: 'var(--color-neutral-400)' }}>
+                {cancelledCopy.body}
+              </p>
+            </div>
+            <Btn ghost className="!min-h-0 !py-1 text-xs shrink-0" onClick={dismissCancelledDetail}>
+              Dismiss
+            </Btn>
+          </div>
+        </Card>
+      )}
 
       <div className="flex items-center gap-2.5">
         <h2 className="text-sm font-bold text-white m-0">

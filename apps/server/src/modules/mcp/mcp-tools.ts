@@ -3289,8 +3289,8 @@ export class McpToolsService {
       server,
       user,
       'update_scheduled_session',
-      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Moving `scheduledAt` re-notifies ' +
-        'the party.',
+      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
+        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionUpdate.shape },
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
@@ -3304,7 +3304,7 @@ export class McpToolsService {
       server,
       user,
       'cancel_scheduled_session',
-      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs.',
+      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs, and notifying the party.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions') },
       async ({ scheduleId }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);

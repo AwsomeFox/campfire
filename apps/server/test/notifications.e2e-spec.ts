@@ -489,7 +489,16 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let playerId: number;
   let campaignId: number;
 
-  type Notification = { id: number; type: string; title: string; body: string; entityType: string | null; entityId: number | null; actorName: string };
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    data?: Record<string, unknown> | null;
+  };
 
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
@@ -538,8 +547,62 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     // Issue #446: schedule row id is stamped so the UI can open the exact card.
     expect(scheduled[0].entityId).toBe(res.body.id);
     expect(scheduled[0].entityType).toBeNull();
+    // Issue #820: structured metadata carries the instant (no UTC date baked into title).
+    expect(scheduled[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId: res.body.id,
+      changeType: 'created',
+      scheduledAt: res.body.scheduledAt,
+    });
+    expect(scheduled[0].title).not.toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(scheduled[0].title).not.toMatch(/scheduled for \d{4}-\d{2}-\d{2}/);
     // The scheduling DM does not notify themselves.
     expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
+  });
+
+  it('venue/VTT-link and notes changes notify once; title-only edits stay silent; cancel notifies', async () => {
+    const future = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
+    const created = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'Lifecycle night' });
+    expect(created.status).toBe(201);
+    const scheduleId = created.body.id as number;
+    const before = ofType(await listFor(player), 'session_scheduled').length;
+
+    // Title-only: no ping.
+    const titleOnly = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({ title: 'Lifecycle night (renamed)' });
+    expect(titleOnly.status).toBe(200);
+    expect(ofType(await listFor(player), 'session_scheduled')).toHaveLength(before);
+
+    // Venue (VTT link) + notes: one coalesced update ping, field names only.
+    const venueNotes = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({
+      location: 'https://vtt.example/room/secret-invite',
+      notes: 'private prep: surprise dragon',
+    });
+    expect(venueNotes.status).toBe(200);
+    const afterVenue = ofType(await listFor(player), 'session_scheduled');
+    expect(afterVenue).toHaveLength(before + 1);
+    const updatePing = afterVenue[0];
+    expect(updatePing.data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'updated',
+      changedFields: expect.arrayContaining(['venue', 'notes']),
+    });
+    expect(updatePing.title).toMatch(/updated/i);
+    expect(JSON.stringify(updatePing)).not.toMatch(/secret-invite|surprise dragon/i);
+
+    // Cancellation notifies with a cancelled snapshot.
+    const cancel = await dm.delete(`/api/v1/schedule/${scheduleId}`);
+    expect(cancel.status).toBe(200);
+    const afterCancel = ofType(await listFor(player), 'session_scheduled');
+    expect(afterCancel).toHaveLength(before + 2);
+    expect(afterCancel[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'cancelled',
+    });
+    expect(afterCancel[0].title).toMatch(/cancelled/i);
   });
 
   it("a player's RSVP notifies the DM (not the RSVPing player)", async () => {
