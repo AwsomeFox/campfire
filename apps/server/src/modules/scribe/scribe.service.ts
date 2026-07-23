@@ -344,12 +344,15 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'failed', { detail: 'provider returned empty recap', sourceHash, tokensUsed, provider: providerName });
     }
 
-    // 6. Meter the cost against the seat budget atomically (mirrors AiDmService.takeTurn's
+    // 6. Meter the cost against the seat budget atomically (mirrors AiDmService.meterTurn's
     //    #272 in-SQL clamp so two concurrent runs can't under-count the cap).
+    //    Also increments turnCount (#1055) so scribe runs count toward the seat's activity.
     this.db.transaction((tx) => {
       tx.update(aiDmSeats)
         .set({
           tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
+          turnCount: sql`${aiDmSeats.turnCount} + 1`,
+          lastTurnAt: nowIso(),
           updatedAt: nowIso(),
         })
         .where(eq(aiDmSeats.campaignId, campaignId))
