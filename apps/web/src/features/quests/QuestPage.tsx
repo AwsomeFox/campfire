@@ -27,6 +27,8 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { Toggle } from '../../components/Toggle';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { StatusMenuButton } from '../../components/StatusMenuButton';
+import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
 
 type QuestWithObjectives = Quest & { objectives: QuestObjective[] };
@@ -51,6 +53,7 @@ export default function QuestPage() {
 function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId: number }) {
   const { t } = useTranslation();
   const { roleIn } = useAuth();
+  const announce = useAnnounce();
   const role = roleIn(campaignId);
   const isDm = role === 'dm';
   const canToggleObjectives = role === 'dm' || role === 'player';
@@ -80,7 +83,6 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [proposalError, setProposalError] = useState<string | null>(null);
   const [proposalDone, setProposalDone] = useState(false);
 
-  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [savingStatus, setSavingStatus] = useState(false);
 
   const [newObjective, setNewObjective] = useState('');
@@ -227,9 +229,13 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     try {
       const updated = await api.post<Quest>(`${API}/quests/${quest.id}/status`, { status });
       setQuest({ ...quest, ...updated });
-      setStatusMenuOpen(false);
+      announce(t('quests.statusChanged', { status: questStatusWord(t, status) }));
     } catch {
+      // Selection is preserved (quest.status is unchanged). Surface the failure
+      // both visually (page-level ErrorNote) and to the screen reader so the
+      // user learns the save did not stick.
       setError(t('quests.updateStatusFailed'));
+      throw new Error('status save failed');
     } finally {
       setSavingStatus(false);
     }
@@ -461,31 +467,21 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             >
               {t('quests.editQuest')}
             </Btn>
-            <div className="relative">
-              <Btn
-                ghost
-                className="!min-h-0 !py-1.5 text-xs"
-                onClick={() => setStatusMenuOpen((v) => !v)}
-                disabled={savingStatus}
-              >
-                {t('quests.statusMenu')}
-              </Btn>
-              {statusMenuOpen && (
-                <div className="absolute right-0 mt-1 z-10 cf-card p-1 space-y-0.5 min-w-[140px]">
-                  {STATUS_OPTIONS.map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => saveStatus(s)}
-                      className={`w-full text-left text-xs rounded px-2 py-1.5 hover:bg-slate-700 ${
-                        s === quest.status ? 'text-white font-semibold' : 'text-slate-300'
-                      }`}
-                    >
-                      <QuestStatusBadge status={s} />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            <StatusMenuButton
+              className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs"
+              triggerLabel={t('quests.statusMenuLabel', { status: questStatusWord(t, quest.status) })}
+              triggerDescription={t('quests.statusMenuHint')}
+              value={quest.status}
+              options={STATUS_OPTIONS.map((s) => ({
+                value: s,
+                label: <QuestStatusBadge status={s} />,
+              }))}
+              disabled={savingStatus}
+              triggerText={t('quests.statusMenu')}
+              onSelect={(s) => saveStatus(s)}
+              announceFailure={announce}
+              failureMessage={t('quests.updateStatusFailed')}
+            />
             <Btn danger className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfirmingDelete(true)}>
               {t('quests.delete')}
             </Btn>
@@ -998,4 +994,22 @@ function timeAgo(iso: string): string {
   if (weeks < 5) return `${weeks}w ago`;
   const months = Math.floor(days / 30);
   return `${months}mo ago`;
+}
+
+// Localized display word for a quest status, used in trigger labels and
+// announcements so the menu reads "Quest status: Active" instead of the raw
+// enum value. Mirrors QuestStatusBadge's presentation label set.
+function questStatusWord(t: (key: string, opts?: Record<string, unknown>) => string, status: QuestStatusValue): string {
+  switch (status) {
+    case 'available':
+      return t('quests.statusWordAvailable');
+    case 'active':
+      return t('quests.statusWordActive');
+    case 'completed':
+      return t('quests.statusWordCompleted');
+    case 'failed':
+      return t('quests.statusWordFailed');
+    default:
+      return status;
+  }
 }

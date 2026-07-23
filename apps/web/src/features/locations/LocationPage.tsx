@@ -24,6 +24,9 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
+import { StatusMenuButton } from '../../components/StatusMenuButton';
+import { LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
+import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
 
 
@@ -49,6 +52,7 @@ export default function LocationPage() {
   const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { roleIn } = useAuth();
+  const announce = useAnnounce();
   const role = roleIn(cid);
   const isDm = role === 'dm';
 
@@ -104,7 +108,6 @@ export default function LocationPage() {
   const [conflict, setConflict] = useState(false);
   const [historyNonce, setHistoryNonce] = useState(0);
 
-  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
 
   const [movingPin, setMovingPin] = useState(false);
@@ -307,12 +310,17 @@ export default function LocationPage() {
 
   async function setStatus(status: Location['status']) {
     setStatusSaving(true);
-    setStatusMenuOpen(false);
     try {
       const updated = await api.post<Location>(`${API}/locations/${id}/discover`, { status });
       setLocation(updated);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update status.");
+      announce(`Location status set to ${LOCATION_STATUS_LABEL[status]}.`);
+    } catch {
+      // Selection is preserved (location.status is unchanged). Surface the
+      // failure both visually (page-level ErrorNote) and to the screen reader
+      // so the user learns the save did not stick. Use the stable generic
+      // message so the assertion holds regardless of the server's response.
+      setError("Couldn't update status.");
+      throw new Error('status save failed');
     } finally {
       setStatusSaving(false);
     }
@@ -451,35 +459,25 @@ export default function LocationPage() {
               </div>
             )}
             {isDm && (
-              <div className="flex gap-2 shrink-0 relative ml-auto">
+              <div className="flex gap-2 shrink-0 ml-auto">
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                <StatusMenuButton
+                  className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs"
+                  triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
+                  triggerDescription="DM: set status directly"
+                  value={location.status}
+                  options={(LocationStatus.options as Location['status'][]).map((s) => ({
+                    value: s,
+                    label: <LocationStatusLabel status={s} />,
+                  }))}
                   disabled={statusSaving}
-                  onClick={() => setStatusMenuOpen((v) => !v)}
-                  title="DM: set status directly"
-                >
-                  Status ▾
-                </Btn>
-                {statusMenuOpen && (
-                  <div className="absolute right-0 top-full mt-1 z-10 cf-card p-1.5 space-y-1 min-w-[160px]">
-                    {(LocationStatus.options as Location['status'][]).map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => setStatus(s)}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold hover:bg-slate-700 ${
-                          s === location.status ? 'text-amber-400' : 'text-slate-300'
-                        }`}
-                      >
-                        <LocationStatusLabel status={s} />
-                      </button>
-                    ))}
-                  </div>
-                )}
+                  triggerText="Status ▾"
+                  onSelect={(s) => setStatus(s)}
+                  announceFailure={announce}
+                  failureMessage="Couldn't update status."
+                />
               </div>
             )}
           </div>
