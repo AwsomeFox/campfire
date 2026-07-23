@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link } from 'react-router-dom';
 import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -55,6 +55,7 @@ export function RegionMap({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
+  const [draggingPointerId, setDraggingPointerId] = useState<number | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
 
@@ -222,6 +223,7 @@ export function RegionMap({
     e.stopPropagation();
     (e.target as Element).setPointerCapture?.(e.pointerId);
     setDraggingId(locationId);
+    setDraggingPointerId(e.pointerId);
     setDragPos(pointerToPercent(e));
   }
 
@@ -233,13 +235,49 @@ export function RegionMap({
 
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
     if (draggingId == null) return;
+    if (e.pointerId !== draggingPointerId) return;
     const pct = pointerToPercent(e) ?? dragPos;
     const id = draggingId;
     setDraggingId(null);
+    setDraggingPointerId(null);
     setDragPos(null);
     if (!pct) return;
     void savePinPercent(id, pct.x, pct.y);
   }
+
+  /** Cancel drag without saving — restores original pin position. */
+  function cancelDrag() {
+    setDraggingId(null);
+    setDraggingPointerId(null);
+    setDragPos(null);
+  }
+
+  function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    if (e.pointerId !== draggingPointerId) return;
+    cancelDrag();
+  }
+
+  function onSurfaceLostPointerCapture(e: ReactPointerEvent<HTMLDivElement>) {
+    if (draggingId == null) return;
+    if (e.pointerId !== draggingPointerId) return;
+    cancelDrag();
+  }
+
+  // Clear drag state on page visibility change (tab switch, screen lock) and on unmount.
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.visibilityState === 'hidden') {
+        setDraggingId(null);
+        setDraggingPointerId(null);
+        setDragPos(null);
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
 
   return (
     <div className="card elev-sm reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
@@ -278,6 +316,8 @@ export function RegionMap({
         style={{ margin: '8px 14px', touchAction: draggingId != null ? 'none' : undefined }}
         onPointerMove={onSurfacePointerMove}
         onPointerUp={onSurfacePointerUp}
+        onPointerCancel={onSurfacePointerCancel}
+        onLostPointerCapture={onSurfaceLostPointerCapture}
       >
         {mapImageUrl ? (
           <img src={mapImageUrl} alt="Campaign map" className="absolute inset-0 w-full h-full object-cover" />
