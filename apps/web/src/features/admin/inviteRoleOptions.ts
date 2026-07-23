@@ -7,8 +7,6 @@
  */
 import type { InviteRole } from '@campfire/schema';
 
-export const INVITE_ROLES: ReadonlyArray<InviteRole> = ['player', 'viewer'];
-
 export interface InviteRoleOption {
   role: InviteRole;
   /** Short label (chip / table copy). */
@@ -17,19 +15,24 @@ export interface InviteRoleOption {
   description: string;
 }
 
+/** Single source of truth for invite-role order, labels, and descriptions. */
+export const INVITE_ROLE_OPTIONS: ReadonlyArray<InviteRoleOption> = [
+  {
+    role: 'player',
+    label: 'Player',
+    description: 'Player — joins as a full party member',
+  },
+  {
+    role: 'viewer',
+    label: 'Viewer',
+    description: 'Viewer — read-only access to the campaign',
+  },
+];
+
+export const INVITE_ROLES: ReadonlyArray<InviteRole> = INVITE_ROLE_OPTIONS.map((o) => o.role);
+
 export function inviteRoleOptions(): ReadonlyArray<InviteRoleOption> {
-  return [
-    {
-      role: 'player',
-      label: 'Player',
-      description: 'Player — joins as a full party member',
-    },
-    {
-      role: 'viewer',
-      label: 'Viewer',
-      description: 'Viewer — read-only access to the campaign',
-    },
-  ];
+  return INVITE_ROLE_OPTIONS;
 }
 
 /**
@@ -37,7 +40,7 @@ export function inviteRoleOptions(): ReadonlyArray<InviteRoleOption> {
  * Include `inviteId` so multiple active invites with the same role stay distinguishable.
  */
 export function inviteLinkFieldLabel(role: InviteRole, inviteId: number): string {
-  const opt = inviteRoleOptions().find((o) => o.role === role);
+  const opt = INVITE_ROLE_OPTIONS.find((o) => o.role === role);
   const label = opt?.label ?? role;
   return `${label} invite link ${inviteId}, read-only`;
 }

@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   INVITE_COPY_FAILURE,
   INVITE_COPY_SUCCESS,
+  INVITE_ROLE_OPTIONS,
   INVITE_ROLES,
   inviteLinkFieldLabel,
   inviteRoleOptions,
@@ -15,9 +16,10 @@ import {
  */
 
 test.describe('invite role options (issue #516)', () => {
-  test('covers player and viewer in a stable order', () => {
-    expect(INVITE_ROLES).toEqual(['player', 'viewer']);
-    expect(inviteRoleOptions().map((o) => o.role)).toEqual(['player', 'viewer']);
+  test('covers player and viewer in a stable order from one source', () => {
+    expect(INVITE_ROLE_OPTIONS.map((o) => o.role)).toEqual(['player', 'viewer']);
+    expect(INVITE_ROLES).toEqual(INVITE_ROLE_OPTIONS.map((o) => o.role));
+    expect(inviteRoleOptions()).toBe(INVITE_ROLE_OPTIONS);
   });
 
   test('every option includes concise consequence text beyond the short label', () => {
