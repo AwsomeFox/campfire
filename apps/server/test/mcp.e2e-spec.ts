@@ -624,6 +624,67 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect((denied.content as TextContent[])[0].text).toContain('404');
   });
 
+  it('comments keep REST/MCP parity for owned character attribution (issue #787)', async () => {
+    const client = await mcpClient(dmToken);
+    const me = await dmAgent.get('/api/v1/me');
+    const characterResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: {
+        campaignId,
+        name: 'MCP Speaker',
+        ownerUserId: me.body.user.id,
+        portraitUrl: 'https://images.example.test/mcp-speaker.png',
+      },
+    });
+    expect(characterResult.isError).toBeFalsy();
+    const character = parseResult(characterResult) as { id: number };
+    const sessionResult = await client.callTool({
+      name: 'add_session_recap',
+      arguments: { campaignId, title: 'MCP Persona Scene', recap: 'A scene for attributed dialogue.' },
+    });
+    const session = parseResult(sessionResult) as { id: number };
+
+    const postResult = await client.callTool({
+      name: 'post_comment',
+      arguments: {
+        campaignId,
+        entityType: 'session',
+        entityId: session.id,
+        body: 'I speak through MCP.',
+        inCharacter: true,
+        characterId: character.id,
+      },
+    });
+    expect(postResult.isError).toBeFalsy();
+    expect(parseResult(postResult)).toMatchObject({
+      characterId: character.id,
+      characterName: 'MCP Speaker',
+      characterAvatarUrl: 'https://images.example.test/mcp-speaker.png',
+      authorName: 'mcp-dm',
+    });
+
+    const listed = parseResult(
+      await client.callTool({
+        name: 'list_comments',
+        arguments: { campaignId, entityType: 'session', entityId: session.id },
+      }),
+    ) as Array<{ body: string; characterName: string }>;
+    expect(listed).toEqual(expect.arrayContaining([expect.objectContaining({ body: 'I speak through MCP.', characterName: 'MCP Speaker' })]));
+
+    const missingCharacter = await client.callTool({
+      name: 'post_comment',
+      arguments: {
+        campaignId,
+        entityType: 'session',
+        entityId: session.id,
+        body: 'No speaker selected.',
+        inCharacter: true,
+      },
+    });
+    expect(missingCharacter.isError).toBe(true);
+    expect(parseResult(missingCharacter)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
+  });
+
   it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {
     const dmClient = await mcpClient(dmToken);
     const viewerClient = await mcpClient(viewerToken);

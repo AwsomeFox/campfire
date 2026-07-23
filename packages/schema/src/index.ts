@@ -158,6 +158,7 @@ export const CampaignImport = z
     characters: z.array(ImportedEntity).optional(),
     sessions: z.array(ImportedEntity).optional(),
     notes: z.array(ImportedEntity).optional(),
+    comments: z.array(ImportedEntity).optional(),
     encounters: z.array(ImportedEntity).optional(),
     // Issue #266: entity types the export previously dropped and now round-trips.
     // Arrays are loose objects (remapped defensively in the service); the two
@@ -1132,6 +1133,13 @@ export const Comment = z.object({
   authorName: z.string().max(120).default(''),
   body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Immutable creation-time persona attribution (issue #787). characterId is a
+  // soft reference to the selected owned character; the name/avatar snapshots are
+  // authoritative for display so a later rename or character deletion cannot
+  // rewrite old dialogue. Legacy/OOC comments carry nulls.
+  characterId: Id.nullable().default(null),
+  characterName: z.string().max(120).nullable().default(null),
+  characterAvatarUrl: z.string().max(500).nullable().default(null),
   // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
   // deleted by its author / a DM and its body has been redacted. The row remains so
   // replies keep their parent. Cleared on restore.
@@ -1159,6 +1167,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  characterName: true,
+  characterAvatarUrl: true,
   deletedAt: true,
   deletedBy: true,
   editedAt: true,
@@ -1170,6 +1180,8 @@ export const CommentCreate = Comment.omit({
   .required({ entityType: true, entityId: true, body: true });
 export const CommentUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
+  // Kept for wire compatibility, but changing it after creation is rejected by
+  // the service because persona attribution is immutable historical provenance.
   inCharacter: z.boolean().optional(),
 });
 

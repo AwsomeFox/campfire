@@ -7,7 +7,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { parsePageParams } from '../../common/pagination';
 import { CommentsService } from './comments.service';
-import { CommentCreateDto, CommentUpdateDto } from './comments.dto';
+import { CommentCreateDto, CommentDto, CommentUpdateDto } from './comments.dto';
 
 /** Upper bound for `?limit` on the comment thread list. */
 const COMMENTS_LIST_MAX_LIMIT = 500;
@@ -30,7 +30,7 @@ export class CampaignCommentsController {
   @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max comments to return (default: all, capped at 500).' })
   @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Comments to skip, for paging (default 0).' })
-  @ApiResponse({ status: 200, description: 'The comment thread for the entity.' })
+  @ApiResponse({ status: 200, description: 'The comment thread for the entity.', type: CommentDto, isArray: true })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
@@ -49,9 +49,9 @@ export class CampaignCommentsController {
   @ApiOperation({
     summary: 'Post a comment',
     description:
-      'Requires campaign membership (write) AND visibility of the anchored entity — posting on a hidden/secret entity 404s for a non-DM (issue #230). Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply and inCharacter flag for a play-by-post scene.',
+      'Requires campaign membership (write) AND visibility of the anchored entity — posting on a hidden/secret entity 404s for a non-DM (issue #230). Anchored to an entity (entityType/entityId). Optional parentId for a threaded reply. An in-character post must select characterId for a live character owned by the authenticated account; the server snapshots its safe name/avatar while preserving account author provenance (issue #787).',
   })
-  @ApiResponse({ status: 201, description: 'Created comment.' })
+  @ApiResponse({ status: 201, description: 'Created comment.', type: CommentDto })
   async create(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: CommentCreateDto,
@@ -77,7 +77,7 @@ export class CommentsController {
       'Requires campaign membership. A tombstoned comment (issue #503) is returned as a redacted "[deleted]" ' +
       'placeholder rather than 404 — the row stays so replies keep their parent. Requires membership.',
   })
-  @ApiResponse({ status: 200, description: 'Comment (body redacted if tombstoned).' })
+  @ApiResponse({ status: 200, description: 'Comment (body redacted if tombstoned).', type: CommentDto })
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id, true);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -91,9 +91,9 @@ export class CommentsController {
       'Author or DM only. Requires campaign membership (write). ' +
       'A DM editing another member\'s comment is allowed (moderation) but attributed honestly (issue #783): ' +
       'the original author is preserved and the editor is recorded (editedAt/editedBy) so the body is never ' +
-      'rewritten under a player who didn\'t write it. A self-edit just bumps updatedAt.',
+      'rewritten under a player who didn\'t write it. Character attribution is immutable after posting. A self-edit just bumps updatedAt.',
   })
-  @ApiResponse({ status: 200, description: 'Updated comment.' })
+  @ApiResponse({ status: 200, description: 'Updated comment.', type: CommentDto })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: CommentUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
@@ -109,7 +109,7 @@ export class CommentsController {
       'topology is preserved (issue #503 — a root author must not destroy other members\' replies). ' +
       'Reversible via POST /comments/:id/restore. The deletedAt/deletedBy fields are set on the returned shape.',
   })
-  @ApiResponse({ status: 200, description: 'Tombstoned.' })
+  @ApiResponse({ status: 200, description: 'Tombstoned.', type: CommentDto })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id, true);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
@@ -125,7 +125,7 @@ export class CommentsController {
       'tombstoned. Mirrors the notes restore() authorization so a DM can reverse a moderation and the author ' +
       'can reverse their own soft-delete.',
   })
-  @ApiResponse({ status: 201, description: 'Restored comment.' })
+  @ApiResponse({ status: 201, description: 'Restored comment.', type: CommentDto })
   async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id, true);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
