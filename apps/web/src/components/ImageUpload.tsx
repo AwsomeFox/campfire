@@ -236,8 +236,9 @@ export function ImageUpload({
   // The staged object URL we are responsible for revoking. Tracked alongside the
   // reducer state so we never lose the handle to revoke (issue #583 leak fix).
   const stagedUrlRef = useRef<string | null>(null);
-  // Issue #845: depth-counted drag state so crossing child boundaries does not
-  // flicker the drop affordance. Cleared on drop / cancel / window blur.
+  // Issue #845: boolean drag-active + relatedTarget containment so crossing
+  // child boundaries does not flicker the drop affordance. Cleared on drop /
+  // cancel / window blur (not a depth counter — see imageUploadDragState.ts).
   const [drag, dispatchDrag] = useReducer(reduceDropzoneDrag, initialDropzoneDrag);
   const dragOver = isDropzoneDragActive(drag);
   const [state, dispatch] = useReducer(reduceUpload, initialUploadState);
