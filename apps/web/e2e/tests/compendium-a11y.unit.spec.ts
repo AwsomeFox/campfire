@@ -106,6 +106,16 @@ test.describe('compendium URL filter params (issue #647)', () => {
         urlQueryChanged: false,
       }),
     ).toBe('');
+
+    // Padded URL `q` should still count as matching a trimmed draft.
+    expect(
+      effectiveCompendiumSearchQuery({
+        draftQuery: 'fire',
+        committedQuery: ' fire ',
+        debouncedQuery: '',
+        urlQueryChanged: false,
+      }),
+    ).toBe(' fire ');
   });
 });
 

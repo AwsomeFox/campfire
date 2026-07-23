@@ -73,12 +73,15 @@ export default function CompendiumPage() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCommittedQueryRef = useRef(committedQuery);
   const urlQueryChanged = committedQuery !== prevCommittedQueryRef.current;
-  if (urlQueryChanged) {
+
+  // Snap draft input to URL `q` after external navigation / clearFilters.
+  // Keep this in an effect — setState during render can warn or loop.
+  useEffect(() => {
+    if (!urlQueryChanged) return;
     prevCommittedQueryRef.current = committedQuery;
-    if (query !== committedQuery) {
-      setQuery(committedQuery);
-    }
-  }
+    setQuery((current) => (current !== committedQuery ? committedQuery : current));
+  }, [committedQuery, urlQueryChanged]);
+
   const searchQuery = effectiveCompendiumSearchQuery({
     draftQuery: query,
     committedQuery,
@@ -88,7 +91,8 @@ export default function CompendiumPage() {
 
   useEffect(() => {
     const trimmed = debouncedQuery.trim();
-    if (trimmed === committedQuery) return;
+    // Normalize both sides so padded URL `q` values don't cause rewrite loops.
+    if (trimmed === committedQuery.trim()) return;
     // Skip stale debounce ticks (e.g. Clear filters) so we don't rewrite `q`.
     if (trimmed !== query.trim()) return;
     setSearchParams(

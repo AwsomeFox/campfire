@@ -69,7 +69,9 @@ export function effectiveCompendiumSearchQuery(opts: {
   /** True on the render where URL `q` changed vs the previous committed value. */
   urlQueryChanged: boolean;
 }): string {
-  if (opts.urlQueryChanged || opts.draftQuery.trim() === opts.committedQuery) {
+  // Trim both sides so padded URL `q` values match the draft the same way
+  // CompendiumPage trims before writing search params.
+  if (opts.urlQueryChanged || opts.draftQuery.trim() === opts.committedQuery.trim()) {
     return opts.committedQuery;
   }
   return opts.debouncedQuery;
