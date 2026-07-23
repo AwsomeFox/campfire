@@ -15,8 +15,8 @@ type PointerOptions = {
 
 const MAP_ATTACHMENT_ID = 811_000;
 const AOE_ID = 'gesture-test-aoe';
-const PNG_1PX = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+const PNG_16_9 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAABAAAAAJCAYAAAACvn2aAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARElEQVQoU2NgGAWjYBSMAgAAAQQAAAGn1v8AAAAASUVORK5CYII=',
   'base64',
 );
 
@@ -111,7 +111,7 @@ async function openGestureFixture(page: Page) {
   });
 
   await page.route(`**/api/v1/attachments/${MAP_ATTACHMENT_ID}/file`, (route) =>
-    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1PX }),
+    route.fulfill({ status: 200, contentType: 'image/png', body: PNG_16_9 }),
   );
   await page.route(`**/api/v1/encounters/${encounterId}`, async (route) => {
     const request = route.request();
