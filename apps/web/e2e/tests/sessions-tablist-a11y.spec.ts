@@ -192,7 +192,7 @@ test.describe('Sessions Log/Schedule tablist (#706)', () => {
     });
     const page = await context.newPage();
     try {
-      const { campaignId, navigation } = seed();
+      const { campaignId } = seed();
       const second = await ensureSecondSession(page);
 
       // Watch the app's polite live region so we can assert the announcement.

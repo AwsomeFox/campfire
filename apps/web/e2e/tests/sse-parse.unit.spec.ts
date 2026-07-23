@@ -184,4 +184,36 @@ test.describe('SseParser (#748)', () => {
     const bytes = new TextEncoder().encode(`data: ${EVENT}\r\n\r\n`);
     expect(messages(parser.push(bytes))).toEqual([EVENT]);
   });
+
+  test('buffer caps measure UTF-8 bytes, not UTF-16 code units', () => {
+    // U+2713 CHECK MARK is 1 UTF-16 code unit but 3 UTF-8 bytes.
+    const parser = new SseParser({ maxBufferedBytes: 20 });
+    // "data: " (6) + 5 check marks (15 bytes) = 21 UTF-8 bytes, 11 code units.
+    const signals = parser.pushText(`data: ${'✓'.repeat(5)}`);
+    expect(recoveries(signals).length).toBe(1);
+    expect(recoveries(signals)[0]).toBeGreaterThan(20);
+    // If caps used .length (code units), 11 would not have tripped a 20-byte cap.
+    expect('data: '.length + 5).toBeLessThanOrEqual(20);
+  });
+
+  test('recovery preserves stream-level id and retry', () => {
+    const parser = new SseParser({ maxBufferedBytes: 32 });
+    expect(messages(parser.pushText('id: 99\nretry: 2500\ndata: hello\n\n'))).toEqual(['hello']);
+
+    const recovered = parser.pushText('data: ' + 'z'.repeat(100));
+    expect(recoveries(recovered).length).toBe(1);
+
+    const after = parser.pushText('data: again\n\n');
+    const msg = after.find((s): s is Extract<SseParseSignal, { kind: 'message' }> => s.kind === 'message');
+    expect(msg?.message).toEqual({ event: '', data: 'again', id: '99', retry: 2500 });
+  });
+
+  test('full reset() clears stream-level id and retry', () => {
+    const parser = new SseParser();
+    expect(messages(parser.pushText('id: 7\nretry: 1000\ndata: hi\n\n'))).toEqual(['hi']);
+    parser.reset();
+    const after = parser.pushText('data: next\n\n');
+    const msg = after.find((s): s is Extract<SseParseSignal, { kind: 'message' }> => s.kind === 'message');
+    expect(msg?.message).toEqual({ event: '', data: 'next', id: null, retry: null });
+  });
 });

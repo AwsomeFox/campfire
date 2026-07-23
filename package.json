@@ -4,8 +4,13 @@
   "version": "0.14.1",
   "description": "Self-hosted, AI-operable D&D campaign tracker",
   "license": "MIT",
-  "engines": { "node": ">=22" },
-  "workspaces": ["apps/*", "packages/*"],
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "concurrently -n server,web -c yellow,cyan \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
     "build": "npm run build -w packages/schema && npm run build -w apps/server && npm run build -w apps/web",
@@ -13,11 +18,18 @@
     "test:cov": "npm run test:cov -w apps/server",
     "test:e2e": "npm run build && npm run test:e2e -w apps/web",
     "test:e2e:nobuild": "npm run test:e2e -w apps/web",
-    "test:all": "npm run lint && npm run build -w packages/schema && npm run test && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
-    "lint": "npm run lint --workspaces --if-present"
+    "test:all": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:pwa:dist -w apps/web && npm run test:e2e:typecheck -w apps/web && npm run test:e2e:nobuild",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run build -w packages/schema && npm run typecheck --workspaces"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "concurrently": "^9.1.2",
-    "typescript": "^5.6.3"
+    "eslint": "10.7.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "8.65.0"
   }
 }

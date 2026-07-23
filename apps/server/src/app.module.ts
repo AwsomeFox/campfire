@@ -15,10 +15,6 @@ import {
   THROTTLE_AI,
   DEFAULT_THROTTLE_LIMIT,
   DEFAULT_THROTTLE_TTL_MS,
-  AUTH_THROTTLE_LIMIT,
-  AUTH_THROTTLE_TTL_MS,
-  AI_THROTTLE_LIMIT,
-  AI_THROTTLE_TTL_MS,
   isThrottleDisabled,
 } from './common/throttle.constants';
 import { HealthModule } from './modules/health/health.module';

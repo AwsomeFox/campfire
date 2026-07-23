@@ -7,10 +7,11 @@
  * than native EventSource, so the request carries the exact same auth surface as
  * lib/api.ts — the session cookie (credentials: include) plus the dev-role override
  * headers, which EventSource cannot send. Reconnects with capped exponential backoff;
- * after a heal, `onReconnect` fires so the page can refetch GET /ai-dm/session to catch
- * up on state it missed while offline. A 401/403 stops the loop entirely (no access —
- * retrying won't help), which is also how the server enforces the role matrix: the
- * client simply stops when told no.
+ * after a transport heal, `onReconnect` fires so the page can refetch GET /ai-dm/session
+ * to catch up on state it missed while offline. Parser buffer-overrun recovery is
+ * separate (`onStreamRecovery`) — the connection stayed up. A 401/403 stops the loop
+ * entirely (no access — retrying won't help), which is also how the server enforces
+ * the role matrix: the client simply stops when told no.
  *
  * The transcript is NOT assembled here — this hook only decodes and validates the typed
  * event union and hands each event to `onEvent`. See features/ai-dm/transcript.ts (the
@@ -62,8 +63,14 @@ export type AiDmStreamEventType = AiDmStreamEvent['type'];
 
 export interface AiDmStreamHandlers {
   onEvent: (event: AiDmStreamEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch session state to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch session state. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes while the connection
+   * stays up. Distinct from {@link onReconnect}; wire the same catch-up refetch
+   * when transcript/session state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
 }
 
 const RECONNECT_BASE_MS = 1000;
@@ -229,9 +236,9 @@ export function useAiDmStream(
           const consume = (signals: SseParseSignal[]) => {
             for (const signal of signals) {
               if (signal.kind === 'recovered') {
-                // Parser discarded mid-stream bytes — stay connected but refetch
-                // session/transcript state that may have been skipped.
-                if (!disposed) handlersRef.current.onReconnect?.();
+                // Parser discarded mid-stream bytes — stay connected; not a
+                // transport reconnect. Callers refetch via onStreamRecovery.
+                if (!disposed) handlersRef.current.onStreamRecovery?.();
                 continue;
               }
               if (signal.kind !== 'message') continue;
