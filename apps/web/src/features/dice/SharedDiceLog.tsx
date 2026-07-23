@@ -72,11 +72,14 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   useEffect(() => {
     rollAnnouncementRef.current = null;
     rollsCampaignIdRef.current = null;
-    clearLocalDiceAnnouncements(campaignId);
     setRolls([]);
     setRetention(undefined);
     setJustRolledId(null);
     setError(null);
+    // Clear the *previous* campaign on switch/unmount (cleanup runs with that id).
+    return () => {
+      clearLocalDiceAnnouncements(campaignId);
+    };
   }, [campaignId]);
 
   // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
