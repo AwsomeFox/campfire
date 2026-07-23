@@ -933,11 +933,11 @@ export class McpToolsService {
           ),
       },
       async ({ query, type, pack }) => {
-        const results = await this.rules.search(
+        const page = await this.rules.search(
           { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
           5,
         );
-        return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
+        return page.items.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
     );
 

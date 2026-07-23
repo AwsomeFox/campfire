@@ -4,20 +4,26 @@
  * search bar, type filter chips, result rows -> Reader. The design's "Ask"
  * bar (AI rules lookup) and inline homebrew authoring are out of scope for
  * this pass (no backing endpoint per the BUILD spec) — search + browse only.
+ *
+ * Pagination (issue #613): GET /rules/search returns `{ items, total, hasMore,
+ * nextCursor? }`. The page load-mores (append), keeps prior results visible while
+ * a filter refetch is in flight (stale), and surfaces error + retry.
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
-import type { RuleEntry, RulePack } from '@campfire/schema';
+import type { RuleEntry, RulePack, RuleSearchPage } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import {
   COMPENDIUM_CLEAR_FILTERS_LABEL,
+  COMPENDIUM_LOAD_MORE_LABEL,
   COMPENDIUM_SEARCH_ID,
   COMPENDIUM_SEARCH_LABEL,
   COMPENDIUM_TYPE_FILTER_LABEL,
+  COMPENDIUM_URL_CURSOR,
   COMPENDIUM_URL_Q,
   COMPENDIUM_URL_TYPE,
   applyCompendiumSearchParams,
@@ -65,9 +71,11 @@ export default function CompendiumPage() {
   // `q` is mirrored into local draft state so keystrokes stay responsive while
   // we debounce writes back with replace (no history spam). External URL
   // changes (history / Link / clearFilters) snap the draft + search query
-  // immediately — debounce applies only to typing.
+  // immediately — debounce applies only to typing. `cursor` (issue #613) is
+  // the start keyset for the first page when deep-linking mid-list.
   const type = parseCompendiumTypeParam(searchParams.get(COMPENDIUM_URL_TYPE));
   const committedQuery = searchParams.get(COMPENDIUM_URL_Q) ?? '';
+  const urlCursor = searchParams.get(COMPENDIUM_URL_CURSOR) ?? '';
   const [query, setQuery] = useState(committedQuery);
   const debouncedQuery = useDebounced(query, 300);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -96,28 +104,29 @@ export default function CompendiumPage() {
     // Skip stale debounce ticks (e.g. Clear filters) so we don't rewrite `q`.
     if (trimmed !== query.trim()) return;
     setSearchParams(
-      (prev) => applyCompendiumSearchParams(prev, { q: trimmed, type }),
+      (prev) => applyCompendiumSearchParams(prev, { q: trimmed, type, cursor: null }),
       { replace: true },
     );
   }, [debouncedQuery, committedQuery, query, type, setSearchParams]);
 
   function setType(next: CompendiumUrlType) {
     setSearchParams(
-      (prev) => {
-        const params = new URLSearchParams(prev);
-        if (next === 'all') params.delete(COMPENDIUM_URL_TYPE);
-        else params.set(COMPENDIUM_URL_TYPE, next);
-        return params;
-      },
+      (prev) => applyCompendiumSearchParams(prev, { q: committedQuery, type: next, cursor: null }),
       { replace: true },
     );
   }
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [results, setResults] = useState<RuleEntry[] | null>(null);
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [packsLoading, setPacksLoading] = useState(true);
+  const [reloadToken, setReloadToken] = useState(0);
+  const fetchGeneration = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,9 +158,13 @@ export default function CompendiumPage() {
     if (campaign === undefined) return;
     if (noRuleSystemChosen || noPacksInstalled) {
       setResults([]);
+      setTotal(0);
+      setHasMore(false);
+      setNextCursor(undefined);
       return;
     }
     let cancelled = false;
+    const gen = ++fetchGeneration.current;
     (async () => {
       setLoading(true);
       setError(null);
@@ -160,28 +173,66 @@ export default function CompendiumPage() {
         if (searchQuery.trim()) params.set('q', searchQuery.trim());
         if (type !== 'all') params.set('type', type);
         if (campaignPack) params.set('pack', campaignPack);
-        const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
-        if (!cancelled) setResults(list);
+        if (urlCursor) params.set('cursor', urlCursor);
+        const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
+        if (cancelled || gen !== fetchGeneration.current) return;
+        setResults(page.items);
+        setTotal(page.total);
+        setHasMore(page.hasMore);
+        setNextCursor(page.nextCursor);
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "Couldn't search the compendium.");
-          setResults([]);
-        }
+        if (cancelled || gen !== fetchGeneration.current) return;
+        setError(err instanceof ApiError ? err.message : "Couldn't search the compendium.");
+        // Keep prior results visible when a refetch fails (stale + recovery).
+        setResults((prev) => prev ?? []);
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && gen === fetchGeneration.current) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [searchQuery, type, noPacksInstalled, noRuleSystemChosen, campaignPack, campaign]);
+  }, [
+    searchQuery,
+    type,
+    noPacksInstalled,
+    noRuleSystemChosen,
+    campaignPack,
+    campaign,
+    urlCursor,
+    reloadToken,
+  ]);
+
+  async function loadMore() {
+    if (!nextCursor || loadingMore || loading) return;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (searchQuery.trim()) params.set('q', searchQuery.trim());
+      if (type !== 'all') params.set('type', type);
+      if (campaignPack) params.set('pack', campaignPack);
+      params.set('cursor', nextCursor);
+      const page = await api.get<RuleSearchPage>(`${API}/rules/search?${params.toString()}`);
+      // Append in memory only — writing `cursor` to the URL would re-fire the
+      // primary fetch and replace the accumulated list with a single page.
+      setResults((prev) => [...(prev ?? []), ...page.items]);
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't load more results.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   const chips = useMemo(() => TYPE_CHIPS, []);
   // Empty results have two very different causes: a search that found nothing vs.
   // a type filter (e.g. "Monsters") the installed pack has no entries for. The
   // copy should say which (issue #242).
   const activeTypeLabel = TYPE_CHIPS.find((c) => c.key === type)?.label ?? '';
-  const filtersActive = type !== 'all' || query.trim().length > 0;
+  const filtersActive = type !== 'all' || query.trim().length > 0 || Boolean(urlCursor);
   const chipRefs = useRef<Partial<Record<CompendiumUrlType, HTMLButtonElement | null>>>({});
 
   const canAnnounceResults =
@@ -199,6 +250,8 @@ export default function CompendiumPage() {
         typeKey: type,
         typeLabel: activeTypeLabel,
         failed: Boolean(error),
+        totalCount: total,
+        hasMore,
       })
     : '';
 
@@ -206,7 +259,7 @@ export default function CompendiumPage() {
     // Clear local input immediately; URL params drop both filters (replace).
     setQuery('');
     setSearchParams(
-      (prev) => applyCompendiumSearchParams(prev, { q: '', type: 'all' }),
+      (prev) => applyCompendiumSearchParams(prev, { q: '', type: 'all', cursor: null }),
       { replace: true },
     );
     // Button unmounts when filtersActive becomes false. Defer past the unmount
@@ -244,6 +297,8 @@ export default function CompendiumPage() {
       </div>
     );
   }
+
+  const showStale = loading && results !== null && results.length > 0;
 
   return (
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 760 }}>
@@ -351,69 +406,111 @@ export default function CompendiumPage() {
           </div>
         ) : (
           <>
-            {error && <ErrorNote message={error} />}
-            {!error &&
-              (loading && !results ? (
-                <Card>
-                  <Skeleton lines={5} />
-                </Card>
-              ) : results && results.length === 0 ? (
-                <div className="card items-center text-center" style={{ padding: 24 }}>
-                  {searchQuery.trim() ? (
-                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                      Nothing matches “{searchQuery.trim()}”
-                      {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
-                      {type !== 'all' ? ', or switch to All' : ''}.
+            {error && (
+              <ErrorNote
+                message={error}
+                onRetry={() => {
+                  setError(null);
+                  setReloadToken((n) => n + 1);
+                }}
+              />
+            )}
+            {showStale && (
+              <p className="text-muted" style={{ margin: 0, fontSize: 12 }} aria-live="polite">
+                Updating results…
+              </p>
+            )}
+            {loading && !results ? (
+              <Card>
+                <Skeleton lines={5} />
+              </Card>
+            ) : !error && results && results.length === 0 && !loading ? (
+              <div className="card items-center text-center" style={{ padding: 24 }}>
+                {searchQuery.trim() ? (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                    Nothing matches “{searchQuery.trim()}”
+                    {type !== 'all' ? ` in ${activeTypeLabel}` : ''}. Try another word
+                    {type !== 'all' ? ', or switch to All' : ''}.
+                  </p>
+                ) : type !== 'all' ? (
+                  <>
+                    <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
+                      No {activeTypeLabel.toLowerCase()} in this rule system.
                     </p>
-                  ) : type !== 'all' ? (
-                    <>
-                      <p style={{ margin: 0, fontSize: 13, color: 'var(--color-neutral-200)' }}>
-                        No {activeTypeLabel.toLowerCase()} in this rule system.
-                      </p>
-                      <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
-                        This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
-                      </p>
-                    </>
-                  ) : (
-                    <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
-                      This rule system has no entries yet.
+                    <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 12 }}>
+                      This campaign’s installed pack has no {activeTypeLabel.toLowerCase()} — try another type, or switch to All.
                     </p>
-                  )}
-                </div>
-              ) : (
-                (results ?? []).map((entry) => (
-                  <Link
-                    key={entry.id}
-                    to={`/c/${id}/compendium/${entry.id}`}
-                    className="card elev-sm text-left"
-                    style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
-                  >
-                    {/* Type/school/monster glyph (issue #305): the DM's override if set,
-                        else derived from the entry's type + dataJson. Decorative — the
-                        name beside it carries the label. */}
-                    <span
-                      aria-hidden="true"
-                      style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                  </>
+                ) : (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>
+                    This rule system has no entries yet.
+                  </p>
+                )}
+              </div>
+            ) : results && results.length > 0 ? (
+              <>
+                {total != null && (
+                  <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+                    {hasMore || total > results.length
+                      ? `Showing ${results.length} of ${total}`
+                      : `${total} ${total === 1 ? 'result' : 'results'}`}
+                  </p>
+                )}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                    opacity: showStale ? 0.72 : 1,
+                    transition: 'opacity 160ms ease',
+                  }}
+                >
+                  {results.map((entry) => (
+                    <Link
+                      key={entry.id}
+                      to={`/c/${id}/compendium/${entry.id}`}
+                      className="card elev-sm text-left"
+                      style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                     >
-                      <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
-                    </span>
-                    <span style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
-                        {entry.name}
+                      {/* Type/school/monster glyph (issue #305): the DM's override if set,
+                          else derived from the entry's type + dataJson. Decorative — the
+                          name beside it carries the label. */}
+                      <span
+                        aria-hidden="true"
+                        style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, color: 'var(--color-accent)' }}
+                      >
+                        <GameIcon slug={ruleEntryIconSlug(entry)} size={22} />
                       </span>
-                      <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
-                        {entry.summary}
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexWrap: 'wrap', fontSize: 14 }}>
+                          {entry.name}
+                        </span>
+                        <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+                          {entry.summary}
+                        </span>
                       </span>
-                    </span>
-                    <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
-                      {entry.type}
-                    </span>
-                    <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
-                      ›
-                    </span>
-                  </Link>
-                ))
-              ))}
+                      <span className="tag tag-neutral" style={{ fontSize: 9.5, flex: 'none' }}>
+                        {entry.type}
+                      </span>
+                      <span className="text-muted" style={{ flex: 'none', fontSize: 12 }}>
+                        ›
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+                {hasMore && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ alignSelf: 'center', minHeight: 40, fontSize: 13 }}
+                    onClick={() => void loadMore()}
+                    disabled={loadingMore || loading}
+                  >
+                    {loadingMore ? 'Loading…' : COMPENDIUM_LOAD_MORE_LABEL}
+                  </button>
+                )}
+              </>
+            ) : null}
           </>
         )}
       </div>
