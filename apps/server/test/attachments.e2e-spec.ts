@@ -1325,6 +1325,30 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       const foggedPixels = await sharp(masked.body).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
       expect(foggedPixels.data.subarray(0, 4)).toEqual(source.data.subarray(0, 4));
       expect([...foggedPixels.data.subarray(4, 8)]).toEqual([11, 17, 32, 255]);
+
+      // Token coords on the clear sibling must also fail closed (map is fully masked).
+      const monster = await dmAgent.post(`/api/v1/encounters/${clearId}/combatants`).send({
+        kind: 'monster',
+        name: 'Sibling Token Probe',
+        hpMax: 9,
+      });
+      expect(monster.status).toBe(201);
+      expect(
+        (
+          await dmAgent
+            .patch(`/api/v1/encounters/${clearId}/combatants/${monster.body.id}`)
+            .send({ tokenX: 40, tokenY: 55 })
+        ).status,
+      ).toBe(200);
+      const playerView = await playerAgent.get(`/api/v1/encounters/${clearId}`);
+      expect(playerView.status).toBe(200);
+      const probe = playerView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(probe.tokenX).toBeNull();
+      expect(probe.tokenY).toBeNull();
+      const dmView = await dmAgent.get(`/api/v1/encounters/${clearId}`);
+      const dmProbe = dmView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(dmProbe.tokenX).toBe(40);
+      expect(dmProbe.tokenY).toBe(55);
     });
   });
 
