@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
   public_invites_enabled INTEGER NOT NULL DEFAULT 1,
   session_count INTEGER NOT NULL DEFAULT 0,
+  latest_session_number INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,
   ics_token TEXT,

@@ -236,6 +236,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
     sessionCount: row.sessionCount,
+    latestSessionNumber: row.latestSessionNumber,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
     storageQuotaBytes: row.storageQuotaBytes ?? null,
@@ -430,6 +431,7 @@ export class CampaignsService {
         // DM both unarchives and deliberately re-enables invites (#857).
         publicInvitesEnabled: (input.status ?? 'active') === 'active',
         sessionCount: 0,
+        latestSessionNumber: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
         createdAt: ts,
@@ -660,6 +662,7 @@ export class CampaignsService {
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           publicInvitesEnabled: source.publicInvitesEnabled,
           sessionCount: template ? 0 : source.sessionCount,
+          latestSessionNumber: template ? 0 : source.latestSessionNumber,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // attachments (on-disk files) are not cloned
           createdAt: ts,
@@ -1000,6 +1003,11 @@ export class CampaignsService {
       }
     }
 
+    // Re-sync denormalized session stats from the rows actually cloned (#841) —
+    // template mode clears both; full mode must match MAX(number)/COUNT(*) even when
+    // the source campaign's denormalized fields were stale.
+    await this.sessions.recomputeSessionStats(newId);
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -1192,6 +1200,9 @@ export class CampaignsService {
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
           publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
+          // Prefer an explicit export field; otherwise leave 0 and let the post-import
+          // recompute derive MAX(number) from the sessions actually inserted (#841).
+          latestSessionNumber: Math.max(0, intOr(campaignSrc.latestSessionNumber, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
           createdAt: ts,
@@ -1928,6 +1939,10 @@ export class CampaignsService {
         );
       }
     }
+
+    // Import may carry a stale sessionCount / omit latestSessionNumber — derive both
+    // from the sessions actually inserted so gaps/imports show the right position (#841).
+    await this.sessions.recomputeSessionStats(newId);
 
     const campaign = await this.getOrThrow(newId);
     return {

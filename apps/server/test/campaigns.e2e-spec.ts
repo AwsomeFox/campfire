@@ -36,6 +36,7 @@ describe('campaigns (e2e)', () => {
     expect(createRes.status).toBe(201);
     expect(createRes.body.name).toBe('The Sunless Citadel');
     expect(createRes.body.sessionCount).toBe(0);
+    expect(createRes.body.latestSessionNumber).toBe(0);
     const id = createRes.body.id;
 
     const listRes = await request(server).get('/api/v1/campaigns').set(dm);

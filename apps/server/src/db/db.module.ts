@@ -421,6 +421,38 @@ function migrateCampaignsTableForActiveEncounter(sqlite: Database.Database): voi
 }
 
 /**
+ * Migration for DBs created before campaign position tracking (issue #841):
+ * `campaigns.latest_session_number` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN,
+ * then backfill MAX(sessions.number) for live (non-trashed) recaps so existing
+ * campaigns immediately expose the correct "Session N" position instead of the
+ * recap COUNT(*). New DBs never hit this path — BOOTSTRAP_SQL already declares it.
+ */
+function migrateCampaignsTableForLatestSessionNumber(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'latest_session_number')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN latest_session_number INTEGER NOT NULL DEFAULT 0');
+  // Backfill from live sessions only (soft-deleted recaps must not set campaign position).
+  sqlite.exec(`
+    UPDATE campaigns
+    SET latest_session_number = COALESCE(
+      (
+        SELECT MAX(s.number)
+        FROM sessions s
+        WHERE s.campaign_id = campaigns.id
+          AND s.deleted_at IS NULL
+      ),
+      0
+    )
+  `);
+}
+
+/**
  * Migration for DBs created before XP tracking (issue #14): `characters.xp`
  * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
  * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
@@ -1999,6 +2031,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
+  { name: '0068_campaigns_latest_session_number', run: migrateCampaignsTableForLatestSessionNumber },
 ];
 
 /**
