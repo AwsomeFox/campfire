@@ -9,6 +9,10 @@
  *
  * English strings live in `FACTION_STANDING_LABEL` (and the mirrored i18n
  * catalog). Tests derive expectations from those sources — no third copy.
+ *
+ * Pure helper coverage via `pw-unit.config.ts` (no browser / seeded server) —
+ * kept next to sibling `*.unit.spec.ts` helpers under e2e/tests so one runner
+ * exercises src/ imports without standing up the full Playwright e2e suite.
  */
 import { expect, test } from '@playwright/test';
 import { FACTION_STANDINGS } from '@campfire/schema';

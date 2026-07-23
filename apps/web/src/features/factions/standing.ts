@@ -27,8 +27,11 @@ export function factionStandingLabelKey(standing: FactionStanding): `factions.st
   return `factions.standing.${standing}`;
 }
 
-/** Loose `t` shape so call sites can pass react-i18next without coupling this module. */
-type Translate = (key: string, options?: Record<string, unknown>) => string | undefined;
+/**
+ * Minimal `t` shape for react-i18next call sites without coupling this module.
+ * Only `defaultValue` is used today — keep the options bag intentional.
+ */
+type Translate = (key: string, options?: { defaultValue?: string }) => string | undefined;
 
 /** Humanized standing label. Pass `t` to resolve through the i18n catalog. */
 export function factionStandingLabel(standing: FactionStanding, t?: Translate): string {
@@ -38,7 +41,13 @@ export function factionStandingLabel(standing: FactionStanding, t?: Translate): 
   return t(factionStandingLabelKey(standing), { defaultValue: fallback }) ?? fallback;
 }
 
-/** Chip / badge copy: "Friendly · +12". Raw enums stay on the wire, not here. */
+/**
+ * Chip / badge copy: "Friendly · +12". Raw enums stay on the wire, not here.
+ *
+ * i18n scope: only the standing label is localization-ready (via `t`). The
+ * middle-dot separator and signed reputation formatting remain fixed English
+ * punctuation/order for now — not a full chip-format catalog key.
+ */
 export function formatStandingChip(
   standing: FactionStanding,
   reputation: number,
