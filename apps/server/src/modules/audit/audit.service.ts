@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { AuditActorRole } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
@@ -28,12 +28,11 @@ export const EXPORT_AUDIT_PAGE_SIZE = 500;
 export function computeCampaignAuditExportTruncated(
   total: number,
   exported: number,
-  retainedNow: number,
-  retainedInSnapshotNow: number,
+  /** Rows with id > snapshotMaxId at the end of the export walk. */
+  postSnapshotCount: number,
 ): number {
   const missingFromSnapshot = Math.max(0, total - exported);
-  const appendedAfterSnapshot = Math.max(0, retainedNow - retainedInSnapshotNow);
-  return missingFromSnapshot + appendedAfterSnapshot;
+  return missingFromSnapshot + Math.max(0, postSnapshotCount);
 }
 
 /** Metadata bundled with campaign exports so a partial audit slice never looks complete. */
@@ -128,6 +127,16 @@ export class AuditService implements OnApplicationBootstrap {
     return Number(row?.n ?? 0);
   }
 
+  /** Rows for a campaign with id strictly greater than `minId` (post-snapshot appends). */
+  async countForCampaignAbove(campaignId: number, minId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ value: count() })
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), gt(auditLog.id, minId)));
+    return Number(row?.value ?? 0);
+  }
+
+
   /**
    * #731: export the full retained audit trail for a campaign from a stable snapshot.
    * Records the max(id) ceiling first, then keyset-pages every row with id <= that
@@ -171,9 +180,10 @@ export class AuditService implements OnApplicationBootstrap {
     }
 
     const exported = entries.length;
-    const retainedNow = await this.countForCampaign(campaignId);
-    const retainedInSnapshotNow = await this.countForCampaign(campaignId, snapshotMaxId);
-    const truncated = computeCampaignAuditExportTruncated(total, exported, retainedNow, retainedInSnapshotNow);
+    // Count post-snapshot appends directly so concurrent inserts between two
+    // total-count queries cannot hide truncation (orchestrator review / #731).
+    const postSnapshotCount = await this.countForCampaignAbove(campaignId, snapshotMaxId);
+    const truncated = computeCampaignAuditExportTruncated(total, exported, postSnapshotCount);
 
     const oldest = entries.length ? entries[entries.length - 1]! : null;
     return {

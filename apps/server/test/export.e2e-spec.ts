@@ -414,22 +414,18 @@ describe('export audit history — full snapshot + metadata (e2e, #731)', () => 
     expect(exportRes.body.auditMeta.exported).toBe(exportRes.body.audit.length);
 
     const snapshotMaxId = exportRes.body.auditMeta.cutoff.snapshotMaxId as number;
-    const retainedNow = await audit.countForCampaign(concurrentCampaignId);
-    const retainedInSnapshotNow = await audit.countForCampaign(concurrentCampaignId, snapshotMaxId);
-    const appendedAfterSnapshot = Math.max(0, retainedNow - retainedInSnapshotNow);
-
-    expect(appendedAfterSnapshot).toBeGreaterThan(0);
+    const postSnapshotCount = await audit.countForCampaignAbove(concurrentCampaignId, snapshotMaxId);
+    expect(exportRes.body.auditMeta.total).toBe(exportRes.body.auditMeta.exported);
     expect(exportRes.body.auditMeta.truncated).toBe(
       computeCampaignAuditExportTruncated(
         exportRes.body.auditMeta.total,
         exportRes.body.auditMeta.exported,
-        retainedNow,
-        retainedInSnapshotNow,
+        postSnapshotCount,
       ),
     );
-    expect(exportRes.body.auditMeta.truncated).toBeGreaterThanOrEqual(appendedAfterSnapshot);
+    expect(exportRes.body.auditMeta.truncated).toBe(postSnapshotCount);
     expect(postSnapshotInsertsDone).toBe(true);
-    expect(retainedNow).toBeGreaterThanOrEqual(concurrentExtra + 20);
+    expect(postSnapshotCount).toBeGreaterThanOrEqual(20);
   });
 });
 
