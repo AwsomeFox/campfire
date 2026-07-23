@@ -133,7 +133,11 @@ export function StatusMenuButton<V extends string>({
     function onPointerDown(event: PointerEvent) {
       if (!root) return;
       if (event.target instanceof Node && root.contains(event.target)) return;
-      closeMenu(true);
+      // Close without forcing focus back to the trigger: a forced refocus on
+      // pointerdown fights the user's click target (focus would briefly jump
+      // to the trigger and can disrupt clicking/focusing whatever they
+      // actually clicked outside the popup).
+      closeMenu(false);
     }
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape') {
@@ -287,13 +291,16 @@ export function StatusMenuButton<V extends string>({
   }
 
   async function commit(option: StatusMenuOption<V>, opts?: { restoreFocus?: boolean }) {
-    if (commitInFlight.current) return;
     const finish = (restoreFocus: boolean) => closeMenu(restoreFocus);
     if (option.value === value) {
       // Selecting the already-selected option is a no-op apart from closing.
+      // This must run before the in-flight guard below: dismissing on the
+      // current value (Escape-style) should always close the menu, even
+      // while an earlier save for a different option is still pending.
       finish(opts?.restoreFocus !== false);
       return;
     }
+    if (commitInFlight.current) return;
     commitInFlight.current = true;
     try {
       await onSelect(option.value);
