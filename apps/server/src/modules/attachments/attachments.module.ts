@@ -11,6 +11,6 @@ import { DiagnosticsService } from './diagnostics.service';
   imports: [AuditModule, RoleAccessModule],
   controllers: [CampaignAttachmentsController, AttachmentsController, StorageController, DiagnosticsController],
   providers: [AttachmentsService, DiagnosticsService],
-  exports: [AttachmentsService, DiagnosticsService],
+  exports: [AttachmentsService],
 })
 export class AttachmentsModule {}

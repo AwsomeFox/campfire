@@ -4,7 +4,7 @@ import path from 'node:path';
 import { BadRequestException, Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments } from '../../db/schema';
+import { attachments, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { ALLOWED_MIME_TO_EXT, GENERATED_MIME_TO_EXT } from './attachments.service';
 
@@ -119,6 +119,40 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
   return `${row.campaignId}/${row.id}.${ext}`;
 }
 
+/** Primary (non-thumbnail) attachment file for an id, anywhere under uploads. */
+function findPrimaryAttachmentFileOnDisk(
+  root: string,
+  attachmentId: number,
+): { relPath: string; campaignDir: string } | null {
+  if (!fs.existsSync(root)) return null;
+
+  let campaignDirs: fs.Dirent[];
+  try {
+    campaignDirs = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const idPattern = new RegExp(`^${attachmentId}\\.([a-z0-9]+)$`);
+  for (const dir of campaignDirs) {
+    if (!dir.isDirectory()) continue;
+    const dirPath = path.join(root, dir.name);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (idPattern.test(entry.name)) {
+        return { relPath: `${dir.name}/${entry.name}`, campaignDir: dir.name };
+      }
+    }
+  }
+  return null;
+}
+
 @Injectable()
 export class DiagnosticsService {
   constructor(@Inject(DB) private readonly db: DrizzleDb) {}
@@ -141,7 +175,7 @@ export class DiagnosticsService {
     // Track which row ids we've seen a correct file for on disk.
     const seenOnDisk = new Set<number>();
     const issues: DiagnosticIssue[] = [];
-    const checksums = new Map<string, Array<{ id: number; path: string }>>();
+    const checksums = new Map<string, Array<{ id: number; path: string; size: number }>>();
     let totalDiskFiles = 0;
 
     // Walk the uploads tree: uploads/<campaignDir>/<file>
@@ -231,11 +265,18 @@ export class DiagnosticsService {
             continue;
           }
 
-          seenOnDisk.add(fileId);
-
           const expectedExt = extForMime(row.mime);
           const expectedCampaignId = row.campaignId;
           const expectedRelPath = canonicalRelPath(row);
+          const checksum = checksumFile(filePath);
+          const isCanonical =
+            !Number.isNaN(dirCampaignId) &&
+            dirCampaignId === expectedCampaignId &&
+            fileExt === expectedExt;
+
+          if (isCanonical) {
+            seenOnDisk.add(fileId);
+          }
 
           // Check: wrong campaign directory (misplaced)
           if (!Number.isNaN(dirCampaignId) && dirCampaignId !== expectedCampaignId) {
@@ -247,7 +288,7 @@ export class DiagnosticsService {
               path: relPath,
               canonicalPath: expectedRelPath,
               size,
-              checksum: checksumFile(filePath),
+              checksum,
               detail: `File is in campaign dir ${dirCampaignId} but DB row says campaign ${expectedCampaignId}`,
             });
           }
@@ -262,17 +303,16 @@ export class DiagnosticsService {
               path: relPath,
               canonicalPath: expectedRelPath,
               size,
-              checksum: checksumFile(filePath),
+              checksum,
               detail: `File has extension .${fileExt} but MIME ${row.mime} expects .${expectedExt}`,
             });
           }
 
           // Track checksum for duplicate detection
-          const hash = checksumFile(filePath);
-          if (hash) {
-            const entry = checksums.get(hash) ?? [];
-            entry.push({ id: fileId, path: relPath });
-            checksums.set(hash, entry);
+          if (checksum) {
+            const entry = checksums.get(checksum) ?? [];
+            entry.push({ id: fileId, path: relPath, size });
+            checksums.set(checksum, entry);
           }
         }
       }
@@ -307,7 +347,7 @@ export class DiagnosticsService {
             owner: row?.uploaderUserId ?? null,
             path: e.path,
             canonicalPath: row ? canonicalRelPath(row) : null,
-            size: row?.size ?? 0,
+            size: e.size,
             checksum: hash,
             detail: `Content hash ${hash.slice(0, 12)}… shared by ${entries.length} files: ${entries.map((x) => x.path).join(', ')}`,
           });
@@ -355,34 +395,13 @@ export class DiagnosticsService {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: 'Attachment row not found' };
     }
 
-    // Find the actual file: scan all campaign dirs for a file named `<id>.<ext>`
-    const ext = extForMime(row.mime);
-    const filename = `${row.id}.${ext}`;
-    let actualDir: string | null = null;
-
     this.assertAccessible(root);
-    let campaignDirs: fs.Dirent[];
-    try {
-      campaignDirs = fs.readdirSync(root, { withFileTypes: true });
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code;
-      throw new ServiceUnavailableException(
-        `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot apply relink.`,
-      );
-    }
-    for (const dir of campaignDirs) {
-      if (!dir.isDirectory()) continue;
-      const candidate = path.join(root, dir.name, filename);
-      if (fs.existsSync(candidate)) {
-        actualDir = dir.name;
-        break;
-      }
-    }
-
-    if (!actualDir) {
+    const located = findPrimaryAttachmentFileOnDisk(root, req.attachmentId);
+    if (!located) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: 'File not found on disk in any campaign directory' };
     }
 
+    const actualDir = located.campaignDir;
     const actualCampaignId = Number.parseInt(actualDir, 10);
     if (Number.isNaN(actualCampaignId)) {
       return { success: false, action: 'relink', attachmentId: req.attachmentId, detail: `Non-numeric campaign directory: ${actualDir}` };
@@ -390,6 +409,20 @@ export class DiagnosticsService {
 
     if (actualCampaignId === row.campaignId) {
       return { success: true, action: 'relink', attachmentId: req.attachmentId, detail: 'File already in correct location; no update needed' };
+    }
+
+    const [campaign] = await this.db
+      .select({ id: campaigns.id })
+      .from(campaigns)
+      .where(eq(campaigns.id, actualCampaignId))
+      .limit(1);
+    if (!campaign) {
+      return {
+        success: false,
+        action: 'relink',
+        attachmentId: req.attachmentId,
+        detail: `Campaign ${actualCampaignId} does not exist; cannot relink`,
+      };
     }
 
     // Update the DB row to point at the actual campaign directory.
@@ -416,10 +449,15 @@ export class DiagnosticsService {
     // Determine the file to quarantine
     let relPath: string | undefined = req.diskPath;
 
-    if (!relPath && req.attachmentId) {
-      const [row] = await this.db.select().from(attachments).where(eq(attachments.id, req.attachmentId)).limit(1);
-      if (row) {
-        relPath = canonicalRelPath(row);
+    if (!relPath && req.attachmentId !== undefined) {
+      const located = findPrimaryAttachmentFileOnDisk(root, req.attachmentId);
+      if (located) {
+        relPath = located.relPath;
+      } else {
+        const [row] = await this.db.select().from(attachments).where(eq(attachments.id, req.attachmentId)).limit(1);
+        if (row) {
+          relPath = canonicalRelPath(row);
+        }
       }
     }
 

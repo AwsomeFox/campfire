@@ -332,6 +332,30 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       );
       expect(misplaced).toBeUndefined();
     });
+
+    it('relinks when the on-disk extension differs from the MIME-derived extension', async () => {
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'relink-wrong-ext.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+      const destDir = path.join(ctx.dataDir, 'uploads', String(campaign2Id));
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.renameSync(
+        path.join(srcDir, `${attachId}.png`),
+        path.join(destDir, `${attachId}.jpg`),
+      );
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'relink' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(true);
+      expect(fixRes.body.detail).toContain(String(campaign2Id));
+    });
   });
 
   describe('fix: quarantine', () => {
@@ -382,6 +406,29 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       // In quarantine.
       const qPath = path.join(ctx.dataDir, 'quarantine', String(campaignId), `${attachId}.png`);
       expect(fs.existsSync(qPath)).toBe(true);
+    });
+
+    it('quarantine with attachmentId finds a misplaced on-disk file', async () => {
+      const up = await adminAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'image')
+        .attach('file', TINY_PNG, { filename: 'quarantine-misplaced.png', contentType: 'image/png' });
+      expect(up.status).toBe(201);
+      const attachId = up.body.id;
+
+      const srcFile = path.join(ctx.dataDir, 'uploads', String(campaignId), `${attachId}.png`);
+      const destDir = path.join(ctx.dataDir, 'uploads', String(campaign2Id));
+      fs.mkdirSync(destDir, { recursive: true });
+      const destFile = path.join(destDir, `${attachId}.png`);
+      fs.renameSync(srcFile, destFile);
+
+      const fixRes = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ attachmentId: attachId, action: 'quarantine' });
+      expect(fixRes.status).toBe(201);
+      expect(fixRes.body.success).toBe(true);
+      expect(fs.existsSync(destFile)).toBe(false);
+      expect(fs.existsSync(path.join(ctx.dataDir, 'quarantine', String(campaign2Id), `${attachId}.png`))).toBe(true);
     });
   });
 

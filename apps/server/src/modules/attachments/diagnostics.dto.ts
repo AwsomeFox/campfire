@@ -34,26 +34,14 @@ export class DiagnosticReportDto extends createZodDto(DiagnosticReportSchema) {}
 
 const FixActionSchema = z.enum(['relink', 'quarantine']);
 
-export const DiagnosticFixRequestSchema = z
-  .object({
-    attachmentId: z.number().optional(),
-    diskPath: z.string().optional(),
-    action: FixActionSchema,
-  })
-  .strict()
-  .refine(
-    (data) => data.attachmentId !== undefined || data.diskPath !== undefined,
-    { message: 'Either attachmentId or diskPath must be provided' },
-  );
-
 export class DiagnosticFixRequestDto extends createZodDto(
-  // createZodDto needs a ZodObject; wrap the refined schema in a way nestjs-zod
-  // can handle by using the base object and validating the refinement in the controller.
-  z.object({
-    attachmentId: z.number().optional(),
-    diskPath: z.string().optional(),
-    action: FixActionSchema,
-  }).strict(),
+  z
+    .object({
+      attachmentId: z.number().optional(),
+      diskPath: z.string().optional(),
+      action: FixActionSchema,
+    })
+    .strict(),
 ) {}
 
 const FixResultSchema = z.object({
