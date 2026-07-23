@@ -56,7 +56,11 @@ function buildService(entities: {
   const campaign = campaignRow();
   // Each property is a service-shaped object exposing only the methods
   // buildExport / buildMarkdownZip actually call.
+  const emptyDbQuery = {
+    from: () => ({ where: () => ({ limit: async () => [] }) }),
+  };
   return new ExportService(
+    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
     { getOrThrow: async () => campaign } as any, // campaigns
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any, // quests
     { listForCampaign: async () => entities.npcs ?? [] } as any, // npcs

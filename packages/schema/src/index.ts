@@ -4414,7 +4414,20 @@ export const InventoryItem = z.object({
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;
 export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
-export const InventoryItemUpdate = InventoryItemCreate.partial();
+// Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
+// +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
+// absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
+// form cannot clobber a concurrent increment. Other item fields (name/notes/icon/
+// owner move) stay on the same PATCH. Server enforces the qty/qtyDelta exclusivity
+// and the CAS / idempotency requirements — kept as optional fields here so MCP
+// `InventoryItemUpdate.shape` still spreads cleanly.
+export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
+  qtyDelta: z.number().int().optional(),
+  expectedUpdatedAt: IsoDate.optional(),
+  // Client-generated per-action key (UUID). Required with qtyDelta; optional on an
+  // absolute qty set so a lost-response retry can replay the committed item.
+  idempotencyKey: z.string().min(1).max(128).optional(),
+});
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
 const Coin = z.number().int().nonnegative();

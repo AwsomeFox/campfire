@@ -43,6 +43,7 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiScribeConfigs,
   encounterEvents,
   auditLog,
   participantSupportPreferences,
@@ -600,7 +601,9 @@ export class CampaignsService {
    *    (+combatants), and discussion threads, with every intra-campaign
    *    reference (quest parent/giver, npc location/faction, combatant
    *    character, note/comment entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids.
+   *    remapped to the cloned rows' new ids. Encounter runtime combat state
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
+   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
    *  - 'template': prep only — quests/npcs/locations/factions copied but play
    *    state stripped: quest statuses reset to 'available', objectives
    *    unchecked, locations back to 'unexplored', and sessions/notes/
@@ -645,6 +648,12 @@ export class CampaignsService {
     const combatantRows = encounterIds.length
       ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
       : [];
+
+    // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
 
     const ts = nowIso();
     const newId = this.db.transaction((tx) => {
@@ -878,16 +887,19 @@ export class CampaignsService {
             .values({
               campaignId: cloneId,
               name: e.name,
-              status: e.status,
-              round: e.round,
-              turnIndex: e.turnIndex,
+              // Fresh fights only — never copy live/ended combat runtime (issue #548).
+              status: 'preparing',
+              round: 0,
+              turnIndex: 0,
+              currentCombatantId: null,
               // Where/why/when links (issue #126/#864): remap through the clone maps.
               // A dangling/cross-campaign source link drops to null rather than copying
               // a stale foreign id into the new campaign.
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
-              endedAt: e.endedAt,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              endedAt: null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -896,20 +908,23 @@ export class CampaignsService {
           encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
-                initiative: c.initiative,
+                initiative: null,
                 initMod: c.initMod,
-                hpCurrent: c.hpCurrent,
+                hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
-                conditions: c.conditions,
+                conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
@@ -987,6 +1002,34 @@ export class CampaignsService {
             tx.update(campaigns).set({ currentLocationId }).where(eq(campaigns.id, cloneId)).run();
           }
         }
+      }
+
+      // AI seat + scribe config (issue #1078): carry the DM's hand-authored steering
+      // and trigger settings across clone; reset runtime counters to zero.
+      if (aiSeatRow) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cloneId,
+          mode: aiSeatRow.mode,
+          enabled: aiSeatRow.enabled,
+          model: aiSeatRow.model,
+          instructions: aiSeatRow.instructions,
+          tokenBudget: aiSeatRow.tokenBudget,
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigRow) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cloneId,
+          postSession: aiScribeConfigRow.postSession,
+          cron: aiScribeConfigRow.cron,
+          budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
       }
 
       return cloneId;
@@ -1090,6 +1133,10 @@ export class CampaignsService {
     const treasurySrc = asRec(doc.treasury);
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
+
+    // Issue #1078: AI seat + scribe config from the export document.
+    const aiSeatSrc = asRec(doc.aiSeat);
+    const aiScribeConfigSrc = asRec(doc.aiScribeConfig);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -1834,6 +1881,33 @@ export class CampaignsService {
         if (mapAttachmentId != null) {
           tx.update(campaigns).set({ mapAttachmentId }).where(eq(campaigns.id, cid)).run();
         }
+      }
+
+      // AI seat + scribe config (issue #1078): restore from export with counters zeroed.
+      if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cid,
+          mode: str(aiSeatSrc.mode, 'off'),
+          enabled: boolOf(aiSeatSrc.enabled),
+          model: str(aiSeatSrc.model),
+          instructions: str(aiSeatSrc.instructions),
+          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigSrc && Object.keys(aiScribeConfigSrc).length > 0) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cid,
+          postSession: boolOf(aiScribeConfigSrc.postSession),
+          cron: boolOf(aiScribeConfigSrc.cron),
+          budgetPerRun: Math.max(0, intOr(aiScribeConfigSrc.budgetPerRun, 2000)),
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
       }
 
       // Issue #725: fold the importer's dm membership AND the import audit row
