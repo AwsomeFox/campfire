@@ -83,11 +83,25 @@ function quarantineRoot(): string {
 
 /** Compute sha256 hex of a file, or empty string if unreadable. */
 function checksumFile(filePath: string): string {
+  const hash = crypto.createHash('sha256');
+  let fd: number | undefined;
+  const buf = Buffer.allocUnsafe(64 * 1024);
   try {
-    const buf = fs.readFileSync(filePath);
-    return crypto.createHash('sha256').update(buf).digest('hex');
+    fd = fs.openSync(filePath, 'r');
+    let bytesRead = 0;
+    do {
+      bytesRead = fs.readSync(fd, buf, 0, buf.length, null);
+      if (bytesRead > 0) {
+        hash.update(buf.subarray(0, bytesRead));
+      }
+    } while (bytesRead > 0);
+    return hash.digest('hex');
   } catch {
     return '';
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
   }
 }
 
@@ -140,8 +154,11 @@ export class DiagnosticsService {
         let entries: fs.Dirent[];
         try {
           entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        } catch {
-          continue;
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          throw new ServiceUnavailableException(
+            `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot run diagnostics.`,
+          );
         }
         for (const entry of entries) {
           if (!entry.isFile()) continue;
@@ -329,7 +346,7 @@ export class DiagnosticsService {
    * the DB row's campaignId to match the directory it's actually in.
    */
   private async applyRelink(req: FixRequest, root: string): Promise<FixResult> {
-    if (!req.attachmentId) {
+    if (req.attachmentId === undefined) {
       return { success: false, action: 'relink', attachmentId: null, detail: 'attachmentId required for relink' };
     }
 
@@ -343,7 +360,16 @@ export class DiagnosticsService {
     const filename = `${row.id}.${ext}`;
     let actualDir: string | null = null;
 
-    const campaignDirs = fs.readdirSync(root, { withFileTypes: true });
+    this.assertAccessible(root);
+    let campaignDirs: fs.Dirent[];
+    try {
+      campaignDirs = fs.readdirSync(root, { withFileTypes: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      throw new ServiceUnavailableException(
+        `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot apply relink.`,
+      );
+    }
     for (const dir of campaignDirs) {
       if (!dir.isDirectory()) continue;
       const candidate = path.join(root, dir.name, filename);
@@ -401,12 +427,47 @@ export class DiagnosticsService {
       return { success: false, action: 'quarantine', attachmentId: req.attachmentId ?? null, detail: 'No file path could be determined' };
     }
 
-    const srcPath = path.join(root, relPath);
-    if (!fs.existsSync(srcPath)) {
-      return { success: false, action: 'quarantine', attachmentId: req.attachmentId ?? null, detail: `File not found at ${relPath}` };
+    const safeRelPath = relPath.trim();
+    if (!safeRelPath || path.isAbsolute(safeRelPath)) {
+      return {
+        success: false,
+        action: 'quarantine',
+        attachmentId: req.attachmentId ?? null,
+        detail: 'diskPath must be a non-empty relative path',
+      };
     }
 
-    const destPath = path.join(qRoot, relPath);
+    const srcPath = path.resolve(root, safeRelPath);
+    const srcRelative = path.relative(root, srcPath);
+    if (srcRelative.startsWith('..') || path.isAbsolute(srcRelative)) {
+      return {
+        success: false,
+        action: 'quarantine',
+        attachmentId: req.attachmentId ?? null,
+        detail: 'diskPath must stay within uploads root',
+      };
+    }
+
+    if (!fs.existsSync(srcPath)) {
+      return {
+        success: false,
+        action: 'quarantine',
+        attachmentId: req.attachmentId ?? null,
+        detail: `File not found at ${safeRelPath}`,
+      };
+    }
+
+    const destPath = path.resolve(qRoot, srcRelative);
+    const destRelative = path.relative(qRoot, destPath);
+    if (destRelative.startsWith('..') || path.isAbsolute(destRelative)) {
+      return {
+        success: false,
+        action: 'quarantine',
+        attachmentId: req.attachmentId ?? null,
+        detail: 'diskPath must stay within quarantine root',
+      };
+    }
+
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
     fs.renameSync(srcPath, destPath);
 
@@ -414,7 +475,7 @@ export class DiagnosticsService {
       success: true,
       action: 'quarantine',
       attachmentId: req.attachmentId ?? null,
-      detail: `Moved ${relPath} to quarantine`,
+      detail: `Moved ${srcRelative} to quarantine`,
     };
   }
 

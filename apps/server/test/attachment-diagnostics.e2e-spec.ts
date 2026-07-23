@@ -7,8 +7,8 @@ import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './tes
  * Issue #733 — Attachment diagnostics: validate canonical owner, path, extension,
  * duplicates, and thumbnails.
  *
- * POST /admin/attachments/diagnostics  — run a full scan
- * POST /admin/attachments/diagnostics/fix — apply relink or quarantine
+ * POST /api/v1/admin/attachments/diagnostics  — run a full scan
+ * POST /api/v1/admin/attachments/diagnostics/fix — apply relink or quarantine
  *
  * Both endpoints are server-admin only (@ServerRoles('admin')).
  */
@@ -391,6 +391,22 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
         .post('/api/v1/admin/attachments/diagnostics/fix')
         .send({ action: 'relink' });
       expect(res.status).toBe(400);
+    });
+
+    it('400 when diskPath is blank/whitespace and attachmentId is missing', async () => {
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ action: 'quarantine', diskPath: '   ' });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects diskPath traversal outside uploads root', async () => {
+      const res = await adminAgent
+        .post('/api/v1/admin/attachments/diagnostics/fix')
+        .send({ action: 'quarantine', diskPath: '../outside.txt' });
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(false);
+      expect(res.body.detail).toContain('uploads root');
     });
   });
 });

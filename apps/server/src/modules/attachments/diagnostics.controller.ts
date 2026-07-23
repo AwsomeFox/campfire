@@ -63,13 +63,14 @@ export class DiagnosticsController {
   @ApiResponse({ status: 201, description: 'Fix result.' })
   @ApiResponse({ status: 400, description: 'Invalid request (missing attachmentId or diskPath).' })
   async fix(@Body() body: DiagnosticFixRequestDto, @CurrentUser() actor: RequestUser) {
-    if (!body.attachmentId && !body.diskPath) {
+    const diskPath = body.diskPath?.trim();
+    if (body.attachmentId === undefined && !diskPath) {
       throw new BadRequestException('Either attachmentId or diskPath must be provided');
     }
 
     const result = await this.diagnostics.applyFix({
       attachmentId: body.attachmentId,
-      diskPath: body.diskPath,
+      diskPath,
       action: body.action,
     });
 
