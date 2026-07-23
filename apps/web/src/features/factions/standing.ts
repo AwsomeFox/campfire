@@ -15,9 +15,9 @@ export { FACTION_STANDINGS };
 export type { FactionStanding };
 
 /** Localization-ready English display labels for every standing enum. */
-export const FACTION_STANDING_LABELS: Record<FactionStanding, string> = {
+export const FACTION_STANDING_LABELS: Readonly<Record<FactionStanding, string>> = Object.freeze({
   ...factionsEn.factions.standing,
-};
+});
 
 /**
  * i18n key in the merged default catalog (`locales/en/*.json` are unioned into
@@ -70,7 +70,9 @@ export function standingVariant(standing: FactionStanding): ChipVariant {
       return 'active';
     default: {
       const _exhaustive: never = standing;
-      return _exhaustive;
+      void _exhaustive;
+      // Safe fallback if an unexpected value slips through at runtime.
+      return 'active';
     }
   }
 }
