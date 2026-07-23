@@ -78,7 +78,12 @@ test.describe('inline character cards — live sheet refresh', () => {
       await expect(page.getByText('Sheet Sync PC · STR check', { exact: true })).toBeVisible({ timeout: 10_000 });
       await expect(page.getByText(/1d20\+4/i).first()).toBeVisible();
     } finally {
-      if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+      // End before delete so a failed DELETE cannot leave a RUNNING fight that
+      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+      if (encounterId != null) {
+        await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+        await dm.delete(`/api/v1/encounters/${encounterId}`);
+      }
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
       await restoreSeedEncounter();
       await playerCtx.dispose();

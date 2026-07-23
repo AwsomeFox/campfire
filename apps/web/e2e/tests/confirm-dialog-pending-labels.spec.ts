@@ -76,7 +76,9 @@ async function expectBusyConfirm(
     const idleConfirm = dialog.getByRole('button', { name: idleLabel });
     await expect(idleConfirm).toBeEnabled();
     await expect(idleConfirm).toHaveText(idleLabel);
-    await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveText('');
+    // ConfirmDialog unmounts the polite status region when idle so screen readers
+    // do not announce a blank live region (issue #793).
+    await expect(dialog.locator('[role="status"][aria-live="polite"]')).toHaveCount(0);
   }
 }
 

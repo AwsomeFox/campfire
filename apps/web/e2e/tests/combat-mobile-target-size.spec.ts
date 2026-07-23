@@ -127,7 +127,12 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(page.getByTestId('map-tool-ping'), 'map Ping tool');
         await assertMinTarget(page.getByTestId('map-tool-reveal'), 'map Reveal tool');
       } finally {
-        if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+        // End before delete so a failed DELETE cannot leave a RUNNING fight that
+        // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+        if (encounterId != null) {
+          await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+          await dm.delete(`/api/v1/encounters/${encounterId}`);
+        }
         if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
         await restoreSeedEncounter(page);
         await dm.dispose();
