@@ -1699,8 +1699,10 @@ export interface RuleSystemAdapter {
   /**
    * User-facing statblock field labels for this system (issue #763). The shared StatBlock
    * renderer reads these instead of hardcoding "Challenge" / "Armor Class".
+   * Optional for external / custom adapters — {@link statblockPresentation} falls back to
+   * {@link NEUTRAL_STATBLOCK_PRESENTATION} when omitted.
    */
-  readonly presentation: StatblockPresentation;
+  readonly presentation?: StatblockPresentation;
   /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
@@ -2451,7 +2453,9 @@ export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter
  * adapters (including explicit 5e) return their native `presentation`.
  */
 export function statblockPresentation(ruleSystem?: string | null): StatblockPresentation {
-  if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem].presentation;
+  if (ruleSystem && ADAPTERS[ruleSystem]) {
+    return ADAPTERS[ruleSystem].presentation ?? NEUTRAL_STATBLOCK_PRESENTATION;
+  }
   return NEUTRAL_STATBLOCK_PRESENTATION;
 }
 
@@ -2467,6 +2471,8 @@ export function listRuleSystemAdapters(): RuleSystemAdapter[] {
     seen.add(adapter.id);
     out.push(adapter);
   }
+  // Sort by id so snapshot order does not depend on ADAPTERS insertion order.
+  out.sort((a, b) => a.id.localeCompare(b.id));
   return out;
 }
 
