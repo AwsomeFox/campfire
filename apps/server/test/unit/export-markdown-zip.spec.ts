@@ -77,6 +77,7 @@ function buildService(entities: {
           cutoff: { snapshotMaxId: 0, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
         },
       }),
+      finalizeCampaignExportMeta: async (_campaignId: number, meta: unknown) => meta,
     } as any, // audit
     { listForCampaign: noop as any } as any, // proposals
     {
