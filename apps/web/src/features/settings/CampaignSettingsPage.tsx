@@ -18,6 +18,7 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
+import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -85,15 +86,65 @@ export default function CampaignSettingsPage() {
 
   const settingsReady = mutationsEnabledForRoute(campaign, id, loading);
 
-  // Deep-link support (#343): the AI-DM onboarding checklist links to specific controls
-  // by hash (e.g. #ai-dm-provider). React Router doesn't auto-scroll to a hash, and the
-  // target only exists once the (lazy) page has loaded the campaign, so scroll it into
-  // view here once the anchor is present.
+  // Deep-link support (#343 / #751): the AI-DM onboarding checklist links to specific
+  // controls by hash (e.g. #ai-dm-provider, #ai-dm-budget). React Router doesn't
+  // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
+  // own async seat load — retry on a short interval until the anchor exists (or 10s).
   useEffect(() => {
-    if (!campaign || !location.hash) return;
-    const el = document.getElementById(location.hash.slice(1));
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [campaign, location.hash]);
+    if (!campaign?.id || !location.hash) return;
+    const hashId = decodeLocationHashId(location.hash);
+    let frame: number | null = null;
+    let retryTimer: number | null = null;
+    let cancelled = false;
+    let delay = 100;
+
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const scrollToAnchor = (): boolean => {
+      const el = document.getElementById(hashId);
+      if (!el) return false;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const reduceMotion =
+          typeof window !== 'undefined' &&
+          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+      });
+      return true;
+    };
+
+    const scheduleRetry = (startedAt: number) => {
+      clearRetry();
+      if (cancelled) return;
+      if (Date.now() - startedAt >= 10_000) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (cancelled) return;
+        if (scrollToAnchor()) return;
+        delay = Math.min(delay * 2, 250);
+        scheduleRetry(startedAt);
+      }, delay);
+    };
+
+    if (!scrollToAnchor()) {
+      // Bounded backoff polling avoids a subtree MutationObserver on #root.
+      const startedAt = Date.now();
+      scheduleRetry(startedAt);
+    }
+
+    return () => {
+      cancelled = true;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [campaign?.id, location.hash]);
 
   if (!Number.isFinite(id)) {
     return (

@@ -10,7 +10,7 @@
  *
  * Audit log kept (existing functionality, not in this design block).
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
@@ -20,6 +20,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { useDialog } from '../../components/useDialog';
 import { GameIcon } from '../../components/GameIcon';
 import { firstGrapheme } from '../../lib/avatarText';
 import {
@@ -29,6 +30,21 @@ import {
   inviteLinkFieldLabel,
   inviteRoleOptions,
 } from './inviteRoleOptions';
+import {
+  ADD_MEMBER_CANCEL_LABEL,
+  ADD_MEMBER_DIALOG_TITLE,
+  ADD_MEMBER_ROLE_HELP,
+  ADD_MEMBER_ROLE_LABEL,
+  ADD_MEMBER_SEARCH_LABEL,
+  MEMBER_CHARACTER_LINK_HELP,
+  memberAddedAnnouncement,
+  memberCharacterControlLabel,
+  memberCharacterSavedAnnouncement,
+  memberDisplayName,
+  memberRemoveLabel,
+  memberRoleControlLabel,
+  memberRoleSavedAnnouncement,
+} from './memberControlsA11y';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -723,17 +739,29 @@ function MembersCard({
   const charactersUnavailable = !!charactersError;
   const [showAdd, setShowAdd] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const linkHelpId = useId();
 
   return (
-    <Card className="space-y-2.5">
+    <Card className="space-y-2.5" data-testid="members-card">
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Members</p>
-        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" onClick={() => setShowAdd((v) => !v)}>
-          {showAdd ? 'Cancel' : '+ Add member'}
+        <Btn
+          className="!min-h-0 !py-1.5 text-xs ml-auto"
+          aria-expanded={showAdd}
+          aria-controls={showAdd ? 'add-member-dialog' : undefined}
+          // Keep a stable "+ Add member" name when open — Cancel lives in the
+          // dialog (issue #451) so AT is not left on an ambiguous header Cancel.
+          onClick={() => setShowAdd((v) => !v)}
+        >
+          + Add member
         </Btn>
       </div>
 
-      {error && <p className="text-xs text-rose-400">{error}</p>}
+      {error && (
+        <p className="text-xs text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
 
       {showAdd && (
         <AddMemberForm
@@ -757,7 +785,7 @@ function MembersCard({
       {members.length === 0 ? (
         <EmptyState icon="shield" title="No members yet" hint="Add one above." />
       ) : (
-        <div className="flex flex-col">
+        <div className="flex flex-col" data-testid="members-rows">
           {members.map((m) => (
             <MemberRow
               key={m.id}
@@ -766,15 +794,15 @@ function MembersCard({
               characters={characters}
               charactersLoading={charactersLoading}
               charactersUnavailable={charactersUnavailable}
+              characterLinkHelpId={linkHelpId}
               onChange={onChange}
               onError={setError}
             />
           ))}
         </div>
       )}
-      <p className="text-[11px] text-slate-500">
-        Linking a character makes that player its owner, so they can edit its sheet. Removing someone keeps
-        their character and notes — the seat just closes.
+      <p id={linkHelpId} className="text-[11px] text-slate-500">
+        {MEMBER_CHARACTER_LINK_HELP}
       </p>
     </Card>
   );
@@ -786,6 +814,7 @@ function MemberRow({
   characters,
   charactersLoading,
   charactersUnavailable,
+  characterLinkHelpId,
   onChange,
   onError,
 }: {
@@ -794,22 +823,28 @@ function MemberRow({
   characters: Character[];
   charactersLoading: boolean;
   charactersUnavailable: boolean;
+  characterLinkHelpId: string;
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const announce = useAnnounce();
   const [savingRole, setSavingRole] = useState(false);
   const [savingChar, setSavingChar] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const name = memberDisplayName(member);
 
   async function changeRole(role: Role) {
     setSavingRole(true);
     onError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { role });
+      announce(memberRoleSavedAnnouncement(name, ROLE_LABEL[role]));
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't update role.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't update role.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setSavingRole(false);
     }
@@ -820,9 +855,13 @@ function MemberRow({
     onError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}/members/${member.id}`, { characterId });
+      const linkedName = characterId != null ? characters.find((c) => c.id === characterId)?.name ?? null : null;
+      announce(memberCharacterSavedAnnouncement(name, linkedName));
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't link character.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't link character.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setSavingChar(false);
     }
@@ -836,7 +875,9 @@ function MemberRow({
       setConfirmingRemove(false);
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't remove member.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't remove member.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setRemoving(false);
     }
@@ -857,7 +898,11 @@ function MemberRow({
   const character = linkedCharacter ?? ownedCharacter;
 
   return (
-    <div className="flex items-center gap-2.5 py-2.5 flex-wrap" style={{ borderTop: '1px solid var(--color-divider)' }}>
+    <div
+      className="flex items-center gap-2.5 py-2.5 flex-wrap"
+      style={{ borderTop: '1px solid var(--color-divider)' }}
+      data-testid={`member-row-${member.id}`}
+    >
       <span className="h-8 w-8 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[12px] text-[var(--color-neutral-300)]">
         {firstGrapheme(member.displayName || member.username || '?')}
       </span>
@@ -874,6 +919,7 @@ function MemberRow({
         style={{ width: 96 }}
         value={member.role}
         disabled={savingRole}
+        aria-label={memberRoleControlLabel(name)}
         onChange={(e) => changeRole(e.target.value as Role)}
       >
         <option value="dm" disabled={member.disabled}>dm</option>
@@ -885,10 +931,12 @@ function MemberRow({
         style={{ width: 130 }}
         value={character?.id ?? ''}
         disabled={savingChar || charactersLoading || charactersUnavailable}
+        aria-label={memberCharacterControlLabel(name)}
+        aria-describedby={characterLinkHelpId}
         title={
           charactersUnavailable
             ? "Character roster didn't load — retry above before changing links."
-            : undefined
+            : MEMBER_CHARACTER_LINK_HELP
         }
         onChange={(e) => changeCharacter(e.target.value ? Number(e.target.value) : null)}
       >
@@ -899,7 +947,12 @@ function MemberRow({
           </option>
         ))}
       </select>
-      <button type="button" className="text-[12px] text-slate-500 hover:text-rose-400" onClick={() => setConfirmingRemove(true)}>
+      <button
+        type="button"
+        className="text-[12px] text-slate-500 hover:text-rose-400"
+        aria-label={memberRemoveLabel(name)}
+        onClick={() => setConfirmingRemove(true)}
+      >
         Remove
       </button>
       {confirmingRemove && (
@@ -934,12 +987,26 @@ function AddMemberForm({
   onAdded: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const announce = useAnnounce();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<LookupUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<LookupUser | null>(null);
   const [role, setRole] = useState<Role>('player');
   const [saving, setSaving] = useState(false);
+  const idPrefix = useId();
+  const titleId = `${idPrefix}-title`;
+  const descriptionId = `${idPrefix}-description`;
+  const searchId = `${idPrefix}-search`;
+  const roleId = `${idPrefix}-role`;
+  const roleHelpId = `${idPrefix}-role-help`;
+  // Safe default: initial focus on Cancel (issue #451 — ambiguous Cancel focus).
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onCancel,
+    disabled: saving,
+    initialFocusRef: cancelRef,
+  });
 
   useEffect(() => {
     if (selected) return; // don't re-search after picking
@@ -968,18 +1035,32 @@ function AddMemberForm({
     onError(null);
     try {
       await api.post(`${API}/campaigns/${campaignId}/members`, { userId: selected.id, role });
+      announce(memberAddedAnnouncement(memberDisplayName(selected), ROLE_LABEL[role]));
       onAdded();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't add member.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't add member.";
+      onError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="cf-inset border-amber-500/30 p-3.5 space-y-2">
-      <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Add member</p>
-      <p className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
+    <div
+      ref={dialogRef}
+      id="add-member-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      data-testid="add-member-dialog"
+      className="cf-inset border-amber-500/30 p-3.5 space-y-2"
+    >
+      <p id={titleId} className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
+        {ADD_MEMBER_DIALOG_TITLE}
+      </p>
+      <p id={descriptionId} className="text-[12px] text-amber-200/90 cf-inset !border-amber-500/20 px-2.5 py-2">
         Add someone who already has an account on this server by username. To bring in someone new, send them
         an invite link from the Invite card above instead.
       </p>
@@ -1001,7 +1082,11 @@ function AddMemberForm({
         </div>
       ) : (
         <div className="space-y-1">
+          <label htmlFor={searchId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            {ADD_MEMBER_SEARCH_LABEL}
+          </label>
           <TextInput
+            id={searchId}
             className="!min-h-0 !py-2 text-sm"
             placeholder="Search by username or display name…"
             value={query}
@@ -1012,9 +1097,9 @@ function AddMemberForm({
             <p className="text-[11px] text-slate-500">No matching users.</p>
           )}
           {results.length > 0 && (
-            <ul className="cf-inset divide-y divide-slate-800">
+            <ul className="cf-inset divide-y divide-slate-800" role="listbox" aria-label="Matching users">
               {results.map((u) => (
-                <li key={u.id}>
+                <li key={u.id} role="option">
                   <button
                     type="button"
                     className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/60"
@@ -1029,14 +1114,35 @@ function AddMemberForm({
         </div>
       )}
       <div className="grid sm:grid-cols-3 gap-2">
-        <select className="cf-select !min-h-0 !py-2 text-sm" value={role} onChange={(e) => setRole(e.target.value as Role)}>
-          <option value="dm">Role: DM</option>
-          <option value="player">Role: Player</option>
-          <option value="viewer">Role: Viewer</option>
-        </select>
+        <div className="space-y-1">
+          <label htmlFor={roleId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            {ADD_MEMBER_ROLE_LABEL}
+          </label>
+          <select
+            id={roleId}
+            className="cf-select !min-h-0 !py-2 text-sm"
+            value={role}
+            aria-describedby={roleHelpId}
+            onChange={(e) => setRole(e.target.value as Role)}
+          >
+            <option value="dm">DM</option>
+            <option value="player">Player</option>
+            <option value="viewer">Viewer</option>
+          </select>
+          <p id={roleHelpId} className="text-[11px] text-slate-500 m-0">
+            {ADD_MEMBER_ROLE_HELP}
+          </p>
+        </div>
       </div>
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
+        <Btn
+          ref={cancelRef}
+          ghost
+          className="!min-h-0 !py-1.5 text-xs"
+          onClick={onCancel}
+          disabled={saving}
+          aria-label={ADD_MEMBER_CANCEL_LABEL}
+        >
           Cancel
         </Btn>
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={add} disabled={saving || !selected}>

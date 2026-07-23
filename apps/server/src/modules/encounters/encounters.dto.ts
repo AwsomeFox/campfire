@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -26,3 +26,6 @@ export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
 // Transient battle-map ping (issue #238) — a one-shot SSE broadcast, nothing persisted.
 export class MapPingDto extends createZodDto(MapPing.strict()) {}
+// Issue #466: reopen may carry per-character HP resync directions when the sheet
+// advanced after the previous /end.
+export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {}

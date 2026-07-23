@@ -2,15 +2,16 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterUpdate, FogState, RollRequest, normalizeStats, ruleSystemAdapter } from '@campfire/schema';
+import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { filterHidden, isVisibleTo } from '../../common/redact';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { fogConcealsPixels, parseFogState } from '../../common/fog';
 import { rollDice, rollInitiative } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { AuditService } from '../audit/audit.service';
@@ -25,17 +26,19 @@ import {
   crToXp,
   generateEncounterGroup,
   hpBandFor,
-  parseCr,
   redactEncounterEventsForViewer,
   sortCombatants,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
 import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import { AttachmentsService } from '../attachments/attachments.service';
+import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
+type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
@@ -67,9 +70,7 @@ function clampPercent(value: number): number {
  * fog is a display aid, never a reason to fail a whole encounter read.
  */
 function parseFog(text: string | null): FogState | null {
-  if (text == null) return null;
-  const parsed = FogState.safeParse(fromJsonText<unknown>(text, null));
-  return parsed.success ? parsed.data : null;
+  return parseFogState(text);
 }
 
 /**
@@ -133,6 +134,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenX: row.tokenX,
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
+    tokenHiddenByFog: false,
   };
 }
 
@@ -181,10 +183,14 @@ function tokenInRevealedRegion(c: Combatant, fog: FogState): boolean {
  * on those combatants server-side (the client never receives the coordinates), the same
  * server-side-gate approach as the issue #43 monster-HP band. Tokens inside a revealed
  * rectangle, and unplaced combatants, are returned unchanged.
+ *
+ * Issue #418: also set `tokenHiddenByFog: true` so the client can show an owner-safe
+ * "placed outside the revealed area" state instead of falsely listing the token as
+ * Unplaced (and offering a no-op place-at-center action). Coordinates stay null.
  */
 function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
   if (tokenInRevealedRegion(c, fog)) return c;
-  return { ...c, tokenX: null, tokenY: null };
+  return { ...c, tokenX: null, tokenY: null, tokenHiddenByFog: true };
 }
 
 export type EncounterSearchEntry = {
@@ -204,6 +210,7 @@ export class EncountersService {
     private readonly events: CampaignEventsService,
     private readonly rolls: RollsService,
     private readonly revisions: RevisionsService,
+    private readonly attachmentsService: AttachmentsService,
   ) {}
 
   /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
@@ -323,6 +330,17 @@ export class EncountersService {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
+  }
+
+  /**
+   * Lightweight encounter domain mapping for GET /encounters/:id/map.
+   * Applies the same hidden-entity gate as getWithCombatantsOrThrow without joining combatants.
+   */
+  encounterForMapOrThrow(row: typeof encounters.$inferSelect, viewerRole: Role): Encounter {
+    if (!isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${row.id} not found`);
+    }
+    return encounterToDomain(row);
   }
 
   /**
@@ -721,13 +739,75 @@ export class EncountersService {
           );
         }
       }
-      // Fog of war (issue #40): withhold the position of any token in an unrevealed region.
+      // Fog of war (issue #40 / #463): withhold the position of any token in an
+      // unrevealed region. Encounter JSON still degrades invalid fog to `null` for
+      // the fog field itself, but token coordinates must fail closed the same way
+      // the map-byte path does — otherwise a corrupt fog row would leak monster
+      // positions while the image stayed fully masked. Sibling fog protection is
+      // mirrored here too: when another encounter still conceals the shared map,
+      // this fight's tokens must not float on a fully masked board.
       const fog = parseFog(row.fog);
-      if (fog?.enabled) list = list.map((c) => redactTokenInFog(c, fog));
+      const invalidFog = row.fog !== null && fog === null;
+      // Sibling protection applies whenever THIS encounter does not itself conceal
+      // pixels — including fog enabled but fully revealed (no rectangles masked).
+      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+      const siblingProtects =
+        !invalidFog &&
+        !ownFogConceals &&
+        row.mapAttachmentId != null &&
+        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
+      if (invalidFog || siblingProtects) {
+        const concealAll: FogState = { enabled: true, revealed: [] };
+        list = list.map((c) => redactTokenInFog(c, concealAll));
+      } else if (fog?.enabled) {
+        list = list.map((c) => redactTokenInFog(c, fog));
+      }
     }
+    // Issue #466: when an ended fight's sheet HP diverged from the combatant snapshot,
+    // surface conflicts so the DM can choose a resync direction before /reopen. DM-only
+    // (and undefined-role internal callers); players never see the CAS preview.
+    const hpSyncConflicts =
+      status === 'ended' && (viewerRole === undefined || viewerRole === 'dm')
+        ? await this.collectHpSyncConflicts(combatantRows)
+        : undefined;
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
-    return { ...redactedDomain, combatants: list };
+    return {
+      ...redactedDomain,
+      combatants: list,
+      ...(hpSyncConflicts && hpSyncConflicts.length > 0 ? { hpSyncConflicts } : {}),
+    };
+  }
+
+  /**
+   * Issue #466: compare each character combatant's snapshot against the live sheet.
+   * A conflict is any divergent HP/death slice — the DM must pick keep_combatant or
+   * pull_sheet before reopen can proceed.
+   */
+  private async collectHpSyncConflicts(
+    combatantRows: Array<typeof combatants.$inferSelect>,
+  ): Promise<HpSyncConflict[]> {
+    const characterCombatants = combatantRows.filter((r) => r.kind === 'character' && r.characterId != null);
+    if (characterCombatants.length === 0) return [];
+    const characterIds = characterCombatants.map((r) => r.characterId!);
+    const sheetRows = await this.db.select().from(characters).where(inArray(characters.id, characterIds));
+    const sheetById = new Map(sheetRows.map((c) => [c.id, c]));
+    const conflicts: HpSyncConflict[] = [];
+    for (const row of characterCombatants) {
+      const sheet = sheetById.get(row.characterId!);
+      if (!sheet) continue;
+      const combatantSlice = hpSyncSliceOf(row);
+      const sheetSlice = hpSyncSliceOf(sheet);
+      if (hpSyncSlicesEqual(combatantSlice, sheetSlice)) continue;
+      conflicts.push({
+        combatantId: row.id,
+        characterId: sheet.id,
+        name: row.name,
+        combatant: combatantSlice,
+        sheet: { ...sheetSlice, updatedAt: sheet.updatedAt },
+      });
+    }
+    return conflicts;
   }
 
   async getCombatantRowOrThrow(encounterId: number, combatantId: number) {
@@ -880,6 +960,41 @@ export class EncountersService {
       return this.getWithCombatantsOrThrow(encounterId, role);
     }
 
+    // If this update activates fog over a map that had previously been revealed as
+    // a handout, restage the raw attachment immediately. The raw-file route also
+    // checks fog dynamically (defense in depth), so even a failure here cannot leak
+    // source pixels; this keeps the attachment metadata/UI consistent as well.
+    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
+    const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
+    if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
+      // Reusing the campaign region-map attachment as a fogged battle map would
+      // block players from GET /attachments/:id/file (RegionMap has no fog-safe
+      // alternate). Clone the bytes onto a dedicated battle-map row and retarget
+      // this encounter so the shared campaign background stays player-visible.
+      const [campaign] = await this.db
+        .select({ mapAttachmentId: campaigns.mapAttachmentId })
+        .from(campaigns)
+        .where(eq(campaigns.id, encounterRow.campaignId))
+        .limit(1);
+      if (campaign?.mapAttachmentId === effectiveMapId) {
+        const clone = await this.attachmentsService.duplicate(effectiveMapId, user, role, {
+          filenamePrefix: 'battle-',
+        });
+        await this.db
+          .update(encounters)
+          .set({ mapAttachmentId: clone.id, updatedAt: nowIso() })
+          .where(eq(encounters.id, encounterId));
+        effectiveMapId = clone.id;
+      }
+
+      const attachment = await this.attachmentsService.getRowOrThrow(effectiveMapId);
+      // Only hide attachments that belong to this encounter's campaign — never
+      // side-effect another campaign's row if a stale/cross-campaign id slipped through.
+      if (attachment.campaignId === encounterRow.campaignId && !attachment.hidden) {
+        await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
+      }
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -998,7 +1113,9 @@ export class EncountersService {
       if (partyRows.length > 0 && adapter) {
         const combatantValues = partyRows.map((character, index) => {
           const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-          const initMod = adapter.initiativeModifier(stats);
+          // Pass character level so PF2e (and similar) can include the proficiency/level
+          // term on the Perception/WIS initiative fallback (issue #491). 5e ignores it.
+          const initMod = adapter.initiativeModifier(stats, 'score', character.level);
           // Issue #711: seed the combatant's death/temp-HP slice from the persistent
           // sheet so a stable-but-unconscious PC (carried over from a prior fight via
           // /end reconciliation) re-enters the next encounter still down, not silently
@@ -1016,7 +1133,13 @@ export class EncountersService {
             deathState: character.deathState,
             deathSaveSuccesses: character.deathSaveSuccesses,
             deathSaveFailures: character.deathSaveFailures,
-            conditions: '[]',
+            // Issue #466: stamp the sheet CAS token at open so a later re-end can detect
+            // intervening sheet edits made while the encounter was ended.
+            sheetSyncedUpdatedAt: character.updatedAt,
+            // Issue #486: seed tracker conditions from the sheet so Poisoned (etc.)
+            // applied before combat is already visible in the run-session roster.
+            // Merge semantics for the overlap window: see sync comment on updateCombatant.
+            conditions: character.conditions,
             ruleEntryId: null,
             sortOrder: index,
           };
@@ -1059,20 +1182,27 @@ export class EncountersService {
   }
 
   /**
-   * Compute a read-only 5e difficulty band for an encounter (issue #58). Pulls the PC
-   * levels from the character-combatants' linked character sheets and the monster CRs
-   * from the monster-combatants' linked rule entries (dataJson.challengeRating), then
-   * runs the pure 5e XP-budget math. No new columns — everything is derived on read.
+   * Compute a read-only difficulty estimate for an encounter (issues #58 + #429). Pulls the
+   * PC levels from character-combatants and monster CRs from linked rule entries, then
+   * asks the campaign's RuleSystemAdapter to own the math/labels/support status. Homebrew
+   * and non-5e systems return an explicit unsupported result; manual enemies with no CR/XP
+   * return unknown ("Unknown—add XP/CR") instead of a misleading Trivial band.
    */
   async getDifficulty(encounterId: number, viewerRole?: Role): Promise<EncounterDifficulty> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    // Entity-level secrecy (issue #262): a hidden encounter's 5e difficulty (monsterCount +
+    // Entity-level secrecy (issue #262): a hidden encounter's difficulty (monsterCount +
     // adjustedXp) is DM-only prep — deny a non-DM the same way the roster read does (404, so
     // existence isn't leaked). undefined role is DM-facing and always allowed.
     if (viewerRole !== undefined && !isVisibleTo({ hidden: encounterRow.hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
-    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const [campaignRow] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, encounterRow.campaignId))
+      .limit(1);
+    const ruleSystem = campaignRow?.ruleSystem ?? null;
+    const adapter = ruleSystemAdapter(ruleSystem);
     const combatantRows = await this.listCombatantRows(encounterId);
 
     // Party levels: from each character-combatant's linked character sheet.
@@ -1091,7 +1221,7 @@ export class EncountersService {
 
     // Monster CRs: from each monster-combatant's linked rule entry statblock. A monster
     // combatant with no ruleEntryId (or an entry lacking a CR) contributes a null CR
-    // (0 XP) rather than being dropped, so the monster COUNT still drives the multiplier.
+    // rather than being dropped, so missing data can surface as unknown (issue #429).
     const monsterCombatants = combatantRows.filter((c) => c.kind === 'monster');
     const ruleEntryIds = monsterCombatants.map((c) => c.ruleEntryId).filter((id): id is number => id !== null);
     const crById = new Map<number, number | null>();
@@ -1108,7 +1238,10 @@ export class EncountersService {
     }
     const monsterCrs = monsterCombatants.map((c) => (c.ruleEntryId !== null ? (crById.get(c.ruleEntryId) ?? null) : null));
 
-    return computeEncounterDifficulty(partyLevels, monsterCrs);
+    return estimateEncounterDifficultyForRuleSystem(ruleSystem, {
+      partyLevels,
+      monsterChallengeRatings: monsterCrs,
+    });
   }
 
   /**
@@ -1341,6 +1474,9 @@ export class EncountersService {
     let characterDeathState = 'none';
     let characterDeathSaveSuccesses = 0;
     let characterDeathSaveFailures = 0;
+    let characterSheetUpdatedAt: string | null = null;
+    // Issue #486: sheet conditions carried into a late-join character combatant.
+    let characterConditions = '[]';
     // NOT pre-seeded from input.ruleEntryId — only set once the row is confirmed to exist
     // below, so a dangling id can never make it into the INSERT (was previously assigned
     // unconditionally here, so a bogus/deleted ruleEntryId silently got stored).
@@ -1427,9 +1563,13 @@ export class EncountersService {
       characterDeathState = character.deathState;
       characterDeathSaveSuccesses = character.deathSaveSuccesses;
       characterDeathSaveFailures = character.deathSaveFailures;
+      characterSheetUpdatedAt = character.updatedAt;
+      // Issue #486: seed from the sheet (same contract as create() auto-add).
+      characterConditions = character.conditions;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
-        initMod = adapter.initiativeModifier(stats);
+        // Character level feeds PF2e trained-Perception proficiency (issue #491).
+        initMod = adapter.initiativeModifier(stats, 'score', character.level);
       }
     } else if (input.ruleEntryId !== undefined) {
       // Any explicitly-supplied ruleEntryId (not just kind='monster') must resolve to a
@@ -1513,9 +1653,12 @@ export class EncountersService {
                   deathState: characterDeathState,
                   deathSaveSuccesses: characterDeathSaveSuccesses,
                   deathSaveFailures: characterDeathSaveFailures,
+                  // Issue #466: CAS token for sheet↔combatant HP sync at add time.
+                  sheetSyncedUpdatedAt: characterSheetUpdatedAt,
                 }
               : {}),
-            conditions: '[]',
+            // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
+            conditions: characterId !== null ? characterConditions : '[]',
             ruleEntryId,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
@@ -1613,6 +1756,22 @@ export class EncountersService {
       }
     }
 
+    // Issue #495: non-DM adds must be in the active rule system's condition
+    // vocabulary. The wire schema stays free-text (so DMs can mint homebrew /
+    // custom labels), but a player cannot inject arbitrary mechanical text into
+    // the shared tracker. Matching is case-insensitive; the stored string is
+    // still whatever the caller sent. MCP `update_combatant` shares this path.
+    if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
+      if (unknown.length > 0) {
+        throw new BadRequestException(
+          `Unknown condition(s) for this rule system: ${unknown.map((c) => JSON.stringify(c)).join(', ')}. ` +
+            'Players may only add conditions from the active rule vocabulary; the DM may mint custom entries.',
+        );
+      }
+    }
+
     // Non-HP field writes computed up front (initiative/identity). The HP +
     // death-save fields AND the condition add/remove deltas are computed INSIDE
     // the transaction below off a fresh read, so concurrent damage and concurrent
@@ -1656,18 +1815,33 @@ export class EncountersService {
       return combatantToDomain(existing);
     }
 
-    // Combatant write + linked-character HP mirror run in ONE synchronous
+    // Combatant write + linked-character HP/conditions mirror run in ONE synchronous
     // better-sqlite3 transaction (issue #86): the HP math reads the row's CURRENT
     // committed values inside the transaction (never a stale pre-await read), so two
     // authorized deltas landing near-simultaneously compose instead of clobbering —
     // better-sqlite3 serializes the whole synchronous callback. The mirror then reads
     // the transaction's own result.
     //
-    // The character HP mirror is additionally gated on a still-live (non-'ended')
+    // The character mirror is additionally gated on a still-live (non-'ended')
     // encounter (issue #163). assertMutable() above already rejects an ended encounter
     // outright, so this is defense-in-depth: post-combat combatant rows must never leak
     // back onto the live character sheet even if that guard is ever relaxed.
-    const mirrorHp = existing.kind === 'character' && existing.characterId !== null && recomputeHp && encounterRow.status !== 'ended';
+    //
+    // Issue #486 — sheet↔combatant condition merge semantics (overlap window):
+    //   • create/addCombatant seeds the combatant from the sheet.
+    //   • A tracker write (addConditions/removeConditions) applies set deltas on the
+    //     combatant (#747) then overwrites the linked sheet's conditions array.
+    //   • A sheet write (CharactersService.patchConditions / PATCH conditions) overwrites
+    //     the linked live combatant's conditions array (and stamps the CAS token).
+    //   • Last cross-surface write wins as a whole array — there is no 3-way merge.
+    //     Concurrent tracker deltas still compose via the in-tx set rebase (#747).
+    //   • /end writes combatant conditions back onto the sheet alongside HP.
+    //   • MCP `update_combatant` and `set_character_conditions` share these paths.
+    const mirrorSheet =
+      existing.kind === 'character' &&
+      existing.characterId !== null &&
+      encounterRow.status !== 'ended' &&
+      (recomputeHp || conditionsTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -1744,22 +1918,35 @@ export class EncountersService {
       if (conditionsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
-      if (mirrorHp) {
+      if (mirrorSheet) {
         // Issue #711: live-mirror the full combat death/temp-HP slice, not just
         // hpCurrent, so a downed/dead character is reflected on the sheet the
         // moment it happens mid-fight (the same authoritative write-through
         // contract the HP path already uses). The post-/end reconciliation below
         // does the same write once more for the final state; both are idempotent.
+        // Issue #486: likewise mirror conditions so a tracker-applied Poisoned
+        // lands on the sheet immediately (and survives /end even if that path
+        // were skipped). Issue #466: stamp the sheet CAS token on the combatant
+        // so a later re-end knows this write-through was the last acknowledged sync.
+        const mirroredAt = nowIso();
+        const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
+        if (recomputeHp) {
+          sheetSet.hpCurrent = updated.hpCurrent;
+          sheetSet.hpTemp = updated.hpTemp;
+          sheetSet.deathState = updated.deathState;
+          sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
+          sheetSet.deathSaveFailures = updated.deathSaveFailures;
+        }
+        if (conditionsTouched) {
+          sheetSet.conditions = updated.conditions;
+        }
         tx.update(characters)
-          .set({
-            hpCurrent: updated.hpCurrent,
-            hpTemp: updated.hpTemp,
-            deathState: updated.deathState,
-            deathSaveSuccesses: updated.deathSaveSuccesses,
-            deathSaveFailures: updated.deathSaveFailures,
-            updatedAt: nowIso(),
-          })
+          .set(sheetSet)
           .where(eq(characters.id, existing.characterId!))
+          .run();
+        tx.update(combatants)
+          .set({ sheetSyncedUpdatedAt: mirroredAt })
+          .where(eq(combatants.id, combatantId))
           .run();
       }
     });
@@ -2212,13 +2399,17 @@ export class EncountersService {
     // (a dying PC is still 'active' once the next encounter starts), and a revived
     // (hp > 0) character is forced back to 'active' if it had been marked dead.
     const characterWrites: Array<{
+      combatantId: number;
       characterId: number;
       hpCurrent: number;
       hpTemp: number;
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
+      // Issue #486: conditions travel back with the HP slice on /end.
+      conditions: string;
       status: 'active' | 'dead';
+      sheetSyncedUpdatedAt: string | null;
     }> = [];
     for (const row of rows) {
       if (row.kind !== 'character' || row.characterId === null) continue;
@@ -2232,28 +2423,95 @@ export class EncountersService {
       if (dead) nextStatus = 'dead';
       else if (revived) nextStatus = 'active'; // cleared below if status is already 'active'
       characterWrites.push({
+        combatantId: row.id,
         characterId: row.characterId,
         hpCurrent: row.hpCurrent,
         hpTemp: row.hpTemp,
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
+        conditions: row.conditions,
         status: nextStatus ?? 'active',
+        sheetSyncedUpdatedAt: row.sheetSyncedUpdatedAt ?? null,
       });
     }
 
-    // Pull the current lifecycle status of every affected character so the
+    // Pull the current lifecycle status + HP slice of every affected character so the
     // write-back only touches `status` when it actually changes — avoids a
     // wasteful write AND a misleading audit trail (a no-op status 'flip' would
-    // look like a deliberate DM action). Single round-trip via inArray.
+    // look like a deliberate DM action). Also feeds the issue #466 CAS guard.
     const characterIds = characterWrites.map((w) => w.characterId);
-    const priorStatusById = new Map<number, string>();
+    const priorById = new Map<
+      number,
+      {
+        status: string;
+        updatedAt: string;
+        hpCurrent: number;
+        hpTemp: number;
+        deathState: string;
+        deathSaveSuccesses: number;
+        deathSaveFailures: number;
+      }
+    >();
     if (characterIds.length > 0) {
       const priorRows = await this.db
-        .select({ id: characters.id, status: characters.status })
+        .select({
+          id: characters.id,
+          status: characters.status,
+          updatedAt: characters.updatedAt,
+          hpCurrent: characters.hpCurrent,
+          hpTemp: characters.hpTemp,
+          deathState: characters.deathState,
+          deathSaveSuccesses: characters.deathSaveSuccesses,
+          deathSaveFailures: characters.deathSaveFailures,
+        })
         .from(characters)
         .where(inArray(characters.id, characterIds));
-      for (const r of priorRows) priorStatusById.set(r.id, r.status);
+      for (const r of priorRows) priorById.set(r.id, r);
+    }
+
+    // Issue #466 safety net: refuse to end when the sheet advanced since the last
+    // acknowledged sync AND still differs from the combatant snapshot. The DM must
+    // reopen with an explicit resync direction first (or heal the combatant to match).
+    const endConflicts: HpSyncConflict[] = [];
+    for (const w of characterWrites) {
+      const prior = priorById.get(w.characterId);
+      if (!prior) continue;
+      const combatantSlice = hpSyncSliceOf(w);
+      const sheetSlice = hpSyncSliceOf(prior);
+      if (
+        !canWriteBackHp({
+          sheet: { ...sheetSlice, updatedAt: prior.updatedAt },
+          combatant: combatantSlice,
+          sheetSyncedUpdatedAt: w.sheetSyncedUpdatedAt,
+        })
+      ) {
+        const combatantRow = rows.find((r) => r.id === w.combatantId);
+        endConflicts.push({
+          combatantId: w.combatantId,
+          characterId: w.characterId,
+          name: combatantRow?.name ?? `Character ${w.characterId}`,
+          combatant: combatantSlice,
+          sheet: { ...sheetSlice, updatedAt: prior.updatedAt },
+        });
+      }
+    }
+    if (endConflicts.length > 0) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'encounter.end_hp_conflict',
+        entityType: 'encounter',
+        entityId: encounterId,
+        campaignId: encounterRow.campaignId,
+        detail: JSON.stringify({ conflicts: endConflicts }),
+      });
+      throw new ConflictException({
+        code: 'HP_SYNC_CONFLICT',
+        message:
+          'Character sheets changed since this encounter last synced HP. Reopen with an explicit resync direction for each conflict before ending again.',
+        conflicts: endConflicts,
+      });
     }
 
     const ts = nowIso();
@@ -2261,25 +2519,70 @@ export class EncountersService {
     // #744) — done inside the same HP-write-back transaction so a crash mid-end can't leave
     // the pointer dangling at an 'ended' encounter. A third-party ended a non-active fight
     // (legacy drift where the pointer disagreed with status) leaves the pointer untouched.
+    // Issue #466: each character UPDATE is compare-and-set on updatedAt when we hold a
+    // sync token, so a race that heals the sheet mid-transaction cannot be clobbered.
     this.db.transaction((tx) => {
       for (const w of characterWrites) {
+        const prior = priorById.get(w.characterId);
         // Issue #711: write the full combat slice — HP, temp HP, death state, and
         // death-save counters — so the sheet reflects the post-fight truth. The
         // lifecycle status flip is gated on a real change so a stable/dying PC
         // whose status was already 'active' doesn't get a spurious write.
+        // Issue #486: also persist tracker conditions back onto the sheet.
         const set: Partial<typeof characters.$inferInsert> = {
           hpCurrent: w.hpCurrent,
           hpTemp: w.hpTemp,
           deathState: w.deathState,
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
+          conditions: w.conditions,
           updatedAt: ts,
         };
-        const prior = priorStatusById.get(w.characterId);
-        if (prior !== undefined && prior !== w.status) {
+        if (prior !== undefined && prior.status !== w.status) {
           set.status = w.status;
         }
-        tx.update(characters).set(set).where(eq(characters.id, w.characterId)).run();
+        const where =
+          w.sheetSyncedUpdatedAt != null
+            ? and(eq(characters.id, w.characterId), eq(characters.updatedAt, w.sheetSyncedUpdatedAt))
+            : eq(characters.id, w.characterId);
+        const result = tx.update(characters).set(set).where(where).run();
+        const changes = (result as unknown as { changes?: number }).changes ?? 0;
+        if (changes === 0 && w.sheetSyncedUpdatedAt != null) {
+          // CAS lost a race — re-read and fail the whole end rather than half-apply.
+          const [fresh] = tx
+            .select()
+            .from(characters)
+            .where(eq(characters.id, w.characterId))
+            .limit(1)
+            .all();
+          if (fresh && !hpSyncSlicesEqual(hpSyncSliceOf(fresh), hpSyncSliceOf(w))) {
+            throw new ConflictException({
+              code: 'HP_SYNC_CONFLICT',
+              message:
+                'Character sheets changed since this encounter last synced HP. Reopen with an explicit resync direction for each conflict before ending again.',
+              conflicts: [
+                {
+                  combatantId: w.combatantId,
+                  characterId: w.characterId,
+                  name: rows.find((r) => r.id === w.combatantId)?.name ?? `Character ${w.characterId}`,
+                  combatant: hpSyncSliceOf(w),
+                  sheet: { ...hpSyncSliceOf(fresh), updatedAt: fresh.updatedAt },
+                },
+              ],
+            });
+          }
+          // Slices already match (e.g. name-only sheet edit) — bump updatedAt + token.
+          if (fresh) {
+            tx.update(characters)
+              .set({ updatedAt: ts })
+              .where(eq(characters.id, w.characterId))
+              .run();
+          }
+        }
+        tx.update(combatants)
+          .set({ sheetSyncedUpdatedAt: ts })
+          .where(eq(combatants.id, w.combatantId))
+          .run();
       }
       tx.update(encounters).set({ status: 'ended', endedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
@@ -2306,28 +2609,159 @@ export class EncountersService {
    * Reopens an 'ended' encounter back to 'running' (issue #109) — an accidental /end
    * was previously unrecoverable (the ended page offered only Refresh/Delete). Requires
    * status 'ended'; clears endedAt and restores 'running' while PRESERVING round /
-   * turnIndex / currentCombatantId, so combat resumes exactly where it stopped rather
-   * than resetting to the top of the order. Combatant HP is untouched by /end (only the
-   * write-back onto character sheets happened), so reopening leaves combat state
-   * self-consistent. The same HP-writeback caveat applies on the next /end.
+   * turnIndex / currentCombatantId when still valid, so combat resumes where it stopped
+   * rather than resetting to the top of the order.
+   *
+   * Issue #489: reopen re-validates the turn pointer against the present roster.
+   * Zero combatants → 409. A missing `currentCombatantId` or one whose initiative is
+   * now null snaps to the top of the server-sorted running order and emits a combat-
+   * log notice. `turnIndex` is always re-derived from that identity pointer.
+   *
+   * Issue #466: when sheet HP diverged from the combatant snapshot after the previous
+   * End, the caller MUST supply a per-conflict `hpResync` direction (`keep_combatant`
+   * or `pull_sheet`). Decisions are applied + audited inside the same transaction as
+   * the status flip so a crash cannot leave a half-resynced fight.
    *
    * One authoritative live fight (issue #744): the status flip + activeEncounterId write
    * + the no-other-running assertion run in ONE transaction, mirroring start(). A reopen
    * racing another reopen/start serializes and the loser surfaces a 409 with the winner.
    */
-  async reopen(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+  async reopen(
+    encounterId: number,
+    user: RequestUser,
+    role: Role,
+    input: EncounterReopenInput = {},
+  ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     if (encounterRow.status !== 'ended') {
       throw new BadRequestException(`Encounter must be 'ended' to reopen (currently '${encounterRow.status}')`);
     }
 
+    const combatantRows = await this.listCombatantRows(encounterId);
+    // Issue #489: refuse to resume a fight with nobody in it (start has the same
+    // guard via #469; reopen previously flipped status and left a null pointer).
+    if (combatantRows.length === 0) {
+      throw new ConflictException({
+        code: 'REOPEN_NO_COMBATANTS',
+        message: 'Cannot reopen an encounter with no combatants — add at least one combatant first',
+      });
+    }
+
+    const conflicts = await this.collectHpSyncConflicts(combatantRows);
+    const decisions = new Map((input.hpResync ?? []).map((d) => [d.combatantId, d.direction]));
+    if (conflicts.length > 0) {
+      const missing = conflicts.filter((c) => !decisions.has(c.combatantId));
+      if (missing.length > 0) {
+        throw new ConflictException({
+          code: 'HP_SYNC_CONFLICT',
+          message:
+            'Character sheets changed after this encounter ended. Choose keep_combatant or pull_sheet for each conflict before reopening.',
+          conflicts,
+        });
+      }
+    }
+
+    // Issue #489: re-derive the turn pointer against the present, initiative-bearing
+    // roster before flipping status. A combatant removed (or initiative cleared) while
+    // the fight was ended would otherwise leave a stale currentCombatantId until the
+    // next /next-turn self-healed via advanceTurn.
+    const sorted = sortCombatants(combatantRows.map(combatantToDomain), 'running');
+    const priorCurrentId = encounterRow.currentCombatantId;
+    const priorCurrent = priorCurrentId == null ? undefined : sorted.find((c) => c.id === priorCurrentId);
+    // Missing id OR present-but-null-initiative both snap to the top of the order
+    // and emit a notice (issue #489) — even when that top happens to be the same id.
+    const pointerInvalid = priorCurrent == null || priorCurrent.initiative === null;
+    const currentCombatantId = pointerInvalid ? (sorted[0]?.id ?? null) : priorCurrentId;
+    const turnIndex = turnIndexFor(sorted, currentCombatantId);
+    const turnPointerSnapped = pointerInvalid;
+
     const campaignId = encounterRow.campaignId;
     const ts = nowIso();
+    const decisionAudit: Array<{ combatantId: number; characterId: number; direction: string }> = [];
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
-      tx.update(encounters).set({ status: 'running', endedAt: null, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
+
+      for (const conflict of conflicts) {
+        const direction = decisions.get(conflict.combatantId)!;
+        decisionAudit.push({
+          combatantId: conflict.combatantId,
+          characterId: conflict.characterId,
+          direction,
+        });
+        if (direction === 'pull_sheet') {
+          // Bring the combatant snapshot up to the live sheet; stamp the CAS token.
+          tx.update(combatants)
+            .set({
+              hpCurrent: conflict.sheet.hpCurrent,
+              hpTemp: conflict.sheet.hpTemp,
+              deathState: conflict.sheet.deathState,
+              deathSaveSuccesses: conflict.sheet.deathSaveSuccesses,
+              deathSaveFailures: conflict.sheet.deathSaveFailures,
+              sheetSyncedUpdatedAt: conflict.sheet.updatedAt,
+            })
+            .where(eq(combatants.id, conflict.combatantId))
+            .run();
+        } else {
+          // keep_combatant: leave the snapshot; acknowledge the sheet revision so the
+          // next /end may overwrite it deliberately (CAS token = current sheet.updatedAt).
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: conflict.sheet.updatedAt })
+            .where(eq(combatants.id, conflict.combatantId))
+            .run();
+        }
+      }
+
+      // Refresh CAS tokens for non-conflict character combatants too — their slices
+      // already match, but stamping the current sheet.updatedAt keeps the next /end
+      // from false-conflicting on an unrelated sheet edit (name/notes) that bumped
+      // updatedAt without changing the HP slice.
+      const conflictIds = new Set(conflicts.map((c) => c.combatantId));
+      for (const row of combatantRows) {
+        if (row.kind !== 'character' || row.characterId == null || conflictIds.has(row.id)) continue;
+        const [sheet] = tx
+          .select({ updatedAt: characters.updatedAt })
+          .from(characters)
+          .where(eq(characters.id, row.characterId))
+          .limit(1)
+          .all();
+        if (sheet) {
+          tx.update(combatants)
+            .set({ sheetSyncedUpdatedAt: sheet.updatedAt })
+            .where(eq(combatants.id, row.id))
+            .run();
+        }
+      }
+
+      tx.update(encounters)
+        .set({
+          status: 'running',
+          endedAt: null,
+          // Issue #489: persist the re-validated pointer with the status flip.
+          currentCombatantId,
+          turnIndex,
+          updatedAt: ts,
+        })
+        .where(eq(encounters.id, encounterId))
+        .run();
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
     });
+
+    // Combat-log notice when reopen had to repair a dangling/null-initiative pointer
+    // (issue #489). Appended after the status flip commits — a log failure must not
+    // roll back a successful reopen.
+    if (turnPointerSnapped) {
+      const top = sorted.find((c) => c.id === currentCombatantId);
+      await this.appendEvent(encounterId, encounterRow.round, 'note', {
+        actor: top?.name ?? null,
+        target: top?.name ?? null,
+        actorId: currentCombatantId,
+        targetId: currentCombatantId,
+        detail:
+          priorCurrentId == null || priorCurrent == null
+            ? 'Turn pointer reset to top of order on reopen (previous current combatant missing)'
+            : 'Turn pointer reset to top of order on reopen (previous current combatant had no initiative)',
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -2336,6 +2770,12 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId,
+      detail: JSON.stringify({
+        ...(decisionAudit.length > 0 ? { hpResync: decisionAudit } : {}),
+        ...(turnPointerSnapped
+          ? { turnPointerSnapped: true, previousCombatantId: priorCurrentId, currentCombatantId, turnIndex }
+          : { currentCombatantId, turnIndex }),
+      }),
     });
 
     this.emitEncounterEvent('encounter.updated', campaignId, encounterId);

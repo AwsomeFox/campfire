@@ -109,9 +109,12 @@ prep. Reveal the board as the party explores:
 - **Reveal** tool — click-drag a rectangle to reveal that region to players.
 - **Reveal all** / **Hide all** — light or re-hide the whole map at once.
 
-Fog is **information-safe**: a combatant token sitting in an unrevealed area is withheld
-by the server, so a player's client never even receives where the ambush is waiting —
-it can't be read out of the network response. (An AI DM can reveal regions too, via the
+Fog is **information-safe** at both layers. A combatant token sitting in an unrevealed
+area is withheld by the server, so a player's client never receives where the ambush is
+waiting. The map image is also rendered on the server for each fog revision: players
+receive an opaque image containing only revealed pixels, never the source attachment.
+Opening the attachment URL, requesting its thumbnail or a byte range, and stale offline
+caches cannot bypass the mask. (An AI DM can reveal regions too, via the
 `reveal_map_region` MCP tool.)
 
 ## End the encounter — HP writes back
