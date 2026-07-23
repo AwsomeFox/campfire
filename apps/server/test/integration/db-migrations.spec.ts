@@ -630,7 +630,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           "INSERT INTO encounters (id, campaign_id, name, location_id, quest_id, session_id, created_at, updated_at) VALUES (3, 1, 'Mixed', 10, 21, 12, ?, ?)",
         )
         .run(now, now);
-      legacy.prepare("DELETE FROM __migrations WHERE name = '0063_encounter_links_campaign_scope'").run();
+      legacy.prepare("DELETE FROM __migrations WHERE name = '0064_encounter_links_campaign_scope'").run();
     } finally {
       legacy.close();
     }
