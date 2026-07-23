@@ -673,29 +673,28 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
       expect(up.status).toBe(201);
       const attachId = up.body.id;
 
-      // Plant an unreadable sibling campaign directory. On platforms where chmod
-      // can revoke traverse permission, relink must fail closed with 503 rather
-      // than skip the dir and claim the (still-readable) file was not found.
-      const blockedDir = path.join(ctx.dataDir, 'uploads', 'unreadable-camp');
-      fs.mkdirSync(blockedDir, { recursive: true });
-      fs.writeFileSync(path.join(blockedDir, '9990001.png'), TINY_PNG);
-      fs.chmodSync(blockedDir, 0);
+      // Make the attachment's own campaign directory unreadable. Without
+      // fail-closed lookup, readdir would skip it and report a false not-found;
+      // with the fix it must map to 503 when EACCES is observable.
+      const campaignDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
+      const previousMode = fs.statSync(campaignDir).mode & 0o777;
+      fs.chmodSync(campaignDir, 0);
 
       try {
         const fixRes = await adminAgent
           .post('/api/v1/admin/attachments/diagnostics/fix')
           .send({ attachmentId: attachId, action: 'relink' });
-        // If the process can still read the dir (e.g. running as root), the
-        // endpoint may succeed; only assert the fail-closed mapping when EACCES
-        // is actually observable.
+        // If the process can still read the dir (e.g. running as root), chmod
+        // is ineffective — assert the fix succeeds rather than masking a
+        // success:false "not found".
         if (fixRes.status === 503) {
           expect(String(fixRes.body.message)).toMatch(/unreadable/i);
         } else {
           expect(fixRes.status).toBe(201);
+          expect(fixRes.body.success).toBe(true);
         }
       } finally {
-        fs.chmodSync(blockedDir, 0o755);
-        fs.rmSync(blockedDir, { recursive: true, force: true });
+        fs.chmodSync(campaignDir, previousMode);
       }
     });
   });
