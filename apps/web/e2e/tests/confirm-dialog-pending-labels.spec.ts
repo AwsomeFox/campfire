@@ -100,8 +100,7 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
       await started;
       await expectBusyConfirm(page, 'End this encounter?', 'Ending encounter…', 'End encounter', release, true);
     } finally {
-      await page.request.post(`/api/v1/encounters/${seeded.encounterId}/reopen`).catch(() => undefined);
-      await page.request.post(`/api/v1/encounters/${seeded.encounterId}/start`).catch(() => undefined);
+      await restoreSeedEncounter();
     }
   });
 

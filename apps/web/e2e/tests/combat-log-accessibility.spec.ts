@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { EncounterEvent } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 test.use({ storageState: stateFor('dm') });
 
@@ -55,9 +55,7 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
  * serial suite regardless of which throwaway fight a test created and ended.
  */
 async function restoreSeedFight(page: Page): Promise<void> {
-  const { encounterId } = seed();
-  await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
-  await page.request.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
+  await restoreSeedEncounter(page);
 }
 
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {

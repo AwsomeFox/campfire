@@ -1,5 +1,5 @@
 import { test, expect, request } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
@@ -91,9 +91,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       // call unconditionally — /reopen 400s on a non-'ended' status, which we ignore.
       // Restoring the seed fight keeps the one-live-fight invariant intact for every
       // subsequent serial spec that assumes a single RUNNING encounter.
-      const seedEncounterId = seed().encounterId;
-      await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
-      await dm.post(`/api/v1/encounters/${seedEncounterId}/start`).catch(() => undefined);
+      await restoreSeedEncounter();
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
       await dm.dispose();

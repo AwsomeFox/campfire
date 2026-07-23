@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { APIRequestContext } from '@playwright/test';
-import { CREDS, type SeedData } from '../global-setup';
+import { request, type APIRequestContext } from '@playwright/test';
+import { type SeedData } from '../global-setup';
 
 // __dirname is provided by Playwright's CJS transform — avoid import.meta here.
 const AUTH_DIR = resolve(__dirname, '..', '.auth');
@@ -23,18 +23,13 @@ export const PNG_16_9 = Buffer.from(
 );
 
 /** Reopens and resets the main seeded encounter using captured DM authentication. */
-export async function restoreSeedEncounter(page: { request: APIRequestContext }): Promise<void> {
+export async function restoreSeedEncounter(_page?: { request: APIRequestContext }): Promise<void> {
   try {
     const { encounterId, endedEncounterId, bossId, skirmisherId } = seed();
-    await page.request
-      .post('/api/v1/auth/login', {
-        data: { username: CREDS.dm.username, password: CREDS.dm.password },
-      })
-      .catch(() => undefined);
-    await page.request.post(`/api/v1/encounters/${encounterId}/reopen`).catch(() => undefined);
-    await page.request.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
-    await page.request
-      .patch(`/api/v1/encounters/${encounterId}`, {
+    const dmContext = await request.newContext({ storageState: stateFor('dm') });
+    try {
+      await dmContext.post(`/api/v1/encounters/${encounterId}/reopen`).catch(() => undefined);
+      await dmContext.patch(`/api/v1/encounters/${encounterId}`, {
         data: {
           round: 1,
           turnIndex: 0,
@@ -43,9 +38,12 @@ export async function restoreSeedEncounter(page: { request: APIRequestContext })
             { id: skirmisherId, currentHp: 12, initiative: 7 },
           ],
         },
-      })
-      .catch(() => undefined);
-    await page.request.post(`/api/v1/encounters/${endedEncounterId}/end`).catch(() => undefined);
+      }).catch(() => undefined);
+      await dmContext.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
+      await dmContext.post(`/api/v1/encounters/${endedEncounterId}/end`).catch(() => undefined);
+    } finally {
+      await dmContext.dispose();
+    }
   } catch {
     // Ignore if storageState file is not present yet
   }

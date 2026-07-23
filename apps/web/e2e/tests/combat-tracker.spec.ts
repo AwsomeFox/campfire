@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { MONSTERS } from '../global-setup';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 /**
  * Combat tracker cross-role checks (issue #81):
@@ -24,19 +24,7 @@ function endedEncounterUrl(): string {
 }
 
 async function openEncounter(page: Page) {
-  const encounterId = seed().encounterId;
-  await page.request.post(`/api/v1/encounters/${encounterId}/reopen`);
-  await page.request.post(`/api/v1/encounters/${encounterId}/start`).catch(() => undefined);
-  await page.request.patch(`/api/v1/encounters/${encounterId}`, {
-    data: {
-      round: 1,
-      turnIndex: 0,
-      combatants: [
-        { id: seed().bossId, currentHp: boss.hpMax, initiative: boss.initiative },
-        { id: seed().skirmisherId, currentHp: skirmisher.hpMax, initiative: skirmisher.initiative },
-      ],
-    },
-  }).catch(() => undefined);
+  await restoreSeedEncounter(page);
   await page.goto(encounterUrl());
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
 }

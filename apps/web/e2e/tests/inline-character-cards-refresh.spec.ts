@@ -1,5 +1,5 @@
 import { test, expect, request } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
@@ -80,9 +80,7 @@ test.describe('inline character cards — live sheet refresh', () => {
     } finally {
       if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
-      const seedEncounterId = seed().encounterId;
-      await dm.post(`/api/v1/encounters/${seedEncounterId}/reopen`).catch(() => undefined);
-      await dm.post(`/api/v1/encounters/${seedEncounterId}/start`).catch(() => undefined);
+      await restoreSeedEncounter();
       await playerCtx.dispose();
       await dm.dispose();
     }
