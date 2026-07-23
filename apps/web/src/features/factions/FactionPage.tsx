@@ -290,7 +290,7 @@ export default function FactionPage() {
                         +10
                       </Btn>
                     </div>
-                    <label className="block space-y-1">
+                    <label className="block space-y-1" htmlFor="faction-party-standing">
                       <span className="text-muted">Party standing</span>
                       <select
                         id="faction-party-standing"
