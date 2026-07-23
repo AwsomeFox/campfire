@@ -1506,6 +1506,11 @@ export class EncountersService {
       if (patch.initiative !== undefined) {
         throw new ForbiddenException('Only dm may set initiative');
       }
+      // Combat-log actor attribution is DM-authored (apply-damage UI). A player
+      // patching their own combatant must not spoof who dealt the damage/heal.
+      if (patch.actorId !== undefined) {
+        throw new ForbiddenException('Only dm may set combat log actor');
+      }
       if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
         throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');
       }
