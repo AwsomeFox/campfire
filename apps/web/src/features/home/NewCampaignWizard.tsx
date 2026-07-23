@@ -8,15 +8,23 @@
  * orchestrator-owned; this keeps the flow reachable from the "+ New campaign"
  * tile on the hub without new route wiring.
  */
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { Campaign, RulePack } from '@campfire/schema';
 import { mechanicsForPackSlug } from '../../lib/rules';
 import { useAuth } from '../../app/auth';
 import { adminRulesHref, NEW_CAMPAIGN_SETUP_PATH } from '../../lib/adminNavigation';
+import { useAnnounce } from '../../components/Announcer';
 
 type Step = 'details' | 'system';
+
+const STEP_TITLES: Record<Step, string> = {
+  details: 'Campaign details',
+  system: 'Rule system',
+};
+
+const DEFAULT_DOCUMENT_TITLE = 'Campfire';
 
 export function NewCampaignWizard({
   onClose,
@@ -26,6 +34,7 @@ export function NewCampaignWizard({
   onCreated: (campaign: Campaign) => void | Promise<void>;
 }) {
   const { isAdmin } = useAuth();
+  const announce = useAnnounce();
   const [step, setStep] = useState<Step>('details');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -35,6 +44,9 @@ export function NewCampaignWizard({
 
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [packsError, setPacksError] = useState<string | null>(null);
+
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const prevStepRef = useRef<Step | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -53,6 +65,26 @@ export function NewCampaignWizard({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const stepTitle = STEP_TITLES[step];
+    document.title = `New campaign — ${stepTitle} · ${DEFAULT_DOCUMENT_TITLE}`;
+    return () => {
+      document.title = DEFAULT_DOCUMENT_TITLE;
+    };
+  }, [step]);
+
+  useEffect(() => {
+    const prev = prevStepRef.current;
+    prevStepRef.current = step;
+    const id = window.requestAnimationFrame(() => {
+      stepHeadingRef.current?.focus();
+    });
+    if (prev !== null && prev !== step) {
+      announce(`${STEP_TITLES[step]}.`);
+    }
+    return () => window.cancelAnimationFrame(id);
+  }, [step, announce]);
 
   function goToSystemStep(e: FormEvent) {
     e.preventDefault();
@@ -107,9 +139,12 @@ export function NewCampaignWizard({
       <main
         className="w-full mx-auto flex flex-col gap-4"
         style={{ maxWidth: 560, padding: '28px 20px 48px' }}
+        aria-labelledby="new-campaign-title"
       >
         <div>
-          <h3 style={{ margin: 0 }}>New campaign</h3>
+          <h1 id="new-campaign-title" style={{ margin: 0 }}>
+            New campaign
+          </h1>
           <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
             {step === 'details'
               ? "You'll be the DM. Invite players once it exists."
@@ -118,7 +153,16 @@ export function NewCampaignWizard({
         </div>
 
         {step === 'details' && (
-          <form onSubmit={goToSystemStep} className="flex flex-col gap-4">
+          <form onSubmit={goToSystemStep} className="flex flex-col gap-4" aria-labelledby="new-campaign-step-title">
+            <h2
+              id="new-campaign-step-title"
+              ref={stepHeadingRef}
+              tabIndex={-1}
+              className="focus:outline-none"
+              style={{ margin: 0, fontSize: 'inherit', fontWeight: 600 }}
+            >
+              {STEP_TITLES.details}
+            </h2>
             <div className="card elev-sm">
               <div className="field">
                 <label htmlFor="cname">Name</label>
@@ -128,7 +172,6 @@ export function NewCampaignWizard({
                   placeholder="e.g. The Salt Road"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  autoFocus
                   required
                 />
               </div>
@@ -160,9 +203,17 @@ export function NewCampaignWizard({
         )}
 
         {step === 'system' && (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-4" aria-labelledby="new-campaign-step-title">
+            <h2
+              id="new-campaign-step-title"
+              ref={stepHeadingRef}
+              tabIndex={-1}
+              className="focus:outline-none"
+              style={{ margin: 0, fontSize: 'inherit', fontWeight: 600 }}
+            >
+              {STEP_TITLES.system}
+            </h2>
             <div className="card elev-sm">
-              <span className="card-kicker">Rule system</span>
               {packs === null ? (
                 <p className="text-muted" style={{ fontSize: 13 }}>Loading installed rule systems…</p>
               ) : packs.length === 0 ? (
