@@ -12,6 +12,7 @@ import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
 import { useFormattingLocale } from '../lib/format';
+import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card, TextInput } from '../components/ui';
 import { useDialog } from '../components/useDialog';
@@ -25,14 +26,6 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
-
-function initials(name: string): string {
-  const trimmed = name.trim();
-  if (!trimmed) return '?';
-  const parts = trimmed.split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -310,6 +303,7 @@ function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const clearAnnouncements = useClearAnnouncements();
+  const formattingLocale = useFormattingLocale();
   const params = useParams<{ campaignId: string }>();
   const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
   const campaign = useCampaign(campaignId);
@@ -712,7 +706,7 @@ function LayoutContent() {
                 aria-expanded={menuOpen}
                 aria-label={t('nav.accountMenu')}
               >
-                {initials(displayName)}
+                {initials(displayName, formattingLocale)}
               </button>
               {menuOpen && (
                 <UserMenu

@@ -2,12 +2,7 @@ import { Link } from 'react-router-dom';
 import type { Character } from '@campfire/schema';
 import { EmptyState } from '../../components/ui';
 import { StatusTag } from '../characters/status';
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
+import { initials } from '../../lib/avatarText';
 
 export function PartyCard({ campaignId, characters }: { campaignId: number; characters: Character[] }) {
   return (
