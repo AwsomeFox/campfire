@@ -326,12 +326,14 @@ export default function FactionPage() {
               <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} placeholder="guild, cult, government…" />
             </div>
             <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Standing</label>
+              <label htmlFor="faction-standing" className="text-[10px] text-slate-500 font-bold uppercase">
+                Standing
+              </label>
               <select
+                id="faction-standing"
                 className="cf-select"
                 value={form.standing}
                 onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
-                aria-label="Standing"
               >
                 {standingOptions.map(({ value, label }) => (
                   <option key={value} value={value}>

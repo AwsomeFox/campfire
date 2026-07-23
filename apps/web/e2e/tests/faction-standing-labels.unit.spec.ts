@@ -32,8 +32,10 @@ const EXPECTED_VARIANTS = {
 
 test.describe('faction standing labels (#753)', () => {
   test('shared map covers every standing enum with a humanized label', () => {
-    expect(Object.keys(FACTION_STANDING_LABEL)).toEqual([...FACTION_STANDINGS]);
+    // Iterate the schema tuple — don't rely on object key enumeration order.
+    expect(Object.keys(FACTION_STANDING_LABEL)).toHaveLength(FACTION_STANDINGS.length);
     for (const standing of FACTION_STANDINGS) {
+      expect(FACTION_STANDING_LABEL).toHaveProperty(standing);
       expect(FACTION_STANDING_LABEL[standing]).toBeTruthy();
       expect(FACTION_STANDING_LABEL[standing]).not.toBe(standing);
     }
