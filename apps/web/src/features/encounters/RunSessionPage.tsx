@@ -627,7 +627,17 @@ export default function RunSessionPage() {
     combatLogAnnouncementRef.current = { encounterId: eid, cursor: advanced.cursor };
 
     const message = formatCombatLogAnnouncementBatch(advanced.appendedEvents);
-    if (message) announce(message);
+    if (message) {
+      // ID-based cursor already skips known events; dedupeKey is a belt-and-braces
+      // guard if the same append batch is announced twice after a reconnect race.
+      // Compact: count + first/last id (not a joined list of every event id).
+      const appended = advanced.appendedEvents;
+      const firstId = appended[0]!.id;
+      const lastId = appended[appended.length - 1]!.id;
+      announce(message, {
+        dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
+      });
+    }
   }, [eid, eventsQuery.data, announce]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that

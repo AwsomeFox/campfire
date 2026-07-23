@@ -3,7 +3,12 @@ import sharp from 'sharp';
 import type { FogRect } from '@campfire/schema';
 
 export const FOG_BACKGROUND = { r: 11, g: 17, b: 32, alpha: 1 } as const;
-export const FOG_MAP_MAX_INPUT_PIXELS = 40_000_000;
+/**
+ * Align with practical VTT upload dimensions (≈4096²). Decoding to RGBA at the old
+ * 40MP ceiling could allocate hundreds of MB per request once sharp's internal
+ * buffers are included; fail closed above this bound instead.
+ */
+export const FOG_MAP_MAX_INPUT_PIXELS = 16_777_216;
 export const FOG_MAP_THUMB_MAX_DIM = 512;
 
 export interface FogMapRenderResult {
@@ -47,10 +52,20 @@ function mergedIntervals(rects: PixelRect[], y: number): Array<[number, number]>
   return merged;
 }
 
+/** Fill one RGBA row segment with opaque fog colour (mutates `data` in place). */
+function fillFog(data: Buffer, start: number, end: number): void {
+  for (let offset = start; offset < end; offset += 4) {
+    data[offset] = FOG_BACKGROUND.r;
+    data[offset + 1] = FOG_BACKGROUND.g;
+    data[offset + 2] = FOG_BACKGROUND.b;
+    data[offset + 3] = 255;
+  }
+}
+
 /**
- * Rasterize a source map and copy only explicitly revealed pixels onto an opaque
- * dark canvas. Hidden output pixels contain the fog colour itself, not transparent
- * source RGB that could be recovered by changing alpha in an image editor.
+ * Rasterize a source map and keep only explicitly revealed pixels. Hidden pixels are
+ * overwritten in place with opaque fog colour so peak memory stays at one RGBA buffer
+ * (plus sharp's encode scratch), not a second full-size canvas.
  *
  * Sharp gives one safe decoder for every map format Campfire stores (PNG, JPEG,
  * WebP, and server-generated SVG). The result is always an opaque PNG so lossy
@@ -80,28 +95,27 @@ export async function renderFogSafeMap(
   if (channels !== 4 || width <= 0 || height <= 0) {
     throw new Error('Map decoder did not produce RGBA pixels');
   }
-
-  const safe = Buffer.alloc(decoded.data.length);
-  for (let offset = 0; offset < safe.length; offset += 4) {
-    safe[offset] = FOG_BACKGROUND.r;
-    safe[offset + 1] = FOG_BACKGROUND.g;
-    safe[offset + 2] = FOG_BACKGROUND.b;
-    safe[offset + 3] = 255;
+  if (width * height > FOG_MAP_MAX_INPUT_PIXELS) {
+    throw new Error(`Map exceeds fog render pixel budget (${width}x${height})`);
   }
 
   const pixelRects = revealed
     .map((rect) => toPixelRect(rect, width, height))
     .filter((rect): rect is PixelRect => rect !== null);
   const stride = width * channels;
+  const pixels = decoded.data;
   for (let y = 0; y < height; y++) {
-    for (const [x0, x1] of mergedIntervals(pixelRects, y)) {
-      const start = y * stride + x0 * channels;
-      const end = y * stride + x1 * channels;
-      decoded.data.copy(safe, start, start, end);
+    const rowStart = y * stride;
+    const reveals = mergedIntervals(pixelRects, y);
+    let cursor = 0;
+    for (const [x0, x1] of reveals) {
+      if (x0 > cursor) fillFog(pixels, rowStart + cursor * channels, rowStart + x0 * channels);
+      cursor = Math.max(cursor, x1);
     }
+    if (cursor < width) fillFog(pixels, rowStart + cursor * channels, rowStart + width * channels);
   }
 
-  const bytes = await sharp(safe, { raw: { width, height, channels: 4 } })
+  const bytes = await sharp(pixels, { raw: { width, height, channels: 4 } })
     .png({ compressionLevel: 9, adaptiveFiltering: true })
     .toBuffer();
   const etag = `"${crypto.createHash('sha256').update(bytes).digest('hex')}"`;

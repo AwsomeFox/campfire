@@ -10,7 +10,7 @@ import {
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { and, desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
@@ -26,6 +26,7 @@ import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { persistedFogConcealsPixels } from '../../common/fog';
 import { generatePngThumbnail } from './thumbnail';
+import { sanitizeAttachmentFilename } from './filename';
 
 /** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
 export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
@@ -255,16 +256,62 @@ export class AttachmentsService {
 
   /** Set of raw attachments currently protected by at least one fogged encounter. */
   async fogProtectedMapIdsForCampaign(campaignId: number): Promise<Set<number>> {
+    // persistedFogConcealsPixels is always false when fog/mapAttachmentId is null, so
+    // push those predicates into SQL and skip loading map-less / fog-less encounters.
     const rows = await this.db
       .select({ mapAttachmentId: encounters.mapAttachmentId, fog: encounters.fog })
       .from(encounters)
-      .where(eq(encounters.campaignId, campaignId));
+      .where(
+        and(
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.mapAttachmentId),
+          isNotNull(encounters.fog),
+        ),
+      );
     const ids = new Set<number>();
     for (const row of rows) {
       if (row.mapAttachmentId == null) continue;
       if (persistedFogConcealsPixels(row.fog)) ids.add(row.mapAttachmentId);
     }
     return ids;
+  }
+
+  /**
+   * Byte-copy an attachment into a new row in the same campaign (issue #463).
+   * Used when fog-protecting a battle map that is also the shared campaign region
+   * map — the encounter retargets to the clone so the region map stays player-visible.
+   */
+  async duplicate(
+    id: number,
+    user: RequestUser,
+    role: Role,
+    opts?: { filenamePrefix?: string },
+  ): Promise<Attachment> {
+    const row = await this.getRowOrThrow(id);
+    const bytes = this.readBytesIfPresent(row);
+    if (!bytes) throw new NotFoundException(`Attachment ${id} file is missing`);
+    const prefix = opts?.filenamePrefix ?? '';
+    if (row.mime === 'image/svg+xml') {
+      return this.createGenerated(
+        row.campaignId,
+        row.kind as AttachmentKind,
+        { filename: `${prefix}${row.filename}`, mime: row.mime, bytes },
+        user,
+        role,
+      );
+    }
+    return this.create(
+      row.campaignId,
+      row.kind as AttachmentKind,
+      {
+        originalname: `${prefix}${row.filename}`,
+        mimetype: row.mime,
+        size: bytes.length,
+        buffer: bytes,
+      },
+      user,
+      role,
+    );
   }
 
   /**
@@ -344,7 +391,9 @@ export class AttachmentsService {
         campaignId,
         uploaderUserId: user.id,
         kind,
-        filename: file.originalname.slice(0, 255),
+        // Issue #630: grapheme-safe truncation + path/control scrubbing (not
+        // bare String#slice, which can bisect a surrogate pair).
+        filename: sanitizeAttachmentFilename(file.originalname),
         mime: file.mimetype,
         size: file.size,
         hidden: defaultHiddenForKind(kind),
@@ -394,7 +443,7 @@ export class AttachmentsService {
         campaignId,
         uploaderUserId: user.id,
         kind,
-        filename: file.filename.slice(0, 255),
+        filename: sanitizeAttachmentFilename(file.filename),
         mime: file.mime,
         size: file.bytes.length,
         hidden: defaultHiddenForKind(kind),
@@ -748,6 +797,8 @@ export class AttachmentsService {
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const filePath = path.join(dirPath, entry.name);
+        // Default 0 for definite assignment; catch continues so the value is unused
+        // on the failure path (skip rather than misclassify as a 0-byte orphan).
         let size = 0;
         try {
           size = fs.statSync(filePath).size;

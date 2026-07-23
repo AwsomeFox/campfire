@@ -313,6 +313,17 @@ export class EncountersService {
   }
 
   /**
+   * Lightweight encounter domain mapping for GET /encounters/:id/map.
+   * Applies the same hidden-entity gate as getWithCombatantsOrThrow without joining combatants.
+   */
+  encounterForMapOrThrow(row: typeof encounters.$inferSelect, viewerRole: Role): Encounter {
+    if (!isVisibleTo({ hidden: row.hidden }, viewerRole)) {
+      throw new NotFoundException(`Encounter ${row.id} not found`);
+    }
+    return encounterToDomain(row);
+  }
+
+  /**
    * Resolve the RuleSystemAdapter for a campaign (issue #70) — the seam the combat math
    * (ability modifiers, DEX-derived initiative, the initiative die, monster statblock
    * fields) routes through instead of inlining 5e constants. Reads `campaigns.ruleSystem`
@@ -850,11 +861,35 @@ export class EncountersService {
     // a handout, restage the raw attachment immediately. The raw-file route also
     // checks fog dynamically (defense in depth), so even a failure here cannot leak
     // source pixels; this keeps the attachment metadata/UI consistent as well.
-    const effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
+    let effectiveMapId = input.mapAttachmentId !== undefined ? input.mapAttachmentId : encounterRow.mapAttachmentId;
     const effectiveFog = input.fog !== undefined ? input.fog : parseFog(encounterRow.fog);
     if (effectiveMapId != null && fogConcealsPixels(effectiveFog)) {
+      // Reusing the campaign region-map attachment as a fogged battle map would
+      // block players from GET /attachments/:id/file (RegionMap has no fog-safe
+      // alternate). Clone the bytes onto a dedicated battle-map row and retarget
+      // this encounter so the shared campaign background stays player-visible.
+      const [campaign] = await this.db
+        .select({ mapAttachmentId: campaigns.mapAttachmentId })
+        .from(campaigns)
+        .where(eq(campaigns.id, encounterRow.campaignId))
+        .limit(1);
+      if (campaign?.mapAttachmentId === effectiveMapId) {
+        const clone = await this.attachmentsService.duplicate(effectiveMapId, user, role, {
+          filenamePrefix: 'battle-',
+        });
+        await this.db
+          .update(encounters)
+          .set({ mapAttachmentId: clone.id, updatedAt: nowIso() })
+          .where(eq(encounters.id, encounterId));
+        effectiveMapId = clone.id;
+      }
+
       const attachment = await this.attachmentsService.getRowOrThrow(effectiveMapId);
-      if (!attachment.hidden) await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
+      // Only hide attachments that belong to this encounter's campaign — never
+      // side-effect another campaign's row if a stale/cross-campaign id slipped through.
+      if (attachment.campaignId === encounterRow.campaignId && !attachment.hidden) {
+        await this.attachmentsService.setHidden(effectiveMapId, true, user, role);
+      }
     }
 
     await this.audit.log({
@@ -1384,7 +1419,10 @@ export class EncountersService {
         if (hp !== null) hpMax = hp;
       }
       if (input.initMod === undefined) {
-        initMod = adapter.initiativeModifier(adapter.mapStatblock(data).abilityScores);
+        // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
+        // attributes) are not score-converted a second time (issue #767).
+        const mapped = adapter.mapStatblock(data);
+        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
       }
     }
 
@@ -1526,6 +1564,11 @@ export class EncountersService {
       // able to rename a combatant or rewrite its hpMax/initMod, only adjust HP.
       if (patch.initiative !== undefined) {
         throw new ForbiddenException('Only dm may set initiative');
+      }
+      // Combat-log actor attribution is DM-authored (apply-damage UI). A player
+      // patching their own combatant must not spoof who dealt the damage/heal.
+      if (patch.actorId !== undefined) {
+        throw new ForbiddenException('Only dm may set combat log actor');
       }
       if (patch.name !== undefined || patch.hpMax !== undefined || patch.initMod !== undefined || patch.tokenSize !== undefined) {
         throw new ForbiddenException('Only dm may edit a combatant’s name, hpMax, initMod, or tokenSize');

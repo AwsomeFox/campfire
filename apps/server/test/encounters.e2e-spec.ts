@@ -2146,18 +2146,17 @@ describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () 
   let campaignId: number;
   let encounterId: number;
   let heroCombatantId: number; // character, owned by p-1
-  let heroCharacterId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'HP Model' })).body.id;
-    heroCharacterId = (
-      await request(server)
-        .post(`/api/v1/campaigns/${campaignId}/characters`)
-        .set(dm)
-        .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
-    ).body.id;
+    // Auto-add (issue #115) picks this character up as a combatant once the
+    // encounter below is created — we only need the combatant id, not this id.
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
     const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril' });
     encounterId = encRes.body.id;
     heroCombatantId = encRes.body.combatants[0].id;

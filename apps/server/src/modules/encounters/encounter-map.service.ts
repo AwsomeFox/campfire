@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-import { Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import type { Encounter, Role } from '@campfire/schema';
+import { Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import type { Encounter, FogRect, Role } from '@campfire/schema';
 import { fogConcealsPixels } from '../../common/fog';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { renderFogSafeMap } from './fog-map.renderer';
@@ -21,6 +21,16 @@ const MAX_CACHE_ENTRIES = 32;
 const MAX_CACHE_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Stable cache key for a reveal mask: order-insensitive so identical rectangles in a
+ * different array order reuse the same rendered bytes.
+ */
+export function normalizeRevealedForCache(revealed: FogRect[]): FogRect[] {
+  return [...revealed].sort(
+    (a, b) => a.x - b.x || a.y - b.y || a.w - b.w || a.h - b.h,
+  );
+}
+
+/**
  * Produces the role-specific bytes behind GET /encounters/:id/map.
  *
  * The source attachment remains DM-only while fog conceals pixels. Non-DMs get
@@ -30,6 +40,7 @@ const MAX_CACHE_BYTES = 64 * 1024 * 1024;
  */
 @Injectable()
 export class EncounterMapService {
+  private readonly logger = new Logger(EncounterMapService.name);
   private readonly cache = new Map<string, CachedMapView>();
   private readonly pending = new Map<string, Promise<CachedMapView>>();
   private cacheBytes = 0;
@@ -80,7 +91,8 @@ export class EncounterMapService {
     // not re-read and hash a multi-MB source. The source itself is read only when a
     // role/fog revision is not already in the render LRU.
     const original = this.attachments.resolveFile(row, 'original');
-    const key = `${original.etag}:${variant}:${JSON.stringify(revealedForRender)}`;
+    const normalizedRevealed = normalizeRevealedForCache(revealedForRender);
+    const key = `${original.etag}:${variant}:${JSON.stringify(normalizedRevealed)}`;
     const cached = this.cache.get(key);
     if (cached) {
       this.cache.delete(key);
@@ -91,13 +103,17 @@ export class EncounterMapService {
     const inFlight = this.pending.get(key);
     if (inFlight) return inFlight;
 
-    let source: Buffer;
-    try {
-      source = await fs.promises.readFile(original.path);
-    } catch {
-      throw new NotFoundException(`Encounter ${encounter.id} battle map file is missing`);
-    }
-    const render = this.renderProtected(key, source, revealedForRender, variant, row.filename);
+    // Cover the whole read+render pipeline so concurrent callers share one disk
+    // read and one sharp pass instead of bursting on a cache miss.
+    const render = this.loadAndRenderProtected(
+      key,
+      original.path,
+      normalizedRevealed,
+      variant,
+      row.filename,
+      encounter.id,
+      encounter.mapAttachmentId,
+    );
     this.pending.set(key, render);
     try {
       return await render;
@@ -106,12 +122,32 @@ export class EncounterMapService {
     }
   }
 
+  private async loadAndRenderProtected(
+    key: string,
+    sourcePath: string,
+    revealed: FogRect[],
+    variant: 'original' | 'thumb',
+    filename: string,
+    encounterId: number,
+    mapAttachmentId: number,
+  ): Promise<CachedMapView> {
+    let source: Buffer;
+    try {
+      source = await fs.promises.readFile(sourcePath);
+    } catch {
+      throw new NotFoundException(`Encounter ${encounterId} battle map file is missing`);
+    }
+    return this.renderProtected(key, source, revealed, variant, filename, encounterId, mapAttachmentId);
+  }
+
   private async renderProtected(
     key: string,
     source: Buffer,
-    revealed: NonNullable<Encounter['fog']>['revealed'],
+    revealed: FogRect[],
     variant: 'original' | 'thumb',
     filename: string,
+    encounterId: number,
+    mapAttachmentId: number,
   ): Promise<CachedMapView> {
     try {
       const rendered = await renderFogSafeMap(source, revealed, variant);
@@ -125,9 +161,14 @@ export class EncounterMapService {
       };
       this.remember(result);
       return result;
-    } catch {
+    } catch (err) {
       // Security boundary: decoding/rendering failure must never fall back to the
       // original attachment, which would disclose every hidden pixel.
+      this.logger.warn(
+        `Fog-safe map render failed for encounter=${encounterId} mapAttachmentId=${mapAttachmentId} variant=${variant}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
       throw new UnprocessableEntityException('Battle map cannot be safely rendered for fog-of-war');
     }
   }

@@ -282,6 +282,59 @@ describe('attachments (e2e)', () => {
       expect(Buffer.compare(res.body, TINY_PNG)).toBe(0);
     });
 
+    // Issue #630: Content-Disposition must keep an ASCII filename= fallback and
+    // put Unicode in RFC 5987 filename* — never percent-encode into filename=.
+    describe('Content-Disposition filename encoding (issue #630)', () => {
+      async function uploadAndGetDisposition(filename: string): Promise<{
+        stored: string;
+        disposition: string;
+      }> {
+        const server = ctx.app.getHttpServer();
+        const up = await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/attachments`)
+          .set(dm)
+          .field('kind', 'image')
+          .attach('file', TINY_PNG, { filename, contentType: 'image/png' });
+        expect(up.status).toBe(201);
+        const get = await request(server).get(`/api/v1/attachments/${up.body.id}/file`).set(dm);
+        expect(get.status).toBe(200);
+        return { stored: up.body.filename, disposition: String(get.headers['content-disposition']) };
+      }
+
+      it('ASCII names use a plain quoted filename=', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('me.png');
+        expect(stored).toBe('me.png');
+        expect(disposition).toBe('inline; filename="me.png"');
+        expect(disposition).not.toContain('filename*');
+      });
+
+      it('quoted names escape quotes in filename=', async () => {
+        const { disposition } = await uploadAndGetDisposition('photo "quote".png');
+        expect(disposition).toBe('inline; filename="photo \\"quote\\".png"');
+      });
+
+      it('commas stay inside the quoted filename=', async () => {
+        const { disposition } = await uploadAndGetDisposition('a,b.png');
+        expect(disposition).toBe('inline; filename="a,b.png"');
+      });
+
+      it('Unicode names get ASCII fallback + UTF-8 filename*', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('файл.png');
+        expect(stored).toBe('файл.png');
+        expect(disposition).toContain('filename="____.png"');
+        expect(disposition).toContain("filename*=UTF-8''%D1%84%D0%B0%D0%B9%D0%BB.png");
+        expect(disposition).not.toMatch(/filename="%/);
+      });
+
+      it('CJK / emoji names round-trip via filename*', async () => {
+        const { stored, disposition } = await uploadAndGetDisposition('地図🎉.png');
+        expect(stored).toBe('地図🎉.png');
+        expect(disposition).toMatch(/^inline; filename="/);
+        expect(disposition).toContain("filename*=UTF-8''");
+        expect(disposition).toContain(encodeURIComponent('地図🎉.png'));
+      });
+    });
+
     it('GET on a nonexistent attachment id is 404', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/attachments/999999/file`).set(viewer);
@@ -1002,7 +1055,14 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(thumb.headers['x-campfire-map-view']).toBe('fog-protected');
       const ranged = await playerAgent.get(`/api/v1/encounters/${encounterId}/map`).set('Range', 'bytes=0-31');
       expect(ranged.status).toBe(416);
-      expect(ranged.body).toEqual({});
+      // Controller ends the 416 with an empty body (no JSON payload).
+      const empty =
+        Buffer.isBuffer(ranged.body)
+          ? ranged.body.length === 0
+          : ranged.body == null ||
+            ranged.body === '' ||
+            (typeof ranged.body === 'object' && !Array.isArray(ranged.body) && Object.keys(ranged.body).length === 0);
+      expect(empty).toBe(true);
     });
 
     it('a fog revision cannot reuse a stale validator or cached pixel set', async () => {
@@ -1180,6 +1240,39 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       const dmStalker = dmView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
       expect(dmStalker.tokenX).toBe(25);
       expect(dmStalker.tokenY).toBe(40);
+    });
+
+    it('fogging the campaign region map clones a battle-map attachment so players keep the background', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'region-and-battle.png', contentType: 'image/png' });
+      const sharedId = upload.body.id as number;
+
+      const asCampaign = await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId: sharedId });
+      expect(asCampaign.status).toBe(200);
+      expect(asCampaign.body.mapAttachmentId).toBe(sharedId);
+      expect((await playerAgent.get(`/api/v1/attachments/${sharedId}/file`)).status).toBe(200);
+
+      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fog on Region Map' });
+      const encId = enc.body.id as number;
+      const fogged = await dmAgent.patch(`/api/v1/encounters/${encId}`).send({
+        mapAttachmentId: sharedId,
+        fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 25, h: 100 }] },
+      });
+      expect(fogged.status).toBe(200);
+      // Encounter retargets to a dedicated clone; campaign keeps the original.
+      expect(fogged.body.mapAttachmentId).not.toBe(sharedId);
+      const campaign = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
+      expect(campaign.body.mapAttachmentId).toBe(sharedId);
+      expect((await playerAgent.get(`/api/v1/attachments/${sharedId}/file`)).status).toBe(200);
+      expect((await playerAgent.get(`/api/v1/attachments/${fogged.body.mapAttachmentId}/file`)).status).toBe(404);
+
+      // Wiring the fogged battle-map clone back as the region map is rejected.
+      const reuse = await dmAgent
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .send({ mapAttachmentId: fogged.body.mapAttachmentId });
+      expect(reuse.status).toBe(409);
     });
 
     it('a sibling encounter reusing the map with fog off cannot leak the full source', async () => {

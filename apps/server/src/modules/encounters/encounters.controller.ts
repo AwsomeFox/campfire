@@ -4,6 +4,7 @@ import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
 import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
@@ -155,7 +156,6 @@ export class EncountersController {
     }
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
-    const encounter = await this.encounters.getWithCombatantsOrThrow(id, role);
 
     // A range response would add a second cache/validator path and is unnecessary
     // for <=8MB image uploads. Reject it explicitly after authorization instead of
@@ -164,6 +164,9 @@ export class EncountersController {
       res.status(416).set({ 'Accept-Ranges': 'none', 'Cache-Control': 'private, no-store' }).end();
       return;
     }
+
+    // Map bytes only need the encounter row (map/fog/visibility) — skip the combatant join.
+    const encounter = this.encounters.encounterForMapOrThrow(row, role);
 
     // Ordinary encounter JSON tolerates malformed legacy fog data, but map pixels
     // must fail closed: a non-null invalid value renders an all-concealed view.
@@ -179,7 +182,9 @@ export class EncountersController {
       .set({
         'Content-Type': view.mime,
         'Content-Length': String(view.bytes.length),
-        'Content-Disposition': `inline; filename="${encodeURIComponent(view.filename)}"`,
+        // Issue #630: ASCII fallback + RFC 5987 filename* (not percent-encoding
+        // the Unicode name into the legacy filename= slot).
+        'Content-Disposition': contentDispositionHeader(view.filename, 'inline'),
         ETag: view.etag,
         'Cache-Control': 'private, no-store, max-age=0',
         Pragma: 'no-cache',

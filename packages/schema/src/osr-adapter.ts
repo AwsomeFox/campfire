@@ -1,4 +1,4 @@
-import type { MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
 
 // ---------- OSR (Old-School Renaissance) rule-system adapter (issues #70, #300) ----------
 // A single shared adapter for the B/X-descended retroclone family: Basic Fantasy RPG
@@ -179,9 +179,14 @@ export const OsrAdapter: RuleSystemAdapter = {
   // rather than picking one clone's number, so a retroclone campaign isn't artificially held to
   // the 5e ceiling (issue #535). The per-class progression table remains the real gate.
   maxLevel: Infinity,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = osrDexScore(abilities);
-    return dex === null ? 0 : osrAbilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — no runtime import from ./index (cycle).
+    return representation === 'score' ? osrAbilityModifier(dex) : Math.trunc(dex);
   },
   conditions: OSR_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -197,6 +202,7 @@ export const OsrAdapter: RuleSystemAdapter = {
       hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
       speed: d.movement ?? d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.abilities,
       actions: d.actions ?? d.attacks,
     };
