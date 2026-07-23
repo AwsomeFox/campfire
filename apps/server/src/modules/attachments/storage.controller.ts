@@ -28,7 +28,7 @@ export class StorageController {
   @ApiOperation({
     summary: 'Storage usage snapshot',
     description:
-      'Server-admin only. Total upload bytes (from attachment metadata), a per-campaign breakdown with quotas + over-quota flags, the actual on-disk byte total, and an orphan summary (rows-without-file, files-without-row).',
+      'Server-admin only. Committed/public bytes and in-flight quota reservations, a per-campaign breakdown with quotas + over-quota flags, the actual on-disk byte total, and an orphan summary (rows-without-file, files-without-row).',
   })
   @ApiResponse({ status: 200, description: 'Current storage stats.' })
   stats() {

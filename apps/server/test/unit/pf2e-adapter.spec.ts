@@ -183,20 +183,37 @@ describe('Pf2eAdapter — condition vocabulary', () => {
 });
 
 describe('Pf2eAdapter — initiative (Perception, not DEX)', () => {
-  it('uses a flat monster Perception modifier as the initiative bonus', () => {
+  it('uses a flat monster Perception modifier as the initiative bonus (level-inclusive)', () => {
+    // Stored Perception already includes the creature's level; do not add proficiency again.
     expect(Pf2eAdapter.initiativeModifier({ perception: 27, dexterity: 4 })).toBe(27);
+    expect(Pf2eAdapter.initiativeModifier({ perception: 27 }, 'modifier', 14)).toBe(27);
   });
 
-  it('derives from WIS for a character ability-score sheet (Perception is Wisdom-based)', () => {
+  it('derives from WIS alone when level is unknown (incomplete call)', () => {
     // WIS 16 -> +3; DEX is deliberately ignored (that would be the 5e rule).
+    // Without level the proficiency term cannot be computed — callers that have a
+    // character sheet must pass level (see the level-5 case below / issue #491).
     expect(Pf2eAdapter.initiativeModifier({ WIS: 16, DEX: 20 })).toBe(3);
     expect(Pf2eAdapter.initiativeModifier({ wisdom: 14 })).toBe(2);
     expect(Pf2eAdapter.initiativeModifier({ WIS: 16 }, 'score')).toBe(3);
   });
 
-  it('uses a creature WIS modifier as-is when representation is modifier (no double conversion)', () => {
+  it('adds trained Perception proficiency (level + 2) for a character-sheet WIS fallback (#491)', () => {
+    // By-hand PF2e: level-5, WIS 16 → ability +3 + trained proficiency (5+2) = +10.
+    // Initiative roll is d20 + that modifier (initiativeDie stays 20).
+    expect(Pf2eAdapter.initiativeModifier({ WIS: 16, DEX: 20 }, 'score', 5)).toBe(10);
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: 14 }, 'score', 5)).toBe(9); // +2 + 7
+    expect(Pf2eAdapter.initiativeModifier({ WIS: 10 }, 'score', 1)).toBe(3); // +0 + (1+2)
+    // Matches pf2eProficiencyBonus(level, 'trained') composition.
+    expect(Pf2eAdapter.initiativeModifier({ WIS: 16 }, 'score', 5)).toBe(
+      Pf2eAdapter.abilityModifier(16) + Pf2eAdapter.proficiencyBonus(5, 'trained'),
+    );
+  });
+
+  it('does not add proficiency on the creature modifier path even when level is passed', () => {
     // wisdom: 5 is a PF2e creature mod (+5), not a score of 5 (which would become -3).
     expect(Pf2eAdapter.initiativeModifier({ wisdom: 5 }, 'modifier')).toBe(5);
+    expect(Pf2eAdapter.initiativeModifier({ wisdom: 5 }, 'modifier', 14)).toBe(5);
     expect(Pf2eAdapter.initiativeModifier({ wisdom: 0 }, 'modifier')).toBe(0);
     expect(Pf2eAdapter.initiativeModifier({ wisdom: -1 }, 'modifier')).toBe(-1);
     expect(Pf2eAdapter.initiativeModifier({ wisdom: 12 }, 'modifier')).toBe(12);
@@ -204,6 +221,7 @@ describe('Pf2eAdapter — initiative (Perception, not DEX)', () => {
 
   it('returns 0 when no Perception/WIS is present', () => {
     expect(Pf2eAdapter.initiativeModifier({ STR: 18 })).toBe(0);
+    expect(Pf2eAdapter.initiativeModifier({ STR: 18 }, 'score', 5)).toBe(0);
     expect(Pf2eAdapter.initiativeModifier(null)).toBe(0);
     expect(Pf2eAdapter.initiativeModifier(undefined)).toBe(0);
   });

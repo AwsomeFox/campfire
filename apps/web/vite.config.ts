@@ -3,6 +3,18 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
 import { version as pkgVersion } from "./package.json";
+import {
+  API_CACHE_MAX_AGE_SECONDS,
+  API_IMAGE_CACHE_NAME,
+  API_IMAGE_MAX_ENTRIES,
+  API_JSON_CACHE_NAME,
+  API_JSON_MAX_ENTRIES,
+  cacheWillUpdateImage,
+  cacheWillUpdateJson,
+  matchApiImageCache,
+  matchApiJsonCache,
+  matchNetworkOnlyApi,
+} from "./src/lib/pwaCachePolicy";
 
 export default defineConfig({
   // Single-source the app version from package.json so signed-out surfaces
@@ -55,8 +67,33 @@ export default defineConfig({
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
-            // Read-only GETs (e.g. campaign summary) stay available offline by
-            // serving the last successful response from cache — but ONLY as a
+            // Issue #879: SSE streams, backups, exports, admin/credential
+            // surfaces, and unbounded attachment downloads must never enter
+            // Cache Storage. NetworkOnly means Workbox does not clone/consume
+            // the body for a cache write (critical for never-ending event
+            // streams). Matchers live in lib/pwaCachePolicy.ts and are embedded
+            // into sw.js via Function.prototype.toString().
+            urlPattern: matchNetworkOnlyApi,
+            handler: "NetworkOnly",
+          },
+          {
+            // Bounded attachment thumbnails — separate quota from JSON so a
+            // burst of thumbs cannot evict campaign list/summary responses.
+            urlPattern: matchApiImageCache,
+            handler: "NetworkFirst",
+            options: {
+              cacheName: API_IMAGE_CACHE_NAME,
+              expiration: {
+                maxEntries: API_IMAGE_MAX_ENTRIES,
+                maxAgeSeconds: API_CACHE_MAX_AGE_SECONDS,
+              },
+              cacheableResponse: { statuses: [0, 200] },
+              plugins: [{ cacheWillUpdate: cacheWillUpdateImage }],
+            },
+          },
+          {
+            // Read-only JSON GETs (e.g. campaign summary) stay available offline
+            // by serving the last successful response from cache — but ONLY as a
             // fallback. NetworkFirst here means: whenever the network can be
             // reached the live response wins and the render reflects the API;
             // the cache is consulted solely when the fetch genuinely fails
@@ -65,38 +102,29 @@ export default defineConfig({
             // right after a login/seed) fall back to a stale cached body and
             // render it as truth for a full page view (issue #268). Waiting for
             // the real response is the correct trade — fresh data over fast-but-wrong.
-            // The `campfire-api` bucket is global across sign-ins, so it is
-            // purged at every auth-identity change (see lib/swCache.ts) to keep
-            // one account's data from ever bleeding into another's.
             //
-            // PROVEN-LIVE EXCLUSION (issue #579): `/me` and `/auth/*` are the
-            // identity channel and MUST NOT be served from this cache. The
-            // browser's `navigator.onLine` only reflects the network interface,
-            // not whether a response actually reached the server — so when the
-            // router is up but Campfire is down, NetworkFirst would silently
-            // fall back to a cached `/me` and AuthProvider would mistake that
-            // stale identity for a live one, wiping the offline cache. By keeping
-            // `/me` out of the SW cache entirely, a successful `/me` is
-            // guaranteed to be proven-live (and a failure is a real failure).
-            // The last-known identity is persisted separately by lib/swCache.ts
-            // so an offline reload can still render the authed UI, clearly marked
-            // as stale, without ever confusing a cached body with a live one.
-            urlPattern: ({ url, request }) => {
-              if (request.method !== "GET") return false;
-              if (!url.pathname.startsWith("/api/")) return false;
-              if (
-                url.pathname === "/api/v1/me"
-                || url.pathname.startsWith("/api/v1/auth/")
-              ) {
-                return false;
-              }
-              return true;
-            },
+            // The JSON bucket is global across sign-ins, so it is purged at every
+            // auth-identity change (see lib/swCache.ts) to keep one account's
+            // data from ever bleeding into another's.
+            //
+            // PROVEN-LIVE EXCLUSION (issue #579): `/me` and `/auth/*` are matched
+            // by the NetworkOnly rule above. cacheWillUpdateJson additionally
+            // rejects text/event-stream, Content-Disposition: attachment, and
+            // bodies over API_JSON_MAX_BYTES so a mis-routed download can never
+            // poison the offline JSON set (issue #879). Attachment bytes and
+            // role/fog-specific VTT map renders stay out of this matcher too
+            // (secrecy leak #463 — a previously revealed map must not be served
+            // offline after the DM re-hides it).
+            urlPattern: matchApiJsonCache,
             handler: "NetworkFirst",
             options: {
-              cacheName: "campfire-api",
-              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheName: API_JSON_CACHE_NAME,
+              expiration: {
+                maxEntries: API_JSON_MAX_ENTRIES,
+                maxAgeSeconds: API_CACHE_MAX_AGE_SECONDS,
+              },
               cacheableResponse: { statuses: [0, 200] },
+              plugins: [{ cacheWillUpdate: cacheWillUpdateJson }],
             },
           },
           {

@@ -252,6 +252,62 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     conn.close();
   });
 
+  it('issue #421: sheet edits emit character.updated (no encounterId) and mirror HP into a running fight', async () => {
+    const server = ctx.app.getHttpServer();
+    const conn = await openStream(campaignId, player);
+
+    const characterId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, stats: { STR: 10 }, ownerUserId: 'dev:p-1' })
+    ).body.id as number;
+
+    const createdTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId,
+    );
+    expect(createdTick.campaignId).toBe(campaignId);
+    expect(createdTick.userId).toBe('dev:dm-1');
+    expect(createdTick).not.toHaveProperty('encounterId');
+
+    const encRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Sheet sync fight' });
+    expect(encRes.status).toBe(201);
+    const encounterId = encRes.body.id as number;
+    const combatant = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(
+      (c) => c.characterId === characterId,
+    );
+    expect(combatant).toBeTruthy();
+
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm)).status).toBe(201);
+    expect((await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm)).status).toBe(201);
+
+    const seen = conn.events.length;
+    const patch = await request(server)
+      .patch(`/api/v1/characters/${characterId}`)
+      .set(dm)
+      .send({ stats: { STR: 18 }, hpCurrent: 12 });
+    expect(patch.status).toBe(200);
+    expect(patch.body.stats.STR).toBe(18);
+
+    const sheetTick = await conn.waitFor(
+      (e) => e.type === 'character.updated' && e.characterId === characterId && conn.events.indexOf(e) >= seen,
+    );
+    expect(sheetTick.userId).toBe('dev:dm-1');
+    // Running encounter also gets an encounter.updated so tracker HP reconciles.
+    await conn.waitFor(
+      (e) => e.type === 'encounter.updated' && e.encounterId === encounterId && conn.events.indexOf(e) >= seen,
+    );
+
+    const encGet = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    const row = (encGet.body.combatants as Array<{ id: number; hpCurrent: number }>).find((c) => c.id === combatant!.id);
+    expect(row?.hpCurrent).toBe(12);
+
+    conn.close();
+  });
+
   it('invalidates the authoritative next-session projection on create, reschedule, RSVP, and cancellation', async () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);

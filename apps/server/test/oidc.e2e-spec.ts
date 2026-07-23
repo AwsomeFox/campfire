@@ -259,15 +259,19 @@ async function fetchNoRedirect(url: string): Promise<Response> {
   return fetch(url, { redirect: 'manual' });
 }
 
-async function startOidcLogin(agent: CookieAgent): Promise<URL> {
-  const loginRes = await agent.getNoRedirect('/api/v1/auth/oidc/login');
+async function startOidcLogin(agent: CookieAgent, redirect?: string): Promise<URL> {
+  const path =
+    redirect === undefined
+      ? '/api/v1/auth/oidc/login'
+      : `/api/v1/auth/oidc/login?redirect=${encodeURIComponent(redirect)}`;
+  const loginRes = await agent.getNoRedirect(path);
   expect(loginRes.status).toBe(302);
   return new URL(loginRes.headers.get('location')!);
 }
 
-/** Drives the full /oidc/login -> fake IdP /authorize -> /oidc/callback round trip for a given cookie agent, returning the callback response (which sets the session cookie and redirects to '/'). */
-async function performOidcLogin(agent: CookieAgent): Promise<Response> {
-  const authorizeUrl = await startOidcLogin(agent);
+/** Drives the full /oidc/login -> fake IdP /authorize -> /oidc/callback round trip for a given cookie agent, returning the callback response (which sets the session cookie and redirects to the validated return path or '/'). */
+async function performOidcLogin(agent: CookieAgent, redirect?: string): Promise<Response> {
+  const authorizeUrl = await startOidcLogin(agent, redirect);
 
   // Simulate the browser following the redirect to the fake IdP, which immediately
   // redirects back to our callback URL (no real login form in the fake IdP).
@@ -550,6 +554,31 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
       expect(callbackRes.status).toBe(302);
       expect(callbackRes.headers.get('location')).toBe('/');
       expect((await agent.get('/api/v1/me')).status).toBe(200);
+    });
+
+    it('returns to a validated ?redirect= path after SSO (issue #478)', async () => {
+      idp.setNextUser({
+        sub: 'sub-recovery-return',
+        preferred_username: 'recovery-return',
+        groups: ['campfire-users'],
+      });
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent, '/join/INVITE478');
+      expect(callbackRes.status).toBe(302);
+      expect(callbackRes.headers.get('location')).toBe('/join/INVITE478');
+      expect((await agent.get('/api/v1/me')).status).toBe(200);
+    });
+
+    it('rejects open-redirect targets and falls back to / (issue #478)', async () => {
+      idp.setNextUser({
+        sub: 'sub-recovery-openredir',
+        preferred_username: 'recovery-openredir',
+        groups: ['campfire-users'],
+      });
+      const agent = new CookieAgent(app.baseUrl);
+      const callbackRes = await performOidcLogin(agent, 'https://evil.example/phish');
+      expect(callbackRes.status).toBe(302);
+      expect(callbackRes.headers.get('location')).toBe('/');
     });
   });
 

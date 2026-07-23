@@ -608,6 +608,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
   hidden INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -778,7 +779,9 @@ CREATE TABLE IF NOT EXISTS combatants (
   sort_order INTEGER NOT NULL DEFAULT 0,
   token_x REAL,
   token_y REAL,
-  token_size TEXT NOT NULL DEFAULT 'medium'
+  token_size TEXT NOT NULL DEFAULT 'medium',
+  -- Issue #466: CAS token for sheet↔combatant HP sync (character.updatedAt at last sync).
+  sheet_synced_updated_at TEXT
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
@@ -860,7 +863,11 @@ CREATE INDEX IF NOT EXISTS idx_rule_entries_slug ON rule_entries(slug);
 -- rather than a silently-duplicated compendium row (issue #143). Existing DBs are de-duped
 -- by migrateRuleEntriesTableForSource (runs before this) so the index can be created cleanly.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rule_entries_pack_type_slug ON rule_entries(pack_id, type, slug);
+-- Keep both: the single-column index matches other entity tables and covers
+-- campaign-only lookups; (campaign_id, state) covers reserved/committed filters
+-- used by publication recovery and public reads without relying on prefix quirks.
 CREATE INDEX IF NOT EXISTS idx_attachments_campaign ON attachments(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_campaign_state ON attachments(campaign_id, state);
 CREATE INDEX IF NOT EXISTS idx_encounters_campaign ON encounters(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_encounters_status ON encounters(status);
 CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
