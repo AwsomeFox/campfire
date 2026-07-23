@@ -234,7 +234,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
-      setCopiedId(null);
+      setCopiedId((current) => (current === invite.id ? null : current));
       announce(INVITE_COPY_FAILURE);
       setError(INVITE_COPY_FAILURE);
     }
