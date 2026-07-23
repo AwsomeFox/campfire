@@ -17,6 +17,8 @@ const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 export default defineConfig({
   testDir: './e2e/tests',
+  // Include `.mts` so ESM-only unit specs (import.meta.url) are discovered.
+  testMatch: /.*(test|spec)\.(js|ts|mjs|mts)/,
   // One seeded backend shared by every spec — keep it serial and deterministic.
   fullyParallel: false,
   workers: 1,

@@ -85,6 +85,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(17);
     expect(mapped.hitPoints).toBe(84);
     expect(mapped.abilityScores).toEqual({ dexterity: 14 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('falls back to snake_case / short raw-Open5e keys', () => {
@@ -101,6 +102,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(13);
     expect(mapped.hitPoints).toBe(22);
     expect(mapped.abilityScores).toEqual({ dexterity: 12 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('resolves a monster max HP (rounded), or null when unavailable/non-positive', () => {
