@@ -90,6 +90,13 @@ Together these screens configure:
   the ciphertext after confirmation, preserving the provider, model, base URL,
   parameters, and allowlist. The screen then reports whether the provider is ready
   through `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`, a server fallback, or no credential.
+  An optional **Base URL** may point at an OpenAI-compatible proxy; the server
+  blocks cloud-metadata and (by default) private/loopback hosts so a campaign DM
+  cannot use Test connection as an SSRF probe. To run a **local model server**
+  (Ollama, llama.cpp, LM Studio), the operator must set
+  `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=1` or list the host in
+  `AI_PROVIDER_BASEURL_ALLOW_HOSTS` — see
+  [Installation → AI provider host policy](../getting-started/installation.md).
 - **Model allowlist**, a per-campaign **token budget**, and free-text **steering
   instructions** (redacted from non-DM readers).
 
