@@ -12,12 +12,16 @@ import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
+import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
+
 import { useFormattingLocale } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card } from '../components/ui';
 import { PasswordInput } from '../components/PasswordInput';
 import { useDialog } from '../components/useDialog';
+import { useClearAnnouncements } from '../components/Announcer';
+import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
 import {
   NotificationsBell,
   NotificationsPanel,
@@ -26,7 +30,6 @@ import {
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
-import { useAnnounce, useClearAnnouncements } from '../components/Announcer';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -307,10 +310,12 @@ function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const formattingLocale = useFormattingLocale();
-  const announce = useAnnounce();
   const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
-  const campaignId = params.campaignId ? Number(params.campaignId) : undefined;
+  // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
+  // and confuse campaign lookups. Treat invalid params as "outside campaign".
+  // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
+  const campaignId = parseCampaignIdParam(params.campaignId);
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();
@@ -326,6 +331,10 @@ function LayoutContent() {
     () => typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches,
   );
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Issue #434: clear encounter/dice live-region text when the signed-in user or
+  // active campaign changes, and again when this chrome unmounts (→ /login).
+  useClearAnnouncementsOnScope(me?.user.id ?? null, campaignId);
   // Track WHICH campaign we've stale-checked, not a bare boolean — so navigating
   // to a different campaign re-checks (and clears a prior lock screen) instead of
   // trusting a once-per-session flag.
@@ -498,22 +507,19 @@ function LayoutContent() {
   function onLogout() {
     setMenuOpen(false);
     setMoreOpen(false);
-    // Issue #506: drop any stale live-region text (an in-flight roll/HP/turn
-    // announcement) before this account's session ends — a shared device's next
-    // user must not find leftover identity-scoped text sitting in the DOM.
+    // Issues #434 / #506: drop stale live-region text before this account's
+    // session ends. AuthedLayout/Layout unmount (#434) also clears, so the
+    // "Signed out" confirmation is announced from LoginPage after that wipe —
+    // announcing here would be cancelled by the unmount clear.
     clearAnnouncements();
     // Commit `me = null` before navigate. logout() no longer awaits cache/network,
     // but without flushSync a same-turn navigate('/login') can re-render LoginPage
     // while `me` is still set — LoginPage then bounces away and drops
     // `{ signedOut: true }`. flushSync also means we do not await logout (Copilot):
-    // announce + replace-navigate are not gated on cache/POST timing.
+    // replace-navigate is not gated on cache/POST timing.
     flushSync(() => {
       void logout();
     });
-    // A confirmation for keyboard/screen-reader users that sign-out succeeded —
-    // this live region is mounted at the app root (outside the router), so it
-    // survives the navigation below and is still there to be read on /login.
-    announce(t('nav.signedOutAnnouncement'), { assertive: true });
     // `replace` so the protected route this tab was just on is gone from history
     // — Back must not be able to return to it (the AuthedLayout guard would bounce
     // it to /login anyway once `me` is null, but `replace` here avoids that extra

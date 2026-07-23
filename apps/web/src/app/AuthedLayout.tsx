@@ -3,11 +3,13 @@
  * centered splash while the first /me fetch is in flight, and wraps children
  * in CampaignProvider so campaign-scoped nav/pages can resolve names.
  */
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
+import { Navigate, Outlet, useLocation, useParams } from 'react-router-dom';
 import { useAuth } from './auth';
 import { CampaignProvider } from './CampaignContext';
 import { useAuthStatus } from './AuthStatusGate';
 import { GameIcon } from '../components/GameIcon';
+import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncementsOnScope';
+import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 
 function Splash() {
   return (
@@ -36,6 +38,13 @@ export function AuthedLayout() {
   const { me, ready, connectionError, refresh } = useAuth();
   const { status, loading: statusLoading } = useAuthStatus();
   const location = useLocation();
+  const params = useParams<{ campaignId?: string }>();
+  const campaignId = parseCampaignIdParam(params.campaignId);
+
+  // Issue #434: wipe app-root live-region text on identity/campaign change and when
+  // this authed tree unmounts (sign-out → /login). Cast-to-TV `/c/:id/screen` sits
+  // outside Layout, so campaign scope must clear here too.
+  useClearAnnouncementsOnScope(me?.user.id ?? null, campaignId);
 
   if (!ready || statusLoading) {
     return <Splash />;
