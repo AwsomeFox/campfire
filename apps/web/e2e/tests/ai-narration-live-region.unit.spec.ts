@@ -1,11 +1,15 @@
 import { expect, test } from '@playwright/test';
 import {
   advanceNarrationLog,
+  announceableEntryIds,
+  beginNarrationLogLive,
+  collectPreLiveAnnounceableIds,
   formatNarrationLogAddition,
   nextComposerStatusAnnouncement,
   NARRATION_LOG_LIVE_REGION,
   NARRATION_STATUS_LIVE_REGION,
   NARRATION_STREAM_DEBOUNCE_MS,
+  NARRATION_VISUAL_TRANSCRIPT,
   pendingStreamingNarrationChunk,
   resolveComposerA11ySnapshot,
   silenceNarrationLogBaseline,
@@ -53,6 +57,13 @@ test.describe('AI narration live-region attributes (#1077)', () => {
     expect(NARRATION_STATUS_LIVE_REGION).toEqual({
       role: 'status',
       'aria-live': 'polite',
+    });
+  });
+
+  test('visual transcript is a named log landmark with aria-live=off', () => {
+    expect(NARRATION_VISUAL_TRANSCRIPT).toEqual({
+      role: 'log',
+      'aria-live': 'off',
     });
   });
 
@@ -253,6 +264,110 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
 
     // Identical snapshot is silent.
     expect(nextComposerStatusAnnouncement(paused, paused, labels)).toBeNull();
+  });
+
+  test('viewers get a neutral ready label (not Composer unlocked)', () => {
+    const composerLabels = {
+      streaming: 'The DM is narrating…',
+      ready: 'Composer unlocked. You can send an action.',
+    };
+    const viewerLabels = {
+      streaming: 'The DM is narrating…',
+      ready: 'The table is ready.',
+    };
+
+    const ready = resolveComposerA11ySnapshot(false, null);
+    const streaming = resolveComposerA11ySnapshot(true, null);
+
+    // canCompose=true path still uses the composer copy.
+    expect(nextComposerStatusAnnouncement(streaming, ready, composerLabels)).toBe(
+      composerLabels.ready,
+    );
+    // canCompose=false path must not mention the composer.
+    expect(nextComposerStatusAnnouncement(streaming, ready, viewerLabels)).toBe(
+      viewerLabels.ready,
+    );
+    expect(viewerLabels.ready.toLowerCase()).not.toContain('composer');
+  });
+
+  test('streamed turn.end before live is announced after go-live (not silenced away)', () => {
+    // Race: empty mount → full SSE turn lands while narrationLogLive is still false
+    // (seed/hydration not settled). Going live must announce that DM line.
+    const mountBaselineIds = announceableEntryIds([]); // empty localStorage
+    const pending = new Set<string>();
+    let live = false;
+    const mirror: ReturnType<typeof beginNarrationLogLive>['additions'] = [];
+    let cursor: NarrationLogCursor | null = null;
+
+    const earlyTurn = fold(
+      { type: 'turn.start', campaignId: 1, at },
+      { type: 'narration.delta', campaignId: 1, text: 'Torches flare along the wall.', at },
+      {
+        type: 'turn.end',
+        campaignId: 1,
+        stopReason: 'end_turn',
+        steps: 1,
+        tokensUsed: 8,
+        budgetRemaining: 92,
+        at,
+      },
+    );
+
+    // Pre-live effect: collect finished ids that were not on the mount baseline.
+    for (const id of collectPreLiveAnnounceableIds(earlyTurn, mountBaselineIds)) {
+      pending.add(id);
+    }
+    expect(pending.size).toBe(1);
+
+    // Seed effect flips live because transcript.entries.length > 0.
+    live = true;
+    if (live && cursor === null) {
+      const started = beginNarrationLogLive(earlyTurn, pending);
+      cursor = started.cursor;
+      pending.clear();
+      mirror.push(...started.additions);
+    }
+
+    expect(mirror).toHaveLength(1);
+    expect(mirror[0]).toMatchObject({
+      kind: 'dm',
+      text: 'Torches flare along the wall.',
+    });
+
+    // Failure mode: silencing the whole transcript with no exceptIds drops the line.
+    const silencedAway = silenceNarrationLogBaseline(earlyTurn);
+    expect(advanceNarrationLog(earlyTurn, silencedAway).additions).toEqual([]);
+  });
+
+  test('go-live still silences hydrated history and batched session seed', () => {
+    const hydrated = fold(
+      { type: 'turn.start', campaignId: 1, at },
+      { type: 'narration.delta', campaignId: 1, text: 'Old scrollback.', at },
+      {
+        type: 'turn.end',
+        campaignId: 1,
+        stopReason: 'end_turn',
+        steps: 1,
+        tokensUsed: 4,
+        budgetRemaining: 96,
+        at,
+      },
+    );
+    const mountBaselineIds = announceableEntryIds(hydrated);
+    const pending = collectPreLiveAnnounceableIds(hydrated, mountBaselineIds);
+    expect(pending.size).toBe(0);
+    const started = beginNarrationLogLive(hydrated, pending);
+    expect(started.additions).toEqual([]);
+
+    // Seed batched with live=true never enters the pre-live pending set.
+    const seeded = transcriptReducer(emptyTranscript, {
+      type: 'seed',
+      scene: 'Candlelit cellar',
+      lastNarration: 'Rats skitter in the dark.',
+      at,
+    });
+    const seedStarted = beginNarrationLogLive(seeded.entries, new Set());
+    expect(seedStarted.additions).toEqual([]);
   });
 
   test('pendingStreamingNarrationChunk returns only the unannounced suffix', () => {

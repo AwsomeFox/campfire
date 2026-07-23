@@ -33,6 +33,7 @@
     "composerLockedHuman": "A human has taken the DM seat.",
     "composerLockedAwaiting": "Waiting on the rest of the table…",
     "composerUnlocked": "Composer unlocked. You can send an action.",
+    "narrationReady": "The table is ready.",
     "sceneFieldPlaceholder": "Set the scene (optional)",
     "send": "Send",
     "sending": "Sending…",

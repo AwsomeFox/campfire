@@ -22,6 +22,15 @@ export const NARRATION_LOG_LIVE_REGION = {
   'aria-relevant': 'additions',
 } as const;
 
+/**
+ * Visual transcript scroll surface: named log landmark without live announcements.
+ * Token deltas stay visual-only; the sr-only mirror owns polite additions.
+ */
+export const NARRATION_VISUAL_TRANSCRIPT = {
+  role: 'log',
+  'aria-live': 'off',
+} as const;
+
 /** Live-region props for turn / composer status (DraftWithAiButton / StuckLadder pattern). */
 export const NARRATION_STATUS_LIVE_REGION = {
   role: 'status',
@@ -59,12 +68,21 @@ export interface NarrationLogAdvance {
 }
 
 /** Entries that are finished and safe to announce (never an open streaming bubble). */
-function isAnnounceable(entry: TranscriptEntry): boolean {
+export function isAnnounceableEntry(entry: TranscriptEntry): boolean {
   if (entry.kind === 'dm') return entry.status === 'done' && dmEntryText(entry).trim().length > 0;
   if (entry.kind === 'player') return entry.text.trim().length > 0;
   if (entry.kind === 'system') return true;
   // Tool chips are visual activity; status/lock copy covers the turn itself.
   return false;
+}
+
+/** Ids of finished entries currently safe to announce. */
+export function announceableEntryIds(entries: readonly TranscriptEntry[]): Set<string> {
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (isAnnounceableEntry(entry)) ids.add(entry.id);
+  }
+  return ids;
 }
 
 function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
@@ -101,16 +119,50 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
  * live-region additions. Use once mount/seed/hydration has settled so join
  * context is never re-read aloud; afterward {@link advanceNarrationLog} treats
  * further ids as live.
+ *
+ * `exceptIds` leaves finished lines unseen so a later
+ * {@link advanceNarrationLog} / {@link beginNarrationLogLive} can still announce
+ * them (e.g. a turn.end that arrived while the log was held for seeding).
  */
 export function silenceNarrationLogBaseline(
   entries: readonly TranscriptEntry[],
+  exceptIds?: ReadonlySet<string>,
 ): NarrationLogCursor {
   const seenEntryIds = new Set<string>();
   for (const entry of entries) {
-    if (!isAnnounceable(entry)) continue;
+    if (!isAnnounceableEntry(entry)) continue;
+    if (exceptIds?.has(entry.id)) continue;
     seenEntryIds.add(entry.id);
   }
   return { seenEntryIds };
+}
+
+/**
+ * First live pass after seed/hydration settles: silence join context, but still
+ * announce finished lines that arrived while `narrationLogLive` was false
+ * (streamed turn.end before seeding finished).
+ */
+export function beginNarrationLogLive(
+  entries: readonly TranscriptEntry[],
+  preLiveAnnounceIds: ReadonlySet<string>,
+): NarrationLogAdvance {
+  const cursor = silenceNarrationLogBaseline(entries, preLiveAnnounceIds);
+  return advanceNarrationLog(entries, cursor);
+}
+
+/**
+ * Finished entry ids that appeared after mount while the live log was still
+ * held — keep these pending so the go-live silence pass does not drop them.
+ */
+export function collectPreLiveAnnounceableIds(
+  entries: readonly TranscriptEntry[],
+  mountBaselineIds: ReadonlySet<string>,
+): Set<string> {
+  const pending = new Set<string>();
+  for (const id of announceableEntryIds(entries)) {
+    if (!mountBaselineIds.has(id)) pending.add(id);
+  }
+  return pending;
 }
 
 /**
@@ -135,7 +187,7 @@ export function advanceNarrationLog(
   const additions: NarrationLogAddition[] = [];
 
   for (const entry of entries) {
-    if (!isAnnounceable(entry)) continue;
+    if (!isAnnounceableEntry(entry)) continue;
     if (cursor && !seenEntryIds.has(entry.id)) {
       const addition = toAddition(entry);
       if (addition) additions.push(addition);
