@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, gt, isNull, lt } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { AuditActorRole } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
@@ -16,6 +16,35 @@ export const DEFAULT_AUDIT_RETENTION_DAYS = 365;
 
 /** How often the retention sweep runs. Daily is plenty — retention is coarse (days). */
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Internal page size when walking the full retained audit trail for campaign export
+ * (#731). This is NOT a cap on how many rows are exported — we page until every row
+ * in the snapshot is collected.
+ */
+export const EXPORT_AUDIT_PAGE_SIZE = 500;
+
+/** Metadata bundled with campaign exports so a partial audit slice never looks complete. */
+export type CampaignAuditExportMeta = {
+  /** Rows retained for this campaign with id <= snapshotMaxId at capture time. */
+  total: number;
+  /** Rows actually present in the export's `audit` array. */
+  exported: number;
+  /**
+   * Rows retained in the DB but omitted from this export: `total - exported` when the
+   * snapshot walk fails to collect everything, plus any rows appended after the
+   * snapshot (concurrent writes during export).
+   */
+  truncated: number;
+  cutoff: {
+    /** Monotonic autoincrement ceiling for this snapshot — rows with id > this are excluded. */
+    snapshotMaxId: number;
+    /** ISO timestamp when the snapshot ceiling was recorded. */
+    capturedAt: string;
+    /** createdAt of the oldest exported row (the trailing edge of included history). */
+    oldestExportedCreatedAt: string | null;
+  };
+};
 
 function resolveRetentionDays(): number {
   const raw = process.env.AUDIT_RETENTION_DAYS;
@@ -75,6 +104,74 @@ export class AuditService implements OnApplicationBootstrap {
    * Still ordered newest-first so the freshest change is row 0; the caller takes the
    * first row's id as the next cursor. All filters compose (AND).
    */
+  /** Count of retained audit rows for a campaign (all ids, or only id <= maxId when capped). */
+  async countForCampaign(campaignId: number, maxId?: number): Promise<number> {
+    const conditions = [eq(auditLog.campaignId, campaignId)];
+    if (maxId != null) conditions.push(lte(auditLog.id, maxId));
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(auditLog)
+      .where(and(...conditions));
+    return Number(row?.n ?? 0);
+  }
+
+  /**
+   * #731: export the full retained audit trail for a campaign from a stable snapshot.
+   * Records the max(id) ceiling first, then pages through every row with id <= that
+   * ceiling (newest-first, same order as GET /audit). Rows inserted after the ceiling
+   * are excluded and reflected in `meta.truncated`.
+   */
+  async listForCampaignExport(campaignId: number): Promise<{
+    entries: Awaited<ReturnType<AuditService['listForCampaign']>>;
+    meta: CampaignAuditExportMeta;
+  }> {
+    const capturedAt = nowIso();
+    const [maxRow] = await this.db
+      .select({ maxId: sql<number>`coalesce(max(${auditLog.id}), 0)` })
+      .from(auditLog)
+      .where(eq(auditLog.campaignId, campaignId));
+    const snapshotMaxId = Number(maxRow?.maxId ?? 0);
+    const total = snapshotMaxId === 0 ? 0 : await this.countForCampaign(campaignId, snapshotMaxId);
+
+    type Row = Awaited<ReturnType<AuditService['listForCampaign']>>[number];
+    const entries: Row[] = [];
+    if (snapshotMaxId > 0) {
+      let offset = 0;
+      while (true) {
+        const page = await this.db
+          .select()
+          .from(auditLog)
+          .where(and(eq(auditLog.campaignId, campaignId), lte(auditLog.id, snapshotMaxId)))
+          .orderBy(desc(auditLog.id))
+          .limit(EXPORT_AUDIT_PAGE_SIZE)
+          .offset(offset);
+        if (!page.length) break;
+        entries.push(...page);
+        if (page.length < EXPORT_AUDIT_PAGE_SIZE) break;
+        offset += page.length;
+      }
+    }
+
+    const exported = entries.length;
+    const retainedNow = await this.countForCampaign(campaignId);
+    const truncated = Math.max(0, retainedNow - exported);
+
+    const oldest = entries.length ? entries[entries.length - 1]! : null;
+    return {
+      entries,
+      meta: {
+        total,
+        exported,
+        truncated,
+        cutoff: {
+          snapshotMaxId,
+          capturedAt,
+          oldestExportedCreatedAt: oldest?.createdAt ?? null,
+        },
+      },
+    };
+  }
+
   async listForCampaign(
     campaignId: number,
     limit = 100,

@@ -17,7 +17,7 @@ export class ExportController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Export a campaign', description: 'dm role required. Bundles the full campaign (quests, npcs, locations, characters, sessions, notes) as a downloadable file.' })
+  @ApiOperation({ summary: 'Export a campaign', description: 'dm role required. Bundles the full campaign (quests, npcs, locations, characters, sessions, notes, audit history with auditMeta disclosure, proposals) as a downloadable portability file — not a full-server backup (see auditNote in the JSON).' })
   @ApiQuery({ name: 'format', required: false, enum: ['json', 'mdzip'], description: "'mdzip' for a markdown-per-entity zip; omitted/anything else defaults to a single JSON document." })
   @ApiResponse({ status: 200, description: 'File download (application/json or application/zip, with Content-Disposition attachment).' })
   async export(
