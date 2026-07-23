@@ -17,6 +17,7 @@ import {
   type AiMessage,
   type AiProvider,
   type AiStreamEvent,
+  type AiToolCall,
   type AiToolSchema,
   type AiUsage,
 } from './ai-provider';
@@ -47,6 +48,8 @@ const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
 interface GeminiPart {
   text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+  functionResponse?: { name: string; response: { content: unknown } };
 }
 interface GeminiContent {
   role?: string;
@@ -110,9 +113,27 @@ export class GeminiProvider implements AiProvider {
     }
 
     for (const msg of req.messages) {
-      const role = msg.role === 'assistant' ? 'model' : 'user';
+      if (msg.role === 'tool') {
+        // Tool results become functionResponse parts in a "user" turn (Gemini convention)
+        contents.push({
+          role: 'user',
+          parts: [{ functionResponse: { name: msg.toolName ?? '', response: { content: msg.content ?? '' } } }],
+        });
+        continue;
+      }
+      if (msg.role === 'assistant') {
+        const parts: GeminiPart[] = [];
+        if (msg.content) parts.push({ text: msg.content });
+        for (const tc of msg.toolCalls ?? []) {
+          parts.push({ functionCall: { name: tc.name, args: tc.arguments ?? {} } });
+        }
+        if (parts.length === 0) parts.push({ text: '' });
+        contents.push({ role: 'model', parts });
+        continue;
+      }
+      // user
       const text = typeof msg.content === 'string' ? msg.content : '';
-      contents.push({ role, parts: [{ text }] });
+      contents.push({ role: 'user', parts: [{ text }] });
     }
     body.contents = contents;
 
@@ -157,6 +178,7 @@ export class GeminiProvider implements AiProvider {
     if (!res.body) throw new AiProviderError('transport', `${this.name}: streaming response has no body`, { provider: this.name });
 
     let totalText = '';
+    const toolCalls: AiToolCall[] = [];
     let usage: AiUsage | undefined;
     let finishReason = 'unknown';
 
@@ -175,6 +197,14 @@ export class GeminiProvider implements AiProvider {
             totalText += part.text;
             yield { type: 'text', delta: part.text };
           }
+          if (part.functionCall) {
+            toolCalls.push({
+              id: `call_${toolCalls.length}`,
+              name: part.functionCall.name,
+              arguments: part.functionCall.args ?? {},
+            });
+            yield { type: 'tool_call', index: toolCalls.length - 1, id: `call_${toolCalls.length - 1}`, name: part.functionCall.name };
+          }
         }
       }
       if (candidate?.finishReason) {
@@ -189,7 +219,7 @@ export class GeminiProvider implements AiProvider {
       type: 'done',
       result: {
         text: totalText,
-        toolCalls: [],
+        toolCalls,
         usage: usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         finishReason: finishReason as AiGenerateResult['finishReason'],
         model: req.model || this.opts.model,
@@ -207,11 +237,22 @@ export class GeminiProvider implements AiProvider {
         { provider: this.name },
       );
     }
-    const text = candidate.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+    let text = '';
+    const toolCalls: AiToolCall[] = [];
+    for (const part of candidate.content?.parts ?? []) {
+      if (part.text) text += part.text;
+      if (part.functionCall) {
+        toolCalls.push({
+          id: `call_${toolCalls.length}`,
+          name: part.functionCall.name,
+          arguments: part.functionCall.args ?? {},
+        });
+      }
+    }
     const usage = data.usageMetadata ? mapUsage(data.usageMetadata) : { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     return {
       text,
-      toolCalls: [],
+      toolCalls,
       usage,
       finishReason: candidate.finishReason ? mapFinishReason(candidate.finishReason) : 'stop',
       model: model || this.opts.model,
@@ -242,11 +283,14 @@ function mapUsage(meta: NonNullable<GeminiResponse['usageMetadata']>): AiUsage {
 function mapFinishReason(reason: string): AiGenerateResult['finishReason'] {
   switch (reason.toUpperCase()) {
     case 'STOP':
+      return 'stop';
     case 'MAX_TOKENS':
-      return reason.toUpperCase() === 'STOP' ? 'stop' : 'length';
+      return 'length';
     case 'SAFETY':
     case 'RECITATION':
       return 'content_filter';
+    case 'TOOL_CALLS':
+      return 'tool_calls';
     default:
       return 'unknown';
   }
