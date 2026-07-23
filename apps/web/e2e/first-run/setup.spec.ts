@@ -216,6 +216,9 @@ test('successful setup exits safely when the auth-status cache refresh fails', a
   await page.route('**/api/v1/campaigns', async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
   });
+  await page.route('**/api/v1/notifications**', async (route) => {
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+  });
 
   await page.goto('/setup');
   await page.getByLabel('Username').fill('fallback-admin');
