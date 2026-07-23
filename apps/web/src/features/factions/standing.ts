@@ -2,27 +2,27 @@
  * Shared faction standing labels (issue #753).
  *
  * Cards, chips, forms, filters, and detail views must render these humanized
- * labels — never the raw lowercase enum. The English map is the source of
- * truth today; each key is also mirrored under `factions.standing.*` in the
- * i18n catalog so a translator can drop in another locale without touching
- * call sites that pass `t`.
+ * labels — never the raw lowercase enum. English copy lives once in
+ * `i18n/locales/en/factions.json` (merged into the default `translation`
+ * catalog as `factions.standing.*`); this module re-exports that map as the
+ * runtime fallback when `t` is omitted.
  */
 import { FACTION_STANDINGS, type FactionStanding } from '@campfire/schema';
 import type { ChipVariant } from '../../components/chipVariants';
+import factionsEn from '../../i18n/locales/en/factions.json';
 
 export { FACTION_STANDINGS };
 export type { FactionStanding };
 
 /** Localization-ready English display labels for every standing enum. */
 export const FACTION_STANDING_LABELS: Record<FactionStanding, string> = {
-  hostile: 'Hostile',
-  unfriendly: 'Unfriendly',
-  neutral: 'Neutral',
-  friendly: 'Friendly',
-  allied: 'Allied',
+  ...factionsEn.factions.standing,
 };
 
-/** i18n key under the `factions` domain for a standing enum. */
+/**
+ * i18n key in the merged default catalog (`locales/en/*.json` are unioned into
+ * one `translation` resource — not per-file namespaces).
+ */
 export function factionStandingLabelKey(standing: FactionStanding): `factions.standing.${FactionStanding}` {
   return `factions.standing.${standing}`;
 }
@@ -66,8 +66,12 @@ export function standingVariant(standing: FactionStanding): ChipVariant {
     case 'hostile':
     case 'unfriendly':
       return 'failed';
-    default:
+    case 'neutral':
       return 'active';
+    default: {
+      const _exhaustive: never = standing;
+      return _exhaustive;
+    }
   }
 }
 

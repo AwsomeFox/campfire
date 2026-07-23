@@ -7,8 +7,8 @@
  * consistent — and so a future locale can swap catalog strings without
  * inventing a second map.
  *
- * English strings live in `FACTION_STANDING_LABELS` (and the mirrored i18n
- * catalog). Tests derive expectations from those sources — no third copy.
+ * English strings live in `i18n/locales/en/factions.json`; `FACTION_STANDING_LABELS`
+ * re-exports that map as the runtime fallback. No third copy.
  *
  * Pure helper coverage via `pw-unit.config.ts` (no browser / seeded server) —
  * kept next to sibling `*.unit.spec.ts` helpers under e2e/tests so one runner
