@@ -41,7 +41,7 @@ export class DiagnosticsController {
 
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: 'admin',
       action: 'attachments.diagnostics.scan',
       entityType: 'storage',
       detail: `issues=${report.issues.length} dbRows=${report.totalDbRows} diskFiles=${report.totalDiskFiles}`,
@@ -76,7 +76,7 @@ export class DiagnosticsController {
 
     await this.audit.log({
       actor: auditActor(actor),
-      actorRole: 'dm',
+      actorRole: 'admin',
       action: `attachments.diagnostics.fix.${body.action}`,
       entityType: 'attachment',
       entityId: body.attachmentId,
