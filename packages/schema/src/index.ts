@@ -801,12 +801,15 @@ export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaign
     // callers omit the field (updates may shrink to 0 via ScheduledSessionUpdate).
     durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
   });
-export const ScheduledSessionUpdate = ScheduledSession.omit({
-  id: true,
-  campaignId: true,
-  createdAt: true,
-  updatedAt: true,
-}).partial();
+// Explicit optional fields without `.default()` so PATCH bodies that omit a key
+// do not materialize create-time defaults (Zod applies defaults on undefined).
+export const ScheduledSessionUpdate = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(0).max(24 * 60).optional(),
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+});
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;

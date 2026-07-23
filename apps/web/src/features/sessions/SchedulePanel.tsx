@@ -66,7 +66,20 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   }, [load]);
 
   // Issue #818: keep a game night in the live lists until scheduledAt+duration ends.
-  const { inProgress, upcoming, past } = partitionSchedules(schedules);
+  // Re-render when the soonest in-progress window ends so "Happening now" does not stale.
+  const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const { inProgress: live } = partitionSchedules(schedules, scheduleNowMs);
+    if (live.length === 0) return;
+    const ends = live
+      .map((s) => Date.parse(s.scheduledAt) + s.durationMinutes * 60_000)
+      .filter((ms) => Number.isFinite(ms) && ms > scheduleNowMs);
+    if (ends.length === 0) return;
+    const delay = Math.min(...ends) - scheduleNowMs + 25;
+    const timer = window.setTimeout(() => setScheduleNowMs(Date.now()), Math.max(25, delay));
+    return () => window.clearTimeout(timer);
+  }, [schedules, scheduleNowMs]);
+  const { inProgress, upcoming, past } = partitionSchedules(schedules, scheduleNowMs);
   const [next, ...later] = upcoming;
   const hasLive = inProgress.length > 0 || Boolean(next);
 
