@@ -1037,6 +1037,26 @@ exact same one-line-per-DTO pattern.
   predates auth; the new auth-session table is named `user_sessions` in SQL
   (`userSessions` in drizzle) to avoid a name collision.
 
+### Attachment publication and quota recovery
+
+Attachment rows have an internal `state` (`reserved` or `committed`). Uploads and
+server-generated maps reserve quota with one conditional SQLite `INSERT` whose
+sum includes both states, so concurrent boundary requests cannot both pass. A
+reserved row is excluded from attachment reads, references, exports, and MCP.
+
+Bytes are written to `<final>.stage` in the destination directory, fsynced, then
+published with a no-clobber hard-link to the immutable final name (`link` fails
+with `EEXIST` if that path already exists) followed by unlinking the stage name
+and a directory fsync. Only then does one SQLite transaction insert the
+attachment audit record and change the row to `committed`. A crash between link
+and unlink can leave both names on the same inode; recovery removes the stage
+name. Handled failures synchronously remove staged and final artifacts before
+deleting the reservation. On startup, and immediately after whole-server restore,
+any remaining reservation is treated as an interrupted request and rolled back;
+committed rows are never reconstructed from partial files. `GET /admin/storage`
+reports committed and reserved bytes/counts separately while retaining
+`totalBytes` as the committed-byte compatibility alias.
+
 ### Data retention env vars
 
 Per-campaign dice-roll history is retained under a *disclosed, configurable*

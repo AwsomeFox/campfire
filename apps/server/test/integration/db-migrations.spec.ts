@@ -76,7 +76,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'combatants')).toEqual(
         expect.arrayContaining(['hp_temp', 'death_state', 'death_save_successes', 'death_save_failures', 'npc_id']),
       );
-      expect(columnNames(sqlite, 'attachments')).toContain('hidden');
+      expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
       // 0045 (issue #503): comments gain the tombstone columns — soft delete without
       // destroying other members' replies (deleted_at) + who pulled the trigger (deleted_by).
@@ -158,6 +158,10 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
           .get(),
       ).toEqual({ family_id: 'legacy-1', refresh_consumed_at: null, revoked_at: null, family_revoked_at: null });
       expect((sqlite.prepare('SELECT snapshot FROM proposals WHERE id = 1').get() as { snapshot: unknown }).snapshot).toBeNull();
+      // 0061 (#728): all pre-reservation attachment rows remain publicly visible.
+      expect((sqlite.prepare('SELECT state FROM attachments WHERE id = 1').get() as { state: string }).state).toBe(
+        'committed',
+      );
 
       // Combatant HP-model backfill (issue #57): defaults applied to the pre-existing row.
       const combatant = sqlite.prepare('SELECT * FROM combatants WHERE id = 1').get() as Record<string, unknown>;
@@ -279,6 +283,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       // Fresh DB already has the modern columns (never touched a migration path).
       expect(columnNames(sqlite, 'characters')).toEqual(expect.arrayContaining(['xp', 'dm_secret', 'spell_slots']));
       expect(columnNames(sqlite, 'users')).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
+      expect(columnNames(sqlite, 'attachments')).toEqual(expect.arrayContaining(['hidden', 'state']));
+      expect(
+        sqlite
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attachments'")
+          .get(),
+      ).toEqual(expect.objectContaining({ sql: expect.stringContaining("state IN ('reserved', 'committed')") }));
       // Issue #744: campaigns carry the one-authoritative-live-fight pointer on fresh DBs.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
 
@@ -295,6 +305,8 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0057_campaigns_active_encounter');
       expect(MIGRATION_NAMES).toContain('0058_campaigns_public_invites_enabled');
       expect(MIGRATION_NAMES).toContain('0059_public_invites_disabled_inactive');
+      expect(MIGRATION_NAMES).toContain('0060_encounter_events_combatant_ids');
+      expect(MIGRATION_NAMES).toContain('0062_attachments_publication_state');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['public_invites_enabled']));
