@@ -10,7 +10,7 @@
  * apps/mcp) — so it links to token creation instead of claiming "not
  * available".
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import type { TextSize, User } from '@campfire/schema';
@@ -24,6 +24,7 @@ import {
 } from '../../i18n';
 import { useAuth } from '../../app/auth';
 import { Card, ErrorNote } from '../../components/ui';
+import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 
 // Swatch hexes converted from the design's accent palette (Campfire.dc.html
 // `accents:` state — oklch(0.72 0.13 55) "ember", oklch(0.72 0.12 150) "moss",
@@ -329,19 +330,20 @@ export default function PreferencesPage() {
  * sessions/tokens/memberships, de-links (keeps) owned character sheets, and
  * refuses (409) if you're the last admin or the sole DM of a campaign — the copy
  * points you at the fix rather than dead-ending.
+ *
+ * Refactored in #775 to use the shared ConfirmDestructiveDialog for full
+ * accessibility: alertdialog role, focus management, error association, and
+ * non-color disabled-state explanation.
  */
 function DeleteAccountCard({ username }: { username: string }) {
   const { t } = useTranslation();
   const { logout } = useAuth();
   const [open, setOpen] = useState(false);
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const canDelete = confirmText.trim() === username;
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   async function remove() {
-    if (!canDelete) return;
     setDeleting(true);
     setError(null);
     try {
@@ -356,60 +358,48 @@ function DeleteAccountCard({ username }: { username: string }) {
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="delete-account-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>{t('preferences.deleteAccount')}</span>
-      {!open ? (
-        <div className="flex items-center gap-2 flex-wrap">
-          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            {t('preferences.deleteBlurb')}
-          </p>
-          <div className="flex-1" />
-          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
-            {t('preferences.deleteMyAccountEllipsis')}
-          </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
-            <Trans
-              i18nKey="preferences.deleteConfirmPrompt"
-              values={{ username }}
-              components={[<strong key="u" />]}
-            />
-          </p>
-          <input
-            className="input"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={username}
-            autoComplete="off"
-          />
-          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-          <div className="flex gap-2 items-center">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5 }}
-              onClick={() => {
-                setOpen(false);
-                setConfirmText('');
-                setError(null);
-              }}
-              disabled={deleting}
-            >
-              {t('preferences.cancel')}
-            </button>
-            <div className="flex-1" />
-            <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={!canDelete || deleting}
-              aria-busy={deleting || undefined}
-              onClick={remove}
-            >
-              {deleting ? t('preferences.deleting') : t('preferences.deleteMyAccount')}
-            </button>
-          </div>
-        </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          {t('preferences.deleteBlurb')}
+        </p>
+        <div className="flex-1" />
+        <button
+          ref={triggerRef}
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
+          onClick={() => setOpen(true)}
+          data-testid="delete-account-trigger"
+        >
+          {t('preferences.deleteMyAccountEllipsis')}
+        </button>
+      </div>
+      {open && (
+        <ConfirmDestructiveDialog
+          title={t('preferences.deleteAccount')}
+          consequence={
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              <Trans
+                i18nKey="preferences.deleteConfirmPrompt"
+                values={{ username }}
+                components={[<strong key="u" />]}
+              />
+            </p>
+          }
+          confirmValue={username}
+          confirmLabel={t('preferences.deleteMyAccount')}
+          cancelLabel={t('preferences.cancel')}
+          busy={deleting}
+          error={error}
+          onConfirm={remove}
+          onCancel={() => {
+            setOpen(false);
+            setError(null);
+            // Focus restore is handled by useDialog, but in case we need the
+            // trigger ref explicitly in the future, keep it around.
+          }}
+        />
       )}
     </div>
   );

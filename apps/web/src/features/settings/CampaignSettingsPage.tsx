@@ -21,6 +21,7 @@ import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 import { useAnnounce } from '../../components/Announcer';
 import {
   confirmOpen,
@@ -931,15 +932,11 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
 }
 
 function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted: () => void }) {
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
-  const canDelete = confirmText.trim() === campaign.name;
-
   async function remove() {
-    if (!canDelete) return;
     setDeleting(true);
     setError(null);
     try {
@@ -952,56 +949,42 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="danger-zone-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>Danger zone</span>
-      {!open ? (
-        <div className="flex items-center gap-2">
-          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
-            permanently removed until you purge it from the Trash on your campaigns page.
-          </p>
-          <div className="flex-1" />
-          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
-            Delete campaign…
-          </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
-            Type <strong>{campaign.name}</strong> to move it to the Trash (you can restore it later).
-          </p>
-          <input
-            className="input"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={campaign.name}
-          />
-          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-          <div className="flex gap-2 items-center">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5 }}
-              onClick={() => {
-                setOpen(false);
-                setConfirmText('');
-                setError(null);
-              }}
-              disabled={deleting}
-            >
-              Cancel
-            </button>
-            <div className="flex-1" />
-            <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={!canDelete || deleting}
-              aria-busy={deleting || undefined}
-              onClick={remove}
-            >
-              {deleting ? 'Moving…' : 'Move to Trash'}
-            </button>
-          </div>
-        </div>
+      <div className="flex items-center gap-2">
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
+          permanently removed until you purge it from the Trash on your campaigns page.
+        </p>
+        <div className="flex-1" />
+        <button
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
+          onClick={() => setOpen(true)}
+          data-testid="delete-campaign-trigger"
+        >
+          Delete campaign…
+        </button>
+      </div>
+      {open && (
+        <ConfirmDestructiveDialog
+          title="Delete campaign"
+          consequence={
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              Typing <strong>{campaign.name}</strong> will move this campaign to the Trash.
+              You can restore it later from the campaigns page.
+            </p>
+          }
+          confirmValue={campaign.name}
+          confirmLabel="Move to Trash"
+          busy={deleting}
+          error={error}
+          onConfirm={remove}
+          onCancel={() => {
+            setOpen(false);
+            setError(null);
+          }}
+        />
       )}
     </div>
   );
