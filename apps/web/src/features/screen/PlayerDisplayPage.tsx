@@ -14,7 +14,7 @@
  * Live: refetches on encounter SSE events (issue #4) for snappy combat, plus a
  * slow poll to catch location/quest/party edits that don't emit an event.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   CampaignSummary,
@@ -22,9 +22,14 @@ import type {
   EncounterWithCombatants,
   HpBand,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
-import { useAnnounce } from '../../components/Announcer';
+import { api, API } from '../../lib/api';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
+import {
+  fingerprintDedupeParts,
+  formatGroupedAnnouncement,
+  formatGroupedCombatantAnnouncement,
+  useAnnounce,
+} from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { useAuth } from '../../app/auth';
@@ -37,6 +42,15 @@ import {
   safeQuests,
   type SafeCombatant,
 } from './playerSafe';
+import {
+  PlayerDisplayLoadSequencer,
+  playerDisplaySyncMessage,
+  playerDisplaySyncState,
+  projectionAfterLoadFailure,
+  runPlayerDisplayLoad,
+  type PlayerDisplayFetchers,
+  type PlayerDisplayProjection,
+} from './playerDisplayLoad';
 
 const POLL_MS = 12_000;
 const CONTROLS_HIDE_MS = 3_500;
@@ -89,12 +103,21 @@ function fullscreenFailure(action: 'enter' | 'exit', error: unknown): string {
   return `Fullscreen couldn't start${detail}. Keep this tab active, allow fullscreen for this site, then try again.`;
 }
 
+const displayFetchers: PlayerDisplayFetchers = {
+  getSummary: (campaignId, signal) =>
+    api.get<CampaignSummary>(`${API}/campaigns/${campaignId}/summary`, { signal }),
+  getRunningEncounters: (campaignId, signal) =>
+    api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters?status=running`, { signal }),
+  getEncounter: (encounterId, signal) =>
+    api.get<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { signal }),
+};
+
 export default function PlayerDisplayPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
   const announce = useAnnounce();
-  const { roleIn } = useAuth();
+  const { roleIn, staleIdentity } = useAuth();
   const role = roleIn(cid);
 
   // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
@@ -104,9 +127,14 @@ export default function PlayerDisplayPage() {
   // never both mounted in the same tab — this never creates a second live connection.
   const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) ? cid : undefined);
 
-  const [summary, setSummary] = useState<CampaignSummary | null>(null);
-  const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Key projection/failure by campaignId so a client-side :campaignId swap cannot
+  // flash the prior campaign's (secret-free but still wrong) cast state.
+  const [projection, setProjection] = useState<PlayerDisplayProjection | null>(null);
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
+  const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
+  const [displayStale, setDisplayStale] = useState(false);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const [loading, setLoading] = useState(true);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [fullscreenSupported, setFullscreenSupported] = useState(fullscreenAvailable);
@@ -115,35 +143,65 @@ export default function PlayerDisplayPage() {
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
+
+  const summary = projection?.campaignId === cid ? projection.summary : null;
+  const encounter = projection?.campaignId === cid ? projection.encounter : null;
+  const error = failure?.campaignId === cid ? failure.message : null;
 
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
-    try {
-      const data = await api.get<CampaignSummary>(`${API}/campaigns/${cid}/summary`);
-      setSummary(data);
-      setError(null);
-      // Find the live encounter (if any) and pull its combatants for the initiative rail.
-      try {
-        const running = await api.get<Encounter[]>(`${API}/campaigns/${cid}/encounters?status=running`);
-        const live = running[0];
-        if (live) {
-          const full = await api.get<EncounterWithCombatants>(`${API}/encounters/${live.id}`);
-          setEncounter(full);
-        } else {
-          setEncounter(null);
-        }
-      } catch {
-        setEncounter(null);
-      }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the display.");
-    } finally {
+    const hadProjection = projectionRef.current?.campaignId === cid;
+    const result = await runPlayerDisplayLoad(loadSequencerRef.current, cid, displayFetchers, {
+      hadProjection,
+    });
+    if (result.kind === 'ignored') return;
+    if (result.kind === 'ok') {
+      setProjection(result.projection);
+      setFailure((current) => (current?.campaignId === cid ? null : current));
+      setDisplayStale(false);
       setLoading(false);
+      return;
     }
+    // Transient blip with last-known paint: keep the rail, surface stale/reconnect.
+    if (result.keepLastKnown) {
+      setDisplayStale(true);
+      setLoading(false);
+      return;
+    }
+    // Persistent failure (404/403/…): drop the initiative rail. When this load
+    // already fetched a summary, keep the cast painted and surface a rail-scoped
+    // error — do not wipe the whole Player Display to a full-screen failure.
+    setProjection((current) =>
+      projectionAfterLoadFailure(current, cid, {
+        keepLastKnown: false,
+        summary: result.summary,
+      }),
+    );
+    setFailure({ campaignId: cid, message: result.message });
+    setDisplayStale(false);
+    setLoading(false);
   }, [cid]);
 
   useEffect(() => {
-    if (Number.isFinite(cid)) void load();
+    const sequencer = loadSequencerRef.current;
+    if (!Number.isFinite(cid)) {
+      setLoading(false);
+      // Teardown-only invalidation: React runs this cleanup before the next
+      // effect on cid change, so a single bump covers unmount and campaign swap.
+      return () => {
+        sequencer.invalidate();
+      };
+    }
+    // Prior effect cleanup already aborted in-flight work for the old cid.
+    // Reset sync chrome, then begin a fresh load for this identity.
+    setEventStatus('connecting');
+    setDisplayStale(false);
+    setLoading(true);
+    void load();
+    return () => {
+      sequencer.invalidate();
+    };
   }, [cid, load]);
 
   // Slow poll — catches location/quest/party edits (no SSE event) without hammering.
@@ -154,10 +212,16 @@ export default function PlayerDisplayPage() {
   }, [cid, load]);
 
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
+  // Poll + SSE share the same sequencer, so overlapping bursts cannot reorder commits.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(() => void load(), [load]),
     onReconnect: useCallback(() => void load(), [load]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
+    onStreamRecovery: useCallback(() => void load(), [load]),
   });
+
+  const syncState = playerDisplaySyncState({ staleIdentity, displayStale, eventStatus });
+  const syncMessage = summary ? playerDisplaySyncMessage(syncState) : null;
 
   // The ARIA live region is a single node mounted at the app root (Announcer),
   // so it survives client-side navigation. The DM's run-session tracker announces
@@ -194,29 +258,42 @@ export default function PlayerDisplayPage() {
     const prev = prevAnnounceRef.current;
 
     if (prev) {
+      const parts: string[] = [];
       if (turnKey !== prev.turnKey) {
         if (encounter.status === 'running') {
           const current = safe.find((c) => c.id === currentId);
-          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
+          parts.push(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
         } else if (encounter.status === 'ended') {
-          announce('Encounter ended');
+          parts.push('Encounter ended');
         }
       }
+      const combatantUpdates: string[] = [];
       for (const c of safe) {
         const before = prev.hp.get(c.id);
         const now = hp.get(c.id);
         if (before == null || now == null || now === '' || before === now) continue;
         if (c.hpBand != null) {
           // Monster — band label only, never the exact numbers.
-          announce(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
+          combatantUpdates.push(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
         } else if (c.hpCurrent != null && c.hpMax != null) {
           // Character — exact HP is shared table info.
-          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
+          combatantUpdates.push(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
+      }
+      const combatantMessage = formatGroupedCombatantAnnouncement(combatantUpdates);
+      if (combatantMessage) parts.push(combatantMessage);
+      // One atomic announce keeps turn + bulk HP/condition updates from racing
+      // the shared live region; dedupeKey suppresses identical reconnect refetches.
+      // Fingerprint + count keep the key bounded (avoid joining full update text).
+      const message = formatGroupedAnnouncement(parts);
+      if (message) {
+        announce(message, {
+          dedupeKey: `screen:${cid}:${encounter.id}:${turnKey}:${combatantUpdates.length}:${fingerprintDedupeParts(combatantUpdates)}`,
+        });
       }
     }
     prevAnnounceRef.current = { hp, turnKey };
-  }, [encounter, announce]);
+  }, [cid, encounter, announce]);
 
   // Fullscreen can end without this control being used (Escape, browser chrome,
   // or another caller), so the browser events — not the request promise — own
@@ -300,6 +377,9 @@ export default function PlayerDisplayPage() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      // Drop inert synchronously so this same Tab keystroke can land on Exit /
+      // Fullscreen before React re-renders visibility (issue #595).
+      controlsRef.current?.removeAttribute('inert');
       ping(event);
       if (event.key !== 'Escape' || event.defaultPrevented || event.repeat) return;
 
@@ -378,12 +458,22 @@ export default function PlayerDisplayPage() {
     ? fullscreenNotice
     : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
   const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
+  // Auto-hidden controls must leave the sequential focus / a11y tree until a
+  // keyboard or pointer reveal — opacity alone left Exit/Fullscreen tabbable
+  // while invisible (issue #595). Fullscreen notices force visibility so
+  // recovery guidance stays reachable.
+  useLayoutEffect(() => {
+    const node = controlsRef.current;
+    if (!node) return;
+    if (keepControlsVisible) node.removeAttribute('inert');
+    else node.setAttribute('inert', '');
+  }, [keepControlsVisible]);
   const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
   const operatorControls = (
     <div
       ref={controlsRef}
       className="cf-screen-control-stack"
-      style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
+      data-visible={keepControlsVisible ? 'true' : 'false'}
     >
       <div className="cf-screen-controls">
         <button
@@ -479,6 +569,15 @@ export default function PlayerDisplayPage() {
           )}
           <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
         </div>
+        {syncMessage && (
+          <p
+            role="status"
+            aria-live="polite"
+            className={`cf-screen-sync ${syncState === 'offline' ? 'offline' : ''}`}
+          >
+            {syncMessage}
+          </p>
+        )}
         {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
           <p className="cf-ai-ticker"><GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />{liveActivity.lastNarration}</p>
         )}
@@ -486,7 +585,7 @@ export default function PlayerDisplayPage() {
 
       <div className="cf-screen-grid">
         {/* Initiative rail takes the stage while combat is live */}
-        {encounter && combatants.length > 0 && (
+        {encounter && combatants.length > 0 ? (
           <section className="cf-panel cf-panel-wide">
             <div className="cf-panel-head">
               <h2>Initiative</h2>
@@ -500,7 +599,20 @@ export default function PlayerDisplayPage() {
               ))}
             </ol>
           </section>
-        )}
+        ) : error ? (
+          // Rail-scoped failure after summary succeeded — keep cast/summary visible.
+          <section className="cf-panel cf-panel-wide" aria-label="Initiative">
+            <div className="cf-panel-head">
+              <h2>Initiative</h2>
+            </div>
+            <p className="cf-empty" role="alert">
+              {error}
+            </p>
+            <button className="btn btn-primary cf-rail-retry" onClick={() => void load()}>
+              Retry
+            </button>
+          </section>
+        ) : null}
 
         {/* Party */}
         <section className="cf-panel">
@@ -707,13 +819,26 @@ const SCREEN_CSS = `
   right: 14px;
   width: min(420px, calc(100vw - 28px));
   z-index: 20;
+  opacity: 1;
+  pointer-events: auto;
   transition: opacity 0.4s ease;
+}
+/* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
+   reveal painted even before React flips data-visible (issue #595). */
+.cf-screen-control-stack[data-visible="false"]:not(:focus-within) {
+  opacity: 0;
+  pointer-events: none;
 }
 .cf-screen-controls {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+/* Strong focus ring for cast controls at high zoom / shared-TV distances. */
+.cf-screen-controls .btn:focus-visible {
+  outline: 3px solid var(--color-accent-2, var(--color-accent));
+  outline-offset: 4px;
 }
 .cf-screen-fullscreen-notice {
   margin: 8px 0 0 auto;
@@ -758,6 +883,21 @@ const SCREEN_CSS = `
   color: var(--color-accent-2);
 }
 .cf-chip-sub { opacity: 0.7; }
+.cf-screen-sync {
+  margin: 10px 0 0;
+  width: fit-content;
+  max-width: 48ch;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  color: var(--color-neutral-200);
+  padding: 7px 12px;
+  font-size: clamp(12px, 1.1vw, 16px);
+  line-height: 1.35;
+}
+.cf-screen-sync.offline {
+  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 45%, transparent);
+}
 .cf-ai-ticker {
   margin: 10px 0 0;
   font-size: clamp(13px, 1.3vw, 18px);
@@ -796,6 +936,7 @@ const SCREEN_CSS = `
   letter-spacing: 0.04em;
 }
 .cf-empty { color: var(--color-neutral-500); font-size: clamp(14px, 1.2vw, 18px); margin: 4px 0 0; }
+.cf-rail-retry { margin-top: 12px; }
 
 /* Initiative */
 .cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }

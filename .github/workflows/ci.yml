@@ -9,10 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  # Lint gate. `npm run lint` fans out per-workspace via `--if-present`, so it
-  # exits cleanly today (no workspace ships a `lint` script yet — there is no
-  # working eslint flat config). Once a workspace adds one, this job enforces it
-  # automatically with no workflow change.
+  # Lint + typecheck gate. Root `npm run lint` runs each workspace's flat
+  # ESLint config (hard-fail; no `--if-present`). `npm run typecheck` builds
+  # schema then runs `tsc --noEmit` in every workspace.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -23,6 +22,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
 
   # Primary gate for PRs — DO NOT weaken. Builds schema + server + web
   # (`npm run build`) and runs the full server suite: unit (test/unit/*.spec.ts)

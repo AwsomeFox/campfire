@@ -19,7 +19,11 @@ import { minRole, type RequestUser, type TokenContext } from '../../common/user.
 import { UsersService } from '../users/users.service';
 import { SettingsService } from '../settings/settings.service';
 import { ServerMetaService } from '../server-meta/server-meta.service';
-import { SESSION_MAX_AGE_MS, SESSION_SLIDING_UPDATE_INTERVAL_MS } from './auth.constants';
+import {
+  SESSION_ABSOLUTE_MAX_AGE_MS,
+  SESSION_MAX_AGE_MS,
+  SESSION_SLIDING_UPDATE_INTERVAL_MS,
+} from './auth.constants';
 
 type SetupInput = z.infer<typeof SetupRequest>;
 type LoginInput = z.infer<typeof LoginRequest>;
@@ -28,6 +32,13 @@ type SignupInput = z.infer<typeof SignupRequest>;
 export interface SessionIssueResult {
   token: string;
   me: Me;
+}
+
+/** Result of resolving a cookie session; `slid` means DB + cookie should refresh. */
+export interface ResolvedSession {
+  user: RequestUser;
+  /** True when this call wrote a sliding `lastSeenAt` / `expiresAt` update. */
+  slid: boolean;
 }
 
 /** Sweep expired sessions once an hour — see AuthService.onApplicationBootstrap(). */
@@ -258,13 +269,20 @@ export class AuthService implements OnApplicationBootstrap {
     await this.db.delete(userSessions).where(eq(userSessions.tokenHash, hashSessionToken(token)));
   }
 
-  /** Resolves a session cookie token to a RequestUser, applying sliding lastSeenAt (at most once/hour). */
-  async resolveSessionUser(token: string): Promise<RequestUser | null> {
+  /**
+   * Resolves a session cookie token to a RequestUser, sliding both `lastSeenAt`
+   * and `expiresAt` at most once per {@link SESSION_SLIDING_UPDATE_INTERVAL_MS}
+   * (issue #661). Idle extension is capped by {@link SESSION_ABSOLUTE_MAX_AGE_MS}
+   * from `createdAt` so continuous activity cannot mint an immortal session.
+   */
+  async resolveSessionUser(token: string): Promise<ResolvedSession | null> {
     const tokenHash = hashSessionToken(token);
     const [session] = await this.db.select().from(userSessions).where(eq(userSessions.tokenHash, tokenHash)).limit(1);
     if (!session) return null;
 
-    if (new Date(session.expiresAt).getTime() < Date.now()) {
+    const now = Date.now();
+    const absoluteDeadline = new Date(session.createdAt).getTime() + SESSION_ABSOLUTE_MAX_AGE_MS;
+    if (now >= absoluteDeadline || new Date(session.expiresAt).getTime() < now) {
       await this.db.delete(userSessions).where(eq(userSessions.id, session.id));
       return null;
     }
@@ -272,15 +290,30 @@ export class AuthService implements OnApplicationBootstrap {
     const [user] = await this.db.select().from(users).where(eq(users.id, session.userId)).limit(1);
     if (!user || user.disabled) return null;
 
-    const now = Date.now();
+    let slid = false;
     if (now - new Date(session.lastSeenAt).getTime() > SESSION_SLIDING_UPDATE_INTERVAL_MS) {
-      await this.db.update(userSessions).set({ lastSeenAt: new Date(now).toISOString() }).where(eq(userSessions.id, session.id));
+      // Slide idle expiry forward, never shorten, and never past the absolute cap.
+      const nextExpiresAt = Math.min(
+        Math.max(new Date(session.expiresAt).getTime(), now + SESSION_MAX_AGE_MS),
+        absoluteDeadline,
+      );
+      await this.db
+        .update(userSessions)
+        .set({
+          lastSeenAt: new Date(now).toISOString(),
+          expiresAt: new Date(nextExpiresAt).toISOString(),
+        })
+        .where(eq(userSessions.id, session.id));
+      slid = true;
     }
 
     return {
-      id: String(user.id),
-      name: user.displayName || user.username,
-      serverRole: user.serverRole as RequestUser['serverRole'],
+      user: {
+        id: String(user.id),
+        name: user.displayName || user.username,
+        serverRole: user.serverRole as RequestUser['serverRole'],
+      },
+      slid,
     };
   }
 

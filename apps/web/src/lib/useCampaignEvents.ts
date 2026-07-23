@@ -11,16 +11,25 @@
  *
  * Reconnects automatically with capped exponential backoff; after a drop is
  * healed, onReconnect fires so pages can refetch whatever they missed while
- * offline. A 401/403 stops the loop entirely (no access — retrying won't help).
+ * offline. Parser buffer-overrun recovery is separate ({@link CampaignEventsHandlers.onStreamRecovery})
+ * — the TCP/HTTP connection stayed up. A 401/403 stops the loop entirely
+ * (no access — retrying won't help).
  */
 import { useEffect, useRef } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
 import { API } from './api';
+import { SseParser, type SseParseSignal } from './sseParse';
 
 export interface CampaignEventsHandlers {
   onEvent: (event: CampaignEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch to catch up. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes (buffer overrun) while
+   * the connection stays up. Distinct from {@link onReconnect}; wire the same
+   * catch-up refetch when UI state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
   /** Lets last-known-data surfaces distinguish a healthy stream from a dropped/offline one. */
   onStatusChange?: (status: CampaignEventsStatus) => void;
 }
@@ -78,15 +87,6 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
     return typeof v.scheduleId === 'number';
   }
   return false;
-}
-
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
 }
 
 export function useCampaignEvents(campaignId: number | undefined, handlers: CampaignEventsHandlers): void {
@@ -170,25 +170,36 @@ export function useCampaignEvents(campaignId: number | undefined, handlers: Camp
           if (reconnected) handlersRef.current.onReconnect?.();
 
           const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
+          // Incremental SSE parser (#748): CRLF/CR/LF frames, heartbeats, multiline
+          // data, UTF-8 chunk splits, and bounded recovery for malformed streams.
+          const parser = new SseParser();
+          const consume = (signals: SseParseSignal[]) => {
+            for (const signal of signals) {
+              if (signal.kind === 'recovered') {
+                // Parser discarded mid-stream bytes — connection stays up, but
+                // UI may have missed events. Not a transport reconnect.
+                needsCatchUp = true;
+                if (!disposed) handlersRef.current.onStreamRecovery?.();
+                continue;
+              }
+              const data = signal.message.data;
               if (!data) continue;
               try {
                 const parsed: unknown = JSON.parse(data);
                 // Keepalive pings and unknown future event types are ignored here.
                 if (isCampaignEvent(parsed) && !disposed) handlersRef.current.onEvent(parsed);
               } catch {
-                /* malformed frame — skip */
+                /* malformed JSON payload — skip */
               }
             }
+          };
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) {
+              consume(parser.flush());
+              break;
+            }
+            consume(parser.push(value));
           }
           // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
           throw new Error('SSE stream ended');

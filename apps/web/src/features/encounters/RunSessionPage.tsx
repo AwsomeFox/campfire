@@ -608,6 +608,8 @@ export default function RunSessionPage() {
     ),
     // The stream was down for a while — refetch to catch anything missed.
     onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    // Parser recovery (connection stayed up) — same catch-up refetch.
+    onStreamRecovery: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
   });
 
   // The persisted event stream is the single announcement source for turn, HP,
@@ -627,7 +629,17 @@ export default function RunSessionPage() {
     combatLogAnnouncementRef.current = { encounterId: eid, cursor: advanced.cursor };
 
     const message = formatCombatLogAnnouncementBatch(advanced.appendedEvents);
-    if (message) announce(message);
+    if (message) {
+      // ID-based cursor already skips known events; dedupeKey is a belt-and-braces
+      // guard if the same append batch is announced twice after a reconnect race.
+      // Compact: count + first/last id (not a joined list of every event id).
+      const appended = advanced.appendedEvents;
+      const firstId = appended[0]!.id;
+      const lastId = appended[appended.length - 1]!.id;
+      announce(message, {
+        dedupeKey: `combat-log:${eid}:${appended.length}:${firstId}:${lastId}`,
+      });
+    }
   }, [eid, eventsQuery.data, announce]);
 
   // Ending an encounter does not currently append a combat-log row. Retain that
@@ -1199,7 +1211,7 @@ export default function RunSessionPage() {
       {confirmEnd && (
         <ConfirmDialog
           title="End this encounter?"
-          body="HP writes back to character sheets. This cannot be undone."
+          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets change after this End, ending again after a Reopen can overwrite those intervening changes."
           confirmLabel={runControl.isPending ? 'Ending…' : 'End encounter'}
           busy={runControl.isPending}
           onConfirm={endEncounter}
