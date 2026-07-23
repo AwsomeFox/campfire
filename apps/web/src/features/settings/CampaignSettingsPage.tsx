@@ -64,14 +64,44 @@ export default function CampaignSettingsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, role]);
 
-  // Deep-link support (#343): the AI-DM onboarding checklist links to specific controls
-  // by hash (e.g. #ai-dm-provider). React Router doesn't auto-scroll to a hash, and the
-  // target only exists once the (lazy) page has loaded the campaign, so scroll it into
-  // view here once the anchor is present.
+  // Deep-link support (#343 / #751): the AI-DM onboarding checklist links to specific
+  // controls by hash (e.g. #ai-dm-provider, #ai-dm-budget). React Router doesn't
+  // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
+  // own async seat load — observe the tree until the anchor exists, then scroll once.
   useEffect(() => {
     if (!campaign || !location.hash) return;
-    const el = document.getElementById(location.hash.slice(1));
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const id = decodeURIComponent(location.hash.slice(1));
+    let observer: MutationObserver | null = null;
+    let frame = 0;
+    let timeout = 0;
+
+    const scrollToAnchor = () => {
+      const el = document.getElementById(id);
+      if (!el) return false;
+      frame = window.requestAnimationFrame(() => {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      observer?.disconnect();
+      if (timeout) window.clearTimeout(timeout);
+      return true;
+    };
+
+    if (!scrollToAnchor()) {
+      observer = new MutationObserver(() => {
+        void scrollToAnchor();
+      });
+      observer.observe(document.getElementById('root') ?? document.body, {
+        childList: true,
+        subtree: true,
+      });
+      timeout = window.setTimeout(() => observer?.disconnect(), 10_000);
+    }
+
+    return () => {
+      observer?.disconnect();
+      if (timeout) window.clearTimeout(timeout);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
   }, [campaign, location.hash]);
 
   if (!Number.isFinite(id)) {

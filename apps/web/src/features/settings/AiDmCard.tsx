@@ -41,6 +41,11 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
 
+/** Deep-link hash for the Budget & usage section (onboarding checklist / gate CTAs). */
+export const AI_DM_BUDGET_SECTION_ID = 'ai-dm-budget';
+/** Distinct control id for the token-budget input — must not collide with the section anchor (#751). */
+export const AI_DM_BUDGET_INPUT_ID = 'ai-dm-budget-input';
+
 export default function AiDmCard({ campaignId }: { campaignId: number }) {
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
   const [effective, setEffective] = useState<AiProviderEffectiveView | null>(null);
@@ -317,14 +322,14 @@ function BudgetSection({
   }
 
   return (
-    <Section title="Budget & usage" id="ai-dm-budget">
+    <Section title="Budget & usage" id={AI_DM_BUDGET_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.
       </p>
       <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor="ai-dm-budget">Token budget</label>
+        <label htmlFor={AI_DM_BUDGET_INPUT_ID}>Token budget</label>
         <input
-          id="ai-dm-budget"
+          id={AI_DM_BUDGET_INPUT_ID}
           className="input"
           type="number"
           min={0}
