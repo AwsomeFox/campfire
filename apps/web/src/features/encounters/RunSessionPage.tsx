@@ -29,14 +29,20 @@ import type {
   MapPing,
   Npc,
   RuleEntry,
+  RulePack,
   TokenSize,
 } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
-import { queryKeys, invalidateEncounter } from '../../lib/query';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { queryKeys, invalidateCampaignCharacters, invalidateEncounter } from '../../lib/query';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
+import {
+  inlineCharacterSheetsInteractive,
+  inlineCharacterSheetsStatusLabel,
+  shouldInvalidateInlineCharacters,
+} from './inlineCharacterCards';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
@@ -65,6 +71,7 @@ import {
   dmLifecycleActions,
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
+import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -589,13 +596,30 @@ export default function RunSessionPage() {
   const events = eventsQuery.data ?? [];
 
   // Campaign characters — maps a combatant.characterId -> ownerUserId so a player is
-  // scoped to only their own character's combatant. Low-churn, so no poll.
+  // scoped to only their own character's combatant, and feeds inline CharacterStatCards.
+  // Issue #421: invalidate on character.updated SSE; poll is a dropped-stream backstop.
   const charactersQuery = useQuery({
     queryKey: queryKeys.campaignCharacters(cid),
     queryFn: () => api.get<Character[]>(`${API}/campaigns/${cid}/characters`),
     enabled: Number.isFinite(cid),
+    refetchInterval: 10_000,
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
+  const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
+  const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
+    eventStatus,
+    charactersQuery.isFetching && !charactersQuery.isLoading,
+  );
+
+  // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
+  const packsQuery = useQuery({
+    queryKey: ['rules', 'packs'],
+    queryFn: () => api.get<RulePack[]>(`${API}/rules/packs`),
+    enabled: Number.isFinite(cid) && isDm,
+    staleTime: 60_000,
+  });
+  const campaignHasCompendium = (packsQuery.data?.length ?? 0) > 0;
 
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
@@ -620,14 +644,17 @@ export default function RunSessionPage() {
   // take a turn, adjust HP, …) see it pushed instantly. Rather than a manual reload, an
   // event just invalidates the encounter's reads and Query refetches. On a remote delete,
   // bounce back to the encounters list rather than surfacing a 404.
+  // Issue #421: character.updated (and membership.revoked) have no encounterId — handle
+  // them BEFORE the encounterId filter so inline sheet cards refresh on sheet edits.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(
       (event) => {
-        // Only the encounter.* variants carry an encounterId; membership.revoked
-        // (and any future non-encounter variant) is irrelevant here and has no
-        // encounterId to compare against. The server already filters revoked
-        // frames out of the data path, but narrowing on type keeps this correct
-        // even if that ever changes.
+        // Sheet / membership frames have no encounterId — must not fall into the
+        // encounterId filter below (that was the #421 bug: character events ignored).
+        if (shouldInvalidateInlineCharacters(event)) {
+          invalidateCampaignCharacters(queryClient, cid);
+          return;
+        }
         if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
@@ -643,10 +670,17 @@ export default function RunSessionPage() {
       },
       [eid, cid, navigate, queryClient, addPing],
     ),
-    // The stream was down for a while — refetch to catch anything missed.
-    onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    // The stream was down for a while — refetch encounter + character sheets.
+    onReconnect: useCallback(() => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
+    }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
-    onStreamRecovery: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    onStreamRecovery: useCallback(() => {
+      invalidateEncounter(queryClient, eid);
+      invalidateCampaignCharacters(queryClient, cid);
+    }, [queryClient, eid, cid]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 
   // The persisted event stream is the single announcement source for turn, HP,
@@ -856,6 +890,18 @@ export default function RunSessionPage() {
   // to 'running' with nobody in the turn order). Mirror that here so the DM sees a
   // disabled control with an explanation instead of a round-trip 400.
   const hasNoCombatants = encounter ? encounter.combatants.length === 0 : true;
+
+  // Issue #431: preparing banner tailored to auto-added party / enemies / map / packs.
+  const preparingSetupGuidance = useMemo(() => {
+    if (!encounter || encounter.status !== 'preparing') return null;
+    return preparingGuidance({
+      partyCombatantCount: encounter.combatants.filter((c) => c.kind === 'character').length,
+      enemyCombatantCount: encounter.combatants.filter((c) => c.kind === 'monster' || c.kind === 'npc').length,
+      hasMap: encounter.mapAttachmentId != null,
+      campaignHasActiveParty: characters.some((c) => c.status === 'active'),
+      campaignHasCompendium,
+    });
+  }, [encounter, characters, campaignHasCompendium]);
 
   // Issue #420: drop confirm dialogs that the current status no longer allows
   // (e.g. End left open after a peer/SSE transition out of running).
@@ -1187,10 +1233,38 @@ export default function RunSessionPage() {
         }
       />
 
-      {isDm && encounter.status === 'preparing' && (
-        <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-          Add the party &amp; monsters below, roll initiative, then hit Start.
-        </p>
+      {isDm && preparingSetupGuidance && (
+        <div
+          data-testid="encounter-preparing-guidance"
+          className="text-muted"
+          style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}
+        >
+          <p style={{ margin: 0 }}>{preparingSetupGuidance.lead}</p>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {preparingSetupGuidance.nextSteps.map((step) => (
+              <li key={step}>{step}</li>
+            ))}
+          </ol>
+          <ol
+            aria-label="Encounter lifecycle"
+            data-testid="encounter-lifecycle-checklist"
+            style={{
+              margin: 0,
+              padding: 0,
+              listStyle: 'none',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: 6,
+              alignItems: 'center',
+            }}
+          >
+            {ENCOUNTER_LIFECYCLE_STEPS.map((step, i) => (
+              <li key={step.id} className="tag tag-neutral" style={{ fontSize: 10 }} title={step.detail}>
+                {i + 1}. {step.label}
+              </li>
+            ))}
+          </ol>
+        </div>
       )}
 
       {/* Optional battle map (issue #39) — a DM-uploaded image with draggable combatant
@@ -1229,9 +1303,30 @@ export default function RunSessionPage() {
       )}
 
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
+        {sheetsStatusLabel && (
+          <p
+            className="text-muted"
+            data-testid="inline-character-sheets-status"
+            style={{ fontSize: 11, margin: 0, padding: '8px 14px 0' }}
+            role="status"
+            aria-live="polite"
+          >
+            {sheetsStatusLabel}
+          </p>
+        )}
         {orderedCombatants.length === 0 ? (
           <div style={{ padding: 16 }}>
-            <EmptyState icon="crossed-swords" title="No combatants yet" hint={isDm ? 'Add one below.' : 'Waiting on the DM.'} />
+            <EmptyState
+              icon="crossed-swords"
+              title="No combatants yet"
+              hint={
+                isDm
+                  ? characters.some((c) => c.status === 'active')
+                    ? 'Add the party from the Party tab, then enemies.'
+                    : 'Add combatants below — this campaign has no active party to auto-add.'
+                  : 'Waiting on the DM.'
+              }
+            />
           </div>
         ) : (
           orderedCombatants.map((c) => (
@@ -1247,7 +1342,8 @@ export default function RunSessionPage() {
               running={encounter.status === 'running'}
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
-              campaignId={cid}
+              // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
+              campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
               onApplyDamage={onApplyDamageRolled}
               busy={pendingCombatantIds.has(c.id)}
@@ -2530,8 +2626,11 @@ function CombatantRow({
   character: Character | null;
   /** Start the character card expanded — used for the viewer's own character. */
   openCardByDefault: boolean;
-  /** Campaign id — enables click-to-roll on the card for combatants the viewer controls. */
-  campaignId: number;
+  /**
+   * Campaign id — enables click-to-roll on the card for combatants the viewer controls.
+   * Undefined while SSE is offline/reconnecting so obsolete modifiers cannot be rolled (#421).
+   */
+  campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
