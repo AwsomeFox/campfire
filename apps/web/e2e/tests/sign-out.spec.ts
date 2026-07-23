@@ -16,13 +16,16 @@ import { CREDS } from '../global-setup';
  *   (a) clicking Sign out removes protected DOM and lands on /login with the
  *       route REPLACED (no lingering history entry to bounce back into);
  *   (b) the sign-in heading receives focus and an assertive live region
- *       announces the sign-out, for keyboard/screen-reader users;
+ *       announces the sign-out, for keyboard/screen-reader users; the heading
+ *       keeps a visible focus ring (WCAG 2.4.7 — no inline outline:none);
  *   (c) revisiting the just-signed-out campaign URL (the shared-device case —
  *       the next person tries Back, a bookmark, or a saved link) is bounced to
  *       /login, proving the server session was actually invalidated, not just
  *       the client UI;
  *   (d) a server failure on /auth/logout does not block the client-side clear
- *       + redirect — the account is gone from THIS device either way.
+ *       + redirect — the account is gone from THIS device either way;
+ *   (e) a slow in-flight GET /me that resolves after Sign out must not
+ *       resurrect the just-cleared client identity (logout epoch guard).
  */
 
 async function signInAsDm(page: Page) {
@@ -50,8 +53,12 @@ test.describe('sign out (issue #506)', () => {
 
     // Accessible confirmation: focus lands on the heading, and the assertive
     // live region carries a "Signed out" announcement for screen readers.
-    await expect(page.locator('#login-title')).toBeFocused();
+    const loginTitle = page.locator('#login-title');
+    await expect(loginTitle).toBeFocused();
     await expect(page.locator('[role="alert"]').filter({ hasText: 'Signed out' })).toHaveCount(1);
+    // Programmatic focus after a pointer Sign out click must still show a ring
+    // (nocturne `#login-title:focus` — not suppressed via inline outline:none).
+    await expect(loginTitle).toHaveCSS('outline-style', 'solid');
 
     // History was replaced, not pushed — Back must not return to the campaign.
     await page.goBack();
@@ -90,6 +97,53 @@ test.describe('sign out (issue #506)', () => {
     // Client-side state clears and the redirect happens regardless of the
     // server error — there is nothing left client-side to roll back.
     await page.waitForURL('**/login');
+    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+  });
+
+  test('a late /me response after sign-out does not restore the cleared session', async ({ page }) => {
+    const { campaignId } = seed();
+    await signInAsDm(page);
+    await page.goto(`/c/${campaignId}`);
+    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
+
+    // SPA-navigate to preferences first (full page.goto would remount AuthProvider
+    // and our gated /me would freeze the splash). Then hold the next refresh()/me.
+    await page.getByRole('link', { name: /preferences/i }).first().click();
+    await page.waitForURL('**/preferences');
+    await expect(page.getByLabel(/display name/i)).toBeVisible();
+
+    let releaseMe!: () => void;
+    const meGate = new Promise<void>((resolve) => {
+      releaseMe = resolve;
+    });
+    let mePending!: () => void;
+    const meStarted = new Promise<void>((resolve) => {
+      mePending = resolve;
+    });
+    let holdNext = true;
+    await page.route('**/api/v1/me', async (route) => {
+      if (holdNext && route.request().method() === 'GET') {
+        holdNext = false;
+        mePending();
+        await meGate;
+      }
+      await route.continue();
+    });
+
+    // Preferences save awaits refresh() — that is the in-flight /me we gate.
+    await page.getByLabel(/display name/i).fill(`Sign-out race ${Date.now()}`);
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
+    await meStarted;
+
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await page.waitForURL('**/login');
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+
+    releaseMe();
+    // Allow the late refresh() to settle; logout epoch must discard it.
+    await page.waitForTimeout(300);
+    await expect(page).toHaveURL(/\/login/);
     await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   });

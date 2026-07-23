@@ -7,7 +7,7 @@
  * every viewport. SSO is first when OIDC is configured; local authentication is
  * the primary option when OIDC is off and secondary/collapsible when both are available.
  */
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
@@ -233,9 +233,10 @@ export function LoginPage() {
   // autoFocus (aimed at the username field) is left alone for those.
   const cameFromSignOut = Boolean((location.state as { signedOut?: boolean } | null)?.signedOut);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  useEffect(() => {
+  // useLayoutEffect so heading focus wins over a later paint; skip username
+  // autoFocus when cameFromSignOut (see LocalLoginForm below).
+  useLayoutEffect(() => {
     if (cameFromSignOut) headingRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameFromSignOut]);
 
   // React Router keeps this page mounted for query-only navigation. Mirror the
@@ -298,7 +299,7 @@ export function LoginPage() {
         <div className="login-auth-heading">
           <span className="login-auth-mark" aria-hidden="true"><FlameMark /></span>
           <div>
-            <h2 id="login-title" ref={headingRef} tabIndex={-1} style={{ margin: 0, outline: 'none' }}>
+            <h2 id="login-title" ref={headingRef} tabIndex={-1} style={{ margin: 0 }}>
               Sign in
             </h2>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
@@ -369,7 +370,7 @@ export function LoginPage() {
               password={password}
               setPassword={setPassword}
               error={error}
-              primary
+              primary={!cameFromSignOut}
             />
           </div>
         )}

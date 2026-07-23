@@ -142,6 +142,13 @@ figcaption {
   outline: 2px solid var(--color-accent);
   outline-offset: 3px;
 }
+/* Sign-out landing (#506): LoginPage focuses #login-title programmatically after
+   a pointer-driven Sign out click — :focus-visible often does not apply, so keep
+   a visible :focus ring for WCAG 2.4.7 (do not suppress via inline outline:none). */
+#login-title:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
 ::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
 
 /* — rules — */

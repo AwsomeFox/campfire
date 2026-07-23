@@ -104,8 +104,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // though the user id is unchanged. Only a PROVEN-LIVE /me updates this (never a
   // stale/restored identity), so it can't itself be poisoned by offline artifacts.
   const lastInstanceRef = useRef<ServerInstance | null>(null);
+  // Issue #506 / Bugbot: bumped synchronously at the start of logout() so any
+  // in-flight refresh() that resolves after sign-out discards its result instead
+  // of resurrecting `me` from a cookie that hasn't been revoked yet.
+  const logoutEpochRef = useRef(0);
 
   const handleMultiTabSignOut = useCallback(() => {
+    logoutEpochRef.current += 1;
     setMe(null);
     lastUserIdRef.current = null;
     lastInstanceRef.current = null;
@@ -122,6 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useAuthStorageListener(handleMultiTabSignOut);
 
   const refresh = useCallback(async () => {
+    const epoch = logoutEpochRef.current;
     let outcome: MeFetchOutcome;
     try {
       const nextMe = await api.get<Me>(`${API}/me`);
@@ -129,6 +135,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       outcome = outcomeFromError(err);
     }
+
+    // Sign-out won the race: do not apply a late /me (live or snapshot restore).
+    if (epoch !== logoutEpochRef.current) return;
 
     const snapshot = readMeSnapshot<Me>();
     const decision = decideAuthOutcome(outcome, {
@@ -141,6 +150,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await clearApiCache();
       queryClient.clear();
     }
+    // Re-check after the cache await — logout may have started meanwhile.
+    if (epoch !== logoutEpochRef.current) return;
+
     if (decision.shouldClearSnapshot) {
       clearMeSnapshot();
     }
@@ -205,13 +217,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    // Issue #506: clear auth/query/global state FIRST, before waiting on the
-    // server round-trip. On a shared device a slow (or failed) network call must
-    // not leave the authed UI, cached campaign data, or accent/reading-preference
-    // overrides on screen a moment longer than necessary — the local session is
-    // over the instant the user asks to sign out, regardless of what the server
-    // says. `clearAuthStorage()` also fires the storage event that drives
-    // multi-tab sign-out (issue #666), so other tabs clear immediately too.
+    // Issue #506: invalidate the server session and clear local state without
+    // awaiting either network/cache work. Callers (Layout) must be able to
+    // announce + navigate synchronously; `clearApiCache` is documented as
+    // never blocking logout; a stalled /auth/logout must not hold the UI.
+    // Bump the epoch FIRST so any in-flight refresh() cannot re-apply `me`
+    // from a cookie that still looks valid until the POST lands.
+    logoutEpochRef.current += 1;
+
+    // Fire server invalidation immediately (before/alongside the local clear)
+    // so the session-survival window on reload is as short as possible. Errors
+    // are swallowed — the local session is over regardless.
+    void api.post(`${API}/auth/logout`).catch(() => {
+      /* Swallowed intentionally — see comment above. */
+    });
+
+    // `clearAuthStorage()` also fires the storage event that drives multi-tab
+    // sign-out (issue #666), so other tabs clear immediately too.
     clearAuthStorage();
     setMe(null);
     // Drop this account's cached campaign data so the next person to sign in on
@@ -219,25 +241,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // offline identity so an offline reload no longer restores this account.
     lastUserIdRef.current = null;
     lastInstanceRef.current = null;
-    await clearApiCache();
-    queryClient.clear();
     clearMeSnapshot();
     setStaleIdentity(false);
     setLastSyncedAt(null);
     setConnectionError(false);
     applyAccentColor(null);
     applyReadingPreference(document.documentElement, 'default');
-
-    // Best-effort server-side session invalidation. Client state is already
-    // fully cleared above, so a network failure here (offline, server down,
-    // request already raced by a concurrent logout) must not block, delay, or
-    // reverse the sign-out the user already sees — there is nothing left to
-    // roll back client-side, and a stale/expired session cookie is harmless.
-    try {
-      await api.post(`${API}/auth/logout`);
-    } catch {
-      // Swallowed intentionally — see comment above.
-    }
+    // Match handleMultiTabSignOut: purge is best-effort and must not gate UI.
+    void clearApiCache().finally(() => queryClient.clear());
   }, []);
 
   const isAdmin = me?.user.serverRole === 'admin';
