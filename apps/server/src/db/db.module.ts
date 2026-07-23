@@ -1484,6 +1484,20 @@ function migratePublicRecapSharePolicy(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #857: campaign-level public-invite kill switch. Existing campaigns keep
+ * invites enabled (DEFAULT 1) so live tables are uninterrupted; archive/trash
+ * paths clear the flag going forward so restore cannot accidentally revive
+ * bearer join links.
+ */
+function migrateCampaignsTableForPublicInvitesEnabled(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+  if (!hasCampaigns) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === 'public_invites_enabled')) return;
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN public_invites_enabled INTEGER NOT NULL DEFAULT 1');
+}
+
+/**
  * Migration for issue #723 (PWA restore safety): the `server_meta` table didn't
  * exist before install/data-generation identity was tracked. The table itself is
  * a single-row singleton (key='singleton') carrying a per-install UUID and a
@@ -1658,7 +1672,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
   { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
-  { name: '0058_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
+  { name: '0058_campaigns_public_invites_enabled', run: migrateCampaignsTableForPublicInvitesEnabled },
+  { name: '0059_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
 ];
 
 /**

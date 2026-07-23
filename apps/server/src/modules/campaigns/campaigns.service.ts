@@ -62,6 +62,7 @@ import { TimelineService } from '../timeline/timeline.service';
 import { CommentsService } from '../comments/comments.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
+import { InvitesService } from '../membership/invites.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
@@ -231,6 +232,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
     dmControlsProgression: row.dmControlsProgression,
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
+    publicInvitesEnabled: row.publicInvitesEnabled,
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -258,6 +260,7 @@ export class CampaignsService {
     private readonly comments: CommentsService,
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
+    private readonly invites: InvitesService,
   ) {}
 
   /**
@@ -415,6 +418,9 @@ export class CampaignsService {
         dangerLevel: input.dangerLevel ?? 'low',
         dmControlsProgression: input.dmControlsProgression ?? false,
         publicRecapSharingEnabled: true,
+        // Brand-new campaigns that start archived cannot accept joins until the
+        // DM both unarchives and deliberately re-enables invites (#857).
+        publicInvitesEnabled: (input.status ?? 'active') === 'active',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -481,6 +487,13 @@ export class CampaignsService {
       entityId: id,
       campaignId: id,
     });
+    // Archive (active → paused/completed) suspends public invites. Restore/
+    // unarchive never flips the flag back — deliberate reactivation required (#857).
+    if (existing.status === 'active' && input.status !== undefined && input.status !== 'active') {
+      await this.invites.suspendForCampaign(id, user, 'archive');
+      const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      return toDomain(fresh ?? row);
+    }
     return toDomain(row);
   }
 
@@ -551,6 +564,7 @@ export class CampaignsService {
           dangerLevel: source.dangerLevel,
           dmControlsProgression: source.dmControlsProgression,
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
+          publicInvitesEnabled: source.publicInvitesEnabled,
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // attachments (on-disk files) are not cloned
@@ -1074,6 +1088,7 @@ export class CampaignsService {
           // Older exports predate the policy field and retain the historical
           // enabled default. Explicitly disabled campaigns stay disabled.
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
+          publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
@@ -1852,6 +1867,9 @@ export class CampaignsService {
    */
   async remove(id: number, user: RequestUser): Promise<void> {
     await this.getOrThrow(id);
+    // Suspend invites before stamping deletedAt so a concurrent preview/accept
+    // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
+    await this.invites.suspendForCampaign(id, user, 'trash');
     await this.db.update(campaigns).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(campaigns.id, id));
     await this.audit.log({
       actor: auditActor(user),

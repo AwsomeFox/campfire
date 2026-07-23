@@ -18,6 +18,11 @@ export const campaigns = sqliteTable('campaigns', {
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
   dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
   publicRecapSharingEnabled: integer('public_recap_sharing_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #857: when false, public invite preview/accept/join all 404 with the
+  // uniform inactive message. Archive/trash auto-clears this; restore/unarchive
+  // does NOT flip it back — deliberate reactivation via the invites policy
+  // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
+  publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
