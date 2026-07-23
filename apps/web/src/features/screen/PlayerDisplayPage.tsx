@@ -180,18 +180,21 @@ export default function PlayerDisplayPage() {
   useEffect(() => {
     const sequencer = loadSequencerRef.current;
     if (!Number.isFinite(cid)) {
-      sequencer.invalidate('campaign-changed');
-      return;
+      setLoading(false);
+      // Teardown-only invalidation: React runs this cleanup before the next
+      // effect on cid change, so a single bump covers unmount and campaign swap.
+      return () => {
+        sequencer.invalidate();
+      };
     }
-    // Campaign identity changed: drop prior in-flight work and reset sync chrome
-    // before the first load for the new id.
-    sequencer.invalidate('campaign-changed');
+    // Prior effect cleanup already aborted in-flight work for the old cid.
+    // Reset sync chrome, then begin a fresh load for this identity.
     setEventStatus('connecting');
     setDisplayStale(false);
     setLoading(true);
     void load();
     return () => {
-      sequencer.invalidate('unmount');
+      sequencer.invalidate();
     };
   }, [cid, load]);
 

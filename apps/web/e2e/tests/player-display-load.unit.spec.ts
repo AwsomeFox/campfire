@@ -405,7 +405,7 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
       getEncounter: async () => detailFor(9, 7, 1),
     };
     const dropped = runPlayerDisplayLoad(sequencer, 7, hungFetchers);
-    sequencer.invalidate('campaign-changed'); // stream drop / identity churn
+    sequencer.invalidate(); // stream drop / identity churn (single bump)
     const reconnected = await runPlayerDisplayLoad(sequencer, 7, fetchers);
     expect(reconnected.kind).toBe('ok');
     if (reconnected.kind === 'ok') {
@@ -413,6 +413,68 @@ test.describe('PlayerDisplayLoadSequencer + runPlayerDisplayLoad (#743)', () => 
     }
     hung.resolve(summaryFor(7, 'stale'));
     expect((await dropped).kind).toBe('ignored');
+  });
+
+  test('TimeoutError is a transient failure, not an ignored abort', async () => {
+    // First-load timeouts must not return `ignored` (page would keep loading forever).
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), {
+      name: 'TimeoutError',
+    });
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: async () => {
+        throw timeout;
+      },
+      getRunningEncounters: async () => [],
+      getEncounter: async () => detailFor(9, 7, 2),
+    };
+
+    const firstLoad = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: false });
+    expect(firstLoad).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: false,
+      transient: true,
+      message: 'The operation was aborted due to timeout',
+    });
+
+    const refresh = await runPlayerDisplayLoad(sequencer, 7, fetchers, { hadProjection: true });
+    expect(refresh).toMatchObject({
+      kind: 'failed',
+      keepLastKnown: true,
+      transient: true,
+    });
+  });
+
+  test('AbortError / signal.aborted still classify as ignored', async () => {
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const hung = deferred<CampaignSummary>();
+    const fetchers: PlayerDisplayFetchers = {
+      getSummary: (_cid, signal) => trackAbort(signal, hung.promise),
+      getRunningEncounters: async () => [],
+      getEncounter: async () => detailFor(9, 7, 1),
+    };
+    const inFlight = runPlayerDisplayLoad(sequencer, 7, fetchers);
+    // Superseding begin aborts the prior signal → ignored, not failed.
+    sequencer.begin(7);
+    hung.resolve(summaryFor(7, 'stale'));
+    expect((await inFlight).kind).toBe('ignored');
+  });
+
+  test('campaign change: cleanup invalidate once, then begin — no double bump', () => {
+    // Mirrors PlayerDisplayPage: React cleanup invalidates; the next effect body
+    // must NOT invalidate again before load()/begin().
+    const sequencer = new PlayerDisplayLoadSequencer();
+    const prior = sequencer.begin(1);
+    const genAfterPrior = sequencer.currentGeneration;
+
+    sequencer.invalidate(); // previous effect cleanup only
+    expect(sequencer.currentGeneration).toBe(genAfterPrior + 1);
+    expect(prior.signal.aborted).toBe(true);
+    expect(sequencer.activeCampaign).toBeNull();
+
+    const next = sequencer.begin(2); // new effect → load()
+    expect(next.generation).toBe(genAfterPrior + 2);
+    expect(sequencer.isCurrent(next.generation, 2)).toBe(true);
   });
 
   test('begin() aborts the prior signal', async () => {

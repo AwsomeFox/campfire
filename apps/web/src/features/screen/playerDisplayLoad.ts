@@ -88,9 +88,12 @@ export function playerDisplaySyncMessage(state: PlayerDisplaySyncState): string 
 }
 
 function isAbortError(error: unknown): boolean {
+  // Only real aborts — not TimeoutError. A timeout that did not abort our
+  // signal must reach the transient failure path so callers can clear loading
+  // / keepLastKnown. If a timeout aborts via AbortController, `signal.aborted`
+  // in the catch path already covers it.
   if (!error || typeof error !== 'object') return false;
-  const name = (error as { name?: unknown }).name;
-  return name === 'AbortError' || name === 'TimeoutError';
+  return (error as { name?: unknown }).name === 'AbortError';
 }
 
 function abortError(): DOMException {
@@ -183,11 +186,12 @@ export class PlayerDisplayLoadSequencer {
   }
 
   /**
-   * Invalidate in-flight work when the route identity changes. The next
-   * `begin()` starts a fresh generation for the new campaign.
+   * Abort in-flight work and bump the generation so late responses cannot
+   * commit. Call once per teardown transition (React effect cleanup) — do not
+   * also call from the next effect body on campaign change, or the generation
+   * double-bumps.
    */
-  invalidate(reason: 'unmount' | 'campaign-changed' = 'campaign-changed'): void {
-    void reason;
+  invalidate(): void {
     this.controller?.abort();
     this.controller = null;
     this.generation += 1;
