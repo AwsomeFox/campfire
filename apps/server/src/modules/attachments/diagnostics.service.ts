@@ -199,6 +199,24 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
 }
 
 /**
+ * Read a campaign directory's entries for the on-disk scan/lookup paths below.
+ * Returns `null` on `ENOENT` (directory vanished between the parent listing and
+ * this read). Any other error — e.g. EACCES/EPERM, or ENOTDIR — is fail-closed
+ * (503) so callers cannot produce a false "not found".
+ */
+function readCampaignDirOrNullOnError(dirPath: string, dirName: string, contextSuffix: string): fs.Dirent[] | null {
+  try {
+    return fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return null;
+    throw new ServiceUnavailableException(
+      `Attachment storage subdirectory is unreadable or inaccessible (${code ?? 'unknown error'} in campaign directory ${dirName}); ${contextSuffix}`,
+    );
+  }
+}
+
+/**
  * All primary (non-thumbnail) attachment files for an id, anywhere under uploads,
  * returned in a stable (relPath-sorted) order.
  *
@@ -211,13 +229,19 @@ function findPrimaryAttachmentFilesOnDisk(
   root: string,
   attachmentId: number,
 ): Array<{ relPath: string; campaignDir: string }> {
-  if (!fs.existsSync(root)) return [];
-
   let campaignDirs: fs.Dirent[];
   try {
     campaignDirs = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return [];
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // Missing root is an empty-storage case (callers report success:false), not 503.
+    // `existsSync` would also mask EACCES/EPERM (existing-but-unreadable root) as
+    // "missing", so check the readdir error code directly instead.
+    if (code === 'ENOENT') return [];
+    // Avoid leaking absolute host paths in admin API error responses.
+    throw new ServiceUnavailableException(
+      `Attachment storage root is unreadable or inaccessible (${code ?? 'unknown error'}); cannot locate attachment files.`,
+    );
   }
 
   const idPattern = new RegExp(`^${attachmentId}\\.([a-z0-9]+)$`);
@@ -225,12 +249,10 @@ function findPrimaryAttachmentFilesOnDisk(
   for (const dir of campaignDirs) {
     if (!dir.isDirectory()) continue;
     const dirPath = path.join(root, dir.name);
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dirPath, { withFileTypes: true });
-    } catch {
-      continue;
-    }
+    // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
+    // produce a false "file not found" for relink/quarantine-by-attachmentId.
+    const entries = readCampaignDirOrNullOnError(dirPath, dir.name, 'cannot locate attachment files.');
+    if (entries === null) continue;
     for (const entry of entries) {
       if (!entry.isFile()) continue;
       if (idPattern.test(entry.name)) {
@@ -275,22 +297,15 @@ export class DiagnosticsService {
       } catch (err) {
         const code = (err as NodeJS.ErrnoException)?.code;
         throw new ServiceUnavailableException(
-          `Attachment storage root is unreadable (${code ?? 'unknown error'} at ${root}); cannot run diagnostics.`,
+          `Attachment storage root is unreadable or inaccessible (${code ?? 'unknown error'}); cannot run diagnostics.`,
         );
       }
       for (const dir of campaignDirs) {
         if (!dir.isDirectory()) continue;
         const dirCampaignId = parseCampaignDirId(dir.name);
         const dirPath = path.join(root, dir.name);
-        let entries: fs.Dirent[];
-        try {
-          entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException)?.code;
-          throw new ServiceUnavailableException(
-            `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot run diagnostics.`,
-          );
-        }
+        const entries = readCampaignDirOrNullOnError(dirPath, dir.name, 'cannot run diagnostics.');
+        if (entries === null) continue;
         for (const entry of entries) {
           if (!entry.isFile()) continue;
           totalDiskFiles++;
@@ -650,8 +665,10 @@ export class DiagnosticsService {
       fs.accessSync(root, fs.constants.R_OK | fs.constants.X_OK);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
+      // Avoid leaking the absolute host path in admin API error responses,
+      // matching the other unreadable-storage error messages in this file.
       throw new ServiceUnavailableException(
-        `Attachment storage is unavailable (${code ?? 'unknown error'} at ${root}); cannot run diagnostics.`,
+        `Attachment storage is unavailable or inaccessible (${code ?? 'unknown error'}).`,
       );
     }
   }
