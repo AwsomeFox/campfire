@@ -6,7 +6,7 @@
  * move pin (numeric X/Y -> PATCH), dmSecret panel, delete.
  * Everyone: header, mini pin map, markdown body, here & connected, notes.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
@@ -27,6 +27,12 @@ import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
 import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
 
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -59,6 +65,9 @@ export default function LocationPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  // Issue #853: generation-token loads so a slow A response cannot paint (or leave
+  // mutation controls armed) after the route has moved to B.
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   // Auxiliary panels (issue #697): the full location list (breadcrumb/children/
   // parent-picker), the NPC roster (the "Here" card), the quest list (connected
@@ -114,29 +123,66 @@ export default function LocationPage() {
   const [pinY, setPinY] = useState('50');
   const [pinSaving, setPinSaving] = useState(false);
 
+  // Reset editor chrome tied to the prior record whenever the route identity changes
+  // (issue #853) — parent/child links reuse this component instance.
+  function resetEditorChrome() {
+    setEditing(false);
+    setProposeMode(false);
+    setProposeDone(false);
+    setForm({ name: '', kind: '', body: '', dmSecret: '', parentId: '' });
+    setSaving(false);
+    setSaveError(null);
+    setDeleting(false);
+    setConfirmingDelete(false);
+    setPendingUndo(false);
+    setConflict(false);
+    setMovingPin(false);
+    setPinX('50');
+    setPinY('50');
+    setPinSaving(false);
+    setStatusSaving(false);
+  }
+
   // Core fetch: ONLY the location can set the page-level error/not-found state.
   // The auxiliary panels above own their own error/retry and never reach here (#697).
   const load = useCallback(async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(id);
     setLoading(true);
     setError(null);
     setNotFound(false);
+    // Clear immediately so A's canon/dmSecret never stays painted on B's URL while
+    // B loads — and so mutation controls unmount until the new record matches.
+    setLocation(null);
+    resetEditorChrome();
     try {
-      const locData = await api.get<Location>(`${API}/locations/${id}`);
-      setLocation(locData);
+      const locData = await api.get<Location>(`${API}/locations/${id}`, { signal });
+      const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, id, locData);
+      if (decision.kind !== 'commit') return;
+      setLocation(decision.record);
     } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, id)) return;
+      setLocation(null);
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
+      } else if ((err as { name?: string } | undefined)?.name === 'AbortError') {
+        // Superseded by a newer navigation — ignore.
       } else {
         setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
       }
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, id)) setLoading(false);
     }
   }, [id]);
 
   useEffect(() => {
-    if (Number.isFinite(cid) && Number.isFinite(id)) void load();
+    if (!Number.isFinite(cid) || !Number.isFinite(id)) return;
+    void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [cid, id, load]);
+
+  // Block every mutation until the painted record is the route's record (#853).
+  const recordReady = mutationsEnabledForRoute(location, id, loading);
 
   const hereNpcs = useMemo(() => npcs.filter((n) => n.locationId === id), [npcs, id]);
   const hereNpcIds = useMemo(() => new Set(hereNpcs.map((n) => n.id)), [hereNpcs]);
@@ -227,6 +273,9 @@ export default function LocationPage() {
 
   async function save() {
     if (!form.name.trim()) return;
+    // Issue #853: never write form values loaded for A into B's route id.
+    const gate = assertMutationTarget(location?.id, id);
+    if (!gate.ok) return;
     setSaving(true);
     setSaveError(null);
     setConflict(false);
@@ -288,6 +337,7 @@ export default function LocationPage() {
   }
 
   async function remove() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setDeleting(true);
     try {
       // Soft-delete (issue #116) — reversible; offer an Undo instead of navigating away.
@@ -308,6 +358,7 @@ export default function LocationPage() {
   }
 
   async function setStatus(status: Location['status']) {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setStatusSaving(true);
     try {
       const updated = await api.post<Location>(`${API}/locations/${id}/discover`, { status });
@@ -333,6 +384,7 @@ export default function LocationPage() {
   }
 
   async function savePin() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     const x = Number(pinX);
     const y = Number(pinY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -390,7 +442,20 @@ export default function LocationPage() {
     );
   }
 
-  if (!location) return null;
+  // After a route change we clear `location` immediately; until the new record
+  // matches the route, never paint prior content or arm mutation controls (#853).
+  if (!location || !recordReady) {
+    if (loading) {
+      return (
+        <div className="max-w-5xl mx-auto px-4 mt-5">
+          <Card>
+            <Skeleton lines={6} />
+          </Card>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const px = location.mapX ?? 50;
   const py = location.mapY ?? 50;
