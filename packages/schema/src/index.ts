@@ -4284,6 +4284,8 @@ export const CampaignEventType = z.enum([
   'schedule.updated',
   'membership.revoked',
   'treasury.updated',
+  // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
+  'character.updated',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -4342,6 +4344,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     // (the client compares userId against the local session and ignores its own echo).
     type: z.literal('treasury.updated'),
     campaignId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #421: a character sheet (or member-linked resource on that sheet) changed.
+    // Thin invalidation only — no stats/actions payload — so run-session inline cards
+    // refetch the permission-checked character list without requiring an encounterId
+    // (the old SSE filter dropped these as non-encounter frames). `userId` is the actor
+    // (String(users.id)); `characterId` identifies which sheet went stale.
+    type: z.literal('character.updated'),
+    campaignId: Id,
+    characterId: Id,
     userId: z.string().max(120),
     at: IsoDate,
   }),
