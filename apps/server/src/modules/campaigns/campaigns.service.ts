@@ -2182,10 +2182,14 @@ export class CampaignsService {
     // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
     // are already gone (source of truth), so a failure here just leaves an orphaned
     // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
+    // Synchronous wipe: the e2e purge assertion reads the directory immediately after
+    // the HTTP response returns. Async fs.rm raced that check on Node 22.x CI.
     const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    fs.rm(campaignUploadsDir, { recursive: true, force: true }, () => {
+    try {
+      fs.rmSync(campaignUploadsDir, { recursive: true, force: true });
+    } catch {
       /* best-effort — DB rows are already gone; a stray directory is harmless */
-    });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
