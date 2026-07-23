@@ -303,8 +303,9 @@ export class DiagnosticsService {
           const code = (err as NodeJS.ErrnoException)?.code;
           // Directory removed between root listing and this read — skip and continue.
           if (code === 'ENOENT') continue;
+          // Use the campaign directory name (relative), not the absolute path.
           throw new ServiceUnavailableException(
-            `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} at ${dirPath}); cannot run diagnostics.`,
+            `Attachment storage subdirectory is unreadable (${code ?? 'unknown error'} in campaign directory ${dir.name}); cannot run diagnostics.`,
           );
         }
         for (const entry of entries) {

@@ -702,7 +702,12 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
           expect(fixRes.body.success).toBe(true);
         }
       } finally {
-        fs.chmodSync(campaignDir, previousMode);
+        // Best-effort restore: a failure here shouldn't cascade into other tests.
+        try {
+          fs.chmodSync(campaignDir, previousMode);
+        } catch {
+          // Ignore — restricted filesystems may also refuse the restore.
+        }
       }
     });
   });
