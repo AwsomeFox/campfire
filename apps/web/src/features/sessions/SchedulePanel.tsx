@@ -5,7 +5,7 @@
  * DM: schedule/edit/cancel sessions, enable/rotate/disable the feed.
  * Everyone: see what's coming, one-tap RSVP.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
@@ -18,7 +18,10 @@ import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
-import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { sanitizeFieldPrefix } from '../../components/Field';
+import { LabeledField } from '../../components/LabeledField';
+import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CopyControl } from '../../components/CopyControl';
@@ -30,12 +33,28 @@ import {
   clearCancelledScheduleDetail,
   readCancelledScheduleDetail,
 } from '../../lib/scheduleNotificationCopy';
-
-const RSVP_OPTIONS: Array<{ status: RsvpStatus; label: string; icon: string }> = [
-  { status: 'yes', label: 'In', icon: '✓' },
-  { status: 'maybe', label: 'Maybe', icon: '?' },
-  { status: 'no', label: 'Out', icon: '✗' },
-];
+import { RsvpChooser } from './RsvpChooser';
+import {
+  initialRsvpSaveState,
+  reduceRsvpSave,
+  RSVP_GROUP_LEGEND,
+  RSVP_SAVE_FAILED_ANNOUNCEMENT,
+  RSVP_SAVING_STATUS,
+  rsvpDisplayStatus,
+  rsvpSavedAnnouncement,
+  rsvpStatusSummary,
+  SCHEDULE_DURATION_HELP,
+  SCHEDULE_FIELD_NAMES,
+  SCHEDULE_FORM_ID_PREFIX,
+  SCHEDULE_LOCATION_HELP,
+  SCHEDULE_NOTES_HELP,
+  SCHEDULE_TITLE_HELP,
+  SCHEDULE_WHEN_HELP,
+  SESSION_SAVE_FAILED_ANNOUNCEMENT,
+  isoToDatetimeLocalInputValue,
+  sessionScheduledAnnouncement,
+  sessionUpdatedAnnouncement,
+} from './schedulePanelA11y';
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const formattingLocale = useFormattingLocale();
@@ -264,23 +283,43 @@ function ScheduleItem({
   myIds: Set<string>;
   onChange: () => void;
 }) {
+  const announce = useAnnounce();
+  const rsvpLegendId = `schedule-rsvp-legend-${schedule.id}`;
+  const rsvpStatusId = `schedule-rsvp-status-${schedule.id}`;
   const [editing, setEditing] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const mine = schedule.rsvps.find((r) => myIds.has(r.userId));
+  const [rsvpState, dispatchRsvp] = useReducer(
+    reduceRsvpSave,
+    mine?.status ?? null,
+    initialRsvpSaveState,
+  );
+
+  useEffect(() => {
+    dispatchRsvp({ type: 'sync', persisted: mine?.status ?? null });
+  }, [mine?.status]);
+
+  const displayRsvp = rsvpDisplayStatus(rsvpState);
+  const rsvpSaving = rsvpState.phase === 'saving';
 
   async function setRsvp(status: RsvpStatus) {
-    setBusy(true);
+    if (rsvpSaving) return;
+    const prior = rsvpState.persisted;
+    if (status === prior && rsvpState.pending == null) return;
+    dispatchRsvp({ type: 'select', status });
     setError(null);
     try {
       await api.put<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/rsvp`, { status });
+      dispatchRsvp({ type: 'saved', status });
+      announce(rsvpSavedAnnouncement(status));
       onChange();
     } catch {
-      setError("Couldn't save your RSVP.");
-    } finally {
-      setBusy(false);
+      dispatchRsvp({ type: 'failed' });
+      setError(RSVP_SAVE_FAILED_ANNOUNCEMENT);
+      announce(RSVP_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
     }
   }
 
@@ -349,18 +388,27 @@ function ScheduleItem({
         {schedule.notes && <Markdown className="!text-sm !text-[color:var(--color-text)]">{schedule.notes}</Markdown>}
 
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Can you make it?</span>
-          {RSVP_OPTIONS.map((opt) => (
-            <Btn
-              key={opt.status}
-              ghost={mine?.status !== opt.status}
-              className="!min-h-0 !py-1 !px-2.5 text-xs"
-              disabled={busy}
-              onClick={() => setRsvp(opt.status)}
-            >
-              {opt.icon} {opt.label}
-            </Btn>
-          ))}
+          <span
+            id={rsvpLegendId}
+            className="text-[11px] font-bold text-slate-500 uppercase tracking-wide"
+          >
+            {RSVP_GROUP_LEGEND}
+          </span>
+          <RsvpChooser
+            aria-labelledby={rsvpLegendId}
+            value={displayRsvp}
+            onChange={(status) => void setRsvp(status)}
+            disabled={busy || rsvpSaving}
+          />
+          <span
+            id={rsvpStatusId}
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {rsvpSaving ? RSVP_SAVING_STATUS : rsvpStatusSummary(displayRsvp)}
+          </span>
         </div>
 
         {schedule.rsvps.length > 0 && <RsvpList rsvps={schedule.rsvps} />}
@@ -462,7 +510,13 @@ function ScheduleForm({
   onSubmit: (body: { scheduledAt: string; durationMinutes: number; title: string; location: string; notes: string }) => Promise<void>;
   onCancel: () => void;
 }) {
-  const [when, setWhen] = useState(initial ? toLocalInputValue(initial.scheduledAt) : '');
+  const announce = useAnnounce();
+  const reactId = useId();
+  const idPrefix = initial
+    ? `${SCHEDULE_FORM_ID_PREFIX}-${initial.id}`
+    : `${SCHEDULE_FORM_ID_PREFIX}-${sanitizeFieldPrefix(reactId)}`;
+  const formErrorId = `${idPrefix}-error`;
+  const [when, setWhen] = useState(initial ? isoToDatetimeLocalInputValue(initial.scheduledAt) : '');
   const [duration, setDuration] = useState(String(initial?.durationMinutes ?? 240));
   const [title, setTitle] = useState(initial?.title ?? '');
   const [location, setLocation] = useState(initial?.location ?? '');
@@ -479,52 +533,107 @@ function ScheduleForm({
     }
     setSaving(true);
     setError(null);
+    const body = {
+      scheduledAt: new Date(parsed).toISOString(),
+      durationMinutes: (() => {
+        if (!Number.isFinite(minutes)) return initial ? initial.durationMinutes : 240;
+        if (initial) return Math.min(1440, Math.max(0, minutes));
+        return minutes >= 15 ? Math.min(minutes, 1440) : 240;
+      })(),
+      title: title.trim(),
+      location: location.trim(),
+      notes,
+    };
     try {
-      await onSubmit({
-        scheduledAt: new Date(parsed).toISOString(),
-        durationMinutes: (() => {
-          if (!Number.isFinite(minutes)) return initial ? initial.durationMinutes : 240;
-          // Edits may keep end-session values in 0..14; create still requires >=15.
-          if (initial) return Math.min(1440, Math.max(0, minutes));
-          return minutes >= 15 ? Math.min(minutes, 1440) : 240;
-        })(),
-        title: title.trim(),
-        location: location.trim(),
-        notes,
-      });
+      await onSubmit(body);
+      announce(initial ? sessionUpdatedAnnouncement(body.title) : sessionScheduledAnnouncement(body.title));
     } catch {
-      setError("Couldn't save the session.");
+      setError(SESSION_SAVE_FAILED_ANNOUNCEMENT);
+      announce(SESSION_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
       setSaving(false);
     }
   }
 
   return (
-    <Card className="space-y-3">
+    <Card
+      className="space-y-3"
+      role="region"
+      aria-label={initial ? 'Edit scheduled session' : 'Schedule the next session'}
+      aria-describedby={error ? formErrorId : undefined}
+    >
       <h2 className="font-bold text-white text-sm">{initial ? 'Edit scheduled session' : 'Schedule the next session'}</h2>
-      {error && <ErrorNote message={error} />}
+      {error && (
+        <div id={formErrorId}>
+          <ErrorNote message={error} />
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">When</label>
-          <TextInput type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} />
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Duration (minutes)</label>
-          <TextInput type="number" min={initial ? 0 : 15} max={1440} step={15} value={duration} onChange={(e) => setDuration(e.target.value)} />
-        </div>
+        <LabeledField
+          idPrefix={idPrefix}
+          name={SCHEDULE_FIELD_NAMES.when}
+          type="datetime-local"
+          label="When"
+          help={SCHEDULE_WHEN_HELP}
+          value={when}
+          onChange={(e) => setWhen(e.target.value)}
+          disabled={saving}
+          describedBy={error ? formErrorId : undefined}
+        />
+        <LabeledField
+          idPrefix={idPrefix}
+          name={SCHEDULE_FIELD_NAMES.durationMinutes}
+          type="number"
+          label="Duration (minutes)"
+          help={SCHEDULE_DURATION_HELP}
+          min={initial ? 0 : 15}
+          max={1440}
+          step={15}
+          value={duration}
+          onChange={(e) => setDuration(e.target.value)}
+          disabled={saving}
+          describedBy={error ? formErrorId : undefined}
+        />
       </div>
-      <TextInput value={title} onChange={(e) => setTitle(e.target.value)} placeholder='Title (optional), e.g. "Session 12 — the heist"' />
-      <TextInput value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Where? (optional) — Sam's place, VTT link…" />
-      <TextArea
-        className="!min-h-[60px]"
+      <LabeledField
+        idPrefix={idPrefix}
+        name={SCHEDULE_FIELD_NAMES.title}
+        label="Title"
+        help={SCHEDULE_TITLE_HELP}
+        placeholder='e.g. "Session 12 — the heist"'
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        disabled={saving}
+        describedBy={error ? formErrorId : undefined}
+      />
+      <LabeledField
+        idPrefix={idPrefix}
+        name={SCHEDULE_FIELD_NAMES.location}
+        label="Where"
+        help={SCHEDULE_LOCATION_HELP}
+        placeholder="Sam's place, VTT link…"
+        value={location}
+        onChange={(e) => setLocation(e.target.value)}
+        disabled={saving}
+        describedBy={error ? formErrorId : undefined}
+      />
+      <LabeledField
+        idPrefix={idPrefix}
+        name={SCHEDULE_FIELD_NAMES.notes}
+        as="textarea"
+        label="Notes"
+        help={SCHEDULE_NOTES_HELP}
+        placeholder="Bring level 5 sheets, we start on time…"
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
-        placeholder="Notes for the table (optional) — bring level 5 sheets, we start on time…"
+        minHeight={60}
+        disabled={saving}
+        describedBy={error ? formErrorId : undefined}
       />
       <div className="flex gap-2 justify-end">
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel}>
+        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
-        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+        <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void save()} disabled={saving} aria-busy={saving || undefined}>
           {saving ? 'Saving…' : initial ? 'Save' : 'Schedule'}
         </Btn>
       </div>
@@ -680,12 +789,4 @@ function formatDuration(minutes: number): string {
   const m = minutes % 60;
   if (h === 0) return `${m}min`;
   return m === 0 ? `${h}h` : `${h}h ${m}min`;
-}
-
-/** ISO UTC -> value for <input type="datetime-local"> in the viewer's local time. */
-function toLocalInputValue(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
