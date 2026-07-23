@@ -48,9 +48,9 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          # ABI-sensitive native deps (better-sqlite3, sharp) — key on the Node
-          # major so a 22.x cache is never restored onto a 24.x runner.
-          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          # ABI-sensitive native deps (better-sqlite3, sharp) — key on Node
+          # major, architecture, runner OS/image version, and lockfile.
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -85,7 +85,7 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -117,7 +117,7 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-22x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-22x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -145,7 +145,7 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -178,7 +178,7 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -218,7 +218,7 @@ jobs:
             node_modules
             apps/*/node_modules
             packages/*/node_modules
-          key: node-modules-24x-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: node-modules-24x-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
@@ -235,7 +235,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('package-lock.json') }}
       # Always run install so the OS deps (--with-deps) are present; on a browser
       # cache hit the Chromium binary download itself is skipped.
       - run: npx playwright install --with-deps chromium
