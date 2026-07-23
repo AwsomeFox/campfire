@@ -4,6 +4,7 @@ import {
   INVITE_COPY_SUCCESS,
   INVITE_ROLE_OPTIONS,
   INVITE_ROLES,
+  inviteCopyButtonLabel,
   inviteLinkFieldLabel,
   inviteRoleOptions,
 } from '../../src/features/admin/inviteRoleOptions';
@@ -38,6 +39,19 @@ test.describe('invite link field labels (issue #516)', () => {
 
   test('keeps same-role invites distinguishable by id', () => {
     expect(inviteLinkFieldLabel('player', 1)).not.toBe(inviteLinkFieldLabel('player', 2));
+  });
+});
+
+test.describe('invite copy button labels (issue #516)', () => {
+  test('names the invite by role and id without claiming it is read-only', () => {
+    expect(inviteCopyButtonLabel('player', 12)).toMatch(/^Copy player invite link 12$/i);
+    expect(inviteCopyButtonLabel('viewer', 34)).toMatch(/^Copy viewer invite link 34$/i);
+    // The button is actionable — it must not sound "read-only" like the field.
+    expect(inviteCopyButtonLabel('viewer', 34)).not.toMatch(/read-only/i);
+  });
+
+  test('keeps same-role invites distinguishable by id', () => {
+    expect(inviteCopyButtonLabel('player', 1)).not.toBe(inviteCopyButtonLabel('player', 2));
   });
 });
 

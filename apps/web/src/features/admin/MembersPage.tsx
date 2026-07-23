@@ -24,6 +24,7 @@ import { GameIcon } from '../../components/GameIcon';
 import {
   INVITE_COPY_FAILURE,
   INVITE_COPY_SUCCESS,
+  inviteCopyButtonLabel,
   inviteLinkFieldLabel,
   inviteRoleOptions,
 } from './inviteRoleOptions';
@@ -477,7 +478,19 @@ function InviteCard({ campaignId }: { campaignId: number }) {
         {creating ? 'Generating…' : 'Generate invite link'}
       </button>
 
-      {error && <p className="text-xs text-rose-400 m-0" role="alert">{error}</p>}
+      {/* Copy failures are already announced via the polite live region
+          (`announce(INVITE_COPY_FAILURE)` in `copy()`); giving this paragraph
+          role="alert" too would announce the same message a second time,
+          assertively. Create/revoke failures have no other announcement path,
+          so they keep role="alert" here. */}
+      {error && (
+        <p
+          className="text-xs text-rose-400 m-0"
+          role={error === INVITE_COPY_FAILURE ? undefined : 'alert'}
+        >
+          {error}
+        </p>
+      )}
 
       {/* Live invite links */}
       {invites.map((invite) => {
@@ -509,7 +522,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
             type="button"
             className="btn btn-primary"
             style={{ minHeight: 36 }}
-            aria-label={`Copy ${inviteLinkFieldLabel(invite.role, invite.id)}`}
+            aria-label={inviteCopyButtonLabel(invite.role, invite.id)}
             onClick={() => copy(invite)}
           >
             {copiedId === invite.id ? 'Copied!' : 'Copy link'}

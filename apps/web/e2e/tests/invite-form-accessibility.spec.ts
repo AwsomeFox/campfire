@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 import {
   INVITE_COPY_FAILURE,
   INVITE_COPY_SUCCESS,
+  inviteCopyButtonLabel,
   inviteLinkFieldLabel,
 } from '../../src/features/admin/inviteRoleOptions';
 import { seed, stateFor } from './seed';
@@ -42,7 +43,7 @@ test.describe('invite form accessibility (issue #516)', () => {
     await expect(linkField).toHaveAttribute('aria-readonly', 'true');
 
     const copyButton = card.getByRole('button', {
-      name: `Copy ${inviteLinkFieldLabel('viewer', created.id)}`,
+      name: inviteCopyButtonLabel('viewer', created.id),
     });
     await copyButton.click();
     await expect(copyButton).toBeFocused();
@@ -56,7 +57,16 @@ test.describe('invite form accessibility (issue #516)', () => {
     // Make navigator.clipboard.writeText reject so `copy()` takes its catch
     // branch. Installed before navigation so it's in place for every script
     // on the page, including the one that reads/uses navigator.clipboard.
+    // `navigator.clipboard` itself may not exist yet in this context (no
+    // clipboard permissions are granted for this test), so define it first
+    // rather than assuming it's already an object.
     await page.addInitScript(() => {
+      if (!window.navigator.clipboard) {
+        Object.defineProperty(window.navigator, 'clipboard', {
+          configurable: true,
+          value: {},
+        });
+      }
       Object.defineProperty(window.navigator.clipboard, 'writeText', {
         configurable: true,
         value: () => Promise.reject(new Error('denied')),
@@ -80,7 +90,7 @@ test.describe('invite form accessibility (issue #516)', () => {
     const created = (await createResponse.json()) as { id: number; role: 'viewer' };
 
     const copyButton = card.getByRole('button', {
-      name: `Copy ${inviteLinkFieldLabel('viewer', created.id)}`,
+      name: inviteCopyButtonLabel('viewer', created.id),
     });
     await copyButton.click();
 
@@ -88,6 +98,9 @@ test.describe('invite form accessibility (issue #516)', () => {
     // the Copy button rather than moving anywhere (same contract as success).
     await expect(politeAnnouncement(page, INVITE_COPY_FAILURE)).toBeAttached();
     await expect(copyButton).toBeFocused();
+    // Visible, but not a second (assertive) announcement of the same message —
+    // that's already covered by the polite live-region check above.
     await expect(card.getByText(INVITE_COPY_FAILURE)).toBeVisible();
+    await expect(card.getByText(INVITE_COPY_FAILURE)).not.toHaveAttribute('role', 'alert');
   });
 });

@@ -36,13 +36,28 @@ export function inviteRoleOptions(): ReadonlyArray<InviteRoleOption> {
 }
 
 /**
- * Accessible name for a generated invite URL field.
- * Include `inviteId` so multiple active invites with the same role stay distinguishable.
+ * Base "<role> invite link <id>" name shared by the field label and the copy
+ * button below. Include `inviteId` so multiple active invites with the same
+ * role stay distinguishable to assistive tech.
  */
-export function inviteLinkFieldLabel(role: InviteRole, inviteId: number): string {
+function inviteLinkName(role: InviteRole, inviteId: number): string {
   const opt = INVITE_ROLE_OPTIONS.find((o) => o.role === role);
   const label = opt?.label ?? role;
-  return `${label} invite link ${inviteId}, read-only`;
+  return `${label} invite link ${inviteId}`;
+}
+
+/** Accessible name for a generated invite URL field — it really is read-only. */
+export function inviteLinkFieldLabel(role: InviteRole, inviteId: number): string {
+  return `${inviteLinkName(role, inviteId)}, read-only`;
+}
+
+/**
+ * Accessible name for the "Copy" button next to a generated invite link.
+ * Deliberately omits ", read-only" — unlike the field, the button is
+ * actionable, and including that text would misleadingly describe it too.
+ */
+export function inviteCopyButtonLabel(role: InviteRole, inviteId: number): string {
+  return `Copy ${inviteLinkName(role, inviteId)}`;
 }
 
 export const INVITE_COPY_SUCCESS = 'Invite link copied to clipboard.';
