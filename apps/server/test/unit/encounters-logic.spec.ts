@@ -459,34 +459,53 @@ describe('encounter difficulty (issue #58)', () => {
   describe('computeEncounterDifficulty', () => {
     it('bands a CR-10 solo vs four level-5 PCs as deadly', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [10]);
+      expect(d.status).toBe('ok');
+      expect(d.label).toBe('Deadly');
       expect(d.thresholds).toEqual({ easy: 1000, medium: 2000, hard: 3000, deadly: 4400 });
       expect(d.totalMonsterXp).toBe(5900);
       expect(d.multiplier).toBe(1);
       expect(d.adjustedXp).toBe(5900);
       expect(d.band).toBe('deadly');
+      expect(d.assumptions.length).toBeGreaterThan(0);
     });
     it('applies the multiplier for several monsters (3 x CR2 vs 4 L5 = medium)', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [2, 2, 2]);
+      expect(d.status).toBe('ok');
       expect(d.totalMonsterXp).toBe(1350); // 3 * 450
       expect(d.multiplier).toBe(2); // 3–6 monsters
       expect(d.adjustedXp).toBe(2700);
       expect(d.band).toBe('medium'); // >= medium 2000, < hard 3000
+      expect(d.warnings.some((w) => /action economy/i.test(w))).toBe(true);
     });
     it('a lone weak monster is trivial (below the easy threshold)', () => {
       const d = computeEncounterDifficulty([5, 5, 5, 5], [0.25]);
+      expect(d.status).toBe('ok');
       expect(d.adjustedXp).toBe(50);
       expect(d.band).toBe('trivial');
+      expect(d.label).toBe('Trivial');
     });
-    it('no party -> trivial with zeroed thresholds', () => {
+    it('no party -> trivial with zeroed thresholds and a party-data warning', () => {
       const d = computeEncounterDifficulty([], [5]);
       expect(d.thresholds).toEqual({ easy: 0, medium: 0, hard: 0, deadly: 0 });
+      expect(d.status).toBe('ok');
       expect(d.band).toBe('trivial');
+      expect(d.warnings.some((w) => /No PC levels/i.test(w))).toBe(true);
     });
     it('no monsters -> trivial', () => {
       const d = computeEncounterDifficulty([5, 5], []);
       expect(d.monsterCount).toBe(0);
       expect(d.adjustedXp).toBe(0);
+      expect(d.status).toBe('ok');
       expect(d.band).toBe('trivial');
+    });
+    it('manual enemies with no CR/XP are unknown — never Trivial (issue #429)', () => {
+      const d = computeEncounterDifficulty([5, 5, 5, 5], [null, null]);
+      expect(d.status).toBe('unknown');
+      expect(d.band).toBeNull();
+      expect(d.label).toBe('Unknown—add XP/CR');
+      expect(d.adjustedXp).toBe(0);
+      expect(d.monstersMissingRating).toBe(2);
+      expect(d.warnings.some((w) => /no CR\/XP/i.test(w))).toBe(true);
     });
   });
 });

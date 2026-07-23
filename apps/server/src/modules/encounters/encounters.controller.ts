@@ -1,13 +1,19 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterMapService } from './encounter-map.service';
+import type { Request, Response } from 'express';
+import { parseFogState } from '../../common/fog';
 
 @ApiTags('encounters')
+// Campaign-scoped list/create only. Role-safe map bytes live on
+// EncountersController at GET /encounters/:id/map (not under this prefix).
 @Controller('campaigns/:campaignId/encounters')
 export class CampaignEncountersController {
   constructor(
@@ -112,6 +118,7 @@ export class EncountersController {
   constructor(
     private readonly encounters: EncountersService,
     private readonly access: CampaignAccessService,
+    private readonly encounterMaps: EncounterMapService,
   ) {}
 
   @Get(':id')
@@ -123,6 +130,83 @@ export class EncountersController {
     // HP as a coarse band, never exact numbers.
     const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.getWithCombatantsOrThrow(id, role);
+  }
+
+  @Get(':id/map')
+  @ApiOperation({
+    summary: 'Get the role-safe battle-map image for an encounter',
+    description:
+      'Requires campaign membership. DMs receive the source map. When fog conceals pixels, non-DMs receive an ' +
+      'opaque server-rendered PNG containing only revealed regions; the source attachment remains inaccessible. ' +
+      'Responses are private/no-store and byte ranges are rejected so role or fog revisions cannot leak through caches.',
+  })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
+  @ApiQuery({ name: 'revision', required: false, type: String, description: 'Opaque client cache-buster derived from encounter.updatedAt; ignored by the server.' })
+  @ApiResponse({ status: 200, description: 'Role-safe image bytes.' })
+  @ApiResponse({ status: 404, description: 'Encounter/map is absent, hidden from the caller, or its bytes are missing.' })
+  @ApiResponse({ status: 416, description: 'Range requests are not supported on role-specific map views.' })
+  @ApiResponse({ status: 422, description: 'The source image could not be safely rasterized while fog is active.' })
+  async map(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('size') size?: string,
+  ): Promise<void> {
+    if (size !== undefined && size !== 'thumb') {
+      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+
+    // A range response would add a second cache/validator path and is unnecessary
+    // for <=8MB image uploads. Reject it explicitly after authorization instead of
+    // ever slicing the raw source attachment.
+    if (req.headers.range !== undefined) {
+      // RFC 9110: 416 should advertise the valid range space even when we refuse ranges.
+      res
+        .status(416)
+        .set({
+          'Accept-Ranges': 'none',
+          'Cache-Control': 'private, no-store',
+          'Content-Range': 'bytes */0',
+          // Keep Vary identical to the 200 map response so intermediaries cannot
+          // key 416/200 differently across auth/cookie/dev-role variants.
+          Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        })
+        .end();
+      return;
+    }
+
+    // Map bytes only need the encounter row (map/fog/visibility) — skip the combatant join.
+    const encounter = this.encounters.encounterForMapOrThrow(row, role);
+
+    // Ordinary encounter JSON tolerates malformed legacy fog data, but map pixels
+    // must fail closed: a non-null invalid value renders an all-concealed view.
+    const persistedFogInvalid = row.fog !== null && parseFogState(row.fog) === null;
+    const view = await this.encounterMaps.resolve(
+      encounter,
+      role,
+      size === 'thumb' ? 'thumb' : 'original',
+      persistedFogInvalid,
+    );
+    res
+      .status(200)
+      .set({
+        'Content-Type': view.mime,
+        'Content-Length': String(view.bytes.length),
+        // Issue #630: ASCII fallback + RFC 5987 filename* (not percent-encoding
+        // the Unicode name into the legacy filename= slot).
+        'Content-Disposition': contentDispositionHeader(view.filename, 'inline'),
+        ETag: view.etag,
+        'Cache-Control': 'private, no-store, max-age=0',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Accept-Ranges': 'none',
+        Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        'X-Campfire-Map-View': view.protected ? 'fog-protected' : 'fully-revealed',
+      })
+      .end(view.bytes);
   }
 
   @Get(':id/difficulty')
@@ -284,12 +368,23 @@ export class EncountersController {
   }
 
   @Post(':id/reopen')
-  @ApiOperation({ summary: 'Reopen an ended encounter', description: "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state — recovers an accidental End. HP was already written back on End; the same write-back caveat applies on the next End." })
+  @ApiOperation({
+    summary: 'Reopen an ended encounter',
+    description:
+      "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state. " +
+      'When character sheets advanced after the previous End (heal/rest/another fight), pass `hpResync` ' +
+      'decisions for each conflict listed on GET (issue #466) — never silently overwrite newer sheet HP.',
+  })
   @ApiResponse({ status: 201, description: 'Reopened (running) encounter.' })
   @ApiResponse({ status: 400, description: 'Encounter is not ended.' })
-  async reopen(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiResponse({ status: 409, description: 'HP sync conflicts require hpResync decisions (issue #466).' })
+  async reopen(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterReopenDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.reopen(id, user, role);
+    return this.encounters.reopen(id, user, role, body);
   }
 }
