@@ -15,6 +15,7 @@ import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.mod
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, type RequestUser } from '../../common/user.types';
+import { AttachmentsService } from '../attachments/attachments.service';
 import { SettingsService } from '../settings/settings.service';
 import {
   BACKUP_CADENCE_KEY,
@@ -107,6 +108,7 @@ export class BackupService implements OnApplicationBootstrap {
     @Inject(DB_HOLDER) private readonly holder: DbHolder,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
+    private readonly attachments: AttachmentsService,
   ) {}
 
   /**
@@ -404,6 +406,26 @@ export class BackupService implements OnApplicationBootstrap {
           fs.writeFileSync(dest, data);
         }
       });
+
+      // A backup may have been cut while an upload was between its SQLite
+      // reservation and final commit. The restored DB is already reopened here;
+      // apply the same rollback protocol startup uses before any restored metadata
+      // can be served from this still-running process.
+      //
+      // Full-root `.stage` scrubbing is intentional after restore: stage files can
+      // exist without a reserved row after a backup cut, so gating on reserved
+      // count would miss them. Scrubbing skips ids that are still reserved so an
+      // in-flight publish after reopen is not deleted. Top-level FS errors must
+      // not abort an otherwise successful restore (mirrors startup try/catch).
+      try {
+        this.attachments.recoverPendingPublications({ scrubDanglingStages: true });
+      } catch (err) {
+        this.logger.error(
+          `Attachment publication recovery failed after restore: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
 
       const result: RestoreResult = {
         ok: true,

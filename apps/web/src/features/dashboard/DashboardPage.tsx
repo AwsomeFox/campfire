@@ -14,6 +14,7 @@ import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { StatusHeader } from './StatusHeader';
 import { InstallHintBanner } from './InstallHintBanner';
+import { OfflinePackBanner } from './OfflinePackBanner';
 import { RegionMap } from './RegionMap';
 import { QuestsCard } from './QuestsCard';
 import { NpcGrid } from './NpcGrid';
@@ -209,6 +210,7 @@ export default function DashboardPage() {
       <AiDmDashboardOnboarding campaignId={id} isDm={role === 'dm'} isAdmin={isAdmin} />
 
       <InstallHintBanner />
+      <OfflinePackBanner campaignId={id} />
 
       {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
           See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}

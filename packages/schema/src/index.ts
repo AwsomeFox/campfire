@@ -158,6 +158,7 @@ export const CampaignImport = z
     characters: z.array(ImportedEntity).optional(),
     sessions: z.array(ImportedEntity).optional(),
     notes: z.array(ImportedEntity).optional(),
+    comments: z.array(ImportedEntity).optional(),
     encounters: z.array(ImportedEntity).optional(),
     // Issue #266: entity types the export previously dropped and now round-trips.
     // Arrays are loose objects (remapped defensively in the service); the two
@@ -355,9 +356,10 @@ export const ConditionsPatch = z.object({
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
- * Conditions stay free-text on the wire (homebrew is allowed), but these are the
- * standard names surfaced as suggestions so the three surfaces speak the same
- * vocabulary instead of each hardcoding its own list.
+ * The wire schema stays `string` (DM homebrew is allowed), but non-DM combatant
+ * adds are validated against the active adapter's list (issue #495). These are
+ * also the standard names surfaced as suggestions so the three surfaces speak
+ * the same vocabulary instead of each hardcoding its own list.
  */
 export const CONDITIONS = [
   'Blinded',
@@ -377,6 +379,16 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/**
+ * Case-insensitive membership check against a rule-system condition vocabulary
+ * (issue #495). Trims the candidate; empty strings never match.
+ */
+export function isKnownCondition(vocab: readonly string[], name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  return vocab.some((c) => c.toLowerCase() === needle);
+}
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -1141,6 +1153,13 @@ export const Comment = z.object({
   authorName: z.string().max(120).default(''),
   body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Immutable creation-time persona attribution (issue #787). characterId is a
+  // soft reference to the selected owned character; the name/avatar snapshots are
+  // authoritative for display so a later rename or character deletion cannot
+  // rewrite old dialogue. Legacy/OOC comments carry nulls.
+  characterId: Id.nullable().default(null),
+  characterName: z.string().max(120).nullable().default(null),
+  characterAvatarUrl: z.string().max(500).nullable().default(null),
   // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
   // deleted by its author / a DM and its body has been redacted. The row remains so
   // replies keep their parent. Cleared on restore.
@@ -1168,6 +1187,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  characterName: true,
+  characterAvatarUrl: true,
   deletedAt: true,
   deletedBy: true,
   editedAt: true,
@@ -1179,6 +1200,8 @@ export const CommentCreate = Comment.omit({
   .required({ entityType: true, entityId: true, body: true });
 export const CommentUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
+  // Kept for wire compatibility, but changing it after creation is rejected by
+  // the service because persona attribution is immutable historical provenance.
   inCharacter: z.boolean().optional(),
 });
 
@@ -1595,10 +1618,14 @@ export interface RuleSystemAdapter {
    * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
    * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
    * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation?: AbilityRepresentation,
+    level?: number,
   ): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
@@ -2151,21 +2178,36 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. When `representation` is `modifier` (mapped creatures), WIS
-  // is already a modifier and must not be converted again (issue #767).
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
+    level?: number,
   ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return resolveAbilityModifier(this, wisScore, representation);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
   conditions: PF2E_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
@@ -4563,10 +4605,13 @@ export type AdminMetrics = z.infer<typeof AdminMetrics>;
 export const StorageCampaignUsage = z.object({
   campaignId: Id,
   name: z.string(),
-  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  fileCount: z.number().int().nonnegative(), // committed attachment rows for this campaign
+  reservedFileCount: z.number().int().nonnegative(), // in-flight quota reservations
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable attachment bytes
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
   quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
-  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+  overQuota: z.boolean(), // committed + reserved > quotaBytes (always false when unlimited)
 });
 export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
 
@@ -4579,8 +4624,11 @@ export const StorageOrphans = z.object({
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
 export const StorageStats = z.object({
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
-  fileCount: z.number().int().nonnegative(), // total attachment rows
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
+  fileCount: z.number().int().nonnegative(), // total committed attachment rows
+  reservedFileCount: z.number().int().nonnegative(), // total reservation rows
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,

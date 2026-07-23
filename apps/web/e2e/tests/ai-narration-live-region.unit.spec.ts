@@ -199,14 +199,15 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
 
     // Seed arrives; enable live and silence baseline in one settled pass.
     live = true;
-    if (cursor === null) {
+    if (live && cursor === null) {
       cursor = silenceNarrationLogBaseline(seeded.entries);
-    } else {
+    } else if (live) {
       const step = advanceNarrationLog(seeded.entries, cursor);
       cursor = step.cursor;
       mirror.push(...step.additions);
     }
     expect(mirror).toEqual([]);
+    expect(live).toBe(true);
 
     const withPlayer = transcriptReducer(seeded, {
       type: 'localPlayer',
@@ -295,7 +296,6 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     // (seed/hydration not settled). Going live must announce that DM line.
     const mountBaselineIds = announceableEntryIds([]); // empty localStorage
     const pending = new Set<string>();
-    let live = false;
     const mirror: ReturnType<typeof beginNarrationLogLive>['additions'] = [];
     let cursor: NarrationLogCursor | null = null;
 
@@ -320,7 +320,7 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     expect(pending.size).toBe(1);
 
     // Seed effect flips live because transcript.entries.length > 0.
-    live = true;
+    const live = true;
     if (live && cursor === null) {
       const started = beginNarrationLogLive(earlyTurn, pending);
       cursor = started.cursor;
@@ -328,6 +328,7 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
       mirror.push(...started.additions);
     }
 
+    expect(cursor).not.toBeNull();
     expect(mirror).toHaveLength(1);
     expect(mirror[0]).toMatchObject({
       kind: 'dm',
