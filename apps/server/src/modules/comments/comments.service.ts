@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { notDeleted } from '../../common/soft-delete';
 import { isVisibleTo } from '../../common/redact';
 import { applyPage } from '../../common/pagination';
@@ -46,6 +47,9 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
     authorName: row.authorName,
     body: tombstoned ? TOMBSTONE_BODY : row.body,
     inCharacter: row.inCharacter,
+    characterId: row.characterId,
+    characterName: row.characterName,
+    characterAvatarUrl: row.characterAvatarUrl,
     deletedAt: row.deletedAt,
     deletedBy: row.deletedBy,
     // Editor provenance (issue #783): null on a comment only ever self-edited;
@@ -310,6 +314,75 @@ export class CommentsService {
     return parent.parentId ?? parent.id;
   }
 
+  /**
+   * Resolve and snapshot an in-character speaker. The selected character must be
+   * live, belong to this campaign, and be owned by the authenticated account — DM
+   * status never grants impersonation rights. Missing/cross-campaign/removed ids
+   * share a 404 so the request cannot probe another campaign's roster; a visible
+   * but differently-owned character is a 403.
+   *
+   * The returned name/avatar are copied once and never recomputed. Attachment
+   * portraits are retained only when they resolve to a visible portrait in this
+   * campaign; remote portraits must pass the HTTPS-only sanitizer.
+   */
+  private async resolveCharacterAttribution(
+    campaignId: number,
+    input: CommentCreateInput,
+    user: RequestUser,
+  ): Promise<{ characterId: number | null; characterName: string | null; characterAvatarUrl: string | null }> {
+    if (!input.inCharacter) {
+      if (input.characterId != null) {
+        throw new BadRequestException('characterId may only be supplied for an in-character comment');
+      }
+      return { characterId: null, characterName: null, characterAvatarUrl: null };
+    }
+    if (input.characterId == null) {
+      throw new BadRequestException('characterId is required for an in-character comment');
+    }
+
+    const [character] = await this.db
+      .select({
+        id: characters.id,
+        ownerUserId: characters.ownerUserId,
+        name: characters.name,
+        portraitUrl: characters.portraitUrl,
+      })
+      .from(characters)
+      .where(
+        and(
+          eq(characters.id, input.characterId),
+          eq(characters.campaignId, campaignId),
+          notDeleted(characters.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!character) throw new NotFoundException(`Character ${input.characterId} not found`);
+    if (character.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only post in character as a character you own');
+    }
+
+    const label = (character.name.trim() || `Character ${character.id}`).slice(0, 120);
+    let avatarUrl = safeHistoricalAvatarUrl(character.portraitUrl);
+    const attachmentId = avatarUrl ? historicalAvatarAttachmentId(avatarUrl) : null;
+    if (attachmentId != null) {
+      const [attachment] = await this.db
+        .select({ id: attachments.id })
+        .from(attachments)
+        .where(
+          and(
+            eq(attachments.id, attachmentId),
+            eq(attachments.campaignId, campaignId),
+            eq(attachments.kind, 'portrait'),
+            eq(attachments.hidden, false),
+          ),
+        )
+        .limit(1);
+      if (!attachment) avatarUrl = null;
+    }
+
+    return { characterId: character.id, characterName: label, characterAvatarUrl: avatarUrl };
+  }
+
   async create(campaignId: number, input: CommentCreateInput, user: RequestUser, role: Role): Promise<Comment> {
     const entityType = input.entityType as EntityTypeValue;
     const entityId = input.entityId;
@@ -319,6 +392,7 @@ export class CommentsService {
     if (input.parentId != null) {
       parentId = await this.resolveParent(campaignId, entityType, entityId, input.parentId);
     }
+    const attribution = await this.resolveCharacterAttribution(campaignId, input, user);
 
     const ts = nowIso();
     const [row] = await this.db
@@ -332,6 +406,7 @@ export class CommentsService {
         authorName: user.name,
         body: input.body,
         inCharacter: input.inCharacter ?? false,
+        ...attribution,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -370,10 +445,12 @@ export class CommentsService {
     // provenance columns untouched, the way updated_at already drives the UI's
     // generic "edited" badge.
     const moderatorEdit = existing.authorUserId !== user.id;
+    if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {
+      throw new BadRequestException('In-character attribution is immutable after posting');
+    }
     const ts = nowIso();
     const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts };
     if (input.body !== undefined) patch.body = input.body;
-    if (input.inCharacter !== undefined) patch.inCharacter = input.inCharacter;
     if (moderatorEdit) {
       patch.editedAt = ts;
       patch.editedBy = auditActor(user);

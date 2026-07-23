@@ -80,7 +80,15 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'inventory_items')).toContain('icon_slug'); // 0039 (issue #307)
       // 0045 (issue #503): comments gain the tombstone columns — soft delete without
       // destroying other members' replies (deleted_at) + who pulled the trigger (deleted_by).
-      expect(columnNames(sqlite, 'comments')).toEqual(expect.arrayContaining(['deleted_at', 'deleted_by']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining([
+          'deleted_at',
+          'deleted_by',
+          'character_id',
+          'character_name',
+          'character_avatar_url',
+        ]),
+      );
 
       // 0040 (issue #310): the ai_provider_configs table is created as a NEW table
       // by the migration, with the encrypted-key + scope columns present.
@@ -188,11 +196,22 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         sqlite.prepare('SELECT visibility, ai_use_consent FROM participant_support_preferences').get(),
       ).toEqual({ visibility: 'facilitator', ai_use_consent: 0 });
       const legacyRoot = sqlite
-        .prepare("SELECT body, parent_id, deleted_at, deleted_by FROM comments WHERE parent_id IS NULL")
-        .get() as { body: string; parent_id: number | null; deleted_at: string | null; deleted_by: string | null };
+        .prepare("SELECT body, parent_id, deleted_at, deleted_by, character_id, character_name, character_avatar_url FROM comments WHERE parent_id IS NULL")
+        .get() as {
+          body: string;
+          parent_id: number | null;
+          deleted_at: string | null;
+          deleted_by: string | null;
+          character_id: number | null;
+          character_name: string | null;
+          character_avatar_url: string | null;
+        };
       expect(legacyRoot.body).toBe('Legacy root comment');
       expect(legacyRoot.deleted_at).toBeNull();
       expect(legacyRoot.deleted_by).toBeNull();
+      expect(legacyRoot.character_id).toBeNull();
+      expect(legacyRoot.character_name).toBeNull();
+      expect(legacyRoot.character_avatar_url).toBeNull();
       const legacyReply = sqlite
         .prepare("SELECT body, parent_id FROM comments WHERE body = 'Legacy reply that must survive'")
         .get() as { body: string; parent_id: number };
@@ -293,8 +312,12 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       );
       expect(MIGRATION_NAMES).toContain('0055_participant_support_preferences');
       expect(MIGRATION_NAMES).toContain('0057_campaigns_active_encounter');
+      expect(MIGRATION_NAMES).toContain('0058_comments_character_attribution');
       // Issue #744: the active-encounter pointer column is added to campaigns on old DBs too.
       expect(columnNames(sqlite, 'campaigns')).toEqual(expect.arrayContaining(['active_encounter_id']));
+      expect(columnNames(sqlite, 'comments')).toEqual(
+        expect.arrayContaining(['character_id', 'character_name', 'character_avatar_url']),
+      );
 
       // WAL mode is set on open.
       expect((sqlite.pragma('journal_mode', { simple: true }) as string).toLowerCase()).toBe('wal');

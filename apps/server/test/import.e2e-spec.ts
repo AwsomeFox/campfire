@@ -82,13 +82,30 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     // Play state: session, character, encounter+combatant, a shared note linked to the quest.
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The crew assembled.' });
-    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Rogue', className: 'Thief', level: 3 });
+    const charRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'Rogue',
+      className: 'Thief',
+      level: 3,
+      portraitUrl: 'https://images.example.test/rogue.png',
+    });
     characterId = charRes.body.id;
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Vault Guards' });
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Guard', hpMax: 11 });
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .send({ body: 'Quest intel for the party', visibility: 'party_shared', entityType: 'quest', entityId: questId });
+    const rootComment = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({
+        entityType: 'quest',
+        entityId: questId,
+        body: 'Rogue takes point.',
+        inCharacter: true,
+        characterId,
+      });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/comments`)
+      .send({ entityType: 'quest', entityId: questId, parentId: rootComment.body.id, body: 'The corridor is trapped.' });
 
     // Policy is portable configuration; capability rows/tokens are not.
     await dmAgent.put(`/api/v1/campaigns/${campaignId}/session-shares/policy`).send({ enabled: false });
@@ -181,6 +198,24 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(shared).toBeDefined();
     expect(shared.entityType).toBe('quest');
     expect(shared.entityId).toBe(q.id);
+
+    // Comments round-trip with anchor/parent/character ids remapped and immutable
+    // character display history preserved. Import ownership moves to the importer
+    // so source account ids cannot alias unrelated users on this install.
+    const importedComments = await dmAgent
+      .get(`/api/v1/campaigns/${imported.id}/comments`)
+      .query({ entityType: 'quest', entityId: q.id });
+    expect(importedComments.status).toBe(200);
+    expect(importedComments.body).toHaveLength(2);
+    const spoken = importedComments.body.find((c: { body: string }) => c.body === 'Rogue takes point.');
+    const reply = importedComments.body.find((c: { body: string }) => c.body === 'The corridor is trapped.');
+    expect(spoken).toMatchObject({
+      characterId: chars.body[0].id,
+      characterName: 'Rogue',
+      characterAvatarUrl: 'https://images.example.test/rogue.png',
+      authorName: 'import-player',
+    });
+    expect(reply.parentId).toBe(spoken.id);
 
     // The source campaign is untouched — import never mutates it.
     const sourceLocs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/locations`);

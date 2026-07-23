@@ -65,6 +65,7 @@ import { MembersService } from '../membership/members.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 
 /** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
 function uploadsRoot(): string {
@@ -515,7 +516,7 @@ export class CampaignsService {
 
     // Read everything up front — only the writes need the transaction. Trashed
     // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
-    const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows] = await Promise.all([
+    const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows, commentRows] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
@@ -523,6 +524,7 @@ export class CampaignsService {
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
       this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
       this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+      this.db.select().from(comments).where(eq(comments.campaignId, id)),
     ]);
     const questIds = questRows.map((r) => r.id);
     const objectiveRows = questIds.length
@@ -731,6 +733,7 @@ export class CampaignsService {
             .run();
         }
 
+        const encounterMap = new Map<number, number>();
         for (const e of encounterRows) {
           const [row] = tx
             .insert(encounters)
@@ -746,6 +749,7 @@ export class CampaignsService {
             })
             .returning()
             .all();
+          encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
             tx.insert(combatants)
@@ -764,6 +768,68 @@ export class CampaignsService {
                 sortOrder: c.sortOrder,
               })
               .run();
+          }
+        }
+
+        // Full clones retain discussion history; templates deliberately strip it
+        // with the rest of play state. Anchor ids, reply parents, and live speaking
+        // character ids are remapped. Account/character display names stay as posted.
+        // Attachment-backed avatars cannot: clone deliberately skips attachment bytes
+        // (see mapAttachmentId null above), so local `/attachments/:id/file` snapshots
+        // are dropped while safe remote HTTPS portraits are preserved.
+        // Threads whose anchor is not part of the clone (for example a type this
+        // older clone surface does not copy) are skipped.
+        const commentEntityMaps: Record<string, Map<number, number>> = {
+          quest: questMap,
+          npc: npcMap,
+          location: locMap,
+          character: charMap,
+          session: sessionMap,
+          encounter: encounterMap,
+        };
+        const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
+          const safe = safeHistoricalAvatarUrl(url);
+          if (!safe) return null;
+          if (historicalAvatarAttachmentId(safe) != null) return null;
+          return safe;
+        };
+        const commentMap = new Map<number, number>();
+        for (const c of commentRows) {
+          const entityId = c.entityType === 'campaign'
+            ? cloneId
+            : commentEntityMaps[c.entityType]?.get(c.entityId);
+          if (entityId == null) continue;
+          const [row] = tx
+            .insert(comments)
+            .values({
+              campaignId: cloneId,
+              entityType: c.entityType,
+              entityId,
+              parentId: null,
+              authorUserId: c.authorUserId,
+              authorName: c.authorName,
+              body: c.body,
+              inCharacter: c.inCharacter,
+              characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+              characterName: c.characterName,
+              characterAvatarUrl: remapClonedHistoricalAvatarUrl(c.characterAvatarUrl),
+              deletedAt: c.deletedAt,
+              deletedBy: c.deletedBy,
+              editedAt: c.editedAt,
+              editedBy: c.editedBy,
+              createdAt: c.createdAt,
+              updatedAt: c.updatedAt,
+            })
+            .returning()
+            .all();
+          commentMap.set(c.id, row.id);
+        }
+        for (const c of commentRows) {
+          if (c.parentId == null) continue;
+          const selfId = commentMap.get(c.id);
+          const parentId = commentMap.get(c.parentId);
+          if (selfId != null && parentId != null) {
+            tx.update(comments).set({ parentId }).where(eq(comments.id, selfId)).run();
           }
         }
 
@@ -863,6 +929,7 @@ export class CampaignsService {
     const characterRows = asArr(doc.characters);
     const sessionRows = asArr(doc.sessions);
     const noteRows = asArr(doc.notes);
+    const commentRows = asArr(doc.comments);
     const encounterRows = asArr(doc.encounters);
     // Issue #266: entity types the export used to drop wholesale — now recreated with
     // fresh ids and intra-campaign refs remapped (npc→faction, beat→arc, branch→beat).
@@ -914,6 +981,15 @@ export class CampaignsService {
       const m = url.match(/\/attachments\/(\d+)\/file(?:[?#].*)?$/);
       if (!m) return null;
       const newId = attMap.get(Number(m[1]));
+      return newId != null ? `/api/v1/attachments/${newId}/file` : null;
+    };
+    /** Preserve safe remote historical avatars; remap local attachment snapshots. */
+    const remapHistoricalAvatarUrl = (url: unknown): string | null => {
+      const safe = safeHistoricalAvatarUrl(url);
+      if (!safe) return null;
+      const sourceAttachmentId = historicalAvatarAttachmentId(safe);
+      if (sourceAttachmentId == null) return safe;
+      const newId = attMap.get(sourceAttachmentId);
       return newId != null ? `/api/v1/attachments/${newId}/file` : null;
     };
 
@@ -1263,7 +1339,9 @@ export class CampaignsService {
           .run();
       }
 
+      const encounterMap = new Map<number, number>();
       for (const e of encounterRows) {
+        const encounterSrcId = intOrNull(e.id);
         const [row] = tx
           .insert(encounters)
           .values({
@@ -1291,6 +1369,7 @@ export class CampaignsService {
           })
           .returning()
           .all();
+        if (encounterSrcId != null) encounterMap.set(encounterSrcId, row.id);
         // Map each source combatant id to its fresh id so the encounter's current-turn
         // pointer (identity-based, issue #49) can be remapped.
         const combatantIdMap = new Map<number, number>();
@@ -1324,6 +1403,69 @@ export class CampaignsService {
           if (currentCombatantId != null) {
             tx.update(encounters).set({ currentCombatantId }).where(eq(encounters.id, row.id)).run();
           }
+        }
+      }
+
+      // Discussion history (issue #787): rebuild anchors and one-level parent
+      // pointers with fresh ids. Imported account ids are install-local and could
+      // alias an unrelated destination user, so ownership is assigned to the
+      // importer (matching imported notes) while the source authorName remains the
+      // visible posted-by provenance. Character labels stay immutable snapshots;
+      // only their soft ids and local attachment avatar routes are remapped.
+      const commentEntityMaps: Record<string, Map<number, number>> = {
+        quest: questMap,
+        npc: npcMap,
+        faction: factionMap,
+        location: locMap,
+        character: charMap,
+        session: sessionMap,
+        encounter: encounterMap,
+      };
+      const commentMap = new Map<number, number>();
+      for (const c of commentRows) {
+        const srcId = intOrNull(c.id);
+        const entityType = str(c.entityType);
+        const sourceEntityId = intOrNull(c.entityId);
+        const entityId = entityType === 'campaign'
+          ? cid
+          : sourceEntityId != null
+            ? commentEntityMaps[entityType]?.get(sourceEntityId)
+            : undefined;
+        if (srcId == null || entityId == null) continue;
+        const sourceCharacterId = intOrNull(c.characterId);
+        const [row] = tx
+          .insert(comments)
+          .values({
+            campaignId: cid,
+            entityType,
+            entityId,
+            parentId: null,
+            authorUserId: importerId,
+            authorName: str(c.authorName).slice(0, 120),
+            body: str(c.body, '[deleted]').slice(0, 20_000),
+            inCharacter: boolOf(c.inCharacter),
+            characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
+            characterName: typeof c.characterName === 'string' ? c.characterName.slice(0, 120) : null,
+            characterAvatarUrl: remapHistoricalAvatarUrl(c.characterAvatarUrl),
+            deletedAt: typeof c.deletedAt === 'string' ? c.deletedAt : null,
+            deletedBy: typeof c.deletedBy === 'string' ? c.deletedBy.slice(0, 120) : null,
+            editedAt: typeof c.editedAt === 'string' ? c.editedAt : null,
+            editedBy: typeof c.editedBy === 'string' ? c.editedBy.slice(0, 120) : null,
+            createdAt: typeof c.createdAt === 'string' ? c.createdAt : ts,
+            updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : ts,
+          })
+          .returning()
+          .all();
+        commentMap.set(srcId, row.id);
+      }
+      for (const c of commentRows) {
+        const srcId = intOrNull(c.id);
+        const parentSrc = intOrNull(c.parentId);
+        if (srcId == null || parentSrc == null) continue;
+        const selfId = commentMap.get(srcId);
+        const parentId = commentMap.get(parentSrc);
+        if (selfId != null && parentId != null) {
+          tx.update(comments).set({ parentId }).where(eq(comments.id, selfId)).run();
         }
       }
 
