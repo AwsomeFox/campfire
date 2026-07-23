@@ -11,6 +11,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, ApiError, API } from '../../lib/api';
 import { noteUnauthorizedResponse } from '../../lib/sessionExpiry';
+import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
@@ -218,7 +219,7 @@ function CampaignTile({
           </p>
         )}
         <div className="text-muted" style={{ fontSize: 11.5 }}>
-          {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
+          {formatCampaignSessionPosition(campaign)}
         </div>
       </div>
     </Link>

@@ -23,6 +23,7 @@ import type {
   HpBand,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import {
@@ -599,7 +600,7 @@ export default function PlayerDisplayPage() {
           ) : (
             <span className="cf-chip">Location unset</span>
           )}
-          <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
+          <span className="cf-chip">{formatCampaignSessionPosition(summary.campaign)}</span>
         </div>
         {syncMessage && (
           <p

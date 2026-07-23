@@ -4,6 +4,7 @@ import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schem
 
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
+import { formatCampaignSessionPosition } from '../../lib/sessionPosition';
 import { Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
@@ -128,7 +129,7 @@ export function StatusHeader({
           </Link>
         )}
         <span className="tag tag-neutral" style={{ whiteSpace: 'nowrap' }}>
-          {campaign.sessionCount > 0 ? `Session ${campaign.sessionCount}` : 'No sessions yet'}
+          {formatCampaignSessionPosition(campaign)}
         </span>
         <span className="tag tag-accent" style={{ whiteSpace: 'nowrap' }}>
           {DANGER_LABEL[campaign.dangerLevel]} danger
