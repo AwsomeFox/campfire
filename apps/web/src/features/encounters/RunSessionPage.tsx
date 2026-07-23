@@ -1146,8 +1146,9 @@ export default function RunSessionPage() {
         />
       )}
 
-      {isDm && !encounter.hidden && (
+      {isDm && (
         <VisibleToPlayersBar
+          visible={!encounter.hidden}
           onHide={async () => {
             await api.patch(`${API}/encounters/${eid}`, { hidden: true });
             invalidateEncounter(queryClient, eid);

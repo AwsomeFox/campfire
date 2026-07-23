@@ -213,8 +213,19 @@ export class EncountersService {
     private readonly attachmentsService: AttachmentsService,
   ) {}
 
-  /** Push a thin SSE change signal to everyone watching this campaign (issue #4). */
-  private emitEncounterEvent(type: 'encounter.updated' | 'encounter.deleted', campaignId: number, encounterId: number): void {
+  /**
+   * Push a thin SSE change signal to everyone watching this campaign (issue #4).
+   * #754: never broadcast ids of DM-only prep encounters on the shared stream —
+   * players must not learn a hidden encounter exists by id. Multi-DM prep syncs
+   * on navigation/focus refetch instead.
+   */
+  private emitEncounterEvent(
+    type: 'encounter.updated' | 'encounter.deleted',
+    campaignId: number,
+    encounterId: number,
+    hidden = false,
+  ): void {
+    if (hidden) return;
     this.events.emit({ type, campaignId, encounterId });
   }
 
@@ -1011,7 +1022,9 @@ export class EncountersService {
       detail: JSON.stringify(input),
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    // Use post-update visibility so a reveal (hidden → false) still notifies players.
+    const nextHidden = input.hidden !== undefined ? input.hidden : encounterRow.hidden;
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, nextHidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -1165,12 +1178,7 @@ export class EncountersService {
       detail: `${partyRows.length} party member(s) auto-added`,
     });
 
-    // #754: a DM-only prep create must not tip players via SSE (existence leak by id).
-    // Live updates for still-hidden encounters continue to emit from later writes so
-    // multi-DM prep stays in sync; those clients refetch and 404 harmlessly if non-DM.
-    if (!encounterRow.hidden) {
-      this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id);
-    }
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterRow.id, role);
   }
@@ -1721,7 +1729,7 @@ export class EncountersService {
       detail: insertedRows.length > 1 ? `${name} ×${insertedRows.length}` : name,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     return combatantToDomain(row);
   }
@@ -2128,7 +2136,7 @@ export class EncountersService {
         .where(eq(encounters.id, encounterId));
     }
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     return combatantToDomain(row);
   }
@@ -2195,7 +2203,7 @@ export class EncountersService {
       detail: existing.name,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
   }
 
   /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
@@ -2257,7 +2265,7 @@ export class EncountersService {
       detail: `${rolled.length}`,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     const snapshot = await this.getWithCombatantsOrThrow(encounterId, role);
     return { ...snapshot, rolledCount: rolled.length };
@@ -2324,7 +2332,7 @@ export class EncountersService {
       campaignId,
     });
 
-    this.emitEncounterEvent('encounter.updated', campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterId, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -2372,7 +2380,7 @@ export class EncountersService {
       detail: `round ${round}, turn ${turnIndex}`,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -2611,7 +2619,7 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
     });
 
-    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -2789,7 +2797,7 @@ export class EncountersService {
       }),
     });
 
-    this.emitEncounterEvent('encounter.updated', campaignId, encounterId);
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterId, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
   }
@@ -2824,7 +2832,7 @@ export class EncountersService {
       campaignId: encounterRow.campaignId,
     });
 
-    this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId);
+    this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId, encounterRow.hidden);
   }
 
   /**

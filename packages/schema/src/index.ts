@@ -483,7 +483,14 @@ export const Quest = z.object({
   ...timestamps,
 });
 export type Quest = z.infer<typeof Quest>;
-export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+// Create: `hidden` stays optional with NO Zod default so omit≠false. Service
+// `resolveCreateHidden` then applies issue #754 (omit → DM-only). A `.default(false)`
+// here would materialize false before the service and bypass private-by-default
+// on MCP/proposal/DTO parse paths.
+export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export const QuestUpdate = QuestCreate.partial();
 export const QuestStatusPatch = z.object({ status: QuestStatus });
 export const ObjectiveCreate = z.object({ text: z.string().min(1).max(500), sortOrder: z.number().int().optional() });
@@ -638,7 +645,11 @@ export const Npc = z.object({
   ...timestamps,
 });
 export type Npc = z.infer<typeof Npc>;
-export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const NpcUpdate = NpcCreate.partial();
 
 // ---------- faction / organization (issue #221) ----------
@@ -671,7 +682,11 @@ export const Faction = z.object({
   ...timestamps,
 });
 export type Faction = z.infer<typeof Faction>;
-export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const FactionUpdate = FactionCreate.partial();
 
 // A faction with its member NPCs embedded (the detail read — issue #221 "surface
@@ -927,9 +942,11 @@ export const TimelineEvent = z.object({
   ...timestamps,
 });
 export type TimelineEvent = z.infer<typeof TimelineEvent>;
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
 export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
   .partial()
-  .required({ title: true });
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
 export const TimelineEventUpdate = TimelineEventCreate.partial();
 export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;

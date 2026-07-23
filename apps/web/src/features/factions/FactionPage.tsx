@@ -217,8 +217,9 @@ export default function FactionPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && !faction.hidden && (
+      {isDm && (
         <VisibleToPlayersBar
+          visible={!faction.hidden}
           onHide={async () => {
             await api.patch(`${API}/factions/${id}`, { hidden: true });
             setFaction({ ...faction, hidden: true });

@@ -22,7 +22,7 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
       await page.request.post(`/api/v1/encounters/${enc.id}/end`);
     }
   }
-  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name } });
+  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name, hidden: false } });
   expect(created.ok()).toBe(true);
   const encounter = (await created.json()) as { id: number };
 

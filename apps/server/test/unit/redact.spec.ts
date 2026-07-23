@@ -1,4 +1,10 @@
-import type { Role } from '@campfire/schema';
+import {
+  QuestCreate,
+  NpcCreate,
+  FactionCreate,
+  TimelineEventCreate,
+  type Role,
+} from '@campfire/schema';
 import { redactSecret, redactSecrets, isVisibleTo, filterHidden, resolveCreateHidden } from '../../src/common/redact';
 
 /**
@@ -80,5 +86,15 @@ describe('redact — resolveCreateHidden (issue #754 private-by-default prep)', 
 
   it('explicit true stays DM-only', () => {
     expect(resolveCreateHidden(true)).toBe(true);
+  });
+
+  it('Create schemas leave omitted hidden undefined so MCP/DTO parse cannot bypass private-by-default', () => {
+    // Zod `.default(false)` on the entity would otherwise materialize false on parse
+    // and make resolveCreateHidden treat the create as public (#754 / Bugbot).
+    expect(QuestCreate.parse({ title: 'x' }).hidden).toBeUndefined();
+    expect(NpcCreate.parse({ name: 'x' }).hidden).toBeUndefined();
+    expect(FactionCreate.parse({ name: 'x' }).hidden).toBeUndefined();
+    expect(TimelineEventCreate.parse({ title: 'x' }).hidden).toBeUndefined();
+    expect(resolveCreateHidden(QuestCreate.parse({ title: 'x' }).hidden)).toBe(true);
   });
 });

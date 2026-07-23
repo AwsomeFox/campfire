@@ -467,8 +467,9 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && !quest.hidden && (
+      {isDm && (
         <VisibleToPlayersBar
+          visible={!quest.hidden}
           onHide={async () => {
             const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
             setQuest({ ...quest, ...updated });

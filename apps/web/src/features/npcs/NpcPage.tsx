@@ -324,8 +324,9 @@ export default function NpcPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && !npc.hidden && (
+      {isDm && (
         <VisibleToPlayersBar
+          visible={!npc.hidden}
           onHide={async () => {
             const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
             setNpc(updated);

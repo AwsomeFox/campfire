@@ -2,15 +2,22 @@
  * Persistent “Visible to players” affordance (issue #754).
  * Shown while a prep entity is player-visible. Hide → DM-only; then an Undo
  * snackbar offers one-click re-reveal.
+ *
+ * Parents should keep this mounted for DMs (pass `visible`) so the Undo snackbar
+ * can render after Hide flips the entity to hidden — otherwise the parent’s
+ * `!entity.hidden` guard unmounts the bar before pendingUndo can show.
  */
 import { useState } from 'react';
 import { Btn } from './ui';
 import { UndoSnackbar } from './UndoSnackbar';
 
 export function VisibleToPlayersBar({
+  visible,
   onHide,
   onUndoHide,
 }: {
+  /** Whether the entity is currently player-visible. */
+  visible: boolean;
   /** Make the entity DM-only again. */
   onHide: () => Promise<void>;
   /** Re-reveal after Hide (Undo). */
@@ -48,6 +55,8 @@ export function VisibleToPlayersBar({
     );
   }
 
+  if (!visible) return null;
+
   return (
     <div
       role="status"
@@ -61,9 +70,6 @@ export function VisibleToPlayersBar({
       {error && <span className="text-xs text-rose-300">{error}</span>}
       <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy} onClick={() => void hide()}>
         {busy ? 'Hiding…' : 'Hide'}
-      </Btn>
-      <Btn ghost className="!min-h-0 !py-1 text-xs" disabled={busy} onClick={() => void hide()} title="Undo making this visible — same as Hide">
-        Undo
       </Btn>
     </div>
   );

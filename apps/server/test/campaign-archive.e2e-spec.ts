@@ -38,11 +38,11 @@ describe('campaign archive read-only enforcement (e2e)', () => {
     expect(campRes.status).toBe(201);
     campaignId = campRes.body.id;
 
-    const questRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Last Quest' });
+    const questRes = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'Last Quest', hidden: false });
     expect(questRes.status).toBe(201);
     questId = questRes.body.id;
 
-    const npcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Old Friend' });
+    const npcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Old Friend', hidden: false });
     expect(npcRes.status).toBe(201);
     npcId = npcRes.body.id;
 

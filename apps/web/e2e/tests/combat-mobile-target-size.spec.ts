@@ -71,7 +71,7 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         characterId = character.id;
 
         const encRes = await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, {
-          data: { name: `Touch size ${viewport.name}` },
+          data: { name: `Touch size ${viewport.name}`, hidden: false },
         });
         expect(encRes.ok(), `create encounter: ${await encRes.text()}`).toBeTruthy();
         const enc = await encRes.json();

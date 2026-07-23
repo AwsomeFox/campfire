@@ -391,8 +391,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       arguments: { campaignId, title: 'MCP-created quest', body: 'Written over MCP' },
     });
     expect(result.isError).toBeFalsy();
-    const quest = parseResult(result) as { id: number; title: string };
+    const quest = parseResult(result) as { id: number; title: string; hidden: boolean };
     expect(quest.title).toBe('MCP-created quest');
+    // #754: omit `hidden` on MCP create → DM-only (Zod must not default it to false).
+    expect(quest.hidden).toBe(true);
 
     const restRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
     expect(restRes.status).toBe(200);
