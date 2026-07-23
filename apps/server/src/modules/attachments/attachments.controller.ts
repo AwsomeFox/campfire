@@ -177,9 +177,11 @@ export class AttachmentsController {
       // There is deliberately NO encounter-map exception here. A player obtains a
       // role-specific image through GET /encounters/:id/map; direct originals,
       // thumbnails, conditional requests, and Range probes all fail before bytes or
-      // validators are exposed. The dynamic fog check also protects legacy visible rows.
+      // validators are exposed. Hidden rows 404 immediately; fog only checked for
+      // visible legacy/reused maps that may still conceal source pixels.
+      if (row.hidden) throw new NotFoundException(`Attachment ${id} not found`);
       const fogProtected = await this.attachmentsService.isFogProtectedEncounterMap(id, row.campaignId);
-      if (row.hidden || fogProtected) throw new NotFoundException(`Attachment ${id} not found`);
+      if (fogProtected) throw new NotFoundException(`Attachment ${id} not found`);
     }
 
     // Issue #84: the DB row can outlive its bytes on disk — an orphaned row from a
@@ -201,7 +203,7 @@ export class AttachmentsController {
     // actually defeats cross-authorization-state cache hits.
     res.set({
       'Cache-Control': 'private, no-cache, must-revalidate',
-      Vary: 'Cookie',
+      Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
       ETag: file.etag,
     });
 

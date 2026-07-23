@@ -250,7 +250,13 @@ export class AttachmentsService {
     const rows = await this.db
       .select({ fog: encounters.fog })
       .from(encounters)
-      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)));
+      .where(
+        and(
+          eq(encounters.mapAttachmentId, attachmentId),
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.fog),
+        ),
+      );
     return rows.some((row) => persistedFogConcealsPixels(row.fog));
   }
 

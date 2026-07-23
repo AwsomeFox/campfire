@@ -12,6 +12,8 @@ import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
 
 @ApiTags('encounters')
+// Campaign-scoped list/create only. Role-safe map bytes live on
+// EncountersController at GET /encounters/:id/map (not under this prefix).
 @Controller('campaigns/:campaignId/encounters')
 export class CampaignEncountersController {
   constructor(
