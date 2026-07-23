@@ -200,13 +200,11 @@ function canonicalRelPath(row: { campaignId: number; id: number; mime: string })
 
 /**
  * Read a campaign directory's entries for the on-disk scan/lookup paths below.
- * `ENOENT` (directory vanished between the parent listing and this read) is
- * treated as "skip" (returns `null`); any other error — e.g. EACCES/EPERM,
- * or a non-directory entry like ENOTDIR — is fail-closed: skipping it could
- * produce a false "not found" for callers, so it's surfaced as a 503 that
- * names the relative campaign directory rather than its absolute path.
+ * Returns `null` on `ENOENT` (directory vanished between the parent listing and
+ * this read). Any other error — e.g. EACCES/EPERM, or ENOTDIR — is fail-closed
+ * (503) so callers cannot produce a false "not found".
  */
-function readCampaignDirOrThrow(dirPath: string, dirName: string, contextSuffix: string): fs.Dirent[] | null {
+function readCampaignDirOrNullOnError(dirPath: string, dirName: string, contextSuffix: string): fs.Dirent[] | null {
   try {
     return fs.readdirSync(dirPath, { withFileTypes: true });
   } catch (err) {
@@ -253,7 +251,7 @@ function findPrimaryAttachmentFilesOnDisk(
     const dirPath = path.join(root, dir.name);
     // Fail closed like runDiagnostics: skipping an unreadable campaign dir can
     // produce a false "file not found" for relink/quarantine-by-attachmentId.
-    const entries = readCampaignDirOrThrow(dirPath, dir.name, 'cannot locate attachment files.');
+    const entries = readCampaignDirOrNullOnError(dirPath, dir.name, 'cannot locate attachment files.');
     if (entries === null) continue;
     for (const entry of entries) {
       if (!entry.isFile()) continue;
@@ -306,7 +304,7 @@ export class DiagnosticsService {
         if (!dir.isDirectory()) continue;
         const dirCampaignId = parseCampaignDirId(dir.name);
         const dirPath = path.join(root, dir.name);
-        const entries = readCampaignDirOrThrow(dirPath, dir.name, 'cannot run diagnostics.');
+        const entries = readCampaignDirOrNullOnError(dirPath, dir.name, 'cannot run diagnostics.');
         if (entries === null) continue;
         for (const entry of entries) {
           if (!entry.isFile()) continue;

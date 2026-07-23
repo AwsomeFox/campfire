@@ -711,6 +711,9 @@ describe('Issue #733: attachment diagnostics (e2e)', () => {
         // Fail fast if restore fails so the suite stops with a clear cause.
         // The campaign dir is isolated above, so this cannot poison shared fixtures.
         fs.chmodSync(campaignDir, previousMode);
+        // Best-effort cleanup of the isolated campaign (and its uploads dir).
+        await adminAgent.delete(`/api/v1/campaigns/${isolatedCampaignId}`);
+        fs.rmSync(campaignDir, { recursive: true, force: true });
       }
     });
   });
