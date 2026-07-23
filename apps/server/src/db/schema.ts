@@ -454,12 +454,24 @@ export const comments = sqliteTable('comments', {
 export const entityRevisions = sqliteTable('entity_revisions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
-  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location'
+  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location' | 'faction' | 'note'
   entityId: integer('entity_id').notNull(),
-  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body }
+  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body } — prose OF THIS VERSION
+  // Version author (issue #813). Empty when authorship_known=0 (legacy rows).
   authorUserId: text('author_user_id').notNull().default(''),
   authorName: text('author_name').notNull().default(''),
-  createdAt: text('created_at').notNull(),
+  authorSource: text('author_source').notNull().default('human'), // 'human' | 'ai' | 'tool'
+  authorSourceDetail: text('author_source_detail').notNull().default(''),
+  createdAt: text('created_at').notNull().default(''), // authored-at; '' when unknown (legacy)
+  // Replacing actor/time — null replaced_at marks the current tip (still live).
+  replacedByUserId: text('replaced_by_user_id').notNull().default(''),
+  replacedByName: text('replaced_by_name').notNull().default(''),
+  replacedBySource: text('replaced_by_source').notNull().default('human'),
+  replacedBySourceDetail: text('replaced_by_source_detail').notNull().default(''),
+  replacedAt: text('replaced_at'),
+  restoredFromRevisionId: integer('restored_from_revision_id'),
+  // 0 for pre-#813 rows: UI must label "Replaced by …" rather than invent authorship.
+  authorshipKnown: integer('authorship_known', { mode: 'boolean' }).notNull().default(true),
 });
 
 export const auditLog = sqliteTable('audit_log', {

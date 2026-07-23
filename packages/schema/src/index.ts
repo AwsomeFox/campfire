@@ -170,6 +170,9 @@ export const CampaignImport = z
     sessionZero: ImportedEntity.optional(),
     inventory: z.array(ImportedEntity).optional(),
     treasury: ImportedEntity.optional(),
+    // Issue #813: immutable prose versions (author + replacer provenance) round-trip
+    // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
+    revisions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -1094,32 +1097,56 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
-// ---------- entity revisions (issue #157) ----------
-// A revision-history layer for the prose entities most at risk of a blind
-// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
-// own edit). On every committed prose update the server snapshots the PRIOR content
-// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
-// a new update, itself recorded). Covers the DM-authored world-building prose whose
-// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations/factions
-// (body) — AND notes (body), which #157 cited by line as the destroyed prose. Notes
-// carry their own per-note visibility/author-only-edit model, so their revision reads
-// are gated on the note's OWN visibility (not a blanket dm-gate) and restore is
-// author-only — see RevisionsController — so history is never a redaction back-door.
+// ---------- entity revisions (issue #157 / #813) ----------
+// Immutable prose versions for the entities most at risk of a blind last-write-wins
+// clobber (a co-DM polishing a recap while a connected AI saves its own edit). Each
+// row is a version of the prose itself (not merely "content being overwritten"):
+// `author*` + `createdAt` are who/when that version became authoritative, while
+// `replacedBy*` + `replacedAt` record who later superseded it. A null `replacedAt`
+// marks the current tip (live content); history listings omit tips. Restoring a
+// prior version opens a NEW tip attributed to the restorer and linked via
+// `restoredFromRevisionId`. Legacy rows migrated from the pre-#813 shape (where
+// author/time were the replacing editor) set `authorshipKnown=false` so the UI can
+// label them honestly as "Replaced by …" instead of inventing an author.
+// Covers DM-authored world-building prose — sessions (recap), quests/npcs/locations/
+// factions (body) — AND notes (body). Notes carry their own per-note visibility/
+// author-only-edit model, so revision reads are gated on the note's OWN visibility
+// and restore is author-only — see RevisionsController.
 export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+/** How the version's prose was produced — human editor, AI seat, or tool/PAT. */
+export const RevisionAuthorSource = z.enum(['human', 'ai', 'tool']);
+export type RevisionAuthorSource = z.infer<typeof RevisionAuthorSource>;
 
 export const EntityRevision = z.object({
   id: Id,
   campaignId: Id,
   entityType: RevisionEntityType,
   entityId: Id,
-  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // The prose OF THIS VERSION, keyed by the entity's prose field ('recap' for a
   // session, 'body' for quest/npc/location/faction/note). A plain string map so the
   // shape is uniform across entity types and the web can render whichever key is present.
   snapshot: z.record(z.string(), z.string()).default({}),
+  // Version author (who wrote this snapshot). Empty when authorshipKnown is false.
   authorUserId: z.string().max(120).default(''),
   authorName: z.string().max(120).default(''),
+  authorSource: RevisionAuthorSource.default('human'),
+  // Token name / AI seat id / provider hint — empty for ordinary human cookie sessions.
+  authorSourceDetail: z.string().max(200).default(''),
+  // When this version became authoritative. Empty string for legacy rows whose
+  // original authored-at is unknowable (authorshipKnown=false).
   createdAt: IsoDate,
+  // Who/when superseded this version. Null replacedAt = current tip (still live).
+  replacedByUserId: z.string().max(120).default(''),
+  replacedByName: z.string().max(120).default(''),
+  replacedBySource: RevisionAuthorSource.default('human'),
+  replacedBySourceDetail: z.string().max(200).default(''),
+  replacedAt: z.string().nullable().default(null),
+  // Set when this version was created by restoring another revision.
+  restoredFromRevisionId: Id.nullable().default(null),
+  // false for pre-#813 rows: author fields must not be presented as provenance.
+  authorshipKnown: z.boolean().default(true),
 });
 export type EntityRevision = z.infer<typeof EntityRevision>;
 

@@ -374,7 +374,16 @@ CREATE TABLE IF NOT EXISTS entity_revisions (
   snapshot TEXT NOT NULL DEFAULT '{}',
   author_user_id TEXT NOT NULL DEFAULT '',
   author_name TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  author_source TEXT NOT NULL DEFAULT 'human',
+  author_source_detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT '',
+  replaced_by_user_id TEXT NOT NULL DEFAULT '',
+  replaced_by_name TEXT NOT NULL DEFAULT '',
+  replaced_by_source TEXT NOT NULL DEFAULT 'human',
+  replaced_by_source_detail TEXT NOT NULL DEFAULT '',
+  replaced_at TEXT,
+  restored_from_revision_id INTEGER,
+  authorship_known INTEGER NOT NULL DEFAULT 1
 );
 
 -- audit_log deliberately carries NO foreign key on campaign_id (issue #69). Audit
