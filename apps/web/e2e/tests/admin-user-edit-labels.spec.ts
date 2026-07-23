@@ -29,6 +29,14 @@ async function createUser(page: Page, username: string, displayName: string) {
 test.describe('admin user edit and reset labels (issue #770)', () => {
   test.use({ storageState: stateFor('admin') });
 
+  test.beforeEach(async ({ page }) => {
+    await page.request
+      .post('/api/v1/auth/login', {
+        data: { username: CREDS.admin.username, password: CREDS.admin.password },
+      })
+      .catch(() => undefined);
+  });
+
   test('groups repeated edit rows under username legends with associated labels', async ({ page }) => {
     const suffix = Date.now();
     const shortName = `edit-a-${suffix}`;

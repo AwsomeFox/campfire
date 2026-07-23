@@ -3,14 +3,14 @@
  * preview of manifest metadata and upload paths before restore.
  */
 import { useId, useRef, useState } from 'react';
-import { API, ApiError } from '../../lib/api';
-import { noteUnauthorizedResponse } from '../../lib/sessionExpiry';
+import { API, ApiError, api } from '../../lib/api';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 
 export interface BackupInspectResult {
   app: string;
   kind: string;
   formatVersion: number;
+  sourceFormatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
   createdAt: string | null;
@@ -23,31 +23,7 @@ export interface BackupInspectResult {
 async function inspectBackupArchive(file: File): Promise<BackupInspectResult> {
   const form = new FormData();
   form.append('file', file);
-
-  const headers: Record<string, string> = {};
-  const devRole = localStorage.getItem('cf.devRole');
-  const devUser = localStorage.getItem('cf.devUser');
-  if (devRole) headers['x-dev-role'] = devRole;
-  if (devUser) headers['x-dev-user'] = devUser;
-
-  const res = await fetch(`${API}/backup/inspect`, {
-    method: 'POST',
-    credentials: 'include',
-    headers,
-    body: form,
-  });
-  if (!res.ok) {
-    noteUnauthorizedResponse(`${API}/backup/inspect`, res.status);
-    let message = res.statusText;
-    try {
-      const body = await res.json();
-      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
-    } catch {
-      /* non-json error body */
-    }
-    throw new ApiError(res.status, message);
-  }
-  return (await res.json()) as BackupInspectResult;
+  return api.post<BackupInspectResult>(`${API}/backup/inspect`, undefined, { body: form });
 }
 
 function formatBytes(bytes: number): string {
@@ -156,7 +132,12 @@ export function ServerBackupInspectCard() {
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
             <div>
               <dt className="text-[10px] uppercase tracking-widest text-slate-500">Format version</dt>
-              <dd className="font-semibold text-white">{result.formatVersion}</dd>
+              <dd className="font-semibold text-white">
+                {result.formatVersion}
+                {result.sourceFormatVersion !== result.formatVersion && (
+                  <span className="text-slate-400 font-normal"> (source: {result.sourceFormatVersion})</span>
+                )}
+              </dd>
             </div>
             <div>
               <dt className="text-[10px] uppercase tracking-widest text-slate-500">App version</dt>

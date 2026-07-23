@@ -1,3 +1,5 @@
+[![CI](https://github.com/AwsomeFox/campfire/actions/workflows/ci.yml/badge.svg)](https://github.com/AwsomeFox/campfire/actions/workflows/ci.yml)
+
 # 🔥 Campfire
 
 **Self-hosted, AI-operable campaign tracker for tabletop RPGs.**

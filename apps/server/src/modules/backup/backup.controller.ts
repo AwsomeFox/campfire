@@ -60,6 +60,7 @@ export class BackupController {
   })
   @ApiResponse({ status: 200, description: 'Manifest metadata and upload listing.' })
   @ApiResponse({ status: 400, description: 'Malformed or invalid archive.' })
+  @ApiResponse({ status: 403, description: 'Not a server admin.' })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_RESTORE_BYTES } }))
   async inspect(@UploadedFile() file: MulterFile | undefined) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
