@@ -90,6 +90,12 @@ describe('Pathfinder1eAdapter — initiative (native bonus preferred, else DEX; 
     expect(pf1eInitiativeBreakdown({ initiative: 0 })).toEqual({ source: 'native', bonus: 0 });
     expect(Pathfinder1eAdapter.initiativeModifier({ initiative: 0, dex: 18 })).toBe(0);
   });
+
+  it('skips invalid-but-present keys and accepts numeric strings (SRD-shaped inputs)', () => {
+    expect(pf1eNativeInitiative({ initiative: '', init: 6 })).toBe(6);
+    expect(pf1eNativeInitiative({ initiative: '6' })).toBe(6);
+    expect(pf1eInitiativeBreakdown({ DEX: '', dexterity: '14' })).toEqual({ source: 'dex', bonus: 2, dexScore: 14 });
+  });
 });
 
 describe('Pathfinder1eAdapter — save progressions (good/poor tracks)', () => {
@@ -256,6 +262,14 @@ describe('Pathfinder1eAdapter — statblock mapping', () => {
       abilityScores: { str: 21, dex: 12, con: 17, int: 2, wis: 12, cha: 10 },
     });
     expect(Pathfinder1eAdapter.initiativeModifier(mapped.abilityScores)).toBe(1);
+  });
+
+  it('reads native Init nested in ability_scores when the top-level row omits it', () => {
+    const mapped = Pathfinder1eAdapter.mapStatblock({
+      ability_scores: { dex: 15, init: 6 },
+    });
+    expect(mapped.abilityScores).toEqual({ dex: 15, init: 6, initiative: 6 });
+    expect(Pathfinder1eAdapter.initiativeModifier(mapped.abilityScores)).toBe(6);
   });
 
   it('does not invent a native Init when the statblock omits it (DEX derive / unavailable)', () => {

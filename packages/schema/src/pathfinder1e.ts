@@ -113,7 +113,7 @@ function pf1eDexScore(abilities: Record<string, unknown> | null | undefined): nu
  */
 export function pf1eNativeInitiative(abilities: Record<string, unknown> | null | undefined): number | null {
   if (!abilities) return null;
-  return pf1eNum(abilities.initiative ?? abilities.init);
+  return pf1eFirstNum(abilities, ['initiative', 'init']);
 }
 
 /**
@@ -252,13 +252,14 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   // across web / REST / MCP / generator / duplicate-add / reroll call sites (issue #764).
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const scores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
-    const nativeInit = pf1eNativeInitiative(d);
+    const scoreMap = scores && typeof scores === 'object' && !Array.isArray(scores) ? scores : undefined;
+    const nativeInit = pf1eNativeInitiative(d) ?? (scoreMap ? pf1eNativeInitiative(scoreMap) : null);
     // Only allocate a new object when folding native Init into the ability map.
     const abilityScores =
-      scores && typeof scores === 'object'
+      scoreMap
         ? nativeInit !== null
-          ? { ...scores, initiative: nativeInit }
-          : scores
+          ? { ...scoreMap, initiative: nativeInit }
+          : scoreMap
         : nativeInit !== null
           ? { initiative: nativeInit }
           : undefined;
