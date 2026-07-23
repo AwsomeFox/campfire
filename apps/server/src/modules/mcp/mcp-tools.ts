@@ -1820,6 +1820,24 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'set_npc_disposition',
+      'Set an NPC\'s disposition (attitude/stance toward the party) in real time (DM). The live social-scene counterpart ' +
+        'to upsert_npc\'s disposition field — allows the AI DM to flip attitude during dialogue without a full NPC proposal. ' +
+        'Disposition is free text (max 40 chars); typical values: friendly, neutral, hostile, suspicious, terrified.',
+      {
+        npcId: Id.describe('NPC id'),
+        disposition: z.string().max(40).describe('New disposition label (e.g. "hostile", "friendly", "suspicious")'),
+      },
+      async ({ npcId, disposition }) => {
+        const row = await this.npcs.getRowOrThrow(npcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.npcs.update(npcId as number, { disposition: disposition as string }, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'upsert_faction',
       'Create or update a faction/organization (guild, cult, government, syndicate). Pass factionId to update a ' +
         'specific faction; omit it and an existing faction with the same name (case-insensitive, same campaign) is ' +
