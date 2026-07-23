@@ -242,8 +242,10 @@ export class NotesService {
         });
       }
     } catch (err) {
+      // notifyUser swallows per-row insert errors; this catch covers memberRoles /
+      // iteration failures only (issue #832).
       this.logger.warn(
-        `inbox_submitted notification fan-out failed for note ${row.id}: ${err instanceof Error ? err.message : err}`,
+        `inbox_submitted DM role lookup failed for note ${row.id}: ${err instanceof Error ? err.message : err}`,
       );
     }
   }

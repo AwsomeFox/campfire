@@ -66,7 +66,8 @@ export default function InboxPage() {
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const [searchParams] = useSearchParams();
-  const deepInboxId = Number(searchParams.get('inbox'));
+  const inboxParam = searchParams.get('inbox');
+  const deepInboxId = inboxParam != null && inboxParam !== '' ? Number(inboxParam) : Number.NaN;
 
   const [view, setView] = useState<ViewValue>('open');
   const [items, setItems] = useState<Note[]>([]);
