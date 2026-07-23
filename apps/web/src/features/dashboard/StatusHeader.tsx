@@ -4,11 +4,11 @@ import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schem
 
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
-import { Btn, TextInput, TextArea } from '../../components/ui';
+import { Btn } from '../../components/ui';
+import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
 
-const DANGER_CYCLE: DangerLevel[] = ['low', 'moderate', 'high', 'deadly'];
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
   moderate: 'Moderate',
@@ -36,24 +36,49 @@ export function StatusHeader({
   const [description, setDescription] = useState(campaign.description);
   const [dangerLevel, setDangerLevel] = useState<DangerLevel>(campaign.dangerLevel);
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Inline editor status line mirrors the Settings card: a transient "Saved."
+  // confirmation after a successful write, cleared by a short timer.
+  const dirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
 
   function startEdit() {
     setName(campaign.name);
     setDescription(campaign.description);
     setDangerLevel(campaign.dangerLevel);
+    setError(null);
+    setSaved(false);
     setEditing(true);
   }
 
+  function cancel() {
+    // Reset to baseline so reopening never shows stale edits (issue #750).
+    setName(campaign.name);
+    setDescription(campaign.description);
+    setDangerLevel(campaign.dangerLevel);
+    setError(null);
+    setSaved(false);
+    setEditing(false);
+  }
+
   async function save() {
-    if (!name.trim()) return;
+    if (!name.trim()) {
+      setError('Campaign name is required.');
+      return;
+    }
     setSaving(true);
     setError(null);
+    setSaved(false);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { name: name.trim(), description, dangerLevel });
+      setSaved(true);
       setEditing(false);
       onChange();
+      setTimeout(() => setSaved(false), 2000);
     } catch (err) {
+      // Preserve the in-flight values on failure so a transient 5xx doesn't
+      // silently discard what the DM typed (issue #750 acceptance criterion).
       setError(err instanceof ApiError ? err.message : "Couldn't save changes.");
     } finally {
       setSaving(false);
@@ -62,36 +87,25 @@ export function StatusHeader({
 
   if (editing) {
     return (
-      <section className="card elev-sm" style={{ padding: 16 }}>
-        {error && <p className="text-sm text-rose-400">{error}</p>}
-        <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Campaign name" />
-        <TextArea
-          style={{ minHeight: 90 }}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="Description"
+      <section className="card elev-sm" style={{ padding: 16 }} aria-label="Edit campaign details">
+        <CampaignMetadataFields
+          idPrefix="dashboard-campaign"
+          name={name}
+          description={description}
+          dangerLevel={dangerLevel}
+          onNameChange={setName}
+          onDescriptionChange={setDescription}
+          onDangerLevelChange={setDangerLevel}
+          error={error}
+          disabled={saving}
         />
-        <div className="field" style={{ maxWidth: 200 }}>
-          <label htmlFor="status-danger">Danger level</label>
-          <select
-            id="status-danger"
-            className="input"
-            value={dangerLevel}
-            onChange={(e) => setDangerLevel(e.target.value as DangerLevel)}
-          >
-            {DANGER_CYCLE.map((level) => (
-              <option key={level} value={level}>
-                {DANGER_LABEL[level]}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="flex gap-2 justify-end">
-          <Btn ghost onClick={() => setEditing(false)} disabled={saving}>
+        <div className="flex gap-2 justify-end items-center">
+          {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+          <Btn ghost onClick={cancel} disabled={saving}>
             Cancel
           </Btn>
-          <Btn onClick={save} disabled={saving || !name.trim()}>
-            Save
+          <Btn onClick={save} disabled={saving || !name.trim() || !dirty}>
+            {saving ? 'Saving…' : 'Save'}
           </Btn>
         </div>
       </section>
@@ -149,7 +163,12 @@ export function StatusHeader({
           </>
         )}
       </div>
-      {error && <p className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
+      {error && <p role="alert" className="text-xs text-rose-400" style={{ width: '100%', margin: 0 }}>{error}</p>}
+      {saved && (
+        <p role="status" className="text-xs" style={{ width: '100%', margin: 0, color: 'var(--color-success, #34d399)' }}>
+          Saved.
+        </p>
+      )}
     </div>
   );
 }
