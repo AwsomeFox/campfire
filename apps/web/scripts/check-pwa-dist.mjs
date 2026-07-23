@@ -41,6 +41,12 @@ if (existsSync(join(dist, "manifest.webmanifest"))) {
   check(m.display === "standalone", "manifest.display should be standalone");
   check(/^#/.test(m.theme_color || ""), "manifest.theme_color missing");
   check(/^#/.test(m.background_color || ""), "manifest.background_color missing");
+  // Issue #797 — never ship a portrait-only lock; omit orientation or use "any"
+  // so maps / AI table / player display can rotate on tablets and phones.
+  check(
+    m.orientation == null || m.orientation === "any",
+    `manifest.orientation must be omitted or "any" (got ${JSON.stringify(m.orientation)})`,
+  );
   check(Array.isArray(m.icons) && m.icons.length >= 2, "manifest needs >=2 icons");
   check(
     m.icons?.some((i) => i.purpose === "maskable"),

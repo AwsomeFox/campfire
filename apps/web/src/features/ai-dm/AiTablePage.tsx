@@ -332,7 +332,15 @@ export default function AiTablePage() {
   }[statusKey];
 
   return (
-    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ minHeight: 'calc(100dvh - 60px)' }}>
+    <div
+      className="max-w-3xl mx-auto w-full flex flex-col gap-3"
+      style={{
+        minHeight: 'calc(100dvh - 60px)',
+        // Issue #797 — keep the composer clear of landscape notch / home indicator.
+        padding:
+          'max(1.25rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px)) max(1.25rem, env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px))',
+      }}
+    >
       {/* Header: scene, status pill, token budget, DM pause/resume */}
       <Card className="!p-4">
         <div className="flex items-start gap-3 flex-wrap">
@@ -652,7 +660,14 @@ function Gate({
 }) {
   const { t } = useTranslation();
   return (
-    <div className="max-w-lg mx-auto px-4 mt-10 space-y-4">
+    <div
+      className="max-w-lg mx-auto mt-10 space-y-4"
+      style={{
+        // Issue #797 — co-DM / off gate must clear landscape safe areas too.
+        padding:
+          '0 max(1rem, env(safe-area-inset-right, 0px)) max(1.25rem, env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px))',
+      }}
+    >
       <Card className="space-y-3">
         {error !== undefined ? (
           <>

@@ -27,7 +27,10 @@ export default defineConfig({
         theme_color: "#9184d9",
         background_color: "#161826",
         display: "standalone",
-        orientation: "portrait",
+        // Issue #797 — encounter maps, AI table, and player display need landscape
+        // on tablets/phones. `"any"` (not `"portrait"`) lets the installed PWA
+        // follow the device; route-local locks stay opt-in via screenOrientation.ts.
+        orientation: "any",
         scope: "/",
         start_url: "/",
         icons: [

@@ -37,6 +37,7 @@ import {
   safeQuests,
   type SafeCombatant,
 } from './playerSafe';
+import { releaseOrientationLock, requestOrientationLock } from '../../lib/screenOrientation';
 
 const POLL_MS = 12_000;
 const CONTROLS_HIDE_MS = 3_500;
@@ -222,6 +223,11 @@ export default function PlayerDisplayPage() {
   // or another caller), so the browser events — not the request promise — own
   // the displayed state. fullscreenerror also catches failures that are not
   // accompanied by a useful rejected value.
+  //
+  // Issue #797: a landscape orientation lock (when the engine supports it) is
+  // tied to this same fullscreen session — requested only from the user-gesture
+  // toggle path, and always released when fullscreen ends or the route unmounts.
+  // Lock failures (typical on iOS) never block or undo fullscreen.
   const syncFullscreen = useCallback(() => {
     const next = fullscreenActive();
     const previous = fullscreenActiveRef.current;
@@ -229,6 +235,7 @@ export default function PlayerDisplayPage() {
     setIsFullscreen(next);
     setFullscreenSupported(fullscreenAvailable());
     if (previous && !next) {
+      releaseOrientationLock();
       setFullscreenNotice({
         kind: 'info',
         message: 'Fullscreen ended. Select Enter fullscreen to start it again.',
@@ -257,6 +264,8 @@ export default function PlayerDisplayPage() {
     return () => {
       document.removeEventListener('fullscreenchange', syncFullscreen);
       document.removeEventListener('fullscreenerror', handleFullscreenError);
+      // Leaving the cast route must never leave a sticky orientation lock behind.
+      releaseOrientationLock();
     };
   }, [syncFullscreen]);
 
@@ -356,9 +365,15 @@ export default function PlayerDisplayPage() {
     setFullscreenNotice(null);
     try {
       if (action === 'exit') {
+        // Unlock before / with exit so the reverse path is always reversible,
+        // even if exitFullscreen throws after we already left the locked mode.
+        releaseOrientationLock();
         await document.exitFullscreen();
       } else {
         await document.documentElement.requestFullscreen();
+        // User-gesture only: lock after a successful enter. Failure is ignored
+        // (iOS / policy / missing API) so the cast view still works.
+        await requestOrientationLock('landscape');
       }
       // Standards-compliant browsers dispatch fullscreenchange before resolving,
       // but synchronizing here also handles implementations that resolve first.
@@ -366,6 +381,7 @@ export default function PlayerDisplayPage() {
     } catch (fullscreenError) {
       setFullscreenSupported(fullscreenAvailable());
       setFullscreenNotice({ kind: 'error', message: fullscreenFailure(action, fullscreenError) });
+      if (!fullscreenActive()) releaseOrientationLock();
     } finally {
       // The async browser operation — not fullscreenchange/fullscreenerror — owns
       // pending state. Browsers may dispatch either event before the promise
@@ -695,17 +711,23 @@ function CenteredMessage({
 const SCREEN_CSS = `
 .cf-screen {
   min-height: 100vh;
+  min-height: 100dvh;
   background: radial-gradient(120% 120% at 50% -10%, #1c1f31 0%, var(--color-bg) 60%);
   color: var(--color-text);
-  padding: clamp(16px, 3vw, 48px);
+  /* Issue #797 — landscape + notch/home-indicator safe areas (iOS fallback). */
+  padding:
+    max(clamp(16px, 3vw, 48px), env(safe-area-inset-top, 0px))
+    max(clamp(16px, 3vw, 48px), env(safe-area-inset-right, 0px))
+    max(clamp(16px, 3vw, 48px), env(safe-area-inset-bottom, 0px))
+    max(clamp(16px, 3vw, 48px), env(safe-area-inset-left, 0px));
   font-family: var(--font-body);
 }
 .cf-screen.centered { padding: 0; }
 .cf-screen-control-stack {
   position: fixed;
-  top: 14px;
-  right: 14px;
-  width: min(420px, calc(100vw - 28px));
+  top: max(14px, env(safe-area-inset-top, 0px));
+  right: max(14px, env(safe-area-inset-right, 0px));
+  width: min(420px, calc(100vw - 28px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
   z-index: 20;
   transition: opacity 0.4s ease;
 }
