@@ -405,6 +405,24 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(clonedNotes.body.length).toBe(0);
   });
 
+  it('full clone preserves encounter hidden flag (issue #262)', async () => {
+    const hiddenEnc = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .send({ name: 'Surprise ambush prep', hidden: true });
+    expect(hiddenEnc.status).toBe(201);
+
+    const cloneRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/clone`)
+      .send({ name: 'Hidden encounter copy probe' });
+    expect(cloneRes.status).toBe(201);
+
+    const encs = await dmAgent.get(`/api/v1/campaigns/${cloneRes.body.id}/encounters`);
+    const clonedHidden = encs.body.find((e: { name: string }) => e.name === 'Surprise ambush prep');
+    expect(clonedHidden).toBeDefined();
+    const detail = await dmAgent.get(`/api/v1/encounters/${clonedHidden.id}`);
+    expect(detail.body.hidden).toBe(true);
+  });
+
   it('403 for player (non-dm) on the source campaign', async () => {
     const res = await playerAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({});
     expect(res.status).toBe(403);

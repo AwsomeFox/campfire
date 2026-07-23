@@ -891,6 +891,7 @@ export class CampaignsService {
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
               endedAt: null,
               createdAt: ts,
               updatedAt: ts,
