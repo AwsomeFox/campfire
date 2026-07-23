@@ -300,22 +300,38 @@ export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGrou
 }
 
 /**
+ * Optional ruleset tiebreak for equal initiative totals (issue #611).
+ * Adapters supply `RuleSystemAdapter.initiativeTiebreak`; when omitted, falls back to
+ * `sortOrder` ascending (legacy insertion-order behavior).
+ */
+export type InitiativeTiebreak = (
+  a: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+  b: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+) => number;
+
+/**
  * Order combatants for display.
  * - `running`: initiative desc, nulls last (a just-added combatant with no
- *   initiative sinks to the bottom), tie-broken by sortOrder asc.
+ *   initiative sinks to the bottom); equal totals use `tiebreak` when provided
+ *   (per-adapter DEX-desc / preserved-roll-order — issue #611), else sortOrder asc.
  * - otherwise (preparing/ended): plain sortOrder asc.
  * Returns a new array; the input is never mutated.
  */
-export function sortCombatants(rows: Combatant[], status: EncounterStatus): Combatant[] {
+export function sortCombatants(
+  rows: Combatant[],
+  status: EncounterStatus,
+  tiebreak?: InitiativeTiebreak,
+): Combatant[] {
   if (status !== 'running') {
     return [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
   }
+  const breakTie: InitiativeTiebreak = tiebreak ?? ((a, b) => a.sortOrder - b.sortOrder);
   return [...rows].sort((a, b) => {
-    if (a.initiative === null && b.initiative === null) return a.sortOrder - b.sortOrder;
+    if (a.initiative === null && b.initiative === null) return breakTie(a, b);
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
-    return a.sortOrder - b.sortOrder;
+    return breakTie(a, b);
   });
 }
 

@@ -355,6 +355,18 @@ export class EncountersService {
     return ruleSystemAdapter(row?.ruleSystem);
   }
 
+  /**
+   * Sort combatants with the campaign ruleset's initiative tiebreak when running
+   * (issue #611: 5e DEX-desc, PF2e preserved roll order, …).
+   */
+  private sortCombatantsWithAdapter(
+    rows: Combatant[],
+    status: EncounterStatus,
+    adapter: RuleSystemAdapter,
+  ): Combatant[] {
+    return sortCombatants(rows, status, (a, b) => adapter.initiativeTiebreak(a, b));
+  }
+
   async listCombatantRows(encounterId: number) {
     return this.db.select().from(combatants).where(eq(combatants.encounterId, encounterId));
   }
@@ -718,7 +730,8 @@ export class EncountersService {
     }
     const combatantRows = await this.listCombatantRows(id);
     const status = row.status as EncounterStatus;
-    let list = sortCombatants(combatantRows.map(combatantToDomain), status);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    let list = this.sortCombatantsWithAdapter(combatantRows.map(combatantToDomain), status, adapter);
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       list = list.map(redactMonsterHp);
       // Hidden-NPC identity (issue #374): HP is banded by redactMonsterHp, but a combatant
@@ -1699,7 +1712,7 @@ export class EncountersService {
     // it keeps turnIndex correct regardless.
     if (encounterRow.status === 'running') {
       const rows = await this.listCombatantRows(encounterId);
-      const sorted = sortCombatants(rows.map(combatantToDomain), 'running');
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
       const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
       if (turnIndex !== encounterRow.turnIndex) {
         await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
@@ -2115,7 +2128,12 @@ export class EncountersService {
     // Clearing the CURRENT actor's own initiative is intentional and does NOT advance
     // the turn — its identity pointer survives, it just slides down the order.
     if (encounterRow.status === 'running' && staticUpdate.initiative !== undefined) {
-      const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const sortedAfter = this.sortCombatantsWithAdapter(
+        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
+        'running',
+        adapter,
+      );
       const turnIndex = turnIndexFor(sortedAfter, encounterRow.currentCombatantId);
       await this.db
         .update(encounters)
@@ -2145,8 +2163,14 @@ export class EncountersService {
     // advanceTurn does (issue #528). We track the wrap here and apply it below so the
     // round counter can never desync from the turn pointer mid-combat.
     let wrappedToNextRound = false;
-    if (encounterRow.status === 'running' && encounterRow.currentCombatantId === combatantId) {
-      const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+    const runningAdapter =
+      encounterRow.status === 'running' ? await this.adapterForCampaign(encounterRow.campaignId) : null;
+    if (runningAdapter && encounterRow.currentCombatantId === combatantId) {
+      const sorted = this.sortCombatantsWithAdapter(
+        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
+        'running',
+        runningAdapter,
+      );
       const idx = sorted.findIndex((c) => c.id === combatantId);
       const remaining = sorted.filter((c) => c.id !== combatantId);
       if (remaining.length === 0) {
@@ -2170,8 +2194,12 @@ export class EncountersService {
     // Re-derive turnIndex against the post-removal sorted order so it stays in lockstep
     // with the (possibly advanced) identity pointer. The round is bumped in the same
     // UPDATE when the removal wrapped the pointer past the end (issue #528).
-    if (encounterRow.status === 'running') {
-      const sortedAfter = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+    if (runningAdapter) {
+      const sortedAfter = this.sortCombatantsWithAdapter(
+        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
+        'running',
+        runningAdapter,
+      );
       const turnIndex = turnIndexFor(sortedAfter, newCurrentId);
       const round = wrappedToNextRound ? encounterRow.round + 1 : encounterRow.round;
       await this.db
@@ -2235,7 +2263,11 @@ export class EncountersService {
     // Filling a late joiner's initiative mid-fight (issue #54) re-sorts the order, so
     // keep the positional turnIndex aligned with the (unchanged) identity pointer.
     if (encounterRow.status === 'running') {
-      const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+      const sorted = this.sortCombatantsWithAdapter(
+        (await this.listCombatantRows(encounterId)).map(combatantToDomain),
+        'running',
+        adapter,
+      );
       const turnIndex = turnIndexFor(sorted, encounterRow.currentCombatantId);
       if (turnIndex !== encounterRow.turnIndex) {
         await this.db.update(encounters).set({ turnIndex, updatedAt: nowIso() }).where(eq(encounters.id, encounterId));
@@ -2280,7 +2312,8 @@ export class EncountersService {
 
     // The first actor is the top of the initiative order — pin it by identity (issue
     // #49), not just position, so later add/remove can't slide the pointer off it.
-    const sorted = sortCombatants(rows.map(combatantToDomain), 'running');
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
     const currentCombatantId = sorted[0]?.id ?? null;
 
     // One authoritative live fight per campaign (issue #744): flip status to 'running'
@@ -2334,7 +2367,12 @@ export class EncountersService {
     // positional index (issue #49). Find where the current actor sits now, step to the
     // next one, and wrap (round+1) past the end. Because the pointer is an id, a mid-
     // fight add/remove that reshuffled positions can't desync who's "current".
-    const sorted = sortCombatants((await this.listCombatantRows(encounterId)).map(combatantToDomain), 'running');
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const sorted = this.sortCombatantsWithAdapter(
+      (await this.listCombatantRows(encounterId)).map(combatantToDomain),
+      'running',
+      adapter,
+    );
     const { turnIndex, round, currentCombatantId } = advanceTurn(
       sorted,
       encounterRow.currentCombatantId,
@@ -2671,7 +2709,8 @@ export class EncountersService {
     // roster before flipping status. A combatant removed (or initiative cleared) while
     // the fight was ended would otherwise leave a stale currentCombatantId until the
     // next /next-turn self-healed via advanceTurn.
-    const sorted = sortCombatants(combatantRows.map(combatantToDomain), 'running');
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const sorted = this.sortCombatantsWithAdapter(combatantRows.map(combatantToDomain), 'running', adapter);
     const priorCurrentId = encounterRow.currentCombatantId;
     const priorCurrent = priorCurrentId == null ? undefined : sorted.find((c) => c.id === priorCurrentId);
     // Missing id OR present-but-null-initiative both snap to the top of the order
