@@ -22,7 +22,16 @@ interface CampfireE2EWindow extends Window {
   };
 }
 
+/** Opt-in sentinel required with navigator.webdriver for the announcer bridge. */
+async function ensureE2EBridgeOptIn(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as CampfireE2EWindow;
+    if (w.__CAMPFIRE_E2E__ == null) w.__CAMPFIRE_E2E__ = {};
+  });
+}
+
 async function signIn(page: Page, who: keyof typeof CREDS) {
+  await ensureE2EBridgeOptIn(page);
   await page.goto('/login');
   // OIDC-capable servers collapse local auth behind a disclosure; open it when present.
   const localToggle = page.getByRole('button', { name: /local account|username and password/i });

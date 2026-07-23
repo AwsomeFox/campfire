@@ -308,9 +308,13 @@ function LayoutContent() {
   const params = useParams<{ campaignId: string }>();
   // Non-numeric `:campaignId` must not become NaN — that would trip scope clears
   // and confuse campaign lookups. Treat invalid params as "outside campaign".
-  const parsedCampaignId = params.campaignId ? Number(params.campaignId) : undefined;
-  const campaignId =
-    parsedCampaignId != null && Number.isFinite(parsedCampaignId) ? parsedCampaignId : undefined;
+  // Base-10 positive integers only — reject "1.5", "0x10", whitespace, etc.
+  const campaignId = (() => {
+    const raw = params.campaignId;
+    if (!raw || !/^\d+$/.test(raw)) return undefined;
+    const n = Number(raw);
+    return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+  })();
   const campaign = useCampaign(campaignId);
   const { campaigns, loading: campaignsLoading, error: campaignsError, refresh: refreshCampaigns } = useCampaigns();
   const navigate = useNavigate();

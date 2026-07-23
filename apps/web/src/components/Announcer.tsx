@@ -74,11 +74,10 @@ type CampfireE2EWindow = Window & {
 };
 
 function shouldAttachE2EBridge(w: CampfireE2EWindow): boolean {
-  // Require an automation signal from the same window. A bare
-  // `__CAMPFIRE_E2E__` object without webdriver must not expose announcer hooks
-  // to ordinary browsing (injected scripts).
+  // Require BOTH webdriver AND an explicit opt-in sentinel. A bare webdriver
+  // session (or a bare `__CAMPFIRE_E2E__` object) must not expose announcer hooks.
   const nav = (w as Window & { navigator?: Navigator }).navigator;
-  return Boolean(nav?.webdriver);
+  return Boolean(nav?.webdriver && w.__CAMPFIRE_E2E__);
 }
 
 function createProviderQueue(
