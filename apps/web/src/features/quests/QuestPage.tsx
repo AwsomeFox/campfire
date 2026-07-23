@@ -113,7 +113,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [editingObjectiveId, setEditingObjectiveId] = useState<number | null>(null);
   const [objectiveDraft, setObjectiveDraft] = useState('');
   // Issue #854: Enter confirming IME composition must not create an objective.
-  const objectiveCompositionGate = useRef(createCompositionSubmitGate()).current;
+  const objectiveCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (objectiveCompositionGateRef.current === null) {
+    objectiveCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const objectiveCompositionGate = objectiveCompositionGateRef.current;
 
   const [editingDmSecret, setEditingDmSecret] = useState(false);
   const [dmSecretDraft, setDmSecretDraft] = useState('');

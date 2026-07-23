@@ -1642,7 +1642,11 @@ function ConditionsRow({
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
-  const compositionGate = useRef(createCompositionSubmitGate()).current;
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
 
   async function addCondition() {
     const v = value.trim();

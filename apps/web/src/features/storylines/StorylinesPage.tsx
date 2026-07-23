@@ -103,7 +103,11 @@ export default function StorylinesPage() {
   const [busy, setBusy] = useState(false);
   const newArcTitleRef = useRef<HTMLInputElement>(null);
   // Issue #854: Enter confirming IME composition must not create an arc.
-  const arcCompositionGate = useRef(createCompositionSubmitGate()).current;
+  const arcCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (arcCompositionGateRef.current === null) {
+    arcCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const arcCompositionGate = arcCompositionGateRef.current;
   const pendingFocusIdRef = useRef<string | null>(null);
   // Play-record link options (issue #264) — the sessions/quests/encounters a beat can
   // link to. Fetched once; empty lists just leave the pickers showing "— none —".
@@ -343,7 +347,11 @@ function ArcCard({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const newBeatTitleRef = useRef<HTMLInputElement>(null);
   // Issue #854: Enter confirming IME composition must not create a beat.
-  const beatCompositionGate = useRef(createCompositionSubmitGate()).current;
+  const beatCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (beatCompositionGateRef.current === null) {
+    beatCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const beatCompositionGate = beatCompositionGateRef.current;
   const announce = useAnnounce();
   const arcTitleId = `storyline-arc-${arc.id}-title`;
   const arcStatusId = `storyline-arc-${arc.id}-status`;
@@ -583,7 +591,11 @@ function BeatRow({
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
   // Issue #854: Enter confirming IME composition must not create a branch.
-  const branchCompositionGate = useRef(createCompositionSubmitGate()).current;
+  const branchCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (branchCompositionGateRef.current === null) {
+    branchCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const branchCompositionGate = branchCompositionGateRef.current;
   const announce = useAnnounce();
   const beatTitleId = `storyline-beat-${beat.id}-title`;
   const beatStatusId = `storyline-beat-${beat.id}-status`;

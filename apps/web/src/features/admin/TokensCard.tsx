@@ -262,7 +262,11 @@ function NewTokenForm({
   const [campaignId, setCampaignId] = useState<string>('');
   const [saving, setSaving] = useState(false);
   // Issue #854: Enter confirming IME composition must not mint a token.
-  const compositionGate = useRef(createCompositionSubmitGate()).current;
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
 
   async function create() {
     if (saving || !name.trim()) return;
