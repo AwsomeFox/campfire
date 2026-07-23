@@ -13,6 +13,15 @@
  */
 import { expect, test } from '@playwright/test';
 import {
+  clearDeferredInstallPrompt,
+  ensureDeferredInstallPromptCapture,
+  getDeferredInstallPrompt,
+  resetDeferredInstallPromptForTests,
+  setDeferredInstallPrompt,
+  subscribeDeferredInstallPrompt,
+  type DeferredInstallPrompt,
+} from '../../src/features/dashboard/deferredInstallPrompt';
+import {
   DISMISS_KEY,
   detectInstallPlatform,
   installHintGuidance,
@@ -210,6 +219,98 @@ test.describe('install hint state (issue #799)', () => {
       expect(persistDismissed(null)).toBe(false);
       // Status after an in-memory dismiss is still dismissed:
       expect(resolveInstallHintStatus(signals({ dismissed: true }))).toBe('dismissed');
+    });
+  });
+
+  // --- Deferred beforeinstallprompt (survives banner remount) ---------------
+  test.describe('deferredInstallPrompt module scope', () => {
+    test.beforeEach(() => {
+      resetDeferredInstallPromptForTests();
+    });
+
+    function fakePrompt(): DeferredInstallPrompt {
+      return {
+        prompt: async () => {},
+        userChoice: Promise.resolve({ outcome: 'accepted', platform: 'web' }),
+      };
+    }
+
+    test('unmount/remount simulation: deferred prompt survives subscriber teardown', () => {
+      // Regression (Bugbot): InstallHintBanner used to keep the event only in
+      // React state; leaving the dashboard discarded it and Chromium would not
+      // re-emit for the same document load.
+      const prompt = fakePrompt();
+      setDeferredInstallPrompt(prompt);
+
+      let seen: DeferredInstallPrompt | null = null;
+      const unsub = subscribeDeferredInstallPrompt((next) => {
+        seen = next;
+      });
+      // Simulate banner unmount — unsubscribe only; do not clear the store.
+      unsub();
+      expect(getDeferredInstallPrompt()).toBe(prompt);
+
+      // Remount seeds from module scope (same as useState initializer).
+      expect(getDeferredInstallPrompt()).toBe(prompt);
+      expect(seen).toBeNull(); // unsubbed before any further updates
+      expect(
+        resolveInstallHintStatus(signals({ hasNativePrompt: getDeferredInstallPrompt() !== null })),
+      ).toBe('installable');
+      expect(installHintGuidance('android', true).nativeActionLabel).toBe('Install');
+    });
+
+    test('capture preventDefault and stores the event for later remounts', () => {
+      const handlers = new Map<string, EventListener>();
+      const target = {
+        addEventListener(type: string, listener: EventListener) {
+          handlers.set(type, listener);
+        },
+      };
+      ensureDeferredInstallPromptCapture(target as unknown as Window);
+
+      let prevented = false;
+      const event = {
+        preventDefault() {
+          prevented = true;
+        },
+        prompt: async () => {},
+        userChoice: Promise.resolve({ outcome: 'dismissed' as const, platform: '' }),
+      };
+      handlers.get('beforeinstallprompt')?.(event as unknown as Event);
+      expect(prevented).toBe(true);
+      expect(getDeferredInstallPrompt()).toBe(event);
+
+      // Second ensure is a no-op (document-lifetime, single registration).
+      ensureDeferredInstallPromptCapture(target as unknown as Window);
+      expect(handlers.size).toBe(2); // beforeinstallprompt + appinstalled only once
+    });
+
+    test('appinstalled clears the deferred prompt', () => {
+      const handlers = new Map<string, EventListener>();
+      const target = {
+        addEventListener(type: string, listener: EventListener) {
+          handlers.set(type, listener);
+        },
+      };
+      ensureDeferredInstallPromptCapture(target as unknown as Window);
+      setDeferredInstallPrompt(fakePrompt());
+      expect(getDeferredInstallPrompt()).not.toBeNull();
+
+      handlers.get('appinstalled')?.(new Event('appinstalled'));
+      expect(getDeferredInstallPrompt()).toBeNull();
+    });
+
+    test('clearDeferredInstallPrompt notifies subscribers (Install CTA teardown)', () => {
+      const prompt = fakePrompt();
+      setDeferredInstallPrompt(prompt);
+      const seen: Array<DeferredInstallPrompt | null> = [];
+      const unsub = subscribeDeferredInstallPrompt((next) => {
+        seen.push(next);
+      });
+      clearDeferredInstallPrompt();
+      expect(getDeferredInstallPrompt()).toBeNull();
+      expect(seen).toEqual([null]);
+      unsub();
     });
   });
 });

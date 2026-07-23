@@ -4,8 +4,19 @@
  * standalone/iOS standalone, dismissed via localStorage when available, and
  * shown on narrow viewports with either a native install prompt or
  * platform-specific guidance. See `installHintState.ts` for the pure model.
+ *
+ * The deferred `beforeinstallprompt` event lives in module scope
+ * (`deferredInstallPrompt.ts`) so client-side navigation away from the
+ * dashboard does not discard installability for the rest of the document load.
  */
 import { useEffect, useState } from 'react';
+import {
+  clearDeferredInstallPrompt,
+  ensureDeferredInstallPromptCapture,
+  getDeferredInstallPrompt,
+  subscribeDeferredInstallPrompt,
+  type DeferredInstallPrompt,
+} from './deferredInstallPrompt';
 import {
   MOBILE_QUERY,
   STANDALONE_QUERY,
@@ -18,12 +29,6 @@ import {
   shouldRenderInstallHint,
   type InstallPlatform,
 } from './installHintState';
-
-/** Chromium's deferred install event — not in every lib.dom version we target. */
-interface BeforeInstallPromptEvent extends Event {
-  prompt(): Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
-}
 
 function readIosStandalone(): boolean {
   const nav = window.navigator as Navigator & { standalone?: boolean };
@@ -56,13 +61,19 @@ export function InstallHintBanner() {
         })
       : false,
   );
-  const [nativePrompt, setNativePrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  // Seed from module scope so a remount after navigation keeps the CTA.
+  const [nativePrompt, setNativePrompt] = useState<DeferredInstallPrompt | null>(
+    () => getDeferredInstallPrompt(),
+  );
   const [platform] = useState<InstallPlatform>(() =>
     typeof window !== 'undefined' ? readPlatform() : 'desktop',
   );
 
   // Reevaluate when viewport, display-mode, or install lifecycle changes.
   useEffect(() => {
+    ensureDeferredInstallPromptCapture();
+    setNativePrompt(getDeferredInstallPrompt());
+
     const mobileMql = window.matchMedia(MOBILE_QUERY);
     const standaloneMql = window.matchMedia(STANDALONE_QUERY);
 
@@ -76,27 +87,25 @@ export function InstallHintBanner() {
       );
     };
 
-    const onBeforeInstallPrompt = (event: Event) => {
-      // Hold the deferred prompt so the Install CTA can call it — do not let
-      // the browser show its own mini-infobar in parallel with our banner.
-      event.preventDefault();
-      setNativePrompt(event as BeforeInstallPromptEvent);
-    };
     const onAppInstalled = () => {
-      setNativePrompt(null);
       setIsStandalone(true);
     };
+
+    const unsubPrompt = subscribeDeferredInstallPrompt(setNativePrompt);
 
     syncViewport();
     syncStandalone();
     mobileMql.addEventListener('change', syncViewport);
     standaloneMql.addEventListener('change', syncStandalone);
-    window.addEventListener('beforeinstallprompt', onBeforeInstallPrompt);
+    // appinstalled also clears the module-scoped prompt; keep a local listener
+    // so standalone flips even if the banner was already showing.
     window.addEventListener('appinstalled', onAppInstalled);
     return () => {
+      // Intentionally leave the deferred prompt in module scope — unmount must
+      // not discard installability for a later remount on this document load.
+      unsubPrompt();
       mobileMql.removeEventListener('change', syncViewport);
       standaloneMql.removeEventListener('change', syncStandalone);
-      window.removeEventListener('beforeinstallprompt', onBeforeInstallPrompt);
       window.removeEventListener('appinstalled', onAppInstalled);
     };
   }, []);
@@ -125,7 +134,7 @@ export function InstallHintBanner() {
   async function installNative() {
     if (!nativePrompt) return;
     const deferred = nativePrompt;
-    setNativePrompt(null);
+    clearDeferredInstallPrompt();
     try {
       await deferred.prompt();
       const choice = await deferred.userChoice;
@@ -136,7 +145,7 @@ export function InstallHintBanner() {
     } catch {
       // Prompt can fail if the browser already consumed it; fall back to guidance
       // on the next render by leaving nativePrompt null (manual copy still works
-      // if status stays installable — re-listen will restore a fresh event).
+      // if status stays installable — a fresh beforeinstallprompt restores the CTA).
     }
   }
 
