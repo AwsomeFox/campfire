@@ -172,8 +172,22 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
 
   const moveFocus = opts.moveFocus !== false;
   let observer: MutationObserver | null = null;
-  let frame = 0;
+  const frames = new Set<number>();
   let timeout = 0;
+  let settled = false;
+
+  const cancelFrames = () => {
+    for (const id of frames) window.cancelAnimationFrame(id);
+    frames.clear();
+  };
+
+  const scheduleFrame = (cb: () => void) => {
+    const id = window.requestAnimationFrame(() => {
+      frames.delete(id);
+      cb();
+    });
+    frames.add(id);
+  };
 
   const publishTitle = () => {
     const fromDom = pageTitleFromMain(main);
@@ -182,9 +196,14 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   };
 
   const settleOnTarget = (target: HTMLElement) => {
+    if (settled) {
+      publishTitle();
+      return;
+    }
+    settled = true;
     publishTitle();
     if (moveFocus) {
-      frame = window.requestAnimationFrame(() => {
+      scheduleFrame(() => {
         if (shouldPreserveFocusInsideMain(main, document)) return;
         focusProgrammatically(target);
       });
@@ -200,20 +219,22 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
     return true;
   };
 
-  if (!tryFocusHeading()) {
-    observer = new MutationObserver(() => {
-      void tryFocusHeading();
-    });
-    observer.observe(main, { childList: true, subtree: true, characterData: true });
+  // Always observe: an immediate empty h1 may gain text after async data loads.
+  observer = new MutationObserver(() => {
+    publishTitle();
+    if (!settled) void tryFocusHeading();
+  });
+  observer.observe(main, { childList: true, subtree: true, characterData: true });
 
+  if (!tryFocusHeading()) {
     const focusMainIfStillHeadless = () => {
-      if (main.querySelector('h1')) return;
+      if (settled || main.querySelector('h1')) return;
       settleOnTarget(main);
     };
 
     // Many list screens have no h1 — do not leave focus on nav chrome for seconds.
-    frame = window.requestAnimationFrame(() => {
-      frame = window.requestAnimationFrame(focusMainIfStillHeadless);
+    scheduleFrame(() => {
+      scheduleFrame(focusMainIfStillHeadless);
     });
 
     timeout = window.setTimeout(() => {
@@ -225,6 +246,6 @@ export function focusMainDestination(main: HTMLElement, opts: FocusMainOptions =
   return () => {
     observer?.disconnect();
     if (timeout) window.clearTimeout(timeout);
-    if (frame) window.cancelAnimationFrame(frame);
+    cancelFrames();
   };
 }
