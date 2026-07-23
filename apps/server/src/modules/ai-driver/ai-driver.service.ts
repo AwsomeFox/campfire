@@ -746,7 +746,7 @@ export class AiDriverService {
         // stop reason so the stuck-ladder transition below parks correctly.
         // Note: TypeScript narrows session.state at compile time, but it's a mutable shared
         // object — concurrent requests (grantTakeover/pause) can change it between awaits.
-        if ((session.state as string) === 'paused' || (session.state as string) === 'human_control') {
+        if (isMidTurnFrozenState(session.state)) {
           stopReason = 'frozen';
           break;
         }
@@ -772,7 +772,7 @@ export class AiDriverService {
           break;
         }
         // #1057: re-check after streaming — a pause/takeover can land while we streamed.
-        if ((session.state as string) === 'paused' || (session.state as string) === 'human_control') {
+        if (isMidTurnFrozenState(session.state)) {
           stopReason = 'frozen';
           if (text) finalNarration = text;
           break;
@@ -827,7 +827,7 @@ export class AiDriverService {
           break;
         }
         // #1057: re-check after tool execution — a pause/takeover can land between steps.
-        if ((session.state as string) === 'paused' || (session.state as string) === 'human_control') {
+        if (isMidTurnFrozenState(session.state)) {
           stopReason = 'frozen';
           break;
         }
@@ -1831,7 +1831,15 @@ function approvalKey(tool: string, entityId: number): string {
  * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
  * narration / a verbatim loop) since it's the more actionable diagnosis.
  */
-function classifyStuck(ctx: {
+/**
+ * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
+ * it at compile time but concurrent pause/takeover can change it at runtime.
+ */
+export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
+  return state === 'paused' || state === 'human_control';
+}
+
+export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;
   prevNarration: string | null;
