@@ -21,12 +21,17 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useId, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
+import {
+  compositionSafeEscapeHandler,
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
@@ -1636,6 +1641,12 @@ function ConditionsRow({
   const [adding, setAdding] = useState(false);
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  // Issue #854: IME confirm Enter must not add; Escape must not dismiss mid-composition.
+  const compositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (compositionGateRef.current === null) {
+    compositionGateRef.current = createCompositionSubmitGate();
+  }
+  const compositionGate = compositionGateRef.current;
 
   async function addCondition() {
     const v = value.trim();
@@ -1697,19 +1708,22 @@ function ConditionsRow({
       {character.conditions.length === 0 && <span className="text-muted text-xs">None — feeling fine.</span>}
       {canEdit &&
         (adding ? (
-          <span className="inline-flex items-center gap-1">
+          <form
+            className="inline-flex items-center gap-1"
+            onSubmit={compositionSafeFormSubmit(compositionGate, () => {
+              void addCondition();
+            })}
+          >
             <input
               autoFocus
               list="cf-condition-vocab"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void addCondition();
-                if (e.key === 'Escape') {
-                  setAdding(false);
-                  setValue('');
-                }
-              }}
+              onKeyDown={compositionSafeEscapeHandler(compositionGate, () => {
+                setAdding(false);
+                setValue('');
+              })}
+              {...compositionGate.inputProps}
               placeholder="Condition…"
               className="cf-input !min-h-0 !py-1 !w-28 text-xs"
               style={{ minHeight: 0, padding: '4px 8px' }}
@@ -1719,10 +1733,10 @@ function ConditionsRow({
                 <option key={c} value={c} />
               ))}
             </datalist>
-            <button type="button" onClick={addCondition} disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
+            <button type="submit" disabled={busy || !value.trim()} className="cf-chip cf-chip-available">
               Add
             </button>
-          </span>
+          </form>
         ) : (
           <button
             type="button"
