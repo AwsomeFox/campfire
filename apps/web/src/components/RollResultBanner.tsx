@@ -8,7 +8,7 @@
 import type { DiceRoll } from '@campfire/schema';
 import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
-import { d20Flavor } from '../lib/useRoller';
+import { d20Flavor } from '../lib/d20Flavor';
 
 export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismiss: () => void }) {
   const flavor = d20Flavor(roll);
