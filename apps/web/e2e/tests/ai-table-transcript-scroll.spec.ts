@@ -89,15 +89,14 @@ test.describe('AI table transcript scroll (#590)', () => {
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toBeVisible();
-    await expect.poll(async () => {
-      const jump = page.getByTestId('transcript-jump-latest');
-      if (await jump.isVisible()) return true;
-      return transcript.getByText('Earlier table line 80').evaluate((el) => {
+    await expect(page.getByTestId('transcript-jump-latest')).toHaveCount(0);
+    await expect.poll(async () =>
+      transcript.getByText('Earlier table line 80').evaluate((el) => {
         const row = el.getBoundingClientRect();
         const pane = el.closest('[role="log"]')!.getBoundingClientRect();
         return row.top >= pane.top - 4 && row.bottom <= pane.bottom + 4;
-      });
-    }).toBe(true);
+      }),
+    ).toBe(true);
   });
 
   test('stops tail follow when reading history and offers jump-to-latest with unread count', async ({ page }) => {
@@ -122,9 +121,8 @@ test.describe('AI table transcript scroll (#590)', () => {
       node.scrollTop = Math.floor((node.scrollHeight - node.clientHeight) / 2);
       node.dispatchEvent(new Event('scroll', { bubbles: true }));
     });
-    await page.waitForTimeout(100);
+    await expect.poll(async () => transcript.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
     const scrollBefore = await transcript.evaluate((node) => node.scrollTop);
-    expect(scrollBefore).toBeGreaterThan(0);
 
     await page.getByTestId('ai-table-composer').getByRole('textbox', { name: 'Your action' }).fill('I scout ahead.');
     await page.getByRole('button', { name: 'Send' }).click();

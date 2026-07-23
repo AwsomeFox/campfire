@@ -338,53 +338,7 @@ export default function AiTablePage() {
     if (pin) setUnreadBelow(0);
   }, []);
 
-  useEffect(() => {
-    if (!isDriver) return;
-    const el = transcriptRef.current;
-    if (!el) return;
-
-    const syncAfterLayout = () => {
-      const node = transcriptRef.current;
-      if (!node || transcript.entries.length === 0) return;
-      if (!transcriptMountScrollDoneRef.current && node.scrollHeight > node.clientHeight) {
-        transcriptMountScrollDoneRef.current = true;
-        if (
-          shouldScrollTranscriptToTailOnMount(
-            transcript.entries.length,
-            node.scrollTop,
-            node.scrollHeight,
-            node.clientHeight,
-          )
-        ) {
-          node.scrollTop = node.scrollHeight - node.clientHeight;
-          followLatestRef.current = true;
-          setFollowLatest(true);
-          return;
-        }
-      }
-      // Content growth must not look like a user scroll away from the tail.
-      if (followLatestRef.current) {
-        node.scrollTop = node.scrollHeight - node.clientHeight;
-        return;
-      }
-      handleTranscriptScroll();
-    };
-
-    syncAfterLayout();
-    const observer = new ResizeObserver(syncAfterLayout);
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [isDriver, transcript.entries.length, handleTranscriptScroll, campaignId]);
-
-  const jumpToLatest = useCallback(() => {
-    followLatestRef.current = true;
-    setFollowLatest(true);
-    setUnreadBelow(0);
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, []);
-
-  useLayoutEffect(() => {
-    if (!isDriver) return;
+  const syncTranscriptTailScroll = useCallback(() => {
     const el = transcriptRef.current;
     if (!el || transcript.entries.length === 0) return;
 
@@ -399,6 +353,9 @@ export default function AiTablePage() {
         )
       ) {
         el.scrollTop = el.scrollHeight - el.clientHeight;
+        followLatestRef.current = true;
+        setFollowLatest(true);
+        return;
       }
     }
 
@@ -418,7 +375,25 @@ export default function AiTablePage() {
       setUnreadBelow(0);
       bottomRef.current?.scrollIntoView({ block: 'end' });
     }
-  }, [transcriptRevision, isDriver, transcript.entries.length]);
+  }, [transcript.entries.length]);
+
+  const jumpToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    setFollowLatest(true);
+    setUnreadBelow(0);
+    bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!isDriver) return;
+    const el = transcriptRef.current;
+    if (!el) return;
+
+    syncTranscriptTailScroll();
+    const observer = new ResizeObserver(syncTranscriptTailScroll);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [isDriver, transcriptRevision, campaignId, syncTranscriptTailScroll]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';

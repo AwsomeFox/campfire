@@ -10,10 +10,11 @@
  * check") to attribute the roll; the user identity is still recorded server-side.
  */
 import { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
-import { d20Flavor as getD20Flavor } from './d20Flavor';
+import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
 export interface Roller {
@@ -31,6 +32,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
 } {
   const [rolling, setRolling] = useState(false);
   const [last, setLast] = useState<DiceRoll | null>(null);
+  const { t } = useTranslation();
   const announce = useAnnounce();
 
   const roll = useCallback(
@@ -40,13 +42,10 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
-        const flavor = getD20Flavor(result);
         rememberLocalDiceAnnouncement(campaignId, result.id);
-        announce(
-          `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
-            (flavor === 'crit' ? ' — natural 20!' : flavor === 'fumble' ? ' — natural 1.' : ''),
-          { dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}` },
-        );
+        announce(formatDiceRollAnnouncement(result, t), {
+          dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+        });
         return result;
       } catch (err) {
         onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
@@ -55,7 +54,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         setRolling(false);
       }
     },
-    [campaignId, onError, announce],
+    [campaignId, onError, announce, t],
   );
 
   return { roll, rolling, last, dismiss: () => setLast(null) };

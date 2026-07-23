@@ -67,7 +67,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     cursor: DiceRollAnnouncementCursor;
   } | null>(null);
   /** Which campaign the in-memory `rolls` array came from (guards campaign switches). */
-  const rollsCampaignIdRef = useRef<number | null>(campaignId);
+  const rollsCampaignIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     rollAnnouncementRef.current = null;
