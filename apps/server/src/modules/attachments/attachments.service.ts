@@ -12,7 +12,7 @@ import {
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { and, desc, eq, like, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, like, sql } from 'drizzle-orm';
 import type {
   Attachment,
   AttachmentKind,
@@ -26,6 +26,7 @@ import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { persistedFogConcealsPixels } from '../../common/fog';
 import { generatePngThumbnail } from './thumbnail';
 import { sanitizeAttachmentFilename } from './filename';
 import {
@@ -329,33 +330,82 @@ export class AttachmentsService implements OnApplicationBootstrap {
   }
 
   /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259). A fogged encounter map stays hidden (DM-only) as a handout
-   * so it never appears raw on the player Handouts card, but the fogged encounter canvas
-   * Returns encounter map fog information for `attachmentId` in `campaignId` (issue #259, #523).
-   * If `attachmentId` is an encounter's battle map, returns `{ isMap: true, fog: string | null }`.
-   * Otherwise returns `{ isMap: false, fog: null }`.
+   * Whether an attachment backs an encounter whose active fog still conceals source
+   * pixels. This is independent of attachment.hidden: a legacy/reused map may already
+   * be a revealed handout, but enabling fog must close every raw-byte shortcut.
    */
-  async getEncounterMapFog(
-    attachmentId: number,
-    campaignId: number,
-  ): Promise<{ isMap: boolean; fog: string | null }> {
-    const [row] = await this.db
+  async isFogProtectedEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
+    const rows = await this.db
       .select({ fog: encounters.fog })
       .from(encounters)
-      .where(and(eq(encounters.mapAttachmentId, attachmentId), eq(encounters.campaignId, campaignId)))
-      .limit(1);
-    if (!row) return { isMap: false, fog: null };
-    return { isMap: true, fog: row.fog };
+      .where(
+        and(
+          eq(encounters.mapAttachmentId, attachmentId),
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.fog),
+        ),
+      );
+    return rows.some((row) => persistedFogConcealsPixels(row.fog));
+  }
+
+  /** Set of raw attachments currently protected by at least one fogged encounter. */
+  async fogProtectedMapIdsForCampaign(campaignId: number): Promise<Set<number>> {
+    // persistedFogConcealsPixels is always false when fog/mapAttachmentId is null, so
+    // push those predicates into SQL and skip loading map-less / fog-less encounters.
+    const rows = await this.db
+      .select({ mapAttachmentId: encounters.mapAttachmentId, fog: encounters.fog })
+      .from(encounters)
+      .where(
+        and(
+          eq(encounters.campaignId, campaignId),
+          isNotNull(encounters.mapAttachmentId),
+          isNotNull(encounters.fog),
+        ),
+      );
+    const ids = new Set<number>();
+    for (const row of rows) {
+      if (row.mapAttachmentId == null) continue;
+      if (persistedFogConcealsPixels(row.fog)) ids.add(row.mapAttachmentId);
+    }
+    return ids;
   }
 
   /**
-   * True when `attachmentId` is the battle map (mapAttachmentId) of some encounter in
-   * `campaignId` (issue #259).
+   * Byte-copy an attachment into a new row in the same campaign (issue #463).
+   * Used when fog-protecting a battle map that is also the shared campaign region
+   * map — the encounter retargets to the clone so the region map stays player-visible.
    */
-  async isEncounterMap(attachmentId: number, campaignId: number): Promise<boolean> {
-    const { isMap } = await this.getEncounterMapFog(attachmentId, campaignId);
-    return isMap;
+  async duplicate(
+    id: number,
+    user: RequestUser,
+    role: Role,
+    opts?: { filenamePrefix?: string },
+  ): Promise<Attachment> {
+    const row = await this.getRowOrThrow(id);
+    const bytes = this.readBytesIfPresent(row);
+    if (!bytes) throw new NotFoundException(`Attachment ${id} file is missing`);
+    const prefix = opts?.filenamePrefix ?? '';
+    if (row.mime === 'image/svg+xml') {
+      return this.createGenerated(
+        row.campaignId,
+        row.kind as AttachmentKind,
+        { filename: `${prefix}${row.filename}`, mime: row.mime, bytes },
+        user,
+        role,
+      );
+    }
+    return this.create(
+      row.campaignId,
+      row.kind as AttachmentKind,
+      {
+        originalname: `${prefix}${row.filename}`,
+        mimetype: row.mime,
+        size: bytes.length,
+        buffer: bytes,
+      },
+      user,
+      role,
+    );
   }
 
   /**
@@ -947,6 +997,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
       .sort((a, b) => b.committedBytes + b.reservedBytes - (a.committedBytes + a.reservedBytes));
 
     const validIds = new Set(rows.map((r) => r.id));
+    const reservedIds = new Set(rows.filter((r) => r.state === RESERVED).map((r) => r.id));
     // storageStats is the admin's read-only visibility surface, so a transient
     // storage outage (missing/unreadable volume) is tolerated here — the admin
     // needs to SEE the situation, and nothing deletes rows on this path. We fall
@@ -955,7 +1006,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     // cleanupOrphans, which DELETES based on the orphan verdict (issue #722).
     let disk: { totalBytes: number; orphanFiles: Array<{ path: string; size: number }>; orphanBytes: number };
     try {
-      disk = this.scanDisk(validIds);
+      disk = this.scanDisk(validIds, reservedIds);
     } catch {
       disk = { totalBytes: 0, orphanFiles: [], orphanBytes: 0 };
     }
@@ -1011,9 +1062,10 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
     const rows = await this.db.select().from(attachments);
     const validIds = new Set(rows.map((r) => r.id));
+    const reservedIds = new Set(rows.filter((r) => r.state === RESERVED).map((r) => r.id));
 
     const orphanRows = rows.filter((r) => r.state === COMMITTED && !fs.existsSync(this.filePath(r)));
-    const disk = this.scanDisk(validIds);
+    const disk = this.scanDisk(validIds, reservedIds);
 
     let rowsDeleted = 0;
     let filesDeleted = 0;
@@ -1088,9 +1140,13 @@ export class AttachmentsService implements OnApplicationBootstrap {
 
   /**
    * Walk DATA_DIR/uploads once, returning the total on-disk byte size and the set
-   * of orphan files — those whose leading numeric id (from `<id>.<ext>` or
-   * `<id>.thumb.png`) has no matching attachment row in `validIds`. Non-numeric
-   * or unparseable entries are treated as orphans too (nothing else writes here).
+   * of orphan files — those whose filename does not match a live attachment
+   * artifact:
+   *   - `<id>.<ext>` / `<id>.thumb.png` owned when `validIds` has `id`
+   *   - `<id>.<ext>.stage` owned only when `reservedIds` has `id` (in-flight
+   *     publication). Leftover stages must not hitchhike on a committed id via
+   *     `parseInt` stopping at the first dot.
+   * Non-matching names are orphans too (nothing else writes here).
    *
    * FAIL CLOSED on infra errors (issue #722): if the root vanished between the
    * caller's preflight and this walk, or readdir fails for an infrastructure
@@ -1099,7 +1155,10 @@ export class AttachmentsService implements OnApplicationBootstrap {
    * one unreadable file shouldn't abort the whole scan, and the file is simply
    * skipped rather than misclassified.
    */
-  private scanDisk(validIds: Set<number>): {
+  private scanDisk(
+    validIds: Set<number>,
+    reservedIds: Set<number>,
+  ): {
     totalBytes: number;
     orphanFiles: Array<{ path: string; size: number }>;
     orphanBytes: number;
@@ -1155,9 +1214,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
           continue;
         }
         totalBytes += size;
-        // Leading integer is the attachment id (`12.png`, `12.thumb.png`).
-        const id = Number.parseInt(entry.name, 10);
-        if (!Number.isInteger(id) || id <= 0 || !validIds.has(id)) {
+        if (!this.isOwnedUploadArtifact(entry.name, validIds, reservedIds)) {
           orphanFiles.push({ path: filePath, size });
           orphanBytes += size;
         }
@@ -1165,5 +1222,32 @@ export class AttachmentsService implements OnApplicationBootstrap {
     }
 
     return { totalBytes, orphanFiles, orphanBytes };
+  }
+
+  /**
+   * Strict upload filename ownership (do not use parseInt — it treats
+   * `12.png.stage` as id 12 even when that row is already committed).
+   */
+  private isOwnedUploadArtifact(
+    name: string,
+    validIds: Set<number>,
+    reservedIds: Set<number>,
+  ): boolean {
+    const stageMatch = /^(\d+)\.[^.]+\.stage$/.exec(name);
+    if (stageMatch) {
+      const id = Number(stageMatch[1]);
+      return Number.isInteger(id) && id > 0 && reservedIds.has(id);
+    }
+    const thumbMatch = /^(\d+)\.thumb\.png$/.exec(name);
+    if (thumbMatch) {
+      const id = Number(thumbMatch[1]);
+      return Number.isInteger(id) && id > 0 && validIds.has(id);
+    }
+    const normalMatch = /^(\d+)\.[a-z0-9]+$/.exec(name);
+    if (normalMatch) {
+      const id = Number(normalMatch[1]);
+      return Number.isInteger(id) && id > 0 && validIds.has(id);
+    }
+    return false;
   }
 }
