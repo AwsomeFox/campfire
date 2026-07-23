@@ -24,7 +24,9 @@ export function uploadsAbsolutePath(relativePath: string): string {
   const normalized = relativePath.replace(/\//g, path.sep);
   const abs = path.resolve(uploadsRoot(), normalized);
   const root = path.resolve(uploadsRoot());
-  if (!abs.startsWith(root + path.sep) && abs !== root) {
+  // Require a path strictly under the uploads root — never the root itself
+  // (e.g. relative '.'), which would recursively wipe every campaign upload.
+  if (abs === root || !abs.startsWith(root + path.sep)) {
     throw new Error(`Relative path escapes uploads root: ${relativePath}`);
   }
   return abs;

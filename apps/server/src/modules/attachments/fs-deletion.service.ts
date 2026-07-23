@@ -94,12 +94,10 @@ export class FsDeletionService implements OnApplicationBootstrap {
       try {
         rel = uploadsRelativePath(abs);
       } catch (err) {
-        this.logger.error(
-          `Refusing to reserve invalid upload path ${abs}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        continue;
+        // Fail closed: never delete metadata if a path cannot be queued for durable cleanup.
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Refusing to reserve invalid upload path ${abs}: ${message}`);
+        throw new Error(`Cannot reserve upload path for verified erasure: ${message}`);
       }
       let kind: 'file' | 'directory' = 'file';
       try {
@@ -381,6 +379,9 @@ export class FsDeletionService implements OnApplicationBootstrap {
           lastError: params.error,
           updatedAt: now,
           status: params.status,
+          // New held reservation or re-arm after a fresh failure cycle starts at 0.
+          // Preserving attempts across unrelated retries would leave stale "failed"
+          // rows that never get another full drain budget after metadata is gone.
           attempts: 0,
           scope: params.scope,
           campaignId: params.campaignId,

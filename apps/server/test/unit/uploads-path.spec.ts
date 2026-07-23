@@ -23,6 +23,11 @@ describe('uploads-path (issue #727)', () => {
     expect(() => uploadsAbsolutePath('   ')).toThrow(/must not be empty/i);
   });
 
+  it('uploadsAbsolutePath rejects the uploads root itself (e.g. ".")', () => {
+    expect(() => uploadsAbsolutePath('.')).toThrow(/escapes uploads root/i);
+    expect(() => uploadsAbsolutePath('..')).toThrow(/escapes uploads root/i);
+  });
+
   it('uploadsAbsolutePath resolves a normalized relative key', () => {
     const abs = uploadsAbsolutePath('campaigns/42/x.webp');
     expect(abs).toBe(path.join(uploadsRoot(), 'campaigns', '42', 'x.webp'));
