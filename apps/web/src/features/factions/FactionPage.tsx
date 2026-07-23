@@ -5,6 +5,7 @@
  * everything, bump reputation, reveal/hide, delete. Everyone: read the visible parts.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -14,11 +15,14 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { standingVariant } from './FactionListPage';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
-
-const STANDINGS: FactionStanding[] = ['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'];
+import {
+  factionStandingLabel,
+  factionStandingOptions,
+  formatStandingChip,
+  standingVariant,
+} from './standing';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -28,6 +32,7 @@ function initials(name: string): string {
 }
 
 export default function FactionPage() {
+  const { t } = useTranslation();
   const { campaignId, factionId } = useParams<{ campaignId: string; factionId: string }>();
   const cid = Number(campaignId);
   const id = Number(factionId);
@@ -35,6 +40,7 @@ export default function FactionPage() {
   const { roleIn } = useAuth();
   const role = roleIn(cid);
   const isDm = role === 'dm';
+  const standingOptions = factionStandingOptions(t);
 
   const [faction, setFaction] = useState<FactionWithMembers | null>(null);
   const [loading, setLoading] = useState(true);
@@ -208,7 +214,7 @@ export default function FactionPage() {
               {faction.kind && <p className="text-sm text-slate-400 break-words">{faction.kind}</p>}
             </div>
             <Chip variant={standingVariant(faction.standing)}>
-              {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
+              {formatStandingChip(faction.standing, faction.reputation, t)}
             </Chip>
             {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {isDm && (
@@ -274,7 +280,7 @@ export default function FactionPage() {
                 <p className="card-kicker">Party standing</p>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Standing</span>
-                  <span className="capitalize">{faction.standing}</span>
+                  <span>{factionStandingLabel(faction.standing, t)}</span>
                 </div>
                 <div className="flex justify-between gap-2 text-[13px]">
                   <span className="text-muted">Reputation</span>
@@ -295,10 +301,11 @@ export default function FactionPage() {
                       value={faction.standing}
                       disabled={bumping}
                       onChange={(e) => adjustReputation({ standing: e.target.value as FactionStanding })}
+                      aria-label="Party standing"
                     >
-                      {STANDINGS.map((s) => (
-                        <option key={s} value={s}>
-                          {s}
+                      {standingOptions.map(({ value, label }) => (
+                        <option key={value} value={value}>
+                          {label}
                         </option>
                       ))}
                     </select>
@@ -326,10 +333,15 @@ export default function FactionPage() {
             </div>
             <div className="space-y-1">
               <label className="text-[10px] text-slate-500 font-bold uppercase">Standing</label>
-              <select className="cf-select" value={form.standing} onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}>
-                {STANDINGS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+              <select
+                className="cf-select"
+                value={form.standing}
+                onChange={(e) => setForm({ ...form, standing: e.target.value as FactionStanding })}
+                aria-label="Standing"
+              >
+                {standingOptions.map(({ value, label }) => (
+                  <option key={value} value={value}>
+                    {label}
                   </option>
                 ))}
               </select>

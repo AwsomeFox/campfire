@@ -1,0 +1,70 @@
+/**
+ * Shared faction standing labels (issue #753).
+ *
+ * Cards, chips, forms, filters, and detail views must render these humanized
+ * labels — never the raw lowercase enum. The English map is the source of
+ * truth today; each key is also mirrored under `factions.standing.*` in the
+ * i18n catalog so a translator can drop in another locale without touching
+ * call sites that pass `t`.
+ */
+import { FACTION_STANDINGS, type FactionStanding } from '@campfire/schema';
+import type { ChipVariant } from '../../components/chipVariants';
+
+export { FACTION_STANDINGS };
+export type { FactionStanding };
+
+/** Localization-ready English display labels for every standing enum. */
+export const FACTION_STANDING_LABEL: Record<FactionStanding, string> = {
+  hostile: 'Hostile',
+  unfriendly: 'Unfriendly',
+  neutral: 'Neutral',
+  friendly: 'Friendly',
+  allied: 'Allied',
+};
+
+/** i18n key under the `factions` domain for a standing enum. */
+export function factionStandingLabelKey(standing: FactionStanding): `factions.standing.${FactionStanding}` {
+  return `factions.standing.${standing}`;
+}
+
+/** Loose `t` shape so call sites can pass react-i18next without coupling this module. */
+type Translate = (key: string, options?: Record<string, unknown>) => string;
+
+/** Humanized standing label. Pass `t` to resolve through the i18n catalog. */
+export function factionStandingLabel(standing: FactionStanding, t?: Translate): string {
+  const fallback = FACTION_STANDING_LABEL[standing] ?? standing;
+  if (!t) return fallback;
+  return t(factionStandingLabelKey(standing), { defaultValue: fallback }) || fallback;
+}
+
+/** Chip / badge copy: "Friendly · +12". Raw enums stay on the wire, not here. */
+export function formatStandingChip(
+  standing: FactionStanding,
+  reputation: number,
+  t?: Translate,
+): string {
+  const rep = reputation > 0 ? `+${reputation}` : String(reputation);
+  return `${factionStandingLabel(standing, t)} · ${rep}`;
+}
+
+/** Chip color treatment for party standing (hostile→allied scale). */
+export function standingVariant(standing: FactionStanding): ChipVariant {
+  switch (standing) {
+    case 'allied':
+    case 'friendly':
+      return 'completed';
+    case 'hostile':
+    case 'unfriendly':
+      return 'failed';
+    default:
+      return 'active';
+  }
+}
+
+/** Select / filter options: raw enum as `value`, humanized label as display. */
+export function factionStandingOptions(t?: Translate): ReadonlyArray<{ value: FactionStanding; label: string }> {
+  return FACTION_STANDINGS.map((standing) => ({
+    value: standing,
+    label: factionStandingLabel(standing, t),
+  }));
+}
