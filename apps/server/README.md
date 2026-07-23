@@ -83,8 +83,11 @@ salt), stored as `scrypt:N:r:p:saltHex:hashHex`; compared with
 `timingSafeEqual`. No new native dependency. Sessions: 32 random bytes hex as
 the bearer token, cookie `campfire_session` (httpOnly, `sameSite=lax`,
 `path=/`, 30-day maxAge, `secure` only when `NODE_ENV=production`); the DB
-stores only `sha256(token)`. `lastSeenAt` slides forward at most once/hour on
-use (`AuthService.resolveSessionUser`).
+stores only `sha256(token)`. On use, `AuthService.resolveSessionUser` slides both
+`lastSeenAt` and `expiresAt` forward at most once/hour (`expiresAt =
+max(expiresAt, now + 30d)`, capped at `createdAt + 90d` absolute lifetime so a
+stolen cookie cannot live forever under continuous activity). The session cookie
+is re-issued on each slide so browser `maxAge` tracks the idle extension.
 
 **Expired session sweep.** `AuthService.purgeExpiredSessions()` deletes every
 `user_sessions` row past its `expiresAt`. `AuthService` implements
