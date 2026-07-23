@@ -40,7 +40,7 @@ export const FULL_LIBRARY_SEARCHING_MESSAGE = 'Searching the full icon library�
  * short so it stays unobtrusive next to an otherwise usable result grid.
  */
 export const FULL_LIBRARY_FAILED_MESSAGE =
-  "Couldn't load the full icon library — showing curated icons only.";
+  'Couldn\'t load the full icon library — showing curated icons only.';
 
 /** Empty-query copy once the full library is ready (trustworthy "no such icon"). */
 export function noIconsMatchMessage(query: string): string {
@@ -52,7 +52,7 @@ export function noIconsMatchMessage(query: string): string {
  * Must not read as a definitive "no such icon" — Retry may still find matches.
  */
 export const FULL_LIBRARY_PARTIAL_EMPTY_MESSAGE =
-  "Couldn't load the full icon library — Retry to search all icons.";
+  'Couldn\'t load the full icon library — Retry to search all icons.';
 
 /**
  * Copy for the results-grid empty placeholder, or null when no empty placeholder
@@ -71,8 +71,8 @@ export function iconPickerGridEmptyMessage(
   return null;
 }
 
-export function fullLibraryStatus(
-  fullIndex: readonly unknown[] | null | undefined,
+export function fullLibraryStatus<T>(
+  fullIndex: readonly T[] | null | undefined,
 ): FullLibraryStatus {
   if (fullIndex === undefined) return 'loading';
   if (fullIndex === null) return 'failed';
@@ -85,8 +85,8 @@ export function fullLibraryStatus(
  * `fullIndex` uses the same sentinel the component stores:
  *   undefined → still loading, null → failed, array → ready.
  */
-export function iconPickerSurfaceState(
-  fullIndex: readonly unknown[] | null | undefined,
+export function iconPickerSurfaceState<T>(
+  fullIndex: readonly T[] | null | undefined,
   matchCount: number,
 ): IconPickerSurfaceState {
   const lib = fullLibraryStatus(fullIndex);
@@ -96,15 +96,15 @@ export function iconPickerSurfaceState(
 }
 
 /** Whether the partial-results banner (failure + Retry) should render. */
-export function showPartialLibraryBanner(
-  fullIndex: readonly unknown[] | null | undefined,
+export function showPartialLibraryBanner<T>(
+  fullIndex: readonly T[] | null | undefined,
 ): boolean {
   return fullLibraryStatus(fullIndex) === 'failed';
 }
 
 /** Whether the unobtrusive "still loading full library" status should render. */
-export function showFullLibraryLoadingBanner(
-  fullIndex: readonly unknown[] | null | undefined,
+export function showFullLibraryLoadingBanner<T>(
+  fullIndex: readonly T[] | null | undefined,
 ): boolean {
   return fullLibraryStatus(fullIndex) === 'loading';
 }
