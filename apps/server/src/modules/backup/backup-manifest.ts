@@ -48,6 +48,8 @@ export interface BackupInspectResult {
   app: string;
   kind: string;
   formatVersion: number;
+  /** The raw format version from the source archive before normalization (issue #997). */
+  sourceFormatVersion: number;
   appVersion: string | null;
   schemaVersion: number | null;
   createdAt: string | null;
@@ -63,6 +65,9 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/** Expected db entry path for format version 1 archives (issue #997 fix 2). */
+export const EXPECTED_DB_ENTRY_V1 = 'db/campfire.db';
+
 function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
   const db = asNonEmptyString(raw.db);
@@ -70,6 +75,12 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   const uploadCount = raw.uploadCount;
   if (!createdAt || !db) {
     throw new BadRequestException('Invalid backup archive — manifest is missing required fields');
+  }
+  // Validate that db points to the canonical entry for this format (issue #997 fix 2).
+  if (db !== EXPECTED_DB_ENTRY_V1) {
+    throw new BadRequestException(
+      `Invalid backup archive — manifest.db must be "${EXPECTED_DB_ENTRY_V1}" for format version 1, got "${db}"`,
+    );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
     throw new BadRequestException('Invalid backup archive — manifest dbBytes is invalid');
@@ -141,11 +152,12 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
   );
 }
 
-export function manifestToInspectView(manifest: BackupManifest, uploads: string[]): BackupInspectResult {
+export function manifestToInspectView(manifest: BackupManifest, uploads: string[], sourceFormatVersion: number): BackupInspectResult {
   return {
     app: manifest.app,
     kind: manifest.kind,
     formatVersion: manifest.version,
+    sourceFormatVersion,
     appVersion: manifest.appVersion ?? null,
     schemaVersion: manifest.schemaVersion ?? null,
     createdAt: manifest.createdAt ?? null,

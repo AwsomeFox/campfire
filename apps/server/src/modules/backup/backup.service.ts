@@ -322,17 +322,20 @@ export class BackupService implements OnApplicationBootstrap {
    */
   async inspect(buffer: Buffer): Promise<BackupInspectResult> {
     const zip = await this.loadBackupZip(buffer);
-    const manifest = await this.readManifestFromZip(zip);
+    const { manifest, sourceFormatVersion } = await this.readManifestFromZipWithSource(zip);
     const uploads: string[] = [];
     for (const name of Object.keys(zip.files)) {
       const entry = zip.files[name];
       if (entry.dir || !name.startsWith(UPLOADS_PREFIX)) continue;
       const rel = name.slice(UPLOADS_PREFIX.length);
-      if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) continue;
+      // Reject unsafe paths the same way restore() does (issue #997 fix 1).
+      if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
+        throw new BadRequestException('Invalid backup archive — unsafe upload path');
+      }
       uploads.push(rel);
     }
     uploads.sort();
-    return manifestToInspectView(manifest, uploads);
+    return manifestToInspectView(manifest, uploads, sourceFormatVersion);
   }
 
   async restore(buffer: Buffer, confirm: string | undefined, user: RequestUser): Promise<RestoreResult> {
@@ -469,5 +472,28 @@ export class BackupService implements OnApplicationBootstrap {
       throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
     }
     return parseBackupManifest(parsed);
+  }
+
+  /**
+   * Like readManifestFromZip, but also returns the raw source format version
+   * from the archive (before normalization). Used by inspect() to surface the
+   * original version to operators (issue #997 fix 3).
+   */
+  private async readManifestFromZipWithSource(zip: JSZip): Promise<{ manifest: BackupManifest; sourceFormatVersion: number }> {
+    const manifestFile = zip.file(MANIFEST_ENTRY);
+    if (!manifestFile) throw new BadRequestException('Invalid backup archive — manifest.json is missing');
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await manifestFile.async('string'));
+    } catch {
+      throw new BadRequestException('Invalid backup archive — manifest.json is not valid JSON');
+    }
+    // Capture raw version before parseBackupManifest normalizes it.
+    const rawVersion = (parsed as Record<string, unknown>)?.version;
+    const sourceFormatVersion = typeof rawVersion === 'number' && Number.isInteger(rawVersion) && rawVersion >= 0
+      ? rawVersion
+      : 0; // missing/null → legacy format 0
+    const manifest = parseBackupManifest(parsed);
+    return { manifest, sourceFormatVersion };
   }
 }
