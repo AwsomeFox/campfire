@@ -19,4 +19,16 @@ module.exports = {
   // grows past this bound instead of letting retained module state accumulate
   // until the GitHub runner's Node heap is exhausted.
   workerIdleMemoryLimit: '1024MB',
+  // Floor for CI `test:cov` (#562). Set slightly below observed suite levels
+  // (~88% stmts / ~70% branches / ~89% funcs / ~90% lines) so regressions fail
+  // the coverage job without flaking on normal variance. Branches sit just under
+  // 70% today (auth/OIDC + gemini provider drag the average).
+  coverageThreshold: {
+    global: {
+      statements: 85,
+      branches: 68,
+      functions: 80,
+      lines: 85,
+    },
+  },
 };
