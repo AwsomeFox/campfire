@@ -23,11 +23,14 @@ test.describe('Layout skip link and route focus (#591)', () => {
     const skip = page.locator(`#${SKIP_TO_MAIN_ID}`);
     await expect(skip).toBeAttached();
 
-    const firstTabStopId = await page.evaluate((skipId) => {
-      const focusable = [...document.querySelectorAll<HTMLElement>('a[href], button, input, textarea, select, [tabindex]:not([tabindex="-1"])')]
-        .filter((el) => !el.hasAttribute('disabled') && el.getClientRects().length > 0);
+    const firstTabStopId = await page.evaluate(() => {
+      const focusable = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'a[href], button, input, textarea, select, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => !el.hasAttribute('disabled') && el.getClientRects().length > 0);
       return focusable[0]?.id ?? null;
-    }, SKIP_TO_MAIN_ID);
+    });
     expect(firstTabStopId).toBe(SKIP_TO_MAIN_ID);
 
     const scrollBefore = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
