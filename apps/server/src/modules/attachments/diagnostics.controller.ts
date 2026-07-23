@@ -62,6 +62,7 @@ export class DiagnosticsController {
   })
   @ApiResponse({ status: 201, description: 'Fix result.' })
   @ApiResponse({ status: 400, description: 'Invalid request (missing attachmentId or diskPath).' })
+  @ApiResponse({ status: 503, description: 'Attachment storage unavailable (e.g. quarantine move failure or unreadable uploads root).' })
   async fix(@Body() body: DiagnosticFixRequestDto, @CurrentUser() actor: RequestUser) {
     const diskPath = body.diskPath?.trim();
     // Relink resolves the file from its DB row, so it strictly requires an
