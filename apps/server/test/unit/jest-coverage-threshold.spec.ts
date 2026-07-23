@@ -25,8 +25,12 @@ describe('jest coverageThreshold (#562)', () => {
     if (global === undefined) {
       throw new Error('coverageThreshold.global must be defined');
     }
-    // Observed funcs ~89.5%; a 5+ point gap was called out in review.
-    expect(89.5 - global.functions).toBeLessThanOrEqual(4);
+    // Observed funcs ~89.5%; keep the floor in [observed-4, observed] so it is
+    // neither too loose (review) nor set above measured CI (would fail test:cov).
+    const observedFunctions = 89.5;
+    const maxGapPoints = 4;
+    expect(global.functions).toBeGreaterThanOrEqual(observedFunctions - maxGapPoints);
+    expect(global.functions).toBeLessThanOrEqual(observedFunctions);
   });
 
   it('includes per-module carve-outs for known-low branch areas', () => {
