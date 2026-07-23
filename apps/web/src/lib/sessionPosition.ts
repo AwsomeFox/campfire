@@ -30,9 +30,16 @@ function recapLabel(count: number): string {
  * Nullish / missing fields coalesce to 0 before clamping so mixed-version
  * deploys and unvalidated payloads never produce "Session NaN".
  */
+function nonNegativeInt(value: number | null | undefined): number {
+  const n = value ?? 0;
+  // Reject NaN / ±Infinity from unvalidated payloads (Math.max does not).
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.trunc(n));
+}
+
 export function formatCampaignSessionPosition(campaign: CampaignSessionPosition): string {
-  const count = Math.max(0, campaign.sessionCount ?? 0);
-  const latest = Math.max(0, campaign.latestSessionNumber ?? 0);
+  const count = nonNegativeInt(campaign.sessionCount);
+  const latest = nonNegativeInt(campaign.latestSessionNumber);
 
   if (count === 0 && latest === 0) return 'No sessions yet';
 
