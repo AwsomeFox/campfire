@@ -4,9 +4,10 @@
  * The Storylines beat rail rendered as `borderLeft: '2px solid var(--color-border)'`,
  * but `--color-border` is not a defined token — neither in the design-system
  * cascade (index.css / nocturne.css) nor in the runtime accent override
- * (AuthProvider.tsx, which only sets --color-accent / --color-accent-2). With no
- * value and no fallback, the whole declaration becomes invalid-at-parse-time
- * and the nested-beat visual rail silently disappeared.
+ * (AuthProvider.tsx, which sets --color-accent / --color-accent-2 and the
+ * --cf-accent / --cf-accent-2 aliases). With no value and no fallback, the
+ * whole declaration becomes invalid-at-parse-time and the nested-beat visual
+ * rail silently disappeared.
  *
  * The canonical divider token is `--color-divider` (index.css:22); `--cf-border`
  * aliases it (index.css:111). This suite pins three things so this regression
@@ -27,15 +28,15 @@
  */
 import { expect, test } from '@playwright/test';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { basename, extname, join, relative, resolve } from 'node:path';
 
 /**
- * The web app root. Playwright runs with `process.cwd()` at the config directory
- * (apps/web, where playwright.config.ts lives), so `src` resolves to the
- * compiled source tree the rest of the suite exercises.
+ * Resolve from this test file so paths stay stable regardless of how the
+ * Playwright runner is invoked (repo root vs apps/web).
+ * __dirname is provided by Playwright's CJS transform.
  */
-const WEB_ROOT = process.cwd();
-const WEB_SRC = join(WEB_ROOT, 'src');
+const WEB_ROOT = resolve(__dirname, '../..');
+const WEB_SRC = resolve(WEB_ROOT, 'src');
 const STORYLINES_PAGE = join(WEB_SRC, 'features', 'storylines', 'StorylinesPage.tsx');
 
 /** Files whose contents can hold `var(--token)` references or token definitions. */
@@ -67,7 +68,11 @@ function listSourceFiles(root: string): string[] {
  * valid substring) is not misread as a definition.
  */
 const DEFINITION_RE = /(?:^|[;{\n])\s*(--[a-zA-Z0-9-]+)\s*:/g;
-/** Match `var(--token-name)` and `var(--token-name, fallback)` references. */
+/**
+ * Match `var(--token-name)` and `var(--token-name, fallback)` references.
+ * The final character of each match is either `,` (fallback present) or `)`
+ * (no fallback), so hasFallback is derived from that character alone.
+ */
 const REFERENCE_RE = /var\(\s*(--[a-zA-Z0-9-]+)\s*(?:,|\))/g;
 
 /** All custom-property names defined in the CSS cascade. */
@@ -89,10 +94,8 @@ function tokenReferences(files: string[]): Reference[] {
     const text = readFileSync(file, 'utf8');
     for (const match of text.matchAll(REFERENCE_RE)) {
       const token = match[1];
-      // A fallback is present when the var() contains a comma before its close.
-      const hasFallback = /var\(\s*--[a-zA-Z0-9-]+\s*,/.test(
-        text.slice(match.index, match.index + match[0].length + 200),
-      );
+      // REFERENCE_RE ends on `,` when a fallback follows, else on `)`.
+      const hasFallback = match[0].endsWith(',');
       refs.push({ file, token, hasFallback });
     }
   }
@@ -100,8 +103,8 @@ function tokenReferences(files: string[]): Reference[] {
 }
 
 /** Path relative to the web app root, for stable failure messages. */
-function rel(path: string): string {
-  return path.replace(WEB_ROOT + '/', '');
+function rel(filePath: string): string {
+  return relative(WEB_ROOT, filePath).split('\\').join('/');
 }
 
 // --- Pre-computed fixtures (computed once at module load, not per-test) ---
@@ -118,9 +121,8 @@ test.describe('CSS custom-property validation (issue #882)', () => {
       text,
       'StorylinesPage must not reference the undefined --color-border token',
     ).not.toContain('--color-border');
-    // The beat rail now uses the canonical divider token (with no fallback, so
-    // it must resolve). Confirming the replacement keeps the rail visible.
-    expect(text).toContain('var(--color-divider)');
+    // Canonical divider/rail token WITH fallback (issue #882 acceptance).
+    expect(text).toContain('var(--color-divider, rgba(255,255,255,0.08))');
   });
 
   test('every var(--token) without a fallback resolves to a defined custom property', () => {
@@ -152,7 +154,7 @@ test.describe('CSS custom-property validation (issue #882)', () => {
     // the assertions above would vacuously pass. This guard fails loudly so a
     // future relocation can't silently disable the validation.
     expect(CSS_FILES.length, 'at least one CSS source must be scanned').toBeGreaterThan(0);
-    const names = CSS_FILES.map((f) => f.split('/').pop());
+    const names = CSS_FILES.map((f) => basename(f));
     expect(names).toContain('index.css');
     expect(names).toContain('nocturne.css');
   });
