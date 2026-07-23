@@ -66,6 +66,7 @@ import {
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
+import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
@@ -1695,8 +1696,9 @@ function BattleMap({
   // the source, while players receive a server-rendered image containing only revealed
   // pixels. mapAttachmentId is used only as the presence bit, never as a player image URL.
   const mapImageUrl = encounter.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
-  const placed = encounter.combatants.filter((c) => c.tokenX != null && c.tokenY != null);
-  const unplaced = encounter.combatants.filter((c) => c.tokenX == null || c.tokenY == null);
+  // Issue #418: fog-redacted tokens keep null coords but set tokenHiddenByFog — do not
+  // treat them as Unplaced (that offered a no-op place-at-center for the owner).
+  const { placed, unplaced, hiddenByFog } = partitionMapTokens(encounter.combatants);
 
   const gridSize = encounter.gridSize; // cell edge as % of width; null = no grid
   const gridScale = encounter.gridScale;
@@ -1731,8 +1733,8 @@ function BattleMap({
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
-  // A non-DM whose token would be hidden by fog simply never receives its position from the
-  // server (it lands in `unplaced`), so the client never has to trust itself to hide it.
+  // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
+  // Those combatants land in `hiddenByFog` via tokenHiddenByFog (issue #418), not Unplaced.
 
   const clampPct = (v: number) => Math.max(0, Math.min(100, v));
 
@@ -2449,25 +2451,46 @@ function BattleMap({
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
-          {unplaced.length > 0 && (
-            <div className="flex flex-wrap gap-2 items-center" style={{ padding: '0 14px 10px' }}>
-              <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
-              {unplaced.map((c) => {
-                const movable = canMoveToken(c);
-                return (
-                  <button
-                    key={c.id}
-                    type="button"
-                    className="cf-chip"
-                    disabled={!movable || busy}
-                    onClick={() => onMoveToken(c.id, 50, 50)}
-                    title={movable ? 'Place token at center' : 'You can only move your own token'}
-                    style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
-                  >
-                    {tokenInitials(c.name)} · {c.name}
-                  </button>
-                );
-              })}
+          {(unplaced.length > 0 || hiddenByFog.length > 0) && (
+            <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
+              {unplaced.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
+                  {unplaced.map((c) => {
+                    const movable = canMoveToken(c);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className="cf-chip"
+                        data-testid={`map-token-unplaced-${c.id}`}
+                        disabled={!movable || busy}
+                        onClick={() => onMoveToken(c.id, 50, 50)}
+                        title={movable ? 'Place token at center' : 'You can only move your own token'}
+                        style={{ cursor: movable && !busy ? 'pointer' : 'default', border: '1px dashed var(--color-divider)' }}
+                      >
+                        {tokenInitials(c.name)} · {c.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {hiddenByFog.length > 0 && (
+                <div className="flex flex-wrap gap-2 items-center" data-testid="map-token-fog-hidden">
+                  <span className="text-muted" style={{ fontSize: 11 }}>{FOG_HIDDEN_TOKEN_LABEL}:</span>
+                  {hiddenByFog.map((c) => (
+                    <span
+                      key={c.id}
+                      className="cf-chip"
+                      data-testid={`map-token-fog-hidden-${c.id}`}
+                      title="The DM placed this token outside the revealed fog. It will appear when that area is revealed."
+                      style={{ border: '1px solid var(--color-divider)', cursor: 'default', opacity: 0.85 }}
+                    >
+                      {tokenInitials(c.name)} · {c.name}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

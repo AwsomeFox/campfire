@@ -210,8 +210,9 @@ test.describe('mobile login information architecture', () => {
     await expect(password).toHaveAttribute('aria-invalid', 'true');
     await expect(username).toHaveAttribute('aria-describedby', 'login-error');
     await expect(password).toHaveAttribute('aria-describedby', 'login-error');
+    await expect(username).toBeFocused();
     await expect(page.locator('form')).not.toHaveAttribute('aria-describedby', /.+/);
-    await expectInInitialViewport(page, submit);
+    await expectInInitialViewport(page, username);
     await expectNoHorizontalOverflow(page);
 
     const accessibilityScan = await new AxeBuilder({ page }).include('main').analyze();
