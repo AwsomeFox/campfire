@@ -764,7 +764,18 @@ export class AiDriverService {
         // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
         // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
         // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
-        const usage = result?.usage.totalTokens ?? 0;
+        let usage = result?.usage.totalTokens ?? 0;
+        // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+        // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+        // rather than silently fail-open on budget enforcement.
+        if (usage === 0 && (text.length > 0 || (result?.toolCalls.length ?? 0) > 0)) {
+          const outputChars = text.length + JSON.stringify(result?.toolCalls ?? []).length;
+          // ~4 chars per token is a conservative English-language estimate.
+          usage = Math.max(1, Math.ceil(outputChars / 4));
+          this.logger.warn(
+            `Provider did not report streaming usage for step ${steps} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+          );
+        }
         const servedModel = result?.model || execModel;
         const metered = await this.aiDm.meterTurn(campaignId, usage, {
           actor,
