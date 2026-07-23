@@ -234,8 +234,9 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       announce(INVITE_COPY_SUCCESS);
       setTimeout(() => setCopiedId((current) => (current === invite.id ? null : current)), 1500);
     } catch {
+      setCopiedId(null);
       announce(INVITE_COPY_FAILURE);
-      setError('Clipboard blocked — copy the link from the field instead.');
+      setError(INVITE_COPY_FAILURE);
     }
   }
 
