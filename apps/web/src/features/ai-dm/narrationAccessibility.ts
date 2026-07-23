@@ -198,8 +198,20 @@ export function advanceNarrationLog(
   return { cursor: cursor ?? { seenEntryIds }, additions };
 }
 
-/** Concise spoken form for a log addition (English fallback; UI may re-localize). */
-export function formatNarrationLogAddition(addition: NarrationLogAddition): string {
+export type NarrationLogFormatters = {
+  /**
+   * Localized system-line formatter. The Table page passes the same `systemText`
+   * helper used by the visible transcript so the SR mirror matches on-screen copy.
+   * When omitted, an English fallback is used (unit tests / non-i18n callers).
+   */
+  formatSystem?: (addition: Extract<NarrationLogAddition, { kind: 'system' }>) => string;
+};
+
+/** Concise spoken form for a log addition (English fallback unless formatters provided). */
+export function formatNarrationLogAddition(
+  addition: NarrationLogAddition,
+  formatters?: NarrationLogFormatters,
+): string {
   if (addition.kind === 'dm') return `DM: ${addition.text}`;
   if (addition.kind === 'player') {
     const who = addition.characterName
@@ -207,7 +219,8 @@ export function formatNarrationLogAddition(addition: NarrationLogAddition): stri
       : addition.memberName;
     return `${who}: ${addition.text}`;
   }
-  // System lines stay short — the page also renders localized variants visually.
+  if (formatters?.formatSystem) return formatters.formatSystem(addition);
+  // English fallback for tests — production UI must pass formatSystem (systemText + t).
   switch (addition.variant) {
     case 'divider':
       return 'Joined mid-session';

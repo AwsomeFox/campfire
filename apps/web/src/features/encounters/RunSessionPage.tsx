@@ -608,6 +608,8 @@ export default function RunSessionPage() {
     ),
     // The stream was down for a while — refetch to catch anything missed.
     onReconnect: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
+    // Parser recovery (connection stayed up) — same catch-up refetch.
+    onStreamRecovery: useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]),
   });
 
   // The persisted event stream is the single announcement source for turn, HP,
@@ -1209,7 +1211,7 @@ export default function RunSessionPage() {
       {confirmEnd && (
         <ConfirmDialog
           title="End this encounter?"
-          body="HP writes back to character sheets. This cannot be undone."
+          body="Ends the fight and writes each character combatant's HP, temp HP, and death state back to their sheets. You can Reopen later to resume where combat left off. If sheets change after this End, ending again after a Reopen can overwrite those intervening changes."
           confirmLabel="End encounter"
           pendingLabel="Ending encounter…"
           busy={runControl.isPending}

@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ApiToken, Campaign } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
 

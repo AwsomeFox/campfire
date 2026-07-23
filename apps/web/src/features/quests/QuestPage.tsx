@@ -979,7 +979,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
 // Shared shell
 // ---------------------------------------------------------------------------
 
-function PageShell({ campaignId, children }: { campaignId: number; children: React.ReactNode }) {
+function PageShell({ children }: { campaignId: number; children: React.ReactNode }) {
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 grid grid-cols-1 lg:grid-cols-3 gap-5 pb-20 lg:pb-10">
       {children}

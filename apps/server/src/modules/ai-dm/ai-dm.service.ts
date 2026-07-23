@@ -67,6 +67,13 @@ function defaultSeat(campaignId: number): AiDmSeat {
  */
 @Injectable()
 export class AiDmService {
+  /**
+   * Optional hook invoked when configure leaves Driver mode (#1071). Wired by
+   * AiDriverService at construction so the seat path can tear down the live
+   * in-memory driver session without creating an AiDm→AiDriver DI cycle.
+   */
+  private driverSessionTeardown: ((campaignId: number) => void) | null = null;
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -74,6 +81,11 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /** Register the driver-session teardown used when the seat leaves Driver mode (#1071). */
+  registerDriverSessionTeardown(fn: (campaignId: number) => void): void {
+    this.driverSessionTeardown = fn;
+  }
 
   /** 403 unless the server-wide experimental flag is on. The single choke point for the whole feature. */
   private async assertExperimentalEnabled(): Promise<void> {
@@ -243,6 +255,13 @@ export class AiDmService {
       campaignId,
       detail: changed.join(', ') || 'no-op',
     });
+
+    // Leaving Driver must drop the live in-memory session (status/state/actingDm/vote/stuck).
+    // Otherwise a driver→off→driver cycle can strand the seat behind a human_control handback
+    // the DM has no reason to perform (#1071).
+    if (current.mode === 'driver' && resultingMode !== 'driver') {
+      this.driverSessionTeardown?.(campaignId);
+    }
 
     return this.getSeat(campaignId);
   }

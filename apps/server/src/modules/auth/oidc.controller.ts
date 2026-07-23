@@ -5,24 +5,14 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Public } from '../../common/decorators/public.decorator';
 import { OidcService } from './oidc.service';
 import { AuthService } from './auth.service';
-import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, OIDC_FLOW_COOKIE_NAME, OIDC_FLOW_COOKIE_MAX_AGE_MS } from './auth.constants';
+import { SESSION_COOKIE_NAME, OIDC_FLOW_COOKIE_NAME, OIDC_FLOW_COOKIE_MAX_AGE_MS } from './auth.constants';
+import { sessionCookieOptions } from './session-cookie';
 import { resolveCookieSecure } from '../../common/security-config';
 import {
   classifyOidcRecovery,
   OidcRecoveryFailure,
   type OidcRecoveryStage,
 } from './oidc-recovery';
-
-function sessionCookieOptions() {
-  return {
-    httpOnly: true,
-    sameSite: 'lax' as const,
-    path: '/',
-    maxAge: SESSION_MAX_AGE_MS,
-    // See auth.controller.ts — Secure in production unless ALLOW_INSECURE_HTTP (issue #117).
-    secure: resolveCookieSecure(),
-  };
-}
 
 function flowCookieOptions() {
   return {

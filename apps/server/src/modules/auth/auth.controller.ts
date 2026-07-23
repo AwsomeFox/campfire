@@ -23,9 +23,9 @@ import {
   PasswordResetConfirmDto,
 } from './auth.dto';
 import { PreferencesUpdateDto } from '../users/users.dto';
-import { SESSION_COOKIE_NAME, SESSION_MAX_AGE_MS, VERSION } from './auth.constants';
+import { SESSION_COOKIE_NAME, VERSION } from './auth.constants';
+import { sessionCookieOptions } from './session-cookie';
 import { THROTTLE_AUTH, AUTH_THROTTLE_LIMIT, AUTH_THROTTLE_TTL_MS } from '../../common/throttle.constants';
-import { resolveCookieSecure } from '../../common/security-config';
 
 /**
  * P2 DoS fix: these three @Public routes each run a full scrypt password
@@ -34,19 +34,6 @@ import { resolveCookieSecure } from '../../common/security-config';
  * plus a token mint on success. Strict per-IP cap; see throttle.constants.ts.
  */
 const AUTH_THROTTLE = Throttle({ [THROTTLE_AUTH]: { limit: AUTH_THROTTLE_LIMIT, ttl: AUTH_THROTTLE_TTL_MS } });
-
-function cookieOptions() {
-  return {
-    httpOnly: true,
-    sameSite: 'lax' as const,
-    path: '/',
-    maxAge: SESSION_MAX_AGE_MS,
-    // Secure in production, unless the operator opted into plain-HTTP serving
-    // (ALLOW_INSECURE_HTTP) — a Secure cookie is silently dropped over plain HTTP,
-    // causing a login loop on a no-TLS homelab deployment (issue #117).
-    secure: resolveCookieSecure(),
-  };
-}
 
 @ApiTags('auth')
 @Controller('auth')
@@ -90,7 +77,7 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Setup already completed (including when another concurrent request won initialization).' })
   async setup(@Body() body: SetupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.setup(body);
-    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
     return me;
   }
 
@@ -107,7 +94,7 @@ export class AuthController {
   @ApiResponse({ status: 409, description: 'Username already taken, or first-run setup not completed yet.' })
   async signup(@Body() body: SignupRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.signup(body);
-    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
     return me;
   }
 
@@ -120,7 +107,7 @@ export class AuthController {
   @ApiResponse({ status: 403, description: 'Account disabled, SSO-only, or local login currently disabled for non-admins.' })
   async login(@Body() body: LoginRequestDto, @Res({ passthrough: true }) res: Response): Promise<Me> {
     const { token, me } = await this.auth.login(body);
-    res.cookie(SESSION_COOKIE_NAME, token, cookieOptions());
+    res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
     return me;
   }
 
