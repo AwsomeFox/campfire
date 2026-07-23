@@ -5,13 +5,24 @@
  * writable only by the dm or the character's owning player (server-enforced,
  * mirrored here so read-only rows don't render controls).
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  INVENTORY_ADD_PREFIX,
+  INVENTORY_FIELD,
+  INVENTORY_NAME_HELP,
+  INVENTORY_NAME_LABEL,
+  INVENTORY_NOTES_HELP,
+  INVENTORY_NOTES_LABEL,
+  INVENTORY_OWNER_HELP,
+  INVENTORY_OWNER_LABEL,
+} from '../../components/formFieldLabels';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { IconPicker } from '../../components/IconPicker';
@@ -794,10 +805,6 @@ function AddItemForm({
   // rather than silently defaulting to 1.
   const [qtyError, setQtyError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
-  const qtyId = useId();
-  const qtyHelpId = `${qtyId}-help`;
-  const qtyErrorId = `${qtyId}-error`;
-  const qtyDescribedBy = qtyError ? `${qtyHelpId} ${qtyErrorId}` : qtyHelpId;
 
   // Live preview: the DM's explicit pick, else the name-derived default so they
   // see what the row will show before saving.
@@ -845,49 +852,67 @@ function AddItemForm({
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
-          <TextInput placeholder="Item name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-          {/* Labeled quantity (issue #459): associated Quantity label, constraint
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.name}
+            label={INVENTORY_NAME_LABEL}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+            required
+            help={INVENTORY_NAME_HELP}
+            placeholder="Torch, rope, healing potion…"
+          />
+          {/* Labeled quantity (issue #459/#886): Field primitive, constraint
               help, and contextual error announcement. type="text" +
               inputMode="numeric" (issue #633) keeps locale grouping / non-ASCII
               digits intact for parseLocalizedInteger — type="number" would strip
               or mis-handle them before submit parsing (same pattern as treasury). */}
-          <div className="field">
-            <label htmlFor={qtyId}>Quantity</label>
-            <TextInput
-              id={qtyId}
-              type="text"
-              inputMode="numeric"
-              min={ITEM_QTY_MIN}
-              max={ITEM_QTY_MAX}
-              step={ITEM_QTY_STEP}
-              value={qty}
-              aria-invalid={qtyError != null}
-              aria-describedby={qtyDescribedBy}
-              onChange={(e) => {
-                setQty(e.target.value);
-                setQtyError(null);
-              }}
-            />
-            <p id={qtyHelpId} className="mt-1 text-[11px] text-slate-500 leading-snug">
-              {ITEM_QTY_HELP}
-            </p>
-            {qtyError && (
-              <p id={qtyErrorId} role="alert" className="mt-1 text-[11px] text-rose-400">
-                {qtyError}
-              </p>
-            )}
-          </div>
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.qty}
+            label="Quantity"
+            type="text"
+            inputMode="numeric"
+            min={ITEM_QTY_MIN}
+            max={ITEM_QTY_MAX}
+            step={ITEM_QTY_STEP}
+            value={qty}
+            error={qtyError}
+            help={ITEM_QTY_HELP}
+            onChange={(e) => {
+              setQty(e.target.value);
+              setQtyError(null);
+            }}
+          />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <select className="cf-select" value={owner} onChange={(e) => setOwner(e.target.value)} aria-label="Owner">
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.owner}
+            as="select"
+            label={INVENTORY_OWNER_LABEL}
+            value={owner}
+            onChange={(e) => setOwner(e.target.value)}
+            help={INVENTORY_OWNER_HELP}
+          >
             <option value="party">Party stash</option>
             {owners.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
               </option>
             ))}
-          </select>
-          <TextInput placeholder="Notes (optional)" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Field>
+          <Field
+            idPrefix={INVENTORY_ADD_PREFIX}
+            name={INVENTORY_FIELD.notes}
+            label={INVENTORY_NOTES_LABEL}
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            help={INVENTORY_NOTES_HELP}
+            placeholder="Notes"
+            optional
+          />
         </div>
         <div className="flex items-center gap-3">
           <span className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--color-accent)] shrink-0" style={{ background: 'var(--color-neutral-800)' }}>

@@ -5,12 +5,24 @@
  * every campaign member; author-or-DM may edit/delete. One level of threading:
  * top-level comments, with replies nested one deep.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import type { Character, Comment, EntityType } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAnnounce } from '../../components/Announcer';
-import { Btn, TextArea, ErrorNote } from '../../components/ui';
+import { Field, sanitizeFieldPrefix } from '../../components/Field';
+import {
+  COMMENT_BODY_HELP,
+  COMMENT_BODY_LABEL,
+  COMMENT_EDIT_HELP,
+  COMMENT_EDIT_LABEL,
+  COMMENT_SPEAKER_HELP,
+  COMMENT_SPEAKER_LABEL,
+  COMMENTS_COMPOSE_PREFIX,
+  COMMENTS_EDIT_PREFIX,
+  COMMENTS_FIELD,
+} from '../../components/formFieldLabels';
+import { Btn, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { entityTargetProps } from '../../lib/entityLinks';
@@ -215,6 +227,8 @@ function CommentCard({
   const [draft, setDraft] = useState(comment.body);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const editReactId = useId();
+  const editPrefix = `${COMMENTS_EDIT_PREFIX}-${sanitizeFieldPrefix(editReactId)}`;
   const accountLabel = comment.authorName || comment.authorUserId;
   const characterLabel = comment.inCharacter ? comment.characterName?.trim() : null;
 
@@ -266,8 +280,19 @@ function CommentCard({
       </div>
       {error && <ErrorNote message={error} />}
       {editing ? (
-        <div className="space-y-2">
-          <TextArea style={{ minHeight: 80 }} value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <div className="space-y-2" data-testid="comment-edit">
+          <Field
+            idPrefix={editPrefix}
+            name={COMMENTS_FIELD.body}
+            as="textarea"
+            label={COMMENT_EDIT_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            help={COMMENT_EDIT_HELP}
+            minHeight={80}
+            required
+          />
           <div className="flex gap-2 justify-end">
             <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setEditing(false)}>
               Cancel
@@ -356,6 +381,8 @@ function ComposeBox({
   onCancel?: () => void;
 }) {
   const announce = useAnnounce();
+  const composeReactId = useId();
+  const composePrefix = `${COMMENTS_COMPOSE_PREFIX}-${sanitizeFieldPrefix(composeReactId)}`;
   const [body, setBody] = useState('');
   const [inCharacter, setInCharacter] = useState(false);
   const [characterId, setCharacterId] = useState<number | null>(null);
@@ -417,18 +444,25 @@ function ComposeBox({
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-testid="comments-compose">
       {error && <ErrorNote message={error} />}
       {speakerNotice && (
         <p role="status" className="text-xs text-amber-300/90">
           {speakerNotice}
         </p>
       )}
-      <TextArea
-        style={{ minHeight: 72 }}
+      <Field
+        idPrefix={composePrefix}
+        name={COMMENTS_FIELD.body}
+        as="textarea"
+        label={COMMENT_BODY_LABEL}
+        labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
         value={body}
         onChange={(e) => setBody(e.target.value)}
         placeholder={placeholder}
+        help={COMMENT_BODY_HELP}
+        minHeight={72}
+        required
       />
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 sm:justify-end">
         <label
@@ -453,32 +487,36 @@ function ComposeBox({
           In character
         </label>
         {inCharacter && (
-          <label className="flex items-center gap-2 text-xs text-slate-400 min-w-0 sm:max-w-[18rem]">
-            <span className="whitespace-nowrap">Speaking as</span>
-            <select
-              className="cf-select !min-h-0 !py-1.5 text-xs flex-1 min-w-0"
-              value={selectedCharacterId ?? ''}
-              onChange={(e) => {
-                const next = Number(e.target.value);
-                setSpeakerNotice(null);
-                setCharacterId(
-                  Number.isInteger(next) && ownedCharacters.some((character) => character.id === next)
-                    ? next
-                    : null,
-                );
-              }}
-              aria-label="Speaking character"
-            >
-              {selectedCharacterId == null && (
-                <option value="" disabled>
-                  Choose a character…
-                </option>
-              )}
-              {ownedCharacters.map((character) => (
-                <option key={character.id} value={character.id}>{character.name}</option>
-              ))}
-            </select>
-          </label>
+          <Field
+            idPrefix={composePrefix}
+            name={COMMENTS_FIELD.characterId}
+            as="select"
+            label={COMMENT_SPEAKER_LABEL}
+            labelClassName="text-xs text-slate-400"
+            className="field min-w-0 sm:max-w-[18rem]"
+            selectClassName="cf-select !min-h-0 !py-1.5 text-xs w-full"
+            value={selectedCharacterId != null ? String(selectedCharacterId) : ''}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              setSpeakerNotice(null);
+              setCharacterId(
+                Number.isInteger(next) && ownedCharacters.some((character) => character.id === next)
+                  ? next
+                  : null,
+              );
+            }}
+            help={COMMENT_SPEAKER_HELP}
+            required
+          >
+            {selectedCharacterId == null && (
+              <option value="" disabled>
+                Choose a character…
+              </option>
+            )}
+            {ownedCharacters.map((character) => (
+              <option key={character.id} value={character.id}>{character.name}</option>
+            ))}
+          </Field>
         )}
         {onCancel && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={onCancel}>
