@@ -195,9 +195,9 @@ test.describe('Sessions Log/Schedule tablist (#706)', () => {
       const { campaignId } = seed();
       const second = await ensureSecondSession(page);
 
-      // Watch the app's polite live region so we can assert the announcement.
+      // Watch the app Announcer polite region (bare div; schedule RSVP status uses role=status).
       await page.goto(`/c/${campaignId}/sessions`);
-      const polite = page.locator('.sr-only[aria-live="polite"]');
+      const polite = page.locator('div.sr-only[aria-live="polite"][aria-atomic="true"]:not([role])');
       await expect(polite).toHaveCount(1);
 
       // On mobile the list is visible first; selecting a recap swaps to detail.
