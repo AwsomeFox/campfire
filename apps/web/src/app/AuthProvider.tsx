@@ -39,6 +39,7 @@ import {
 } from '../features/auth/useAuthStorageListener';
 import { applyReadingPreference } from './readingPreferences';
 import { clearLiveAnnouncements } from '../components/Announcer';
+import { applyAccentColor } from './accentPalette';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -49,37 +50,6 @@ export {
   type MeFetchOutcome,
 } from './authDecision';
 import { decideAuthOutcome, type MeFetchOutcome } from './authDecision';
-
-/**
- * Blends a #rrggbb hex color toward white by `ratio` (0-1). Used to derive a
- * lighter "-2"/hover tint from the user's chosen accent, mirroring the static
- * --color-accent-2 relationship baked into index.css for the default palette.
- */
-function mixWithWhite(hex: string, ratio: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff;
-  const g = (n >> 8) & 0xff;
-  const b = n & 0xff;
-  const blend = (c: number) => Math.round(c + (255 - c) * ratio);
-  return `#${[blend(r), blend(g), blend(b)].map((c) => c.toString(16).padStart(2, '0')).join('')}`;
-}
-
-/** Applies (or clears, when null) the user's personal accent color override as CSS custom properties. */
-function applyAccentColor(accentColor: string | null): void {
-  const root = document.documentElement.style;
-  if (accentColor) {
-    const accent2 = mixWithWhite(accentColor, 0.3);
-    root.setProperty('--color-accent', accentColor);
-    root.setProperty('--cf-accent', accentColor);
-    root.setProperty('--color-accent-2', accent2);
-    root.setProperty('--cf-accent-2', accent2);
-  } else {
-    root.removeProperty('--color-accent');
-    root.removeProperty('--cf-accent');
-    root.removeProperty('--color-accent-2');
-    root.removeProperty('--cf-accent-2');
-  }
-}
 
 /** Translates a thrown /me error into a MeFetchOutcome. */
 function outcomeFromError(err: unknown): MeFetchOutcome {
