@@ -2,9 +2,12 @@ import zlib from 'node:zlib';
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
+import sharp from 'sharp';
+import { eq } from 'drizzle-orm';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { AttachmentsService } from '../src/modules/attachments/attachments.service';
-import { DB_HOLDER } from '../src/db/db.module';
+import { DB, DB_HOLDER, type DrizzleDb } from '../src/db/db.module';
+import { encounters } from '../src/db/schema';
 
 // --- Test-only PNG builder: produces a real WxH 8-bit RGB PNG so we can exercise
 // the server's thumbnail downscaler on an image larger than the thumb cap. ---
@@ -700,18 +703,10 @@ describe('attachments (e2e)', () => {
     });
   });
 
-  // Issue #75 — attachment bytes are immutable per id, so responses carry a strong
-  // content-hash ETag and a long-lived Cache-Control, and revalidate to 304; a
-  // `?size=thumb` variant serves a downscaled PNG preview.
-  //
-  // Issue #498 hardened the policy: `immutable` was REMOVED (the resource is
-  // permission-dependent — membership/hidden/login-as-other-user can change who
-  // may read it, so the browser must keep revalidating so the auth check runs),
-  // `private` + `Vary: Cookie` are set so no shared proxy caches it, and the web
-  // client appends `?v=<versionToken>` (id+hidden+updatedAt) so an authorization
-  // change yields a new URL. The long `max-age` + strong ETag still let an
-  // unchanged multi-MB map short-circuit to 304.
-  describe('caching + thumbnails (issues #75, #498)', () => {
+  // Issue #75/#463/#498 — bytes are immutable per id, but visibility is mutable.
+  // A strong ETag avoids re-downloading while no-cache/must-revalidate makes every
+  // reuse pass the current authorization/fog checks.
+  describe('caching + thumbnails (issues #75, #463, #498)', () => {
     let pngId: number; // a >thumb-cap PNG so the downscaler actually runs
 
     beforeAll(async () => {
@@ -726,15 +721,14 @@ describe('attachments (e2e)', () => {
       pngId = res.body.id;
     });
 
-    it('GET sets a strong ETag and an authorization-aware (non-immutable) Cache-Control', async () => {
+    it('GET sets a strong ETag and requires visibility revalidation', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).get(`/api/v1/attachments/${pngId}/file`).set(dm);
       expect(res.status).toBe(200);
-      // Issue #498: NO `immutable` — the browser must revalidate so the membership/hidden check runs.
-      expect(res.headers['cache-control']).not.toContain('immutable');
+      expect(res.headers['cache-control']).toContain('no-cache');
+      expect(res.headers['cache-control']).toContain('must-revalidate');
       expect(res.headers['cache-control']).toContain('private');
-      expect(res.headers['cache-control']).toContain('max-age=31536000');
-      // `Vary: Cookie` is a defensive keying hint for shared/proxy caches.
+      expect(res.headers['cache-control']).not.toContain('immutable');
       expect(String(res.headers['vary'])).toContain('Cookie');
       expect(res.headers['etag']).toMatch(/^"[0-9a-f]{64}"$/); // quoted sha256 hex
     });
@@ -973,21 +967,20 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     });
   });
 
-  // Issue #259, #523 — attaching a battle map to an ENCOUNTER must NOT expose the raw map as a
-  // revealed handout (that defeats fog-of-war). Unlike the campaign background above, an
-  // encounter map stays hidden (DM-only) as a handout: it is omitted from the player
-  // Handouts list. Non-DM GET on a hidden encounter map returns 404 when fog is non-empty,
-  // 200 for DM, and 200 for player only when fog is null.
-  describe('encounter battle map fog gating (issue #259, #523)', () => {
+  // Issue #463 — encounter fog is a server-side pixel boundary, not a cosmetic client
+  // overlay. Raw attachment URLs stay DM-only; players load a role-specific encounter
+  // route whose bytes contain only currently revealed pixels.
+  describe('fog-safe encounter battle maps (issue #463)', () => {
     let encounterId: number;
     let mapId: number;
+    const battleMap = makePng(4, 2);
 
     beforeAll(async () => {
       // DM uploads a battle map (hidden by default) and enables fog on an encounter.
       const upload = await dmAgent
         .post(`/api/v1/campaigns/${campaignId}/attachments`)
         .field('kind', 'map')
-        .attach('file', TINY_PNG, { filename: 'battle-map.png', contentType: 'image/png' });
+        .attach('file', battleMap, { filename: 'battle-map.png', contentType: 'image/png' });
       expect(upload.status).toBe(201);
       expect(upload.body.hidden).toBe(true);
       mapId = upload.body.id;
@@ -999,7 +992,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       // Attach the map + enable fog — non-empty fog.
       const patch = await dmAgent
         .patch(`/api/v1/encounters/${encounterId}`)
-        .send({ mapAttachmentId: mapId, fog: { enabled: true, revealed: [] } });
+        .send({ mapAttachmentId: mapId, fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 100 }] } });
       expect(patch.status).toBe(200);
       expect(patch.body.mapAttachmentId).toBe(mapId);
     });
@@ -1023,30 +1016,162 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(dmList.body.some((a: { id: number }) => a.id === mapId)).toBe(true);
     });
 
-    it('player GET on hidden encounter map returns 404 when fog is non-empty; DM GET returns 200; player GET returns 200 only when fog is null', async () => {
-      // 1. Player GET returns 404 when fog is non-empty
-      const playerGetActive = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
-      expect(playerGetActive.status).toBe(404);
-
-      // 2. DM GET returns 200
-      const dmGetActive = await dmAgent.get(`/api/v1/attachments/${mapId}/file`);
-      expect(dmGetActive.status).toBe(200);
-      expect(Buffer.compare(dmGetActive.body, TINY_PNG)).toBe(0);
-
-      // 3. DM sets fog to null
-      const clearFog = await dmAgent
-        .patch(`/api/v1/encounters/${encounterId}`)
-        .send({ fog: null });
-      expect(clearFog.status).toBe(200);
-      expect(clearFog.body.fog).toBeNull();
-
-      // 4. Player GET returns 200 only when fog is null
-      const playerGetNullFog = await playerAgent.get(`/api/v1/attachments/${mapId}/file`);
-      expect(playerGetNullFog.status).toBe(200);
-      expect(Buffer.compare(playerGetNullFog.body, TINY_PNG)).toBe(0);
+    it('raw source, thumbnail, conditional, and Range attachment URLs are all 404 for the player', async () => {
+      const paths = [
+        `/api/v1/attachments/${mapId}/file`,
+        `/api/v1/attachments/${mapId}/file?size=thumb`,
+      ];
+      for (const filePath of paths) {
+        expect((await playerAgent.get(filePath)).status).toBe(404);
+        expect((await playerAgent.get(filePath).set('If-None-Match', '*')).status).toBe(404);
+        expect((await playerAgent.get(filePath).set('Range', 'bytes=0-31')).status).toBe(404);
+      }
     });
 
-    it('the encounter-map exception does not open OTHER hidden attachments to the player', async () => {
+    it('the encounter map route returns only revealed pixels in an opaque no-store PNG', async () => {
+      const safe = await playerAgent.get(`/api/v1/encounters/${encounterId}/map?revision=first`);
+      expect(safe.status).toBe(200);
+      expect(safe.headers['content-type']).toBe('image/png');
+      expect(safe.headers['cache-control']).toContain('no-store');
+      expect(safe.headers['accept-ranges']).toBe('none');
+      expect(safe.headers['x-campfire-map-view']).toBe('fog-protected');
+
+      const source = await sharp(battleMap).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const rendered = await sharp(safe.body).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      expect(rendered.info.width).toBe(4);
+      for (let y = 0; y < 2; y++) {
+        const row = y * 4 * 4;
+        // Left half was revealed and is byte-identical after lossless PNG rendering.
+        expect(rendered.data.subarray(row, row + 8)).toEqual(source.data.subarray(row, row + 8));
+        // Right half contains opaque fog bytes, not recoverable source RGB.
+        expect([...rendered.data.subarray(row + 8, row + 12)]).toEqual([11, 17, 32, 255]);
+        expect([...rendered.data.subarray(row + 12, row + 16)]).toEqual([11, 17, 32, 255]);
+      }
+    });
+
+    it('the role-safe thumbnail is masked too, and Range requests are rejected', async () => {
+      const thumb = await playerAgent.get(`/api/v1/encounters/${encounterId}/map?size=thumb&revision=first`);
+      expect(thumb.status).toBe(200);
+      expect(thumb.headers['x-campfire-map-view']).toBe('fog-protected');
+      const ranged = await playerAgent.get(`/api/v1/encounters/${encounterId}/map`).set('Range', 'bytes=0-31');
+      expect(ranged.status).toBe(416);
+      // Controller ends the 416 with an empty body (no JSON payload).
+      const empty =
+        Buffer.isBuffer(ranged.body)
+          ? ranged.body.length === 0
+          : ranged.body == null ||
+            ranged.body === '' ||
+            (typeof ranged.body === 'object' && !Array.isArray(ranged.body) && Object.keys(ranged.body).length === 0);
+      expect(empty).toBe(true);
+    });
+
+    it('a fog revision cannot reuse a stale validator or cached pixel set', async () => {
+      const first = await playerAgent.get(`/api/v1/encounters/${encounterId}/map?revision=first`);
+      const firstEtag = first.headers.etag;
+      expect(firstEtag).toBeTruthy();
+
+      const patch = await dmAgent
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .send({ fog: { enabled: true, revealed: [{ x: 50, y: 0, w: 50, h: 100 }] } });
+      expect(patch.status).toBe(200);
+
+      const second = await playerAgent
+        .get(`/api/v1/encounters/${encounterId}/map?revision=${encodeURIComponent(patch.body.updatedAt)}`)
+        .set('If-None-Match', firstEtag);
+      expect(second.status).toBe(200);
+      expect(second.headers.etag).not.toBe(firstEtag);
+      expect(second.headers['cache-control']).toContain('no-store');
+
+      const rendered = await sharp(second.body).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const source = await sharp(battleMap).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      expect([...rendered.data.subarray(0, 4)]).toEqual([11, 17, 32, 255]);
+      expect(rendered.data.subarray(8, 16)).toEqual(source.data.subarray(8, 16));
+    });
+
+    it('the DM receives the original source through the encounter route', async () => {
+      const res = await dmAgent.get(`/api/v1/encounters/${encounterId}/map`);
+      expect(res.status).toBe(200);
+      expect(res.headers['x-campfire-map-view']).toBe('fully-revealed');
+      expect(Buffer.compare(res.body, battleMap)).toBe(0);
+    });
+
+    it('the protected attachment cannot be revealed as a raw handout', async () => {
+      const res = await dmAgent.post(`/api/v1/attachments/${mapId}/reveal`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toContain('fogged encounter map');
+    });
+
+    it('revokes a previously visible raw-map cache grant as soon as fog is enabled', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'formerly-public.png', contentType: 'image/png' });
+      const publicMapId = upload.body.id as number;
+      expect((await dmAgent.post(`/api/v1/attachments/${publicMapId}/reveal`)).status).toBe(201);
+
+      const before = await playerAgent.get(`/api/v1/attachments/${publicMapId}/file`);
+      expect(before.status).toBe(200);
+      expect(before.headers.etag).toBeTruthy();
+      expect(before.headers['cache-control']).toContain('must-revalidate');
+
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Re-hidden Map' });
+      const publicEncounterId = created.body.id as number;
+      const protect = await dmAgent.patch(`/api/v1/encounters/${publicEncounterId}`).send({
+        mapAttachmentId: publicMapId,
+        fog: { enabled: true, revealed: [] },
+      });
+      expect(protect.status).toBe(200);
+
+      // Even a stale validator for bytes the player legitimately saw earlier must
+      // run the new authorization check and return 404, never 304 or old bytes.
+      const stale = await playerAgent
+        .get(`/api/v1/attachments/${publicMapId}/file`)
+        .set('If-None-Match', before.headers.etag);
+      expect(stale.status).toBe(404);
+      expect((await playerAgent.get(`/api/v1/attachments/${publicMapId}/file?size=thumb`)).status).toBe(404);
+
+      const safe = await playerAgent.get(`/api/v1/encounters/${publicEncounterId}/map`);
+      expect(safe.status).toBe(200);
+      expect(safe.headers['x-campfire-map-view']).toBe('fog-protected');
+    });
+
+    it('fails closed when persisted fog JSON is malformed', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'corrupt-fog.png', contentType: 'image/png' });
+      const invalidMapId = upload.body.id as number;
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Malformed Fog' });
+      const invalidEncounterId = created.body.id as number;
+      expect(
+        (
+          await dmAgent.patch(`/api/v1/encounters/${invalidEncounterId}`).send({
+            mapAttachmentId: invalidMapId,
+            fog: { enabled: true, revealed: [] },
+          })
+        ).status,
+      ).toBe(200);
+
+      // Manufacture corrupt legacy/storage state that cannot be expressed through
+      // the validated API. Encounter JSON may degrade to fog:null, but pixels may not.
+      const db = ctx.app.get<DrizzleDb>(DB);
+      db.update(encounters).set({ fog: '{ definitely-not-json' }).where(eq(encounters.id, invalidEncounterId)).run();
+
+      expect((await playerAgent.get(`/api/v1/attachments/${invalidMapId}/file`)).status).toBe(404);
+      const safe = await playerAgent.get(`/api/v1/encounters/${invalidEncounterId}/map`);
+      expect(safe.status).toBe(200);
+      expect(safe.headers['x-campfire-map-view']).toBe('fog-protected');
+      const rendered = await sharp(safe.body).ensureAlpha().raw().toBuffer();
+      for (let offset = 0; offset < rendered.length; offset += 4) {
+        expect([...rendered.subarray(offset, offset + 4)]).toEqual([11, 17, 32, 255]);
+      }
+
+      const dmView = await dmAgent.get(`/api/v1/encounters/${invalidEncounterId}/map`);
+      expect(dmView.status).toBe(200);
+      expect(Buffer.compare(dmView.body, battleMap)).toBe(0);
+    });
+
+    it('protecting an encounter map does not open OTHER hidden attachments to the player', async () => {
       // A hidden image that is NOT any encounter's map stays 404 for the player.
       const other = await dmAgent
         .post(`/api/v1/campaigns/${campaignId}/attachments`)
@@ -1058,8 +1183,172 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
     });
 
     it('a non-member outsider still cannot fetch the encounter map (403)', async () => {
-      const res = await outsiderAgent.get(`/api/v1/attachments/${mapId}/file`);
-      expect(res.status).toBe(403);
+      expect((await outsiderAgent.get(`/api/v1/attachments/${mapId}/file`)).status).toBe(403);
+      expect((await outsiderAgent.get(`/api/v1/encounters/${encounterId}/map`)).status).toBe(403);
+    });
+
+    it('the member export contains no attachment metadata or source URL', async () => {
+      const res = await playerAgent.get(`/api/v1/campaigns/${campaignId}/export/me`);
+      expect(res.status).toBe(200);
+      expect(res.body.attachments).toBeUndefined();
+      expect(JSON.stringify(res.body)).not.toContain(`/attachments/${mapId}/file`);
+    });
+
+    it('invalid persisted fog still redacts token coordinates for non-DMs', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'token-redact-fog.png', contentType: 'image/png' });
+      const tokenMapId = upload.body.id as number;
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Corrupt Fog Tokens' });
+      const tokenEncounterId = created.body.id as number;
+      expect(
+        (
+          await dmAgent.patch(`/api/v1/encounters/${tokenEncounterId}`).send({
+            mapAttachmentId: tokenMapId,
+            fog: { enabled: true, revealed: [] },
+          })
+        ).status,
+      ).toBe(200);
+
+      const monster = await dmAgent.post(`/api/v1/encounters/${tokenEncounterId}/combatants`).send({
+        kind: 'monster',
+        name: 'Hidden Stalker',
+        hpMax: 12,
+      });
+      expect(monster.status).toBe(201);
+      expect(
+        (
+          await dmAgent
+            .patch(`/api/v1/encounters/${tokenEncounterId}/combatants/${monster.body.id}`)
+            .send({ tokenX: 25, tokenY: 40 })
+        ).status,
+      ).toBe(200);
+
+      const db = ctx.app.get<DrizzleDb>(DB);
+      db.update(encounters).set({ fog: '{ definitely-not-json' }).where(eq(encounters.id, tokenEncounterId)).run();
+
+      const playerView = await playerAgent.get(`/api/v1/encounters/${tokenEncounterId}`);
+      expect(playerView.status).toBe(200);
+      // Encounter JSON may degrade fog to null, but token coords must still fail closed.
+      expect(playerView.body.fog).toBeNull();
+      const stalker = playerView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(stalker.tokenX).toBeNull();
+      expect(stalker.tokenY).toBeNull();
+
+      const dmView = await dmAgent.get(`/api/v1/encounters/${tokenEncounterId}`);
+      const dmStalker = dmView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(dmStalker.tokenX).toBe(25);
+      expect(dmStalker.tokenY).toBe(40);
+    });
+
+    it('fogging the campaign region map clones a battle-map attachment so players keep the background', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'region-and-battle.png', contentType: 'image/png' });
+      const sharedId = upload.body.id as number;
+
+      const asCampaign = await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId: sharedId });
+      expect(asCampaign.status).toBe(200);
+      expect(asCampaign.body.mapAttachmentId).toBe(sharedId);
+      expect((await playerAgent.get(`/api/v1/attachments/${sharedId}/file`)).status).toBe(200);
+
+      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fog on Region Map' });
+      const encId = enc.body.id as number;
+      const fogged = await dmAgent.patch(`/api/v1/encounters/${encId}`).send({
+        mapAttachmentId: sharedId,
+        fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 25, h: 100 }] },
+      });
+      expect(fogged.status).toBe(200);
+      // Encounter retargets to a dedicated clone; campaign keeps the original.
+      expect(fogged.body.mapAttachmentId).not.toBe(sharedId);
+      const campaign = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
+      expect(campaign.body.mapAttachmentId).toBe(sharedId);
+      expect((await playerAgent.get(`/api/v1/attachments/${sharedId}/file`)).status).toBe(200);
+      expect((await playerAgent.get(`/api/v1/attachments/${fogged.body.mapAttachmentId}/file`)).status).toBe(404);
+
+      // Wiring the fogged battle-map clone back as the region map is rejected.
+      const reuse = await dmAgent
+        .patch(`/api/v1/campaigns/${campaignId}`)
+        .send({ mapAttachmentId: fogged.body.mapAttachmentId });
+      expect(reuse.status).toBe(409);
+    });
+
+    it('a sibling encounter reusing the map with fog off cannot leak the full source', async () => {
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .field('kind', 'map')
+        .attach('file', battleMap, { filename: 'shared-map.png', contentType: 'image/png' });
+      const sharedMapId = upload.body.id as number;
+
+      const fogged = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Shared' });
+      const clear = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Clear Shared' });
+      const foggedId = fogged.body.id as number;
+      const clearId = clear.body.id as number;
+
+      expect(
+        (
+          await dmAgent.patch(`/api/v1/encounters/${foggedId}`).send({
+            mapAttachmentId: sharedMapId,
+            fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 25, h: 100 }] },
+          })
+        ).status,
+      ).toBe(200);
+      // Reuse the same attachment with fog explicitly disabled / off.
+      expect(
+        (
+          await dmAgent.patch(`/api/v1/encounters/${clearId}`).send({
+            mapAttachmentId: sharedMapId,
+            fog: { enabled: false, revealed: [] },
+          })
+        ).status,
+      ).toBe(200);
+
+      // Raw URL stays blocked because the fogged sibling still conceals pixels.
+      expect((await playerAgent.get(`/api/v1/attachments/${sharedMapId}/file`)).status).toBe(404);
+
+      // The clear encounter's map route must fail closed (fully concealed), not serve source.
+      const leaked = await playerAgent.get(`/api/v1/encounters/${clearId}/map`);
+      expect(leaked.status).toBe(200);
+      expect(leaked.headers['x-campfire-map-view']).toBe('fog-protected');
+      const rendered = await sharp(leaked.body).ensureAlpha().raw().toBuffer();
+      for (let offset = 0; offset < rendered.length; offset += 4) {
+        expect([...rendered.subarray(offset, offset + 4)]).toEqual([11, 17, 32, 255]);
+      }
+
+      // The fogged encounter still reveals only its own mask.
+      const masked = await playerAgent.get(`/api/v1/encounters/${foggedId}/map`);
+      expect(masked.status).toBe(200);
+      expect(masked.headers['x-campfire-map-view']).toBe('fog-protected');
+      const source = await sharp(battleMap).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      const foggedPixels = await sharp(masked.body).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+      expect(foggedPixels.data.subarray(0, 4)).toEqual(source.data.subarray(0, 4));
+      expect([...foggedPixels.data.subarray(4, 8)]).toEqual([11, 17, 32, 255]);
+
+      // Token coords on the clear sibling must also fail closed (map is fully masked).
+      const monster = await dmAgent.post(`/api/v1/encounters/${clearId}/combatants`).send({
+        kind: 'monster',
+        name: 'Sibling Token Probe',
+        hpMax: 9,
+      });
+      expect(monster.status).toBe(201);
+      expect(
+        (
+          await dmAgent
+            .patch(`/api/v1/encounters/${clearId}/combatants/${monster.body.id}`)
+            .send({ tokenX: 40, tokenY: 55 })
+        ).status,
+      ).toBe(200);
+      const playerView = await playerAgent.get(`/api/v1/encounters/${clearId}`);
+      expect(playerView.status).toBe(200);
+      const probe = playerView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(probe.tokenX).toBeNull();
+      expect(probe.tokenY).toBeNull();
+      const dmView = await dmAgent.get(`/api/v1/encounters/${clearId}`);
+      const dmProbe = dmView.body.combatants.find((c: { id: number }) => c.id === monster.body.id);
+      expect(dmProbe.tokenX).toBe(40);
+      expect(dmProbe.tokenY).toBe(55);
     });
   });
 

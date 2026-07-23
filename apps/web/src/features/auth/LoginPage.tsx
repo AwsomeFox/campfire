@@ -12,11 +12,22 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { safeInternalPath } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
-
+import {
+  AUTH_CREDENTIALS_ERROR,
+  AUTH_ERROR_IDS,
+  AUTH_FIELD_IDS,
+  AUTH_GENERIC_ERROR,
+  AUTH_LOCAL_DISABLED_ERROR,
+  AUTH_RATE_LIMIT_ERROR,
+  type AuthErrorState,
+  describedBy,
+  focusAuthError,
+} from './authFormA11y';
 function FlameMark({ size = 44 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
@@ -128,6 +139,7 @@ function LocalLoginForm({
   password,
   setPassword,
   error,
+  clearError,
   primary,
   focusOnMount = false,
 }: {
@@ -137,42 +149,67 @@ function LocalLoginForm({
   setUsername: (v: string) => void;
   password: string;
   setPassword: (v: string) => void;
-  error: string | null;
+  error: AuthErrorState | null;
+  clearError: () => void;
   primary: boolean;
   focusOnMount?: boolean;
 }) {
+  // Credential failures associate both fields with one alert (announce once).
+  // Rate-limit / server / disabled failures use a form summary only.
+  const credentialsError =
+    error?.kind === 'fields' ? error.fields.username ?? error.fields.password ?? null : null;
+  const formError = error?.kind === 'form' ? error.message : null;
+  const alertId = AUTH_ERROR_IDS.login;
+  const fieldsInvalid = Boolean(credentialsError);
+
   return (
-    <form onSubmit={onSubmit} className="flex flex-col gap-3">
+    <form onSubmit={onSubmit} className="flex flex-col gap-3" noValidate>
       <div className="field">
-        <label htmlFor="username">Username</label>
+        <label htmlFor={AUTH_FIELD_IDS.username}>Username</label>
         <input
-          id="username"
+          id={AUTH_FIELD_IDS.username}
           className="input"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => {
+            setUsername(e.target.value);
+            if (error) clearError();
+          }}
           autoComplete="username"
           autoFocus={primary || focusOnMount}
-          aria-invalid={error ? true : undefined}
-          aria-describedby={error ? 'login-error' : undefined}
+          aria-invalid={fieldsInvalid ? true : undefined}
+          aria-describedby={describedBy(fieldsInvalid && alertId)}
           required
         />
       </div>
       <div className="field">
-        <label htmlFor="password">Password</label>
+        <label htmlFor={AUTH_FIELD_IDS.password}>Password</label>
         <input
-          id="password"
+          id={AUTH_FIELD_IDS.password}
           type="password"
           className="input"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            if (error) clearError();
+          }}
           autoComplete="current-password"
-          aria-invalid={error ? true : undefined}
-          aria-describedby={error ? 'login-error' : undefined}
+          aria-invalid={fieldsInvalid ? true : undefined}
+          aria-describedby={describedBy(fieldsInvalid && alertId)}
           required
         />
       </div>
 
-      {error && <p id="login-error" role="alert" className="text-sm text-rose-400" style={{ margin: 0 }}>{error}</p>}
+      {(credentialsError || formError) && (
+        <p
+          id={alertId}
+          role="alert"
+          tabIndex={formError ? -1 : undefined}
+          className="text-sm text-rose-400"
+          style={{ margin: 0 }}
+        >
+          {credentialsError ?? formError}
+        </p>
+      )}
 
       <button type="submit" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-block`} style={{ minHeight: 44 }} disabled={submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}
@@ -185,19 +222,6 @@ function LocalLoginForm({
       </p>
     </form>
   );
-}
-
-/**
- * Open-redirect guard: only honor same-origin, in-app absolute paths. Rejects
- * protocol-relative (`//evil.com`), backslash tricks (`/\evil.com`), and
- * anything not rooted at a single `/`. Returns null when unsafe.
- */
-function safeInternalPath(raw: string | null | undefined): string | null {
-  if (!raw || !raw.startsWith('/')) return null;
-  if (raw.startsWith('//') || raw.startsWith('/\\')) return null;
-  // Never bounce back into an auth screen (would loop or hide the target).
-  if (/^\/(login|setup|signup|reset-password)(\/|\?|#|$)/.test(raw)) return null;
-  return raw;
 }
 
 export function LoginPage() {
@@ -223,7 +247,7 @@ export function LoginPage() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<AuthErrorState | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [showLocalForm, setShowLocalForm] = useState(
     () => new URLSearchParams(location.search).get('local') === '1',
@@ -263,6 +287,12 @@ export function LoginPage() {
     };
   }, [clearAnnouncements]);
 
+  // Issue #449: after a failed submit, move focus to the first invalid field
+  // (credentials) or the form summary (rate-limit / server / disabled).
+  useLayoutEffect(() => {
+    if (error) focusAuthError(error, { formErrorId: AUTH_ERROR_IDS.login });
+  }, [error]);
+
   // React Router keeps this page mounted for query-only navigation. Mirror the
   // URL on back/forward and recovery-page navigation instead of treating the
   // initial query string as immutable component state.
@@ -289,13 +319,25 @@ export function LoginPage() {
       navigate(redirectTo, { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
-        setError('Local sign-in is disabled — ask your server admin.');
+        setError({ kind: 'form', message: AUTH_LOCAL_DISABLED_ERROR });
       } else if (err instanceof ApiError && err.status === 401) {
-        setError('Wrong username or password.');
+        // One alert, both fields marked invalid — distinguish from rate-limit /
+        // server failures which stay form-summary-only (issue #449).
+        setError({
+          kind: 'fields',
+          fields: {
+            username: AUTH_CREDENTIALS_ERROR,
+            password: AUTH_CREDENTIALS_ERROR,
+          },
+          focus: 'username',
+        });
       } else if (err instanceof ApiError && err.status === 429) {
-        setError('Too many attempts — wait a minute and try again.');
+        setError({ kind: 'form', message: AUTH_RATE_LIMIT_ERROR });
       } else {
-        setError(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+        setError({
+          kind: 'form',
+          message: err instanceof ApiError ? err.message : AUTH_GENERIC_ERROR,
+        });
       }
     } finally {
       setSubmitting(false);
@@ -305,9 +347,8 @@ export function LoginPage() {
   const oidcEnabled = Boolean(status?.oidcEnabled);
   const localLoginEnabled = Boolean(status?.localLoginEnabled);
   const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
-  // Forward the intended target through SSO. The OIDC flow is a full-page server
-  // round-trip (callback currently always redirects to `/`), so honoring this
-  // needs matching backend support; the local form already returns to it.
+  // Forward the intended target through SSO. The OIDC login endpoint stashes a
+  // validated relative path and the callback returns there (issue #478).
   const oidcLoginHref =
     redirectTo === '/'
       ? '/api/v1/auth/oidc/login'
@@ -362,6 +403,7 @@ export function LoginPage() {
                   password={password}
                   setPassword={setPassword}
                   error={error}
+                  clearError={() => setError(null)}
                   primary={false}
                   focusOnMount
                 />
@@ -394,6 +436,7 @@ export function LoginPage() {
               password={password}
               setPassword={setPassword}
               error={error}
+              clearError={() => setError(null)}
               primary={!cameFromSignOut}
             />
           </div>
