@@ -6,7 +6,7 @@ import {
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
   RsvpSetBody,
-  hasRsvpSetMutation,
+  hasAnyRsvpSetField,
   RSVP_SET_REQUIRED_MESSAGE,
   ExpectedUpdatedAt,
   SessionShareCreate,
@@ -27,7 +27,7 @@ export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.s
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.strict()) {}
 export class RsvpSetDto extends createZodDto(
-  RsvpSetBody.strict().refine(hasRsvpSetMutation, {
+  RsvpSetBody.strict().refine(hasAnyRsvpSetField, {
     message: RSVP_SET_REQUIRED_MESSAGE,
   }),
 ) {}

@@ -369,8 +369,6 @@ function ScheduleItem({
 
   async function saveNote(explicitDraft?: string) {
     if (noteSaving || rsvpSaving) return;
-    const status = displayRsvp;
-    if (!status) return;
     const draft = explicitDraft ?? noteDraft;
     if (draft.trim().length > RSVP_NOTE_MAX_LEN) {
       setNoteError(rsvpNoteTooLongMessage(draft.trim().length));
