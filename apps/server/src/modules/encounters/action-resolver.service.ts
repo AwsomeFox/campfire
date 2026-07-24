@@ -106,12 +106,24 @@ export class ActionResolverService {
     if (target.id === actor.id) {
       throw new BadRequestException(`"${actionName}" cannot target the actor.`);
     }
-    if (allow === 'enemy' && target.kind !== 'monster' && target.kind !== 'npc') {
+    if (allow === 'enemy' && !this.isEnemyTarget(actor, target)) {
       throw new BadRequestException(`"${actionName}" may only target enemies.`);
     }
-    if (allow === 'ally' && target.kind !== 'character') {
+    if (allow === 'ally' && !this.isAllyTarget(actor, target)) {
       throw new BadRequestException(`"${actionName}" may only target allies.`);
     }
+  }
+
+  private isEnemyTarget(actor: typeof combatants.$inferSelect, target: typeof combatants.$inferSelect): boolean {
+    return actor.kind === 'character'
+      ? target.kind === 'monster' || target.kind === 'npc'
+      : target.kind === 'character';
+  }
+
+  private isAllyTarget(actor: typeof combatants.$inferSelect, target: typeof combatants.$inferSelect): boolean {
+    return actor.kind === 'character'
+      ? target.kind === 'character'
+      : target.kind === 'monster' || target.kind === 'npc';
   }
 
   private adapterForCampaign(campaignId: number): RuleSystemAdapter {

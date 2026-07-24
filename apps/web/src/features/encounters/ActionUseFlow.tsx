@@ -21,11 +21,25 @@ import { useAnnounce } from '../../components/Announcer';
 
 type Step = 'targets' | 'preview';
 
+function isEnemyTarget(actor: Combatant, target: Combatant): boolean {
+  return actor.kind === 'character'
+    ? target.kind === 'monster' || target.kind === 'npc'
+    : target.kind === 'character';
+}
+
+function isAllyTarget(actor: Combatant, target: Combatant): boolean {
+  return actor.kind === 'character'
+    ? target.kind === 'character'
+    : target.kind === 'monster' || target.kind === 'npc';
+}
+
 function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+  const actor = combatants.find((c) => c.id === actorId);
+  if (!actor) return [];
   if (allow === 'self') return combatants.filter((c) => c.id === actorId);
   const others = combatants.filter((c) => c.id !== actorId);
-  if (allow === 'enemy') return others.filter((c) => c.kind === 'monster' || c.kind === 'npc');
-  if (allow === 'ally') return others.filter((c) => c.kind === 'character');
+  if (allow === 'enemy') return others.filter((c) => isEnemyTarget(actor, c));
+  if (allow === 'ally') return others.filter((c) => isAllyTarget(actor, c));
   return others;
 }
 
