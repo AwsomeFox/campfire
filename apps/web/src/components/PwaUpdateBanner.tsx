@@ -114,6 +114,15 @@ export function PwaUpdateBanner() {
             )}
           </div>
 
+          {pwaState.blockedByGuard && (
+            <p
+              data-testid="pwa-error-blocked-warning"
+              className="text-xs text-amber-400 bg-amber-950/40 p-2 rounded border border-amber-800/50"
+            >
+              Action or form submission in progress. Reload when complete.
+            </p>
+          )}
+
           <div className="flex items-center gap-2 pt-1">
             <Btn
               id="pwa-clear-cache-reload"

@@ -86,16 +86,30 @@ export async function triggerUpdateNow(): Promise<boolean> {
   state = { ...state, blockedByGuard: false };
   emit();
 
-  if (updateSWFn) {
-    await updateSWFn(true);
-  } else if (typeof window !== 'undefined') {
-    window.location.reload();
+  try {
+    if (updateSWFn) {
+      await updateSWFn(true);
+    } else if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+    return true;
+  } catch (err) {
+    setPwaUpdateError(err);
+    return false;
   }
-  return true;
 }
 
 /** Recovery action for SW registration/update errors: clear caches & reload. */
-export async function clearCacheAndReload(): Promise<void> {
+export async function clearCacheAndReload(): Promise<boolean> {
+  if (!canReloadNow()) {
+    state = { ...state, blockedByGuard: true };
+    emit();
+    return false;
+  }
+
+  state = { ...state, blockedByGuard: false };
+  emit();
+
   try {
     await clearApiCache();
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
@@ -117,6 +131,7 @@ export async function clearCacheAndReload(): Promise<void> {
       window.location.reload();
     }
   }
+  return true;
 }
 
 /** Initialize service worker registration. */
