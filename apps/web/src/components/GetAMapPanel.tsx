@@ -22,7 +22,7 @@ import { GenerateMapPanel } from './GenerateMapPanel';
 import { ExternalGeneratorCard } from './ExternalGeneratorCard';
 import {
   clearAcquisition,
-  loadAcquisition,
+  loadAndPruneAcquisition,
   saveAcquisition,
   type AcquisitionState,
 } from './externalGeneratorAcquisition';
@@ -69,13 +69,12 @@ export function GetAMapPanel({
 }) {
   const [sources, setSources] = useState<MapSource[] | null>(null);
   // A persisted, in-progress external-generator round trip (issue #411): the DM opened a
-  // generator and hasn't imported yet. Restored on mount so a reload / navigation lands them
-  // back on the same card with its return checklist, not a blank menu.
-  const [initialAcquisition] = useState(() => loadAcquisition(campaignId, Date.now()));
-  const [acquisition, setAcquisition] = useState<AcquisitionState | null>(initialAcquisition);
+  // generator and hasn't imported yet. Restored in the effect below so a reload / navigation
+  // lands them back on the same card with its return checklist, not a blank menu.
+  const [acquisition, setAcquisition] = useState<AcquisitionState | null>(null);
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     regionLabel: 'Open, license-clean map sources',
-    initialOpen: initialAcquisition != null,
+    initialOpen: false,
   });
   const generatorDisclosure = useDisclosure({
     regionLabel: 'Map generator',
@@ -99,7 +98,7 @@ export function GetAMapPanel({
       .then((s) => alive && setSources(s))
       .catch(() => alive && setSources([]));
     // Re-read the persisted round trip for this campaign (the id can change without a remount).
-    const restored = loadAcquisition(campaignId, Date.now());
+    const restored = loadAndPruneAcquisition(campaignId, Date.now());
     setAcquisition(restored);
     if (restored) setOpen(true);
     return () => {
