@@ -23,6 +23,8 @@ import {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
   type EncounterDifficultyInput,
 } from './encounter-difficulty';
 import {
@@ -43,6 +45,8 @@ export {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
   initModDescThenSortOrderAsc,
   sortOrderAscTiebreak,
 };
@@ -5527,6 +5531,211 @@ export const EncounterSuggestion = z.object({
   matchedBand: z.boolean(),
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
+
+// ---------- encounter preview / tune / idempotent commit wizard (issue #412) ----------
+// The generator (#304) produced a one-shot homogeneous suggestion. The DM wizard needs a
+// richer, INTERACTIVE contract: a non-mutating preview that returns a multi-slot roster with
+// per-creature inspection data + a difficulty EXPLANATION + actionable warnings, a set of
+// deterministic TUNE operations (reroll all / reroll one slot / swap / adjust count / pin) that
+// round-trip a plan so re-rolls are reproducible and pinned slots are preserved, and an
+// IDEMPOTENT commit that atomically creates the encounter + combatants (+ links/map/grid/tokens)
+// with no partial encounters or duplicate combatants. Preview stays read-only; commit is the
+// single write. All three are reused by REST and MCP.
+
+/**
+ * Per-creature inspection data lifted from a compendium statblock for the preview roster
+ * (issue #412): the AC/HP/actions/saves/traits a DM expands inline. Every field is best-effort
+ * and nullable — a manual/partial statblock simply omits what it lacks (surfaced as a warning),
+ * never fabricated. Labels come from the adapter's presentation metadata upstream; the values
+ * here are the raw mechanical facts.
+ */
+export const EncounterCreatureInspection = z.object({
+  /** True when the linked rule entry resolved to a usable statblock. */
+  hasStatblock: z.boolean(),
+  size: z.string().max(60).nullable().default(null),
+  creatureType: z.string().max(120).nullable().default(null),
+  armorClass: z.number().int().nullable().default(null),
+  hitPointsMax: z.number().int().nullable().default(null),
+  hitPointsText: z.string().max(80).nullable().default(null),
+  speed: z.string().max(200).nullable().default(null),
+  challengeRating: z.number().nullable().default(null),
+  xp: z.number().int().nonnegative(),
+  /** Ability scores/mods as the statblock lists them (raw, adapter representation applies). */
+  abilities: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  savingThrows: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  traits: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+  actions: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+});
+export type EncounterCreatureInspection = z.infer<typeof EncounterCreatureInspection>;
+
+/** Machine-readable warning category surfaced on a preview (issue #412). */
+export const EncounterWarningCode = z.enum([
+  'role-duplication', // the same statblock fills 2+ slots
+  'action-economy', // monster/PC action-count imbalance (solo vs party, or swarm)
+  'missing-statblock', // a slot's creature has no resolvable HP/CR
+  'unsupported-system', // the rule system has no encounter-budget math
+  'difficulty-unknown', // monsters present but carry no CR/XP to score
+  'swinginess', // high-variance fight (a lone big creature, or well over Deadly)
+  'empty-roster', // no monsters were selected
+  'no-candidates', // the compendium had nothing to pick from
+  'band-miss', // the requested band could not be assembled from the compendium
+]);
+export type EncounterWarningCode = z.infer<typeof EncounterWarningCode>;
+
+export const EncounterWarning = z.object({
+  code: EncounterWarningCode,
+  severity: z.enum(['info', 'warn']),
+  message: z.string().min(1).max(400),
+});
+export type EncounterWarning = z.infer<typeof EncounterWarning>;
+
+/**
+ * One resolved slot in a preview roster (issue #412). `slotId` is a stable handle the tune
+ * operations target; `seed` makes a per-slot reroll reproducible; `pinned` protects a slot from
+ * reroll-all. A slot is a stack of `count` identical creatures (maps cleanly onto add_combatant).
+ */
+export const EncounterRosterSlot = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  name: z.string(),
+  entryType: z.enum(['monster', 'hazard']).default('monster'),
+  cr: z.number().nullable(),
+  xp: z.number().int().nonnegative(),
+  hpMax: z.number().int().nullable(),
+  count: z.number().int().min(1),
+  pinned: z.boolean(),
+  seed: z.number().int().nonnegative(),
+  inspection: EncounterCreatureInspection,
+});
+export type EncounterRosterSlot = z.infer<typeof EncounterRosterSlot>;
+
+/**
+ * The slot state a client rounds-trips back into a preview/tune/commit request (issue #412) —
+ * just the plan (no resolved inspection). The server re-resolves creatures + difficulty from
+ * these, so tuning is stateless: reroll/pin/swap are pure functions of the plan + a seed.
+ */
+export const EncounterRosterSlotInput = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  count: z.number().int().min(1).max(50),
+  pinned: z.boolean().default(false),
+  seed: z.number().int().nonnegative().max(4294967295),
+  entryType: z.enum(['monster', 'hazard']).optional(),
+});
+export type EncounterRosterSlotInput = z.infer<typeof EncounterRosterSlotInput>;
+
+/**
+ * A single tune operation applied to the current plan (issue #412). Deterministic: `reroll-*`
+ * mint/accept a seed so the same seed reproduces the same pick; `pin` protects a slot from
+ * `reroll-all`; `swap-slot` replaces a slot's creature with an explicit compendium entry;
+ * `adjust-count` changes the stack size; add/remove grow or shrink the roster.
+ */
+export const EncounterTuneOp = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('reroll-all'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('reroll-slot'), slotId: z.string().min(1).max(40), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('swap-slot'), slotId: z.string().min(1).max(40), ruleEntryId: Id }),
+  z.object({ op: z.literal('adjust-count'), slotId: z.string().min(1).max(40), count: z.number().int().min(1).max(50) }),
+  z.object({ op: z.literal('pin'), slotId: z.string().min(1).max(40), pinned: z.boolean() }),
+  z.object({ op: z.literal('add-slot'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('remove-slot'), slotId: z.string().min(1).max(40) }),
+]);
+export type EncounterTuneOp = z.infer<typeof EncounterTuneOp>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/preview (issue #412) and the preview_encounter
+ * MCP tool. A first call with just `difficulty` (+ optional filters/party/shape/count/seed)
+ * generates a fresh roster; passing back `roster` (the plan) with an optional `tune` op applies
+ * a deterministic tuning step. NON-MUTATING — nothing is persisted.
+ */
+export const EncounterPreviewRequest = z.object({
+  difficulty: DifficultyBand,
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  filters: EncounterGenerateFilters.optional(),
+  count: z.number().int().min(1).max(30).optional(),
+  shape: EncounterShape.optional(),
+  seed: z.number().int().nonnegative().max(4294967295).optional(),
+  /** The current plan being tuned; omit for a fresh generation. */
+  roster: z.array(EncounterRosterSlotInput).max(30).optional(),
+  /** A tuning operation to apply to `roster`. */
+  tune: EncounterTuneOp.optional(),
+});
+export type EncounterPreviewRequest = z.infer<typeof EncounterPreviewRequest>;
+
+/**
+ * Read-only preview result (issue #412): the resolved multi-slot roster, the adapter-owned
+ * difficulty + a human-readable explanation, actionable warnings, and, when the compendium or
+ * the rule system can't support the request, actionable `fallbacks` (never a dead end). The
+ * `plan` echoes the round-trippable slot inputs so a client can send them straight back into a
+ * tune/commit call.
+ */
+export const EncounterPreview = z.object({
+  roster: z.array(EncounterRosterSlot),
+  plan: z.array(EncounterRosterSlotInput),
+  targetBand: DifficultyBand,
+  difficulty: EncounterDifficulty,
+  explanation: EncounterDifficultyExplanation,
+  totalXp: z.number().int().nonnegative(),
+  shape: EncounterShape,
+  seed: z.number().int().nonnegative(),
+  matchedBand: z.boolean(),
+  party: z.array(z.number().int()),
+  warnings: z.array(EncounterWarning),
+  /** Actionable next steps when the compendium is empty or the system lacks budget math. */
+  fallbacks: z.array(z.string().max(400)),
+});
+export type EncounterPreview = z.infer<typeof EncounterPreview>;
+
+/** Optional per-slot token placement applied atomically at commit (issue #412). */
+export const EncounterCommitTokenPlacement = z.object({
+  slotId: z.string().min(1).max(40),
+  /** Base position (0–100 percent of the map). Copies in a stack fan out from here. */
+  tokenX: z.number().min(0).max(100),
+  tokenY: z.number().min(0).max(100),
+});
+export type EncounterCommitTokenPlacement = z.infer<typeof EncounterCommitTokenPlacement>;
+
+/** Optional map + grid to attach atomically at commit (issue #412). */
+export const EncounterCommitMap = z.object({
+  /** An existing campaign attachment (kind map|image) to set as the battle map. */
+  mapAttachmentId: Id,
+  gridSize: z.number().min(1).max(100).optional(),
+  gridScale: z.number().positive().optional(),
+  gridUnit: z.string().max(12).optional(),
+  gridType: GridType.optional(),
+});
+export type EncounterCommitMap = z.infer<typeof EncounterCommitMap>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/commit (issue #412) and the commit_encounter
+ * MCP tool. Commits a tuned roster to a real encounter in ONE atomic transaction. `idempotencyKey`
+ * makes a retried commit a no-op that returns the SAME encounter (never a duplicate). The
+ * encounter defaults hidden + preparing (DM prep, #262). Links/map/grid/token placement are all
+ * applied inside the same transaction — either everything lands or nothing does.
+ */
+export const EncounterCommit = z.object({
+  idempotencyKey: z.string().min(1).max(120),
+  name: z.string().min(1).max(120).optional(),
+  targetBand: DifficultyBand.optional(),
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  roster: z.array(EncounterRosterSlotInput).min(1).max(30),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  sessionId: Id.nullable().optional(),
+  hidden: z.boolean().optional(),
+  map: EncounterCommitMap.optional(),
+  tokens: z.array(EncounterCommitTokenPlacement).max(30).optional(),
+  /** Provenance for the audit trail (which surface committed, and any manual edits). */
+  source: z.string().max(60).optional(),
+  manualEdits: z.array(z.string().max(200)).max(50).optional(),
+});
+export type EncounterCommit = z.infer<typeof EncounterCommit>;
+
+/** Result of a commit (issue #412): the created encounter + whether this was an idempotent replay. */
+export const EncounterCommitResult = z.object({
+  encounter: z.lazy(() => EncounterWithCombatants),
+  idempotent: z.boolean(),
+});
+export type EncounterCommitResult = z.infer<typeof EncounterCommitResult>;
 
 // 'npc' combatants are DM-controlled like monsters (exact HP redacted for non-DM
 // viewers, no death saves) but carry an `npcId` link to the campaign NPC for

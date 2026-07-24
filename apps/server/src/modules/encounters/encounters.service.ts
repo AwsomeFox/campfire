@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -23,7 +23,9 @@ import type { RequestUser } from '../../common/user.types';
 import {
   advanceTurn,
   applyCombatantHp,
+  buildEncounterRoster,
   crToXp,
+  deriveEncounterRosterWarnings,
   deriveEndTurnPrompts,
   deriveStartTurnPrompts,
   generateEncounterGroup,
@@ -36,13 +38,15 @@ import {
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
-import type { CombatantHpState, GeneratorCandidate } from './encounters.logic';
+import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
 type EncounterGenerateInput = z.infer<typeof EncounterGenerate>;
+type EncounterPreviewInput = z.infer<typeof EncounterPreviewRequest>;
+type EncounterCommitInput = z.infer<typeof EncounterCommit>;
 type EncounterUpdateInput = z.infer<typeof EncounterUpdate>;
 type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
@@ -251,6 +255,15 @@ export class EncountersService {
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
   ) {}
+
+  /**
+   * In-memory idempotency map for the generated-encounter commit (issue #412):
+   * `${campaignId}:${idempotencyKey}` -> committed encounter id. A retried commit with the
+   * same key returns the SAME encounter instead of creating a duplicate. Single-instance,
+   * mirroring the AI map job store; a still-in-flight retry serializes on `commitInFlight`.
+   */
+  private readonly commitIdempotency = new Map<string, number>();
+  private readonly commitInFlight = new Map<string, Promise<EncounterWithCombatants>>();
 
   /**
    * Push a thin SSE change signal to everyone watching this campaign (issue #4).
@@ -1566,6 +1579,467 @@ export class EncountersService {
 
     const withCombatants = await this.getWithCombatantsOrThrow(encounter.id, role);
     return { encounter: withCombatants, suggestion };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Preview-and-tune wizard (issue #412).
+  //
+  // A NON-MUTATING, interactive layer over the #304 generator: a multi-slot roster with
+  // per-creature inspection + a difficulty EXPLANATION + actionable warnings, deterministic
+  // tune ops (reroll all / reroll one slot / swap / adjust count / pin), and an idempotent
+  // atomic commit. The pure roster/tune/warning math lives in encounters.logic.ts; the service
+  // supplies candidates from the compendium, resolves statblocks, and owns persistence.
+  // ---------------------------------------------------------------------------
+
+  /** Look up a campaign's rule system slug (for adapter-owned difficulty + support status). */
+  private async ruleSystemForCampaign(campaignId: number): Promise<string | null> {
+    const [row] = await this.db
+      .select({ ruleSystem: campaigns.ruleSystem })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    return row?.ruleSystem ?? null;
+  }
+
+  /**
+   * Build the per-creature inspection card (issue #412): AC/HP/actions/saves/traits lifted from
+   * a compendium statblock via the campaign adapter's mapping (#70). Every field is best-effort
+   * and null-safe — a partial/manual statblock simply omits what it lacks (surfaced as a
+   * missing-statblock warning), never fabricated.
+   */
+  private buildCreatureInspection(
+    adapter: RuleSystemAdapter,
+    data: Record<string, unknown>,
+    cr: number | null,
+    xp: number,
+    resolvedHpMax: number | null,
+  ): EncounterCreatureInspection {
+    const mapped = adapter.mapStatblock(data);
+    const toStr = (v: unknown): string | null => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === 'string') return v.slice(0, 200);
+      if (typeof v === 'number') return String(v);
+      if (typeof v === 'object') {
+        const val = (v as Record<string, unknown>).value ?? (v as Record<string, unknown>).ft ?? null;
+        return val !== null ? String(val).slice(0, 200) : null;
+      }
+      return null;
+    };
+    const toInt = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
+      if (typeof v === 'object' && v !== null) {
+        const val = (v as Record<string, unknown>).value;
+        if (typeof val === 'number' && Number.isFinite(val)) return Math.round(val);
+      }
+      if (typeof v === 'string') {
+        const m = /-?\d+/.exec(v);
+        if (m) return Number(m[0]);
+      }
+      return null;
+    };
+    // Actions/traits/reactions: open5e ships arrays of { name, desc }. Normalize + bound.
+    const normEntries = (raw: unknown): Array<{ name: string; text: string }> => {
+      if (!Array.isArray(raw)) return [];
+      const out: Array<{ name: string; text: string }> = [];
+      for (const item of raw) {
+        if (item && typeof item === 'object') {
+          const o = item as Record<string, unknown>;
+          const name = typeof o.name === 'string' ? o.name : '';
+          const text = typeof o.desc === 'string' ? o.desc : typeof o.text === 'string' ? o.text : typeof o.description === 'string' ? o.description : '';
+          if (name || text) out.push({ name: name.slice(0, 120), text: String(text).slice(0, 1200) });
+        }
+        if (out.length >= 50) break;
+      }
+      return out;
+    };
+    // Ability scores as the statblock lists them.
+    const abilities: Array<{ name: string; value: string }> = [];
+    if (mapped.abilityScores && typeof mapped.abilityScores === 'object') {
+      for (const [k, v] of Object.entries(mapped.abilityScores)) {
+        const s = toStr(v);
+        if (s !== null) abilities.push({ name: k.slice(0, 40), value: s.slice(0, 20) });
+        if (abilities.length >= 24) break;
+      }
+    }
+    // Saving throws: an explicit map, or open5e's per-ability `*_save` fields.
+    const savingThrows: Array<{ name: string; value: string }> = [];
+    const rawSaves = (data.savingThrows ?? data.saving_throws) as unknown;
+    if (rawSaves && typeof rawSaves === 'object' && !Array.isArray(rawSaves)) {
+      for (const [k, v] of Object.entries(rawSaves as Record<string, unknown>)) {
+        const s = toStr(v);
+        if (s !== null) savingThrows.push({ name: k.slice(0, 40), value: s.slice(0, 20) });
+      }
+    } else {
+      for (const [k, v] of Object.entries(data)) {
+        if (/_save$/i.test(k) && (typeof v === 'number' || typeof v === 'string')) {
+          savingThrows.push({ name: k.replace(/_save$/i, '').slice(0, 40), value: String(v).slice(0, 20) });
+        }
+        if (savingThrows.length >= 24) break;
+      }
+    }
+    const actions = [...normEntries(mapped.actions), ...normEntries(mapped.legendaryActions), ...normEntries(mapped.reactions)].slice(0, 50);
+    const hp = resolvedHpMax ?? adapter.monsterHitPoints(data);
+    return {
+      hasStatblock: hp !== null || cr !== null || actions.length > 0 || abilities.length > 0,
+      size: toStr(mapped.size),
+      creatureType: toStr(mapped.creatureType),
+      armorClass: toInt(mapped.armorClass),
+      hitPointsMax: hp,
+      hitPointsText: toStr((data.hit_dice ?? data.hitDice ?? null) as unknown),
+      speed: toStr(mapped.speed),
+      challengeRating: cr,
+      xp,
+      abilities,
+      savingThrows,
+      traits: normEntries(mapped.specialAbilities),
+      actions,
+    };
+  }
+
+  /**
+   * NON-MUTATING preview-and-tune of a generated encounter (issue #412). With just a target
+   * `difficulty` it generates a fresh roster; passing back `roster` (the plan) + a `tune` op
+   * applies a deterministic tuning step (reroll all / reroll one slot / swap / adjust count /
+   * pin / add / remove). Returns the resolved multi-slot roster with per-creature inspection,
+   * the adapter-owned difficulty + a human-readable explanation, actionable warnings, and
+   * actionable fallbacks when the compendium is empty or the system lacks budget math. Persists
+   * NOTHING — any member (or AI) may preview; committing is the separate write path.
+   */
+  async previewEncounter(campaignId: number, input: EncounterPreviewInput, _viewerRole?: Role): Promise<EncounterPreview> {
+    const adapter = await this.adapterForCampaign(campaignId);
+    const ruleSystem = await this.ruleSystemForCampaign(campaignId);
+    const partyLevels = await this.resolvePartyLevels(campaignId, input.party);
+    const candidates = await this.loadMonsterCandidates(adapter, input.filters);
+    const seed = input.seed ?? Math.floor(Math.random() * 0xffffffff);
+    const maxCount = input.count ?? 12;
+
+    const plan: RosterSlotPlan[] | undefined = input.roster?.map((s) => ({
+      slotId: s.slotId,
+      ruleEntryId: s.ruleEntryId,
+      count: s.count,
+      pinned: s.pinned ?? false,
+      seed: s.seed,
+    }));
+
+    const result = buildEncounterRoster({
+      partyLevels,
+      targetBand: input.difficulty,
+      candidates,
+      maxCount,
+      shape: input.shape,
+      seed,
+      plan,
+      tune: input.tune as RosterTuneOp | undefined,
+    });
+
+    // Adapter-owned reported difficulty (issue #429): an unsupported system yields an explicit
+    // unsupported explanation instead of the 5e band the generator internally targeted.
+    const reported = estimateEncounterDifficultyForRuleSystem(ruleSystem, {
+      partyLevels,
+      monsterChallengeRatings: result.picks.flatMap((p) => Array.from({ length: p.count }, () => p.cr)),
+    });
+    const explanation = buildDifficultyExplanation(reported);
+    const warnings = deriveEncounterRosterWarnings(result.picks, partyLevels, reported, result.matchedBand, input.difficulty);
+
+    // Resolve statblocks for the picked creatures (one query) to build inspection cards.
+    const pickedIds = [...new Set(result.picks.map((p) => p.ruleEntryId))];
+    const dataById = new Map<number, Record<string, unknown>>();
+    if (pickedIds.length > 0) {
+      const rows = await this.db.select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(inArray(ruleEntries.id, pickedIds));
+      for (const r of rows) dataById.set(r.id, fromJsonText<Record<string, unknown>>(r.dataJson, {}));
+    }
+
+    const roster: EncounterRosterSlot[] = result.plan.map((slotPlan) => {
+      const pick = result.picks.find((p) => p.ruleEntryId === slotPlan.ruleEntryId && p.count === slotPlan.count) ??
+        result.picks.find((p) => p.ruleEntryId === slotPlan.ruleEntryId);
+      const cr = pick?.cr ?? null;
+      const xp = pick?.xp ?? 0;
+      const hpMax = pick?.hpMax ?? null;
+      const data = dataById.get(slotPlan.ruleEntryId) ?? {};
+      return {
+        slotId: slotPlan.slotId,
+        ruleEntryId: slotPlan.ruleEntryId,
+        name: pick?.name || `Rule entry ${slotPlan.ruleEntryId}`,
+        entryType: pick?.entryType ?? 'monster',
+        cr,
+        xp,
+        hpMax,
+        count: slotPlan.count,
+        pinned: slotPlan.pinned,
+        seed: slotPlan.seed,
+        inspection: this.buildCreatureInspection(adapter, data, cr, xp, hpMax),
+      };
+    });
+
+    const fallbacks = this.buildPreviewFallbacks(candidates.length, reported.status, ruleSystem, partyLevels);
+
+    return {
+      roster,
+      plan: result.plan.map((s) => ({ slotId: s.slotId, ruleEntryId: s.ruleEntryId, count: s.count, pinned: s.pinned, seed: s.seed })),
+      targetBand: input.difficulty,
+      difficulty: reported,
+      explanation,
+      totalXp: reported.adjustedXp,
+      shape: result.shape,
+      seed: result.seed,
+      matchedBand: result.matchedBand,
+      party: partyLevels,
+      warnings,
+      fallbacks,
+    };
+  }
+
+  /** Actionable guidance when the compendium is empty or the system can't score difficulty (issue #412). */
+  private buildPreviewFallbacks(candidateCount: number, status: EncounterDifficulty['status'], ruleSystem: string | null, partyLevels: number[]): string[] {
+    const out: string[] = [];
+    if (candidateCount === 0) {
+      out.push(
+        'No monsters are installed for this campaign. Install a rule pack (Rules → Browse packs, e.g. the SRD monster pack) or import monsters, then regenerate. You can still create an empty encounter and add combatants manually.',
+      );
+    }
+    if (status === 'unsupported') {
+      out.push(
+        `${ruleSystem ?? 'This rule system'} has no built-in XP/CR encounter budget, so difficulty can't be estimated. The roster is still valid — commit it and judge the balance yourself, or switch the campaign to a supported system for automatic difficulty.`,
+      );
+    }
+    if (partyLevels.length === 0) {
+      out.push('No active party members were found, so difficulty is measured against an empty party. Add characters to the campaign, or pass explicit party levels, for an accurate estimate.');
+    }
+    return out;
+  }
+
+  /**
+   * IDEMPOTENT, atomic commit of a tuned roster to a real encounter (issue #412). The whole
+   * write — encounter row + auto-added party + generated monster combatants + optional
+   * location/quest/session links + optional battle map/grid + optional token placement — lands
+   * in ONE transaction, so a mid-commit failure never leaves a partial encounter or orphaned
+   * combatants. `idempotencyKey` makes a retry a no-op that returns the SAME encounter (never a
+   * duplicate). Created hidden + `preparing` by default (DM prep, #262). Audits source, inputs,
+   * roster, and any manual edits.
+   */
+  async commitGeneratedEncounter(
+    campaignId: number,
+    input: EncounterCommitInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<{ encounter: EncounterWithCombatants; idempotent: boolean }> {
+    const idemKey = `${campaignId}:${input.idempotencyKey}`;
+
+    // Fast path: a completed commit with this key returns the same encounter (if it still exists).
+    const existingId = this.commitIdempotency.get(idemKey);
+    if (existingId !== undefined) {
+      const row = await this.db.select({ id: encounters.id }).from(encounters).where(and(eq(encounters.id, existingId), eq(encounters.campaignId, campaignId))).limit(1);
+      if (row.length > 0) {
+        return { encounter: await this.getWithCombatantsOrThrow(existingId, role), idempotent: true };
+      }
+      // The keyed encounter was deleted — drop the stale mapping and re-commit fresh.
+      this.commitIdempotency.delete(idemKey);
+    }
+    // Coalesce a concurrent in-flight retry onto the same promise.
+    const inFlight = this.commitInFlight.get(idemKey);
+    if (inFlight) {
+      return { encounter: await inFlight, idempotent: true };
+    }
+
+    const run = this.doCommitGeneratedEncounter(campaignId, idemKey, input, user, role);
+    this.commitInFlight.set(idemKey, run);
+    try {
+      const encounter = await run;
+      return { encounter, idempotent: false };
+    } finally {
+      this.commitInFlight.delete(idemKey);
+    }
+  }
+
+  private async doCommitGeneratedEncounter(
+    campaignId: number,
+    idemKey: string,
+    input: EncounterCommitInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterWithCombatants> {
+    // ---- validate everything BEFORE the transaction (no partial writes) ----
+    if (input.locationId != null) await this.assertEntityInCampaign('location', input.locationId, campaignId);
+    if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, campaignId);
+    if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, campaignId);
+
+    const adapter = await this.adapterForCampaign(campaignId);
+
+    // Resolve each roster slot's statblock -> name/hp/initMod (outside the tx).
+    const slotIds = [...new Set(input.roster.map((s) => s.ruleEntryId))];
+    const entryRows = await this.db.select().from(ruleEntries).where(inArray(ruleEntries.id, slotIds));
+    const entryById = new Map(entryRows.map((r) => [r.id, r]));
+    for (const s of input.roster) {
+      if (!entryById.has(s.ruleEntryId)) {
+        throw new BadRequestException(`Rule entry ${s.ruleEntryId} not found — refresh the preview before committing.`);
+      }
+    }
+
+    interface ResolvedMonster {
+      slotId: string;
+      name: string;
+      hpMax: number;
+      initMod: number;
+      ruleEntryId: number;
+      count: number;
+    }
+    const resolvedMonsters: ResolvedMonster[] = input.roster.map((s) => {
+      const entry = entryById.get(s.ruleEntryId)!;
+      const data = fromJsonText<Record<string, unknown>>(entry.dataJson, {});
+      const mapped = adapter.mapStatblock(data);
+      const hp = adapter.monsterHitPoints(data);
+      if (hp === null) {
+        throw new BadRequestException(`"${entry.name}" has no hit points in its statblock — cannot commit it as a combatant. Swap it in the preview.`);
+      }
+      let initMod = 0;
+      if (adapter.initiativeModifierOrNull) {
+        const resolved = adapter.initiativeModifierOrNull(mapped.abilityScores, mapped.abilityRepresentation);
+        initMod = resolved ?? 0;
+      } else {
+        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
+      }
+      return { slotId: s.slotId, name: entry.name, hpMax: hp, initMod, ruleEntryId: s.ruleEntryId, count: s.count };
+    });
+
+    // Optional battle map: validate the attachment belongs to this campaign and is an image/map.
+    let mapAttachmentId: number | null = null;
+    if (input.map) {
+      const [att] = await this.db
+        .select({ id: attachments.id, campaignId: attachments.campaignId, kind: attachments.kind })
+        .from(attachments)
+        .where(and(eq(attachments.id, input.map.mapAttachmentId), eq(attachments.campaignId, campaignId)))
+        .limit(1);
+      if (!att) throw new BadRequestException(`Map attachment ${input.map.mapAttachmentId} not found in this campaign.`);
+      if (att.kind !== 'map' && att.kind !== 'image') {
+        throw new BadRequestException(`Attachment ${input.map.mapAttachmentId} is not a map/image.`);
+      }
+      mapAttachmentId = att.id;
+    }
+
+    // Party auto-add (same policy as create(): active PCs only).
+    const partyRows = await this.db
+      .select()
+      .from(characters)
+      .where(and(eq(characters.campaignId, campaignId), eq(characters.status, 'active'), notDeleted(characters.deletedAt)));
+
+    const tokenBySlot = new Map((input.tokens ?? []).map((t) => [t.slotId, t]));
+    const ts = nowIso();
+    const hidden = resolveCreateHidden(input.hidden);
+
+    // ---- ONE atomic transaction: encounter + party + monsters + map/grid + tokens ----
+    const encounterRow = this.db.transaction((tx) => {
+      const [row] = tx
+        .insert(encounters)
+        .values({
+          campaignId,
+          name: input.name ?? `Generated ${input.targetBand ?? ''} encounter`.trim(),
+          status: 'preparing',
+          round: 0,
+          turnIndex: 0,
+          locationId: input.locationId ?? null,
+          questId: input.questId ?? null,
+          sessionId: input.sessionId ?? null,
+          mapAttachmentId,
+          gridSize: input.map?.gridSize ?? null,
+          gridScale: input.map?.gridScale ?? null,
+          gridUnit: input.map?.gridUnit ?? null,
+          gridType: input.map?.gridType ?? 'square',
+          hidden,
+          endedAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning()
+        .all();
+
+      let sortOrder = 0;
+      // Party combatants first (mirrors create()).
+      if (partyRows.length > 0) {
+        const partyValues = partyRows.map((character) => {
+          const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
+          const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+          return {
+            encounterId: row.id,
+            kind: 'character' as const,
+            characterId: character.id,
+            name: character.name,
+            initiative: null,
+            initMod,
+            hpCurrent: character.hpCurrent,
+            hpMax: character.hpMax,
+            hpTemp: character.hpTemp,
+            deathState: character.deathState,
+            deathSaveSuccesses: character.deathSaveSuccesses,
+            deathSaveFailures: character.deathSaveFailures,
+            sheetSyncedUpdatedAt: character.updatedAt,
+            conditions: character.conditions,
+            ruleEntryId: null,
+            sortOrder: sortOrder++,
+          };
+        });
+        tx.insert(combatants).values(partyValues).run();
+      }
+
+      // Monster combatants: one row per copy, names suffixed "Goblin 1".."Goblin N" for count>1
+      // (mirrors addCombatant). Token placement fans copies out horizontally from the base point.
+      for (const m of resolvedMonsters) {
+        const token = tokenBySlot.get(m.slotId);
+        const names = m.count > 1 ? Array.from({ length: m.count }, (_, i) => `${m.name} ${i + 1}`) : [m.name];
+        const monsterValues = names.map((n, i) => {
+          let tokenX: number | null = null;
+          let tokenY: number | null = null;
+          if (token) {
+            tokenX = clampPercent(token.tokenX + (m.count > 1 ? (i - (m.count - 1) / 2) * 4 : 0));
+            tokenY = clampPercent(token.tokenY);
+          }
+          return {
+            encounterId: row.id,
+            kind: 'monster' as const,
+            characterId: null,
+            npcId: null,
+            name: n,
+            initiative: null,
+            initMod: m.initMod,
+            hpCurrent: m.hpMax,
+            hpMax: m.hpMax,
+            conditions: '[]',
+            ruleEntryId: m.ruleEntryId,
+            tokenX,
+            tokenY,
+            sortOrder: sortOrder++,
+          };
+        });
+        tx.insert(combatants).values(monsterValues).run();
+      }
+      return row;
+    });
+
+    // Record idempotency AFTER the tx commits.
+    this.commitIdempotency.set(idemKey, encounterRow.id);
+
+    const monsterTotal = resolvedMonsters.reduce((n, m) => n + m.count, 0);
+    const rosterSummary = resolvedMonsters.map((m) => `${m.name}×${m.count}`).join(', ');
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.generate.commit',
+      entityType: 'encounter',
+      entityId: encounterRow.id,
+      campaignId,
+      detail: [
+        `source=${input.source ?? 'wizard'}`,
+        `target=${input.targetBand ?? 'n/a'}`,
+        `party=[${(input.party ?? partyRows.map(() => 0)).length ? (input.party ?? []).join(',') : 'active'}]`,
+        `roster=${rosterSummary || 'none'} (${monsterTotal} monster(s), ${partyRows.length} PC(s))`,
+        mapAttachmentId ? `map=${mapAttachmentId}` : null,
+        input.manualEdits && input.manualEdits.length > 0 ? `manualEdits=${input.manualEdits.join('; ')}` : null,
+      ]
+        .filter(Boolean)
+        .join(' | '),
+    });
+
+    this.emitEncounterEvent('encounter.updated', campaignId, encounterRow.id, encounterRow.hidden);
+    return this.getWithCombatantsOrThrow(encounterRow.id, role);
   }
 
   /**

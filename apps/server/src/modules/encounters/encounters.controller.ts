@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
@@ -66,6 +66,50 @@ export class CampaignEncountersController {
     }
     const role = await this.access.requireMember(user, campaignId);
     return this.encounters.generateEncounter(campaignId, body, role);
+  }
+
+  @Post('preview')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Preview & tune a generated encounter (issue #412)',
+    description:
+      'NON-MUTATING. Assembles a multi-slot roster for a target difficulty and returns per-creature ' +
+      'inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (not just a band), and actionable ' +
+      'warnings (role duplication, action-economy mismatch, missing statblocks, unsupported-system math, ' +
+      'swinginess). Pass back `roster` (the returned plan) with a `tune` op to reroll all/one slot, swap, adjust ' +
+      'count, or pin — deterministic by the per-slot seeds so pinned slots survive re-rolls. Requires campaign ' +
+      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit.',
+  })
+  @ApiResponse({ status: 200, description: 'Read-only preview: roster + inspection + difficulty explanation + warnings + fallbacks.' })
+  async preview(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: EncounterPreviewDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.encounters.previewEncounter(campaignId, body, role);
+  }
+
+  @Post('commit')
+  @HttpCode(201)
+  @ApiOperation({
+    summary: 'Commit a tuned encounter roster (issue #412)',
+    description:
+      'dm role + write mode required. Atomically creates the encounter with its combatants and optional ' +
+      'location/quest/session links, battle map/grid, and token placement in ONE transaction — never a partial ' +
+      'encounter or duplicate combatants. IDEMPOTENT: a retry with the same `idempotencyKey` returns the SAME ' +
+      'encounter. Created hidden + `preparing` by default (DM prep, #262). Audits source, inputs, roster, and manual edits.',
+  })
+  @ApiResponse({ status: 201, description: '{ encounter, idempotent }. idempotent=true when a prior commit with this key was replayed.' })
+  @ApiResponse({ status: 400, description: 'A roster creature/link/map is invalid (refresh the preview).' })
+  @ApiResponse({ status: 403, description: 'Requires the dm role + write mode.' })
+  async commit(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: EncounterCommitDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.encounters.commitGeneratedEncounter(campaignId, body, user, role);
   }
 
   @Get()

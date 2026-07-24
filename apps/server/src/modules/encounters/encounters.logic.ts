@@ -18,6 +18,7 @@ import type {
   EncounterEvent,
   EncounterShape,
   EncounterStatus,
+  EncounterWarning,
   HpBand,
   TurnPrompt,
 } from '@campfire/schema';
@@ -774,4 +775,358 @@ export function deriveEndTurnPrompts(c: TurnPromptCombatant, slots: readonly Act
     }
   }
   return prompts;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive multi-slot roster build + deterministic tune (issue #412).
+//
+// The #304 generator produces a single homogeneous line. The preview-and-tune wizard needs
+// a multi-slot roster the DM can reroll/swap/pin one slot at a time, reproducibly. These pure
+// functions generalize the generator: a "slot" is a stack of identical creatures, and each
+// (re)generation fills ONE slot against the difficulty contributed by the OTHER slots — reusing
+// the exact #58 math (computeEncounterDifficulty) over the whole roster so the number-of-monsters
+// multiplier is always honoured. Deterministic given the slot seeds; no DB, no `this`.
+// ---------------------------------------------------------------------------
+
+/** One roster slot's persistent plan — the round-trippable state a tune operation mutates. */
+export interface RosterSlotPlan {
+  slotId: string;
+  ruleEntryId: number;
+  count: number;
+  pinned: boolean;
+  seed: number;
+}
+
+/** A deterministic tuning operation applied to a roster plan (issue #412). */
+export type RosterTuneOp =
+  | { op: 'reroll-all'; seed?: number }
+  | { op: 'reroll-slot'; slotId: string; seed?: number }
+  | { op: 'swap-slot'; slotId: string; ruleEntryId: number }
+  | { op: 'adjust-count'; slotId: string; count: number }
+  | { op: 'pin'; slotId: string; pinned: boolean }
+  | { op: 'add-slot'; seed?: number }
+  | { op: 'remove-slot'; slotId: string };
+
+export interface BuildRosterOptions {
+  partyLevels: number[];
+  targetBand: DifficultyBand;
+  candidates: GeneratorCandidate[];
+  maxCount: number;
+  shape?: EncounterShape;
+  seed: number;
+  /** Existing plan being tuned; omit for a fresh generation. */
+  plan?: RosterSlotPlan[];
+  tune?: RosterTuneOp;
+}
+
+export interface BuildRosterResult {
+  plan: RosterSlotPlan[];
+  picks: GeneratorPick[];
+  difficulty: EncounterDifficulty;
+  shape: EncounterShape;
+  seed: number;
+  matchedBand: boolean;
+}
+
+/** Deterministic next seed from a prior one (LCG step) — used when a reroll omits an explicit seed. */
+function deriveSeed(prev: number, salt = 0): number {
+  return (Math.imul(prev ^ salt, 1664525) + 1013904223) >>> 0;
+}
+
+/** Flatten a plan into the per-copy CR list the #58 math consumes (missing candidate -> null CR). */
+function crsForPlan(plan: RosterSlotPlan[], byId: Map<number, GeneratorCandidate>): (number | null)[] {
+  const crs: (number | null)[] = [];
+  for (const s of plan) {
+    const cand = byId.get(s.ruleEntryId);
+    for (let i = 0; i < s.count; i++) crs.push(cand ? cand.cr : null);
+  }
+  return crs;
+}
+
+/** Total number of creatures across a plan. */
+function totalCopies(plan: RosterSlotPlan[]): number {
+  return plan.reduce((n, s) => n + s.count, 0);
+}
+
+/**
+ * Pick the best {candidate, count} to fill ONE slot, given the CRs already contributed by the
+ * other slots (`fixedCrs`). Reuses computeEncounterDifficulty over the COMBINED roster so the
+ * group-size multiplier is applied to the whole fight, not per slot. Deterministic by `seed`:
+ * the first (in seeded order) combination whose whole-roster band equals the target wins; else
+ * the closest by band distance then by adjusted-XP gap to the target threshold. Returns null
+ * when there are no usable candidates or no room left (maxSlotCount <= 0).
+ */
+function fillSlot(
+  fixedCrs: (number | null)[],
+  partyLevels: number[],
+  targetBand: DifficultyBand,
+  usable: GeneratorCandidate[],
+  maxSlotCount: number,
+  shape: EncounterShape | undefined,
+  seed: number,
+): GeneratorPick | null {
+  if (usable.length === 0 || maxSlotCount < 1) return null;
+  const rng = mulberry32(seed);
+  const [rawMin, rawMax] = shapeCountRange(shape, maxSlotCount);
+  const countMin = Math.max(1, Math.min(rawMin, maxSlotCount));
+  const countMax = Math.max(countMin, Math.min(rawMax, maxSlotCount));
+  const thresholds = computeEncounterDifficulty(partyLevels, []).thresholds;
+  const targetXp =
+    targetBand === 'trivial'
+      ? Math.max(1, Math.floor(thresholds.easy / 2))
+      : thresholds[targetBand as 'easy' | 'medium' | 'hard' | 'deadly'];
+
+  const shuffled = seededShuffle(usable, rng);
+  let best: { pick: GeneratorPick; score: number; xpGap: number } | null = null;
+  for (const m of shuffled) {
+    for (let n = countMin; n <= countMax; n++) {
+      const crs = [...fixedCrs, ...Array.from({ length: n }, () => m.cr)];
+      const difficulty = computeEncounterDifficulty(partyLevels, crs);
+      if (difficulty.band === targetBand) {
+        return { ...m, count: n };
+      }
+      const score = bandDistanceOrMax(difficulty.band, targetBand);
+      const xpGap = Math.abs(difficulty.adjustedXp - targetXp);
+      if (best === null || score < best.score || (score === best.score && xpGap < best.xpGap)) {
+        best = { pick: { ...m, count: n }, score, xpGap };
+      }
+    }
+  }
+  return best ? best.pick : null;
+}
+
+/** Next free `s<N>` slot id for a plan. */
+function nextSlotId(plan: RosterSlotPlan[]): string {
+  let max = 0;
+  for (const s of plan) {
+    const m = /^s(\d+)$/.exec(s.slotId);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `s${max + 1}`;
+}
+
+/** CRs contributed by every slot EXCEPT the one at `exceptIndex`. */
+function fixedCrsExcept(plan: RosterSlotPlan[], exceptIndex: number, byId: Map<number, GeneratorCandidate>): (number | null)[] {
+  return crsForPlan(
+    plan.filter((_, i) => i !== exceptIndex),
+    byId,
+  );
+}
+
+/**
+ * Build or tune a multi-slot encounter roster (issue #412). With no `plan`/`tune` it freshly
+ * generates a single primary slot (identical to the #304 generator). With a `tune` op it applies
+ * the deterministic operation to the supplied plan. Always returns the normalized plan (to
+ * round-trip), the resolved picks, and the whole-roster #58 difficulty.
+ */
+export function buildEncounterRoster(opts: BuildRosterOptions): BuildRosterResult {
+  const { partyLevels, targetBand, candidates, maxCount, shape } = opts;
+  const byId = new Map<number, GeneratorCandidate>(candidates.map((c) => [c.ruleEntryId, c]));
+  const usable = candidates.filter((c) => c.xp > 0);
+  let masterSeed = opts.seed >>> 0;
+  let plan: RosterSlotPlan[] = (opts.plan ?? []).map((s) => ({ ...s }));
+
+  const finalize = (): BuildRosterResult => {
+    // Drop slots whose creature no longer resolves AND that carry no count, keep others so the
+    // missing-statblock warning can surface. Recompute picks + difficulty over the whole roster.
+    const picks: GeneratorPick[] = plan.map((s) => {
+      const cand = byId.get(s.ruleEntryId);
+      return cand
+        ? { ...cand, count: s.count }
+        : { ruleEntryId: s.ruleEntryId, name: '', entryType: 'monster' as const, cr: null, xp: 0, hpMax: null, count: s.count };
+    });
+    const difficulty = computeEncounterDifficulty(partyLevels, crsForPlan(plan, byId));
+    const count = totalCopies(plan);
+    return {
+      plan,
+      picks,
+      difficulty,
+      shape: shape ?? shapeForCount(count),
+      seed: masterSeed,
+      matchedBand: difficulty.band === targetBand,
+    };
+  };
+
+  // Fresh generation: no existing plan and no tune op -> assemble the primary slot.
+  if (!opts.tune && (!opts.plan || opts.plan.length === 0)) {
+    const pick = fillSlot([], partyLevels, targetBand, usable, maxCount, shape, masterSeed);
+    plan = pick ? [{ slotId: 's1', ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: masterSeed }] : [];
+    return finalize();
+  }
+
+  const tune = opts.tune;
+  if (!tune) return finalize();
+
+  switch (tune.op) {
+    case 'reroll-all': {
+      const newSeed = (tune.seed ?? deriveSeed(masterSeed, 0x9e3779b9)) >>> 0;
+      masterSeed = newSeed;
+      const rebuilt: RosterSlotPlan[] = [];
+      // Keep pinned slots verbatim; refill each non-pinned slot against the pinned + already
+      // refilled context so the whole roster converges on the target band.
+      const pinned = plan.filter((s) => s.pinned);
+      let idx = 0;
+      for (const s of plan) {
+        if (s.pinned) {
+          rebuilt.push({ ...s });
+          continue;
+        }
+        const fixed = crsForPlan([...pinned, ...rebuilt.filter((r) => !r.pinned)], byId);
+        const used = totalCopies([...pinned, ...rebuilt.filter((r) => !r.pinned)]);
+        const slotSeed = deriveSeed(newSeed, idx + 1);
+        const pick = fillSlot(fixed, partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+        if (pick) rebuilt.push({ slotId: s.slotId, ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: slotSeed });
+        idx++;
+      }
+      plan = rebuilt;
+      break;
+    }
+    case 'reroll-slot': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0 && !plan[i].pinned) {
+        const slotSeed = (tune.seed ?? deriveSeed(plan[i].seed, i + 1)) >>> 0;
+        const used = totalCopies(plan) - plan[i].count;
+        const pick = fillSlot(fixedCrsExcept(plan, i, byId), partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+        if (pick) plan[i] = { ...plan[i], ruleEntryId: pick.ruleEntryId, count: pick.count, seed: slotSeed };
+      }
+      break;
+    }
+    case 'swap-slot': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0 && byId.has(tune.ruleEntryId)) {
+        const used = totalCopies(plan) - plan[i].count;
+        const count = Math.max(1, Math.min(plan[i].count, Math.max(1, maxCount - used)));
+        plan[i] = { ...plan[i], ruleEntryId: tune.ruleEntryId, count };
+      }
+      break;
+    }
+    case 'adjust-count': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0) {
+        const used = totalCopies(plan) - plan[i].count;
+        plan[i] = { ...plan[i], count: Math.max(1, Math.min(tune.count, Math.max(1, maxCount - used))) };
+      }
+      break;
+    }
+    case 'pin': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0) plan[i] = { ...plan[i], pinned: tune.pinned };
+      break;
+    }
+    case 'add-slot': {
+      const slotSeed = (tune.seed ?? deriveSeed(masterSeed, plan.length + 1)) >>> 0;
+      const used = totalCopies(plan);
+      const pick = fillSlot(crsForPlan(plan, byId), partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+      if (pick) plan.push({ slotId: nextSlotId(plan), ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: slotSeed });
+      break;
+    }
+    case 'remove-slot': {
+      plan = plan.filter((s) => s.slotId !== tune.slotId);
+      break;
+    }
+  }
+  return finalize();
+}
+
+/**
+ * Derive the actionable roster warnings a preview surfaces (issue #412): role duplication,
+ * action-economy imbalance, missing statblocks, unsupported-system math, an unknown budget, a
+ * swingy fight, an empty roster, and a best-effort band miss. Pure over the resolved picks +
+ * party + already-computed difficulty; adds no new math. Ordered most-severe-ish first.
+ */
+export function deriveEncounterRosterWarnings(
+  picks: GeneratorPick[],
+  partyLevels: number[],
+  difficulty: EncounterDifficulty,
+  matchedBand: boolean,
+  targetBand: DifficultyBand,
+): EncounterWarning[] {
+  const warnings: EncounterWarning[] = [];
+  const monsterCount = picks.reduce((n, p) => n + p.count, 0);
+  const partySize = partyLevels.length;
+
+  if (picks.length === 0) {
+    warnings.push({ code: 'empty-roster', severity: 'warn', message: 'No creatures selected yet — add or reroll a slot to build the encounter.' });
+  }
+
+  if (difficulty.status === 'unsupported') {
+    warnings.push({
+      code: 'unsupported-system',
+      severity: 'warn',
+      message: difficulty.warnings[0] ?? 'This rule system has no built-in encounter budget, so difficulty cannot be estimated.',
+    });
+  } else if (difficulty.status === 'unknown') {
+    warnings.push({
+      code: 'difficulty-unknown',
+      severity: 'warn',
+      message: 'The selected creatures have no CR/XP, so the difficulty cannot be scored — add ratings to their statblocks.',
+    });
+  }
+
+  // Missing statblock: a picked creature with no resolvable HP or CR.
+  const missing = picks.filter((p) => p.hpMax === null || p.cr === null);
+  if (missing.length > 0) {
+    const names = missing.map((p) => p.name || `#${p.ruleEntryId}`).slice(0, 5).join(', ');
+    warnings.push({
+      code: 'missing-statblock',
+      severity: 'warn',
+      message: `${missing.length} creature${missing.length === 1 ? '' : 's'} lack HP/CR data (${names}) — HP or difficulty may be incomplete.`,
+    });
+  }
+
+  // Role duplication: the same statblock across two or more distinct slots.
+  const idCounts = new Map<number, number>();
+  for (const p of picks) idCounts.set(p.ruleEntryId, (idCounts.get(p.ruleEntryId) ?? 0) + 1);
+  const dupes = [...idCounts.entries()].filter(([, n]) => n > 1);
+  if (dupes.length > 0) {
+    warnings.push({
+      code: 'role-duplication',
+      severity: 'info',
+      message: 'The same statblock fills more than one slot — consider swapping one for variety in roles/tactics.',
+    });
+  }
+
+  // Action economy: a lone monster against a full party, or a swarm that badly outnumbers it.
+  if (partySize > 0 && monsterCount > 0) {
+    if (monsterCount === 1 && partySize >= 3) {
+      warnings.push({
+        code: 'action-economy',
+        severity: 'info',
+        message: `A single monster takes one turn per round against ${partySize} PCs — it may be focus-fired down before acting much. Add minions or legendary actions.`,
+      });
+    } else if (monsterCount >= partySize * 3) {
+      warnings.push({
+        code: 'action-economy',
+        severity: 'warn',
+        message: `${monsterCount} monsters vs ${partySize} PCs is a heavy action-economy imbalance — the party may be overwhelmed regardless of the XP band.`,
+      });
+    }
+  }
+
+  // Swinginess: a lone big creature (high variance), or a fight well past Deadly.
+  if (difficulty.status === 'ok') {
+    if (monsterCount > 0 && monsterCount <= 1 && (difficulty.band === 'hard' || difficulty.band === 'deadly')) {
+      warnings.push({
+        code: 'swinginess',
+        severity: 'info',
+        message: 'A single high-threat creature makes the fight swingy — one lucky crit or failed save can decide it. Consider splitting the budget across two creatures.',
+      });
+    } else if (difficulty.adjustedXp >= Math.round(difficulty.thresholds.deadly * 1.5) && difficulty.thresholds.deadly > 0) {
+      warnings.push({
+        code: 'swinginess',
+        severity: 'warn',
+        message: 'Adjusted XP is well above the Deadly threshold — this fight risks a TPK. Reduce counts or pick weaker creatures unless a lethal set-piece is intended.',
+      });
+    }
+  }
+
+  if (!matchedBand && picks.length > 0 && difficulty.status === 'ok') {
+    warnings.push({
+      code: 'band-miss',
+      severity: 'info',
+      message: `The compendium could not field an exact "${targetBand}" group for this party — the closest achievable roster is shown (${difficulty.label}).`,
+    });
+  }
+
+  return warnings;
 }

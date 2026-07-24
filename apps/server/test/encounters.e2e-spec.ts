@@ -3528,6 +3528,141 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     });
   });
 
+  // Issue #412: preview-and-tune wizard. Reuses the 4×L5 party + CR-2 goblin + CR-10 ogre above.
+  describe('encounter preview / tune / idempotent commit (issue #412)', () => {
+    let previewGoblinId: number;
+
+    beforeAll(async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const [pack] = await db
+        .insert(rulePacks)
+        .values({ slug: 'preview-pack', name: 'Preview Pack', version: '1', license: 'OGL', sourceUrl: '', installedAt: ts, entryCount: 1 })
+        .returning();
+      const [goblin] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'preview-goblin',
+          name: 'Preview Goblin',
+          type: 'monster',
+          summary: 'CR 2',
+          body: '',
+          dataJson: JSON.stringify({ challengeRating: 2, hitPoints: 22, armor_class: 15, type: 'humanoid', actions: [{ name: 'Scimitar', desc: 'Melee attack.' }], dexterity_save: 4 }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      previewGoblinId = goblin.id;
+    });
+
+    it('returns a roster with per-creature inspection, a difficulty explanation, and warnings', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 42, filters: { maxCr: 3 } });
+      expect(res.status).toBe(200);
+      expect(res.body.roster.length).toBeGreaterThan(0);
+      const slot = res.body.roster[0];
+      expect(typeof slot.slotId).toBe('string');
+      expect(slot.inspection).toBeDefined();
+      expect(slot.inspection).toHaveProperty('armorClass');
+      expect(slot.inspection).toHaveProperty('actions');
+      // Explanation is more than a color band.
+      expect(res.body.explanation.headline.length).toBeGreaterThan(0);
+      expect(Array.isArray(res.body.explanation.detail)).toBe(true);
+      expect(Array.isArray(res.body.warnings)).toBe(true);
+      // The plan round-trips.
+      expect(res.body.plan[0].slotId).toBe(slot.slotId);
+    });
+
+    it('tunes deterministically: reroll one slot is reproducible and pin survives reroll-all', async () => {
+      const server = ctx.app.getHttpServer();
+      const base = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: 7 });
+      expect(base.status).toBe(200);
+      const plan = base.body.plan;
+      const slotId = plan[0].slotId;
+
+      const a = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'reroll-slot', slotId, seed: 321 } });
+      const b = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'reroll-slot', slotId, seed: 321 } });
+      expect(a.body.plan).toEqual(b.body.plan);
+
+      const pinned = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'pin', slotId, pinned: true } });
+      const afterAll = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: pinned.body.seed, roster: pinned.body.plan, tune: { op: 'reroll-all', seed: 9999 } });
+      const survivor = afterAll.body.plan.find((s: { slotId: string }) => s.slotId === slotId);
+      expect(survivor).toBeDefined();
+      expect(survivor.ruleEntryId).toBe(pinned.body.plan[0].ruleEntryId);
+      expect(survivor.count).toBe(pinned.body.plan[0].count);
+    });
+
+    it('commits a tuned roster atomically and is idempotent by key', async () => {
+      const server = ctx.app.getHttpServer();
+      const preview = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 3 } });
+      expect(preview.status).toBe(200);
+      const key = `commit-${Date.now()}`;
+      const body = { idempotencyKey: key, name: 'Tuned Ambush', targetBand: 'medium', roster: preview.body.plan, source: 'wizard' };
+
+      const first = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/commit`).set(dm).send(body);
+      expect(first.status).toBe(201);
+      expect(first.body.idempotent).toBe(false);
+      expect(first.body.encounter.name).toBe('Tuned Ambush');
+      expect(first.body.encounter.status).toBe('preparing');
+      expect(first.body.encounter.hidden).toBe(true);
+      const monsters = (first.body.encounter.combatants as Array<{ kind: string }>).filter((c) => c.kind === 'monster');
+      expect(monsters.length).toBeGreaterThan(0);
+      const encounterId = first.body.encounter.id;
+
+      // Retry with the same key -> same encounter, no duplicate combatants.
+      const second = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/commit`).set(dm).send(body);
+      expect(second.status).toBe(201);
+      expect(second.body.idempotent).toBe(true);
+      expect(second.body.encounter.id).toBe(encounterId);
+      expect(second.body.encounter.combatants.length).toBe(first.body.encounter.combatants.length);
+    });
+
+    it('a non-DM may preview but not commit', async () => {
+      const server = ctx.app.getHttpServer();
+      const preview = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(player)
+        .send({ difficulty: 'easy', seed: 3 });
+      expect(preview.status).toBe(200);
+      const commit = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/commit`)
+        .set(player)
+        .send({ idempotencyKey: 'nope', roster: preview.body.plan.length ? preview.body.plan : [{ slotId: 's1', ruleEntryId: previewGoblinId, count: 1, pinned: false, seed: 1 }] });
+      expect(commit.status).toBe(403);
+    });
+
+    it('rejects a commit that references a non-existent rule entry', async () => {
+      const server = ctx.app.getHttpServer();
+      const commit = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/commit`)
+        .set(dm)
+        .send({ idempotencyKey: `bad-${Date.now()}`, roster: [{ slotId: 's1', ruleEntryId: 99999999, count: 1, pinned: false, seed: 1 }] });
+      expect(commit.status).toBe(400);
+    });
+  });
+
   // Issue #262: a DM's prepared, not-yet-sprung fight must not leak its combatant roster or
   // computed 5e difficulty to players. hidden gates the encounter WHOLESALE for a non-DM.
   describe('hidden encounter secrecy (issue #262)', () => {
