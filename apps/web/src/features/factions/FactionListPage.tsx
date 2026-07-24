@@ -161,8 +161,8 @@ export default function FactionListPage() {
                     {initials(faction.name)}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="font-bold text-slate-200 text-sm truncate">{faction.name}</p>
-                    {faction.kind && <p className="text-[11.5px] text-slate-500 truncate">{faction.kind}</p>}
+                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={faction.name} aria-label={`Faction: ${faction.name}`}>{faction.name}</p>
+                    {faction.kind && <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={faction.kind}>{faction.kind}</p>}
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">

@@ -2204,8 +2204,38 @@ function migrateCampaignPurgeTombstones(sqlite: Database.Database): void {
  * it is the canonical sequence in which an old-shaped DB is upgraded (mirrors the
  * historical call order in openDatabase). Append new migrations to the END only.
  */
-function migrateImportJobsTable(sqlite: Database.Database): void {
+function _migrateImportJobsTable(sqlite: Database.Database): void {
   sqlite.exec(`CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_hash TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued', progress TEXT NOT NULL DEFAULT '{}', cursor TEXT, actor_id TEXT NOT NULL DEFAULT '', started_at TEXT, updated_at TEXT NOT NULL, completed_at TEXT, outcome TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status); CREATE INDEX IF NOT EXISTS idx_import_jobs_created_at ON import_jobs(created_at);`);
+}
+
+function migrateStarfinderCombatState(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (hasCharactersTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+    const has = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!has('sp_current')) sqlite.exec('ALTER TABLE characters ADD COLUMN sp_current INTEGER NOT NULL DEFAULT 0');
+    if (!has('sp_max')) sqlite.exec('ALTER TABLE characters ADD COLUMN sp_max INTEGER NOT NULL DEFAULT 0');
+    if (!has('rp_current')) sqlite.exec('ALTER TABLE characters ADD COLUMN rp_current INTEGER NOT NULL DEFAULT 0');
+    if (!has('rp_max')) sqlite.exec('ALTER TABLE characters ADD COLUMN rp_max INTEGER NOT NULL DEFAULT 0');
+    if (!has('eac')) sqlite.exec('ALTER TABLE characters ADD COLUMN eac INTEGER');
+    if (!has('kac')) sqlite.exec('ALTER TABLE characters ADD COLUMN kac INTEGER');
+  }
+
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (hasCombatantsTable) {
+    const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+    const has = (name: string): boolean => columns.some((c) => c.name === name);
+    if (!has('sp_current')) sqlite.exec('ALTER TABLE combatants ADD COLUMN sp_current INTEGER NOT NULL DEFAULT 0');
+    if (!has('sp_max')) sqlite.exec('ALTER TABLE combatants ADD COLUMN sp_max INTEGER NOT NULL DEFAULT 0');
+    if (!has('rp_current')) sqlite.exec('ALTER TABLE combatants ADD COLUMN rp_current INTEGER NOT NULL DEFAULT 0');
+    if (!has('rp_max')) sqlite.exec('ALTER TABLE combatants ADD COLUMN rp_max INTEGER NOT NULL DEFAULT 0');
+    if (!has('eac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN eac INTEGER');
+    if (!has('kac')) sqlite.exec('ALTER TABLE combatants ADD COLUMN kac INTEGER');
+  }
 }
 
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
@@ -2286,8 +2316,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0075_check_requests', run: migrateCheckRequestsTable },
   { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
   { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
-  { name: '0078_import_jobs', run: migrateImportJobsTable },
   { name: '0079_notification_preferences', run: migrateNotificationPreferencesTables },
+  { name: '0080_starfinder_combat_state', run: migrateStarfinderCombatState },
 ];
 
 /**

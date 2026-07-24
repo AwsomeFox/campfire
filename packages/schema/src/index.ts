@@ -316,6 +316,7 @@ export const CharacterAction = z.object({
   kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
   toHit: z.string().max(20).default(''),
   damage: z.string().max(80).default(''),
+  targetAc: z.string().max(20).default(''), // "EAC", "KAC", "AC" etc.
   notes: z.string().max(500).default(''),
   spec: ActionSpec.optional(),
 });
@@ -349,8 +350,14 @@ export const Character = z.object({
   ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
+  eac: z.number().int().nullable().default(null),
+  kac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(1).default(10),
+  spCurrent: z.number().int().min(0).default(0),
+  spMax: z.number().int().min(0).default(0),
+  rpCurrent: z.number().int().min(0).default(0),
+  rpMax: z.number().int().min(0).default(0),
   // Issue #711: persistent echo of the per-combatant death/temp-HP subsystem
   // (originally issue #57). The encounter tracker is the source of truth during
   // a fight; on /end these four fields are reconciled back onto the sheet so a
@@ -5992,6 +5999,12 @@ export const Combatant = z.object({
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
   hpMax: z.number().int().min(1).nullable().default(10),
+  spCurrent: z.number().int().min(0).nullable().default(0),
+  spMax: z.number().int().min(0).nullable().default(0),
+  rpCurrent: z.number().int().min(0).nullable().default(0),
+  rpMax: z.number().int().min(0).nullable().default(0),
+  eac: z.number().int().nullable().default(null),
+  kac: z.number().int().nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.
   // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
@@ -6054,6 +6067,12 @@ export const CombatantCreate = z.object({
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
+  spDelta: z.number().int().optional(),
+  spSet: z.number().int().nonnegative().optional(),
+  rpDelta: z.number().int().optional(),
+  rpSet: z.number().int().nonnegative().optional(),
+  eac: z.number().int().nullable().optional(),
+  kac: z.number().int().nullable().optional(),
   // Temp HP absolute set (issue #57). 0 clears it.
   hpTemp: z.number().int().min(0).optional(),
   // Issue #620: explicit attacker attribution for damage/heal/death log events. When
@@ -6070,6 +6089,7 @@ export const CombatantUpdate = z.object({
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
+  deathState: DeathState.optional(),
   // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
   // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
   // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at
@@ -6110,6 +6130,10 @@ export const CombatantUpdate = z.object({
 export const HpSyncSlice = z.object({
   hpCurrent: z.number().int(),
   hpTemp: z.number().int().min(0),
+  spCurrent: z.number().int().min(0).default(0),
+  spMax: z.number().int().min(0).default(0),
+  rpCurrent: z.number().int().min(0).default(0),
+  rpMax: z.number().int().min(0).default(0),
   deathState: DeathState,
   deathSaveSuccesses: z.number().int().min(0).max(3),
   deathSaveFailures: z.number().int().min(0).max(3),

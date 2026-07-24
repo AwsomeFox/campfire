@@ -23,6 +23,7 @@ import {
   filterCheckCatalog,
   formatCheckBreakdown,
   isResolvableSpec,
+  STARFINDER_ADAPTER_ID,
 } from '@campfire/schema';
 import {
   ABILITY_KEYS,
@@ -111,6 +112,7 @@ export function CharacterStatCard({
     regionLabel: `${character.name} character sheet`,
   });
   const adapter = ruleSystemAdapter(ruleSystem);
+  const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const roller = useRoller(campaignId ?? 0, onError ?? NOOP);
   const interactive = campaignId != null;
 
@@ -206,10 +208,16 @@ export function CharacterStatCard({
                 {subtitle}
               </span>
             )}
-            {character.ac != null && (
-              <span className="tag tag-neutral" style={{ fontSize: 10, marginLeft: 'auto' }} title="Armor Class">
-                AC {character.ac}
+            {isStarfinder || character.eac != null || character.kac != null ? (
+              <span className="tag tag-neutral" style={{ fontSize: 10, marginLeft: 'auto' }} title="Energy AC (EAC) / Kinetic AC (KAC)">
+                EAC {character.eac ?? '—'} · KAC {character.kac ?? character.ac ?? '—'}
               </span>
+            ) : (
+              character.ac != null && (
+                <span className="tag tag-neutral" style={{ fontSize: 10, marginLeft: 'auto' }} title="Armor Class">
+                  AC {character.ac}
+                </span>
+              )
             )}
           </div>
 

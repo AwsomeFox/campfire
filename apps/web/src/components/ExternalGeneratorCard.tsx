@@ -104,6 +104,7 @@ export function ExternalGeneratorCard({
   const inputRef = useRef<HTMLInputElement>(null);
   // The object URL we own and must revoke to avoid a blob leak (mirrors ImageUpload).
   const previewUrlRef = useRef<string | null>(null);
+  const prevAcquisitionActiveRef = useRef(acquisitionActive);
 
   // Revoke any staged preview URL on unmount.
   useEffect(
@@ -112,6 +113,23 @@ export function ExternalGeneratorCard({
     },
     [],
   );
+
+  // Each card stays mounted while the DM browses generators. Drop staged state when this
+  // card is no longer the active round trip so blob URLs aren't leaked and stale previews
+  // don't resurrect if the DM returns later. Only react to true→false transitions — not
+  // the initial mount when acquisitionActive starts false.
+  useEffect(() => {
+    const wasActive = prevAcquisitionActiveRef.current;
+    prevAcquisitionActiveRef.current = acquisitionActive;
+    if (acquisitionActive || !wasActive) return;
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = null;
+    setFile(null);
+    setPreviewUrl(null);
+    setDims(null);
+    setProblem(null);
+    setTitle('');
+  }, [acquisitionActive]);
 
   const stageFile = useCallback(
     async (picked: File) => {
@@ -125,8 +143,11 @@ export function ExternalGeneratorCard({
       setFile(picked);
       setPreviewUrl(url);
       setTitle((t) => t || titleFromFile(picked));
+      setDims(null);
+      setProblem(null);
       // Decode dimensions so the validator (and the DM) can see them, then validate.
       const decoded = await readImageDimensions(picked);
+      if (previewUrlRef.current !== url) return;
       setDims(decoded);
       setProblem(
         describeExportProblem({
