@@ -70,6 +70,7 @@ const ALL_TOOLS = [
   'list_scheduled_sessions',
   'get_next_session',
   'get_calendar_feed',
+  'list_entity_revisions',
   // write
   'set_my_support_preference',
   'delete_my_support_preference',
@@ -167,6 +168,8 @@ const ALL_TOOLS = [
   'set_rsvp',
   'rotate_calendar_feed',
   'disable_calendar_feed',
+  'import_ddb_character',
+  'restore_entity_revision',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -249,7 +252,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(148);
+    expect(tools).toHaveLength(151);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
