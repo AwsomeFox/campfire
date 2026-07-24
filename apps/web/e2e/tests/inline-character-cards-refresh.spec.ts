@@ -74,8 +74,10 @@ test.describe('inline character cards — live sheet refresh', () => {
       await expect(page.getByRole('button', { name: /STR\s*10\s*\(\+0\)/i })).toHaveCount(0);
 
       await updatedStr.click();
-      // Roll banner should show the STR check; announcer also echoes it (avoid strict-mode dual match).
-      await expect(page.getByText('Sheet Sync PC · STR check', { exact: true })).toBeVisible({ timeout: 10_000 });
+      // Roll banner should show the STR check with its transparent, server-computed breakdown
+      // (issue #415: the encounter card resolves checks through the rule-system roll catalog).
+      // Announcer also echoes it (avoid strict-mode dual match).
+      await expect(page.getByText('Sheet Sync PC · STR check (STR +4 = +4)', { exact: true })).toBeVisible({ timeout: 10_000 });
       await expect(page.getByText(/1d20\+4/i).first()).toBeVisible();
     } finally {
       // End before delete so a failed DELETE cannot leave a RUNNING fight that

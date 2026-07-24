@@ -37,6 +37,8 @@ export const queryKeys = {
   /** All encounters in a campaign (the list surface). */
   campaignEncounters: (campaignId: number) => ['campaign', campaignId, 'encounters'] as const,
   campaignCharacters: (campaignId: number) => ['campaign', campaignId, 'characters'] as const,
+  /** DM-initiated check requests (issue #415) — the DM-request → player-prompt → roll loop. */
+  campaignCheckRequests: (campaignId: number) => ['campaign', campaignId, 'check-requests'] as const,
   /** The campaign member roster (resolves userId → display name for AI-DM lever surfaces, #340). */
   campaignMembers: (campaignId: number) => ['campaign', campaignId, 'members'] as const,
   /** The party roster (alias surface for character/HP/condition writes). */
@@ -71,6 +73,15 @@ export function invalidateEncounter(client: QueryClient, encounterId: number): v
 export function invalidateCampaignCharacters(client: QueryClient, campaignId: number): void {
   void client.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
   void client.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+}
+
+/**
+ * Invalidate the DM check-request feed (issue #415). Called from the run-session SSE handler on
+ * `check.requested` / `check.resolved` so the DM's request panel and the targeted player's prompt
+ * reconcile without a manual reload.
+ */
+export function invalidateCampaignCheckRequests(client: QueryClient, campaignId: number): void {
+  void client.invalidateQueries({ queryKey: queryKeys.campaignCheckRequests(campaignId) });
 }
 
 // ---------------------------------------------------------------------------
