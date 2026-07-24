@@ -1,10 +1,31 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter, ddbImportSupported } from '@campfire/schema';
-import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
+import {
+  CharacterCreate,
+  CharacterUpdate,
+  HpPatch,
+  ConditionsPatch,
+  SpellSlotPatch,
+  XpPatch,
+  XpAward,
+  LevelUp,
+  normalizeStats,
+  ruleSystemAdapter,
+  ddbImportSupported,
+  // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
+  checkCatalogForAdapter,
+  findCheckInCatalog,
+  checkRollExpr,
+  formatCheckBreakdown,
+  sortCheckCatalog,
+  pf2eDegreeOfSuccess,
+} from '@campfire/schema';
+import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
+import { rollDice } from '../../common/dice';
+import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
+import { auditLog, campaigns, characters, checkRequests, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
@@ -100,6 +121,9 @@ export class CharactersService {
     private readonly revisions: RevisionsService,
     // Thin SSE invalidation for run-session inline character cards (issue #421).
     private readonly events: CampaignEventsService,
+    // Persistence for the shared dice log (issue #415): a catalog check roll lands in the
+    // same feed as a manual /roll, so DM and players see one authoritative result.
+    private readonly rolls: RollsService,
   ) {}
 
   /** Issue #421: id-only sheet invalidation so encounter clients refetch without an encounterId. */
@@ -145,6 +169,243 @@ export class CharactersService {
       .where(eq(campaigns.id, campaignId))
       .limit(1);
     return ruleSystemAdapter(row?.ruleSystem);
+  }
+
+  /**
+   * Issue #415: the roll catalog for a character — every rollable check (ability checks,
+   * skills incl. unproficient, saves, initiative) with an authoritative modifier and a
+   * transparent breakdown, sourced from the campaign's RuleSystemAdapter. Favorites first.
+   * The catalog reads only public sheet numbers (level/stats/saves/skills), so no dmSecret
+   * redaction is needed — it never touches the secret field.
+   */
+  async listChecks(id: number): Promise<RollCheckDefinition[]> {
+    const row = await this.getRowOrThrow(id);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    return sortCheckCatalog(checkCatalogForAdapter(adapter, toDomain(row)));
+  }
+
+  /**
+   * Issue #415: resolve and roll a catalog check server-side. The SERVER computes the
+   * modifier + dice expression from the adapter catalog (the client only names a checkId and
+   * a roll mode), rolls with the shared crypto roller, records the result to the campaign
+   * dice log with a transparent breakdown label, and — for a system that reports degrees of
+   * success (PF2e) with a DC — returns the degree. This is the same authoritative math the
+   * character sheet and encounter card render, so no surface can drift.
+   */
+  async rollCheck(id: number, input: CheckRollRequest, user: RequestUser, role: Role): Promise<CheckRollResponse> {
+    const row = await this.getRowOrThrow(id);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    const character = toDomain(row);
+    const def = findCheckInCatalog(adapter, character, input.checkId);
+    if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${id}`);
+
+    const mode = input.mode ?? 'flat';
+    const expr = checkRollExpr(def, mode);
+    const result = rollDice(expr);
+    const breakdownText = formatCheckBreakdown(def);
+    // The dice-log label carries the label + transparent breakdown, so the shared feed and
+    // the combat log show how the number was reached without any hidden-data leak.
+    result.label = `${character.name} · ${def.label} (${breakdownText})`;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
+    const persisted = await this.rolls.record(row.campaignId, result, user);
+
+    // Degrees of success: PF2e steps a nat-20 up / nat-1 down. The natural die face is the
+    // kept d20 (advantage/disadvantage) or the sole d20 of a flat roll.
+    let degree: CheckRollResponse['degree'];
+    if (def.supportsDegrees && typeof input.dc === 'number') {
+      const naturalRoll = result.kept?.[0] ?? result.rolls[0];
+      degree = pf2eDegreeOfSuccess(result.total, input.dc, naturalRoll);
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: 'character',
+      entityId: id,
+      campaignId: row.campaignId,
+      detail:
+        `${result.label}: ${result.expr} = ${result.total}` +
+        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'}${degree ? `, ${degree}` : ''})` : '') +
+        (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+    });
+
+    return {
+      check: {
+        id: def.id,
+        label: def.label,
+        category: def.category,
+        ability: def.ability,
+        proficiency: def.proficiency,
+        modifier: def.modifier,
+        breakdown: def.breakdown.map((b) => ({ label: b.label, value: b.value })),
+        breakdownText,
+        ...(def.incomplete ? { incomplete: true } : {}),
+      },
+      mode,
+      roll: persisted,
+      ...(degree ? { degree } : {}),
+    };
+  }
+
+  // ---------- DM-initiated check requests (issue #415) ----------
+  // The interactive "DM asks selected players to roll a check/save" loop. A DM creates one
+  // request per target character; the targeted player reads their pending request(s) over a
+  // permission-checked REST read, rolls ONCE via the same rollCheck() path (dice log + audit +
+  // breakdown/degree), and the row is marked resolved. The SSE ticks stay thin (ids only).
+
+  private toCheckRequestDomain(row: typeof checkRequests.$inferSelect, characterName: string): CheckRequest {
+    return {
+      id: row.id,
+      campaignId: row.campaignId,
+      characterId: row.characterId,
+      characterName,
+      encounterId: row.encounterId ?? null,
+      checkId: row.checkId,
+      checkLabel: row.checkLabel,
+      mode: row.mode as CheckRequest['mode'],
+      dc: row.dc ?? null,
+      consequence: row.consequence ? row.consequence : null,
+      status: row.status as CheckRequest['status'],
+      requestedByUserId: row.requestedByUserId,
+      requestedByName: row.requestedByName,
+      rollId: row.rollId ?? null,
+      createdAt: row.createdAt,
+      resolvedAt: row.resolvedAt ?? null,
+    };
+  }
+
+  /**
+   * DM asks one or more target characters to roll `checkId` (issue #415). Validates the check
+   * exists in EACH target's adapter-owned catalog (so a request can never name a check the sheet
+   * can't roll), persists one row per character, and emits a thin `check.requested` tick per row
+   * so each targeted player's client refetches and shows the prompt. Controller gates this to dm.
+   */
+  async requestChecks(campaignId: number, input: CheckRequestCreate, user: RequestUser, role: Role): Promise<CheckRequest[]> {
+    const adapter = await this.adapterForCampaign(campaignId);
+    const mode = input.mode ?? 'flat';
+    const ts = nowIso();
+    const created: CheckRequest[] = [];
+    for (const characterId of input.characterIds) {
+      const charRow = await this.getRowOrThrow(characterId);
+      if (charRow.campaignId !== campaignId) {
+        throw new BadRequestException(`Character ${characterId} is not in campaign ${campaignId}`);
+      }
+      const def = findCheckInCatalog(adapter, toDomain(charRow), input.checkId);
+      if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${characterId}`);
+      const [row] = await this.db
+        .insert(checkRequests)
+        .values({
+          campaignId,
+          characterId,
+          encounterId: input.encounterId ?? null,
+          checkId: input.checkId,
+          checkLabel: def.label,
+          mode,
+          dc: input.dc ?? null,
+          consequence: input.consequence ?? '',
+          status: 'pending',
+          requestedByUserId: user.id,
+          requestedByName: user.name ?? '',
+          rollId: null,
+          createdAt: ts,
+          resolvedAt: null,
+        })
+        .returning();
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'check.request',
+        entityType: 'character',
+        entityId: characterId,
+        campaignId,
+        detail:
+          `Requested ${def.label}` +
+          (input.dc != null ? ` vs DC ${input.dc}` : '') +
+          (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+      });
+      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId, userId: user.id });
+      created.push(this.toCheckRequestDomain(row, charRow.name));
+    }
+    return created;
+  }
+
+  /**
+   * List check requests visible to the caller (issue #415). The DM sees every request in the
+   * campaign; a non-DM sees only requests targeting a character they OWN (the targeted player).
+   * Optional `status` filter ('pending' | 'resolved'). Newest first.
+   */
+  async listCheckRequests(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    opts: { status?: CheckRequest['status'] } = {},
+  ): Promise<CheckRequest[]> {
+    const rows = await this.db
+      .select({ req: checkRequests, characterName: characters.name, ownerUserId: characters.ownerUserId })
+      .from(checkRequests)
+      .innerJoin(characters, eq(checkRequests.characterId, characters.id))
+      .where(
+        opts.status
+          ? and(eq(checkRequests.campaignId, campaignId), eq(checkRequests.status, opts.status))
+          : eq(checkRequests.campaignId, campaignId),
+      )
+      .orderBy(desc(checkRequests.id));
+    const visible = rows.filter(
+      (r) => role === 'dm' || (r.ownerUserId != null && r.ownerUserId === user.id),
+    );
+    return visible.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
+  }
+
+  private async getCheckRequestRowOrThrow(id: number) {
+    const [row] = await this.db.select().from(checkRequests).where(eq(checkRequests.id, id)).limit(1);
+    if (!row) throw new NotFoundException(`Check request ${id} not found`);
+    return row;
+  }
+
+  /** The campaign a check request belongs to — so the controller can gate membership before resolving. */
+  async campaignIdForCheckRequest(id: number): Promise<number> {
+    const row = await this.getCheckRequestRowOrThrow(id);
+    return row.campaignId;
+  }
+
+  /**
+   * The targeted player (owner of the character) — or the DM — answers a pending check request
+   * by rolling ONCE (issue #415). Reuses rollCheck() so the roll lands in the shared dice log
+   * with a transparent breakdown, is audited, and returns the degree of success where the
+   * system reports it. The DM's consequence text + DC ride through to the roll. The request is
+   * then marked resolved (idempotency: a second attempt on a resolved row is a 400), and a thin
+   * `check.resolved` tick lets the DM's client drop the pending row.
+   */
+  async resolveCheckRequest(id: number, user: RequestUser, role: Role): Promise<CheckRequestResolution> {
+    const req = await this.getCheckRequestRowOrThrow(id);
+    const charRow = await this.getRowOrThrow(req.characterId);
+    // dm-or-owner may answer — same gate as writing the sheet.
+    this.assertCanWrite(charRow, user, role);
+    if (req.status === 'resolved') {
+      throw new BadRequestException('This check request has already been answered');
+    }
+    const result = await this.rollCheck(
+      req.characterId,
+      {
+        checkId: req.checkId,
+        mode: (req.mode as CheckRollRequest['mode']) ?? 'flat',
+        ...(req.dc != null ? { dc: req.dc } : {}),
+        ...(req.consequence ? { consequence: req.consequence } : {}),
+      },
+      user,
+      role,
+    );
+    const [updated] = await this.db
+      .update(checkRequests)
+      .set({ status: 'resolved', rollId: result.roll.id, resolvedAt: nowIso() })
+      .where(eq(checkRequests.id, id))
+      .returning();
+    this.events.emit({ type: 'check.resolved', campaignId: req.campaignId, requestId: id, characterId: req.characterId, userId: user.id });
+    return { request: this.toCheckRequestDomain(updated, charRow.name), result };
   }
 
   /**

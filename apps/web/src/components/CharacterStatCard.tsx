@@ -14,25 +14,33 @@
  * total is handed up via `onApplyDamage` so the encounter can apply it to a target.
  * Without a `campaignId` the card is read-only, so it stays reusable elsewhere.
  */
-import { type CSSProperties, type ReactNode } from 'react';
-import type { Character } from '@campfire/schema';
-import { ruleSystemAdapter } from '@campfire/schema';
+import { type CSSProperties, type ReactNode, useMemo, useState } from 'react';
+import type { Character, RollCheckDefinition } from '@campfire/schema';
+import {
+  ruleSystemAdapter,
+  checkCatalogForAdapter,
+  sortCheckCatalog,
+  filterCheckCatalog,
+  formatCheckBreakdown,
+} from '@campfire/schema';
 import {
   ABILITY_KEYS,
-  SKILLS,
   SPELL_LEVELS,
-  profBonus,
   abilityScore,
-  modOf,
   signed,
-  d20Expr,
   toHitExpr,
   damageExpr,
   advFromEvent,
 } from '../lib/characterStats';
-import { useRoller } from '../lib/useRoller';
+import { useRoller, type CheckRollMode } from '../lib/useRoller';
 import { RollResultBanner } from './RollResultBanner';
 import { useDisclosure } from './useDisclosure';
+
+/** Map a modifier-key click to a catalog roll mode (shift = advantage, alt/ctrl/⌘ = disadvantage). */
+function checkModeFromEvent(e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): CheckRollMode {
+  const adv = advFromEvent(e);
+  return adv === 'adv' ? 'advantage' : adv === 'dis' ? 'disadvantage' : 'flat';
+}
 
 const NOOP = () => {};
 
@@ -99,42 +107,62 @@ export function CharacterStatCard({
     regionLabel: `${character.name} character sheet`,
   });
   const adapter = ruleSystemAdapter(ruleSystem);
-  const pb = profBonus(character.level);
   const roller = useRoller(campaignId ?? 0, onError ?? NOOP);
   const interactive = campaignId != null;
 
-  const proficientSkills = SKILLS.map(({ name, ability }) => {
-    const rank = character.skills[name];
-    if (!rank) return null;
-    const mod = modOf(adapter, character, ability) + (rank === 'expertise' ? pb * 2 : pb);
-    return { name, mod, rank };
-  }).filter((s): s is { name: string; mod: number; rank: 'proficient' | 'expertise' } => s !== null);
+  // Issue #415: the adapter-owned roll catalog is the SINGLE source of truth for every
+  // rollable check — the same list (and math) the character sheet renders. Skills include
+  // proficient AND unproficient, so an ordinary check rolls inline; favorites come first.
+  const catalog = useMemo(() => sortCheckCatalog(checkCatalogForAdapter(adapter, character)), [adapter, character]);
+  const saves = catalog.filter((c) => c.category === 'save');
+  const allSkills = catalog.filter((c) => c.category === 'skill');
+
+  // Skills are searchable (favorites first, not proficient-only). The query narrows the list.
+  const [skillQuery, setSkillQuery] = useState('');
+  const skills = useMemo(() => filterCheckCatalog(allSkills, skillQuery), [allSkills, skillQuery]);
 
   const spellLevels = SPELL_LEVELS.filter((lvl) => (character.spellSlots[lvl]?.max ?? 0) > 0);
+
+  /** Roll a catalog check server-side (the server owns the proficiency math). */
+  function rollCheck(def: RollCheckDefinition, e: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): void {
+    if (!interactive) return;
+    const mode = def.supportsAdvantage ? checkModeFromEvent(e) : 'flat';
+    void roller.rollCheck(character.id, def.id, mode);
+  }
 
   const subtitle = [character.species, character.className && `${character.className} ${character.level}`]
     .filter(Boolean)
     .join(' · ');
 
-  /** A d20 check pill (ability check / save / skill) — a button when interactive, else a span. */
-  function CheckPill({ mod, label, rollLabel, accent }: { mod: number; label: string; rollLabel: string; accent?: boolean }) {
-    const cls = accent ? 'tag tag-accent' : 'tag tag-neutral';
-    const text = `${label} ${signed(mod)}`;
+  /**
+   * A catalog-check pill (ability check / save / skill). A button when interactive (rolls
+   * server-side), else a static span. The transparent breakdown ("DEX +3, proficient +2 = +5")
+   * rides in the accessible name + tooltip — the secondary action that opens the modifier.
+   */
+  function CheckPill({ def }: { def: RollCheckDefinition }) {
+    const cls = def.favorite ? 'tag tag-accent' : 'tag tag-neutral';
+    const suffix = def.proficiency === 'expertise' ? ' ◆' : '';
+    const text = `${def.label}${suffix} ${signed(def.modifier)}`;
+    const breakdown = formatCheckBreakdown(def);
+    const incomplete = def.incomplete ? ' — sheet data incomplete' : '';
     if (!interactive) {
       return (
-        <span className={cls} style={PILL}>
+        <span className={cls} style={PILL} title={breakdown}>
           {text}
         </span>
       );
     }
+    const advHint = def.supportsAdvantage ? ROLL_HINT : '';
     return (
       <button
         type="button"
         className={cls}
         style={{ ...PILL, cursor: 'pointer', border: 0 }}
         disabled={roller.rolling}
-        title={`Roll ${rollLabel} (${signed(mod)})${ROLL_HINT}`}
-        onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${rollLabel}`)}
+        data-testid={`check-roll-${def.id}`}
+        title={`Roll ${def.label} — ${breakdown}${incomplete}${advHint}`}
+        aria-label={`Roll ${def.label}: ${breakdown}${incomplete}`}
+        onClick={(e) => rollCheck(def, e)}
       >
         {text}
       </button>
@@ -183,20 +211,24 @@ export function CharacterStatCard({
 
           {interactive && roller.last && <RollResultBanner roll={roller.last} onDismiss={roller.dismiss} />}
 
-          {/* Ability scores — click for an ability check when interactive */}
+          {/* Ability scores — click for an ability check when interactive (server-resolved) */}
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {ABILITY_KEYS.map((k) => {
               const score = abilityScore(character, k);
               const mod = adapter.abilityModifier(score);
               const value = `${score} (${signed(mod)})`;
-              if (!interactive) return <StatChip key={k} label={k} value={value} />;
+              const def = catalog.find((c) => c.id === `ability:${k}`);
+              if (!interactive || !def) return <StatChip key={k} label={k} value={value} />;
               return (
                 <button
                   key={k}
                   type="button"
                   disabled={roller.rolling}
-                  title={`Roll ${k} check (${signed(mod)})${ROLL_HINT}`}
-                  onClick={(e) => void roller.roll(d20Expr(mod, advFromEvent(e)), `${character.name} · ${k} check`)}
+                  data-testid={`check-roll-ability:${k}`}
+                  // No aria-label: the accessible name stays the chip's own text ("STR 10 (+0)")
+                  // so existing name-based locators keep working; the breakdown rides in the title.
+                  title={`Roll ${k} check (${signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
+                  onClick={(e) => rollCheck(def, e)}
                   style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
                 >
                   <StatChip label={k} value={value} />
@@ -205,29 +237,42 @@ export function CharacterStatCard({
             })}
           </div>
 
-          {/* Saving throws */}
-          <Section title="Saving throws">
-            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-              {ABILITY_KEYS.map((k) => {
-                const proficient = character.saveProficiencies.includes(k);
-                const mod = modOf(adapter, character, k) + (proficient ? pb : 0);
-                return <CheckPill key={k} mod={mod} label={k} rollLabel={`${k} save`} accent={proficient} />;
-              })}
-            </div>
-          </Section>
-
-          {/* Proficient skills only — unproficient ones stay off the card to keep it compact */}
-          {proficientSkills.length > 0 && (
-            <Section title="Skills">
+          {/* Saving throws — every ability, proficient (accent) or not */}
+          {saves.length > 0 && (
+            <Section title="Saving throws">
               <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                {proficientSkills.map((s) => (
-                  <CheckPill
-                    key={s.name}
-                    mod={s.mod}
-                    label={s.rank === 'expertise' ? `${s.name} ◆` : s.name}
-                    rollLabel={`${s.name} check`}
-                  />
+                {saves.map((def) => (
+                  <CheckPill key={def.id} def={def} />
                 ))}
+              </div>
+            </Section>
+          )}
+
+          {/* Skills — EVERY skill (issue #415), proficient and not, searchable, favorites first.
+              An unproficient check now rolls inline at its correct modifier instead of hiding. */}
+          {allSkills.length > 0 && (
+            <Section title="Skills">
+              {interactive && (
+                <input
+                  type="search"
+                  value={skillQuery}
+                  onChange={(e) => setSkillQuery(e.target.value)}
+                  placeholder="Search skills…"
+                  aria-label={`Search ${character.name}'s skills`}
+                  data-testid="check-search"
+                  className="input"
+                  style={{ fontSize: 12, minHeight: 32, marginBottom: 4, maxWidth: 220 }}
+                />
+              )}
+              <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                {skills.map((def) => (
+                  <CheckPill key={def.id} def={def} />
+                ))}
+                {skills.length === 0 && (
+                  <span className="text-muted" style={{ fontSize: 12 }}>
+                    No skills match “{skillQuery}”.
+                  </span>
+                )}
               </div>
             </Section>
           )}

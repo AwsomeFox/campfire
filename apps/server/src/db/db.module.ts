@@ -1274,6 +1274,37 @@ function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before DM-initiated check requests (issue #415): the
+ * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
+ * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
+ * indexes) before BOOTSTRAP_SQL runs. Runs with foreign_keys OFF, so the declared FK
+ * REFERENCES never trips a constraint on a fresh DB where campaigns/characters don't exist yet.
+ */
+function migrateCheckRequestsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS check_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+      encounter_id INTEGER,
+      check_id TEXT NOT NULL,
+      check_label TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'flat',
+      dc INTEGER,
+      consequence TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      requested_by_user_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL DEFAULT '',
+      roll_id INTEGER,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
+    CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
+  `);
+}
+
+/**
  * Issue #849: campaign_members.user_id used to be an unconstrained integer, so
  * a typo or stale import could create a "ghost" DM that could never authenticate
  * but still defeated the last-DM guard. SQLite cannot ALTER-ADD a foreign key,
@@ -2145,6 +2176,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0072_combatants_turn_state', run: migrateCombatantsTableForTurnState },
   { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
   { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
+  { name: '0075_check_requests', run: migrateCheckRequestsTable },
 ];
 
 /**
