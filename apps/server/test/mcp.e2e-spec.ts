@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
+import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
 
 interface TextContent {
   type: 'text';
@@ -181,6 +182,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
   let dmToken: string;
   let viewerToken: string;
   let fakeOpen5e: FakeOpen5e;
+  let fakeDdb: FakeDdb;
+  const prevDdbBaseUrl = process.env.DDB_CHARACTER_SERVICE_BASE_URL;
   const clients: Client[] = [];
 
   async function mcpClient(token: string): Promise<Client> {
@@ -194,6 +197,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
   }
 
   beforeAll(async () => {
+    fakeDdb = await startFakeDdb();
+    process.env.DDB_CHARACTER_SERVICE_BASE_URL = fakeDdb.baseUrl;
     ctx = await createTestAppNoDevAuth();
     await ctx.app.listen(0);
     const address = ctx.app.getHttpServer().address() as { port: number };
@@ -244,6 +249,9 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       await client.close().catch(() => undefined);
     }
     await fakeOpen5e.close();
+    await fakeDdb.close();
+    if (prevDdbBaseUrl === undefined) delete process.env.DDB_CHARACTER_SERVICE_BASE_URL;
+    else process.env.DDB_CHARACTER_SERVICE_BASE_URL = prevDdbBaseUrl;
     await closeTestApp(ctx);
   });
 
@@ -2410,6 +2418,21 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(text).toContain('read_inbox');
   });
 
+  it('#565: import_ddb_character imports a public sheet via MCP (before pack uninstall)', async () => {
+    const client = await mcpClient(dmToken);
+    const campRes = await dmAgent
+      .post('/api/v1/campaigns')
+      .send({ name: `565 DDB Import ${Date.now()}`, ruleSystem: 'open5e-srd' });
+    expect(campRes.status).toBe(201);
+    const ddbCampaignId = campRes.body.id as number;
+    const res = await client.callTool({
+      name: 'import_ddb_character',
+      arguments: { campaignId: ddbCampaignId, ddbId: String(PUBLIC_DDB_CHARACTER_ID) },
+    });
+    expect(res.isError).toBeFalsy();
+    expect((parseResult(res) as { ddbId: string }).ddbId).toBe(String(PUBLIC_DDB_CHARACTER_ID));
+  });
+
   // Runs late on purpose: it uninstalls the shared open5e-srd pack, so it must come
   // after every pack-dependent test (lookup_rule, monster combatants) above.
   it('uninstall_rule_pack removes a pack (adminEnabled token only); a plain dm PAT is denied (issue #76)', async () => {
@@ -2703,6 +2726,441 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       const res = await client.callTool({ name: 'disable_calendar_feed', arguments: { campaignId } });
       // Either succeeds or returns isError if no feed exists — either exercises the handler.
       expect(res).toBeDefined();
+    });
+  });
+
+  // ── #565 batch 2: the remaining 35 tools that were registered but never executed ──
+  describe('#565 coverage: remaining read tool handler execution', () => {
+    it('get_arc / get_beat return a story arc and beat by id', async () => {
+      const client = await mcpClient(dmToken);
+      const arc = parseResult(await client.callTool({ name: 'create_arc', arguments: { campaignId, title: '565 Arc' } })) as {
+        id: number;
+      };
+      const beat = parseResult(
+        await client.callTool({ name: 'create_beat', arguments: { arcId: arc.id, title: '565 Beat' } }),
+      ) as { id: number };
+
+      const arcRes = await client.callTool({ name: 'get_arc', arguments: { arcId: arc.id } });
+      expect(arcRes.isError).toBeFalsy();
+      expect((parseResult(arcRes) as { id: number }).id).toBe(arc.id);
+
+      const beatRes = await client.callTool({ name: 'get_beat', arguments: { beatId: beat.id } });
+      expect(beatRes.isError).toBeFalsy();
+      expect((parseResult(beatRes) as { id: number }).id).toBe(beat.id);
+    });
+
+    it('get_encounter_difficulty estimates difficulty for an encounter with monsters', async () => {
+      const client = await mcpClient(dmToken);
+      const enc = parseResult(
+        await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: '565 Difficulty' } }),
+      ) as { id: number };
+      await client.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: enc.id, kind: 'monster', name: '565 Goblin', hpMax: 7 },
+      });
+      const res = await client.callTool({ name: 'get_encounter_difficulty', arguments: { encounterId: enc.id } });
+      expect(res.isError).toBeFalsy();
+      const body = parseResult(res) as { status: string; band: string | null };
+      expect(body.status).toBeDefined();
+      expect(body).toHaveProperty('band');
+    });
+
+    it('get_inventory_item returns one party item by id', async () => {
+      const client = await mcpClient(dmToken);
+      const item = parseResult(
+        await client.callTool({
+          name: 'add_inventory_item',
+          arguments: { campaignId, name: '565 Torch', qty: 3 },
+        }),
+      ) as { id: number };
+      const res = await client.callTool({ name: 'get_inventory_item', arguments: { itemId: item.id } });
+      expect(res.isError).toBeFalsy();
+      expect((parseResult(res) as { name: string }).name).toBe('565 Torch');
+    });
+
+    it('get_comment returns a posted discussion comment', async () => {
+      const client = await mcpClient(dmToken);
+      const quest = parseResult(
+        await client.callTool({ name: 'create_quest', arguments: { campaignId, title: '565 Comment Quest' } }),
+      ) as { id: number };
+      const comment = parseResult(
+        await client.callTool({
+          name: 'post_comment',
+          arguments: { campaignId, entityType: 'quest', entityId: quest.id, body: 'A 565 thread.' },
+        }),
+      ) as { id: number };
+      const res = await client.callTool({ name: 'get_comment', arguments: { commentId: comment.id } });
+      expect(res.isError).toBeFalsy();
+      expect((parseResult(res) as { body: string }).body).toBe('A 565 thread.');
+    });
+
+    it('get_calendar_feed returns feed settings (or nulls when disabled)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'get_calendar_feed', arguments: { campaignId } });
+      expect(res.isError).toBeFalsy();
+      expect(parseResult(res)).toBeDefined();
+    });
+
+    it('missing required args return isError for remaining read tools', async () => {
+      const client = await mcpClient(dmToken);
+      const cases: Array<{ name: string; args: Record<string, unknown> }> = [
+        { name: 'get_arc', args: {} },
+        { name: 'get_beat', args: {} },
+        { name: 'get_encounter_difficulty', args: {} },
+        { name: 'get_inventory_item', args: {} },
+        { name: 'get_comment', args: {} },
+        { name: 'get_calendar_feed', args: {} },
+      ];
+      for (const { name, args } of cases) {
+        const res = await client.callTool({ name, arguments: args });
+        expect((res as { isError?: boolean }).isError).toBe(true);
+      }
+    });
+  });
+
+  describe('#565 coverage: remaining write tool handler execution', () => {
+    it('story arc/beat write tools: set_quest_status, update_arc, set_arc_status, update_beat, remove_branch, delete_beat, delete_arc', async () => {
+      const client = await mcpClient(dmToken);
+      const quest = parseResult(
+        await client.callTool({ name: 'create_quest', arguments: { campaignId, title: '565 Status Quest' } }),
+      ) as { id: number };
+      const statusRes = await client.callTool({
+        name: 'set_quest_status',
+        arguments: { questId: quest.id, status: 'active' },
+      });
+      expect(statusRes.isError).toBeFalsy();
+      expect((parseResult(statusRes) as { status: string }).status).toBe('active');
+
+      const arc = parseResult(
+        await client.callTool({ name: 'create_arc', arguments: { campaignId, title: '565 Write Arc' } }),
+      ) as { id: number };
+      const beat1 = parseResult(
+        await client.callTool({ name: 'create_beat', arguments: { arcId: arc.id, title: 'Branch A' } }),
+      ) as { id: number };
+      const beat2 = parseResult(
+        await client.callTool({ name: 'create_beat', arguments: { arcId: arc.id, title: 'Branch B' } }),
+      ) as { id: number };
+      const branch = parseResult(
+        await client.callTool({
+          name: 'add_branch',
+          arguments: { beatId: beat1.id, label: 'to B', toBeatId: beat2.id },
+        }),
+      ) as { id: number };
+
+      const updateArc = await client.callTool({
+        name: 'update_arc',
+        arguments: { arcId: arc.id, summary: '565 arc summary' },
+      });
+      expect(updateArc.isError).toBeFalsy();
+
+      const arcStatus = await client.callTool({ name: 'set_arc_status', arguments: { arcId: arc.id, status: 'active' } });
+      expect(arcStatus.isError).toBeFalsy();
+
+      const updateBeat = await client.callTool({
+        name: 'update_beat',
+        arguments: { beatId: beat1.id, body: '565 beat body' },
+      });
+      expect(updateBeat.isError).toBeFalsy();
+
+      const removeBranch = await client.callTool({
+        name: 'remove_branch',
+        arguments: { beatId: beat1.id, branchId: branch.id },
+      });
+      expect(removeBranch.isError).toBeFalsy();
+
+      const deleteBeat = await client.callTool({ name: 'delete_beat', arguments: { beatId: beat2.id } });
+      expect(deleteBeat.isError).toBeFalsy();
+
+      const deleteArc = await client.callTool({ name: 'delete_arc', arguments: { arcId: arc.id } });
+      expect(deleteArc.isError).toBeFalsy();
+    });
+
+    it('session share write tools: update_session_share, revoke_session_share, revoke_all_session_shares', async () => {
+      const client = await mcpClient(dmToken);
+      const recap = parseResult(
+        await client.callTool({
+          name: 'add_session_recap',
+          arguments: { campaignId, recap: '565 share recap', title: 'Share Test' },
+        }),
+      ) as { id: number };
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+      const created = parseResult(
+        await client.callTool({
+          name: 'create_session_share',
+          arguments: { sessionId: recap.id, label: '565 guests', expiresAt },
+        }),
+      ) as { share: { id: number } };
+
+      const updated = await client.callTool({
+        name: 'update_session_share',
+        arguments: { sessionId: recap.id, shareId: created.share.id, label: '565 updated' },
+      });
+      expect(updated.isError).toBeFalsy();
+      expect((parseResult(updated) as { label: string }).label).toBe('565 updated');
+
+      const revoked = await client.callTool({
+        name: 'revoke_session_share',
+        arguments: { sessionId: recap.id, shareId: created.share.id },
+      });
+      expect(revoked.isError).toBeFalsy();
+
+      const share2 = parseResult(
+        await client.callTool({
+          name: 'create_session_share',
+          arguments: { sessionId: recap.id, label: '565 second', expiresAt },
+        }),
+      ) as { share: { id: number } };
+      const revokeAll = await client.callTool({ name: 'revoke_all_session_shares', arguments: { campaignId } });
+      expect(revokeAll.isError).toBeFalsy();
+      expect((parseResult(revokeAll) as { revoked: number }).revoked).toBeGreaterThanOrEqual(1);
+      expect(share2.share.id).toBeGreaterThan(0);
+    });
+
+    it('level_up_character increments a character level', async () => {
+      const client = await mcpClient(dmToken);
+      const character = parseResult(
+        await client.callTool({ name: 'upsert_character', arguments: { campaignId, name: '565 Leveler', level: 1, hpMax: 10 } }),
+      ) as { id: number; level: number };
+      const res = await client.callTool({
+        name: 'level_up_character',
+        arguments: { characterId: character.id, hpMax: 14 },
+      });
+      expect(res.isError).toBeFalsy();
+      expect((parseResult(res) as { level: number }).level).toBe(character.level + 1);
+    });
+
+    it('reject_proposal and withdraw_proposal resolve pending proposals', async () => {
+      const dmClient = await mcpClient(dmToken);
+      const viewerClient = await mcpClient(viewerToken);
+
+      const toReject = parseResult(
+        await viewerClient.callTool({
+          name: 'create_quest',
+          arguments: { campaignId, title: '565 Reject Me', propose: true },
+        }),
+      ) as { proposal: { id: number } };
+      const rejected = await dmClient.callTool({
+        name: 'reject_proposal',
+        arguments: { proposalId: toReject.proposal.id, note: 'not now' },
+      });
+      expect(rejected.isError).toBeFalsy();
+      expect((parseResult(rejected) as { status: string }).status).toBe('rejected');
+
+      const toWithdraw = parseResult(
+        await viewerClient.callTool({
+          name: 'create_quest',
+          arguments: { campaignId, title: '565 Withdraw Me', propose: true },
+        }),
+      ) as { proposal: { id: number } };
+      const withdrawn = await viewerClient.callTool({
+        name: 'withdraw_proposal',
+        arguments: { proposalId: toWithdraw.proposal.id },
+      });
+      expect(withdrawn.isError).toBeFalsy();
+      expect((parseResult(withdrawn) as { status: string }).status).toBe('withdrawn');
+    });
+
+    it('repair_campaign_dm is server-admin-only (dm PAT without adminEnabled is denied)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({
+        name: 'repair_campaign_dm',
+        arguments: { campaignId, userId: 1 },
+      });
+      expect((res as { isError?: boolean }).isError).toBe(true);
+      expect((res.content as TextContent[])[0].text).toContain('403');
+    });
+
+    it('update_encounter edits encounter metadata', async () => {
+      const client = await mcpClient(dmToken);
+      const enc = parseResult(
+        await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: '565 Rename Me' } }),
+      ) as { id: number };
+      const res = await client.callTool({
+        name: 'update_encounter',
+        arguments: { encounterId: enc.id, name: '565 Renamed Fight', hidden: true },
+      });
+      expect(res.isError).toBeFalsy();
+      expect((parseResult(res) as { name: string; hidden: boolean }).name).toBe('565 Renamed Fight');
+      expect((parseResult(res) as { hidden: boolean }).hidden).toBe(true);
+    });
+
+    it('inventory/timeline/comment/scheduling write tools round-trip', async () => {
+      const client = await mcpClient(dmToken);
+      const item = parseResult(
+        await client.callTool({
+          name: 'add_inventory_item',
+          arguments: { campaignId, name: '565 Rope', qty: 1 },
+        }),
+      ) as { id: number };
+      const updatedItem = await client.callTool({
+        name: 'update_inventory_item',
+        arguments: { itemId: item.id, notes: '50 feet' },
+      });
+      expect(updatedItem.isError).toBeFalsy();
+
+      const event = parseResult(
+        await client.callTool({
+          name: 'create_timeline_event',
+          arguments: { campaignId, title: '565 Event', inWorldDate: 'Year 1', hidden: false },
+        }),
+      ) as { id: number };
+      const updatedEvent = await client.callTool({
+        name: 'update_timeline_event',
+        arguments: { eventId: event.id, body: 'Something happened.' },
+      });
+      expect(updatedEvent.isError).toBeFalsy();
+
+      const quest = parseResult(
+        await client.callTool({ name: 'create_quest', arguments: { campaignId, title: '565 Comment Target' } }),
+      ) as { id: number };
+      const comment = parseResult(
+        await client.callTool({
+          name: 'post_comment',
+          arguments: { campaignId, entityType: 'quest', entityId: quest.id, body: 'Original 565' },
+        }),
+      ) as { id: number };
+      const updatedComment = await client.callTool({
+        name: 'update_comment',
+        arguments: { commentId: comment.id, body: 'Edited 565' },
+      });
+      expect(updatedComment.isError).toBeFalsy();
+
+      const deletedComment = await client.callTool({ name: 'delete_comment', arguments: { commentId: comment.id } });
+      expect(deletedComment.isError).toBeFalsy();
+
+      const restoredComment = await client.callTool({ name: 'restore_comment', arguments: { commentId: comment.id } });
+      expect(restoredComment.isError).toBeFalsy();
+      expect((parseResult(restoredComment) as { body: string }).body).toBe('Edited 565');
+
+      const sched = parseResult(
+        await client.callTool({
+          name: 'schedule_session',
+          arguments: { campaignId, scheduledAt: '2999-06-01T18:00:00Z', title: '565 Game Night' },
+        }),
+      ) as { id: number };
+      const updatedSched = await client.callTool({
+        name: 'update_scheduled_session',
+        arguments: { scheduleId: sched.id, title: '565 Rescheduled' },
+      });
+      expect(updatedSched.isError).toBeFalsy();
+
+      const rotated = await client.callTool({ name: 'rotate_calendar_feed', arguments: { campaignId } });
+      expect(rotated.isError).toBeFalsy();
+      expect(parseResult(rotated)).toMatchObject({ token: expect.any(String) });
+
+      const deletedItem = await client.callTool({ name: 'delete_inventory_item', arguments: { itemId: item.id } });
+      expect(deletedItem.isError).toBeFalsy();
+
+      const deletedEvent = await client.callTool({ name: 'delete_timeline_event', arguments: { eventId: event.id } });
+      expect(deletedEvent.isError).toBeFalsy();
+    });
+
+    it('run_scribe reaches the handler (experimental off → disabled job, not a write-mode 403)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'run_scribe', arguments: { campaignId } });
+      expect(res.isError).toBeFalsy();
+      expect((parseResult(res) as { job?: { status: string } }).job?.status).toBe('disabled');
+    });
+
+    it('ai_dm_narrate and draft_content hit the experimental gate when the flag is off', async () => {
+      const client = await mcpClient(dmToken);
+      const narrate = await client.callTool({
+        name: 'ai_dm_narrate',
+        arguments: { campaignId, prompt: '565 narrate smoke' },
+      });
+      expect(narrate.isError).toBe(true);
+      expect((narrate.content as TextContent[])[0].text).toMatch(/experimental/i);
+
+      const draft = await client.callTool({
+        name: 'draft_content',
+        arguments: { campaignId, target: 'npc', prompt: '565 draft smoke' },
+      });
+      expect(draft.isError).toBe(true);
+      expect((draft.content as TextContent[])[0].text).toMatch(/experimental/i);
+    });
+
+    it('restore_entity_revision re-applies a prior session recap snapshot', async () => {
+      const client = await mcpClient(dmToken);
+      const session = parseResult(
+        await client.callTool({
+          name: 'add_session_recap',
+          arguments: { campaignId, recap: '565 revision v1' },
+        }),
+      ) as { id: number };
+      await client.callTool({
+        name: 'update_session',
+        arguments: { sessionId: session.id, recap: '565 revision v2' },
+      });
+      const revs = parseResult(
+        await client.callTool({
+          name: 'list_entity_revisions',
+          arguments: { entityType: 'session', entityId: session.id },
+        }),
+      ) as Array<{ id: number; snapshot: { recap?: string } }>;
+      const v1 = revs.find((r) => r.snapshot.recap === '565 revision v1');
+      expect(v1).toBeDefined();
+
+      const restored = await client.callTool({
+        name: 'restore_entity_revision',
+        arguments: { entityType: 'session', entityId: session.id, revisionId: v1!.id },
+      });
+      expect(restored.isError).toBeFalsy();
+      const fetched = parseResult(
+        await client.callTool({ name: 'get_session', arguments: { sessionId: session.id } }),
+      ) as { recap: string };
+      expect(fetched.recap).toBe('565 revision v1');
+    });
+
+    it('a viewer-scoped PAT is denied DM-only #565 write tools', async () => {
+      const dmClient = await mcpClient(dmToken);
+      const viewerClient = await mcpClient(viewerToken);
+      const arc = parseResult(
+        await dmClient.callTool({ name: 'create_arc', arguments: { campaignId, title: '565 Viewer Deny Arc' } }),
+      ) as { id: number };
+      const denied = await viewerClient.callTool({
+        name: 'delete_arc',
+        arguments: { arcId: arc.id },
+      });
+      expect(denied.isError).toBe(true);
+      expect((denied.content as TextContent[])[0].text).toContain('403');
+    });
+
+    it('missing required args return isError for remaining write tools', async () => {
+      const client = await mcpClient(dmToken);
+      const cases = [
+        'set_quest_status',
+        'update_arc',
+        'set_arc_status',
+        'delete_arc',
+        'update_beat',
+        'delete_beat',
+        'remove_branch',
+        'update_session_share',
+        'revoke_session_share',
+        'level_up_character',
+        'reject_proposal',
+        'withdraw_proposal',
+        'repair_campaign_dm',
+        'update_encounter',
+        'run_scribe',
+        'ai_dm_narrate',
+        'draft_content',
+        'update_inventory_item',
+        'delete_inventory_item',
+        'update_timeline_event',
+        'delete_timeline_event',
+        'update_comment',
+        'delete_comment',
+        'restore_comment',
+        'update_scheduled_session',
+        'rotate_calendar_feed',
+        'import_ddb_character',
+        'restore_entity_revision',
+      ];
+      for (const name of cases) {
+        const res = await client.callTool({ name, arguments: {} });
+        expect((res as { isError?: boolean }).isError).toBe(true);
+      }
     });
   });
 });
