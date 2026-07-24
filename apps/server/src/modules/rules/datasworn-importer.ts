@@ -178,7 +178,10 @@ function sourceUrlOf(src: DataswornSource | null, doc: DataswornDocument): strin
 
 /** The effective license URL for an object — its own `_source.license`, else the document's. */
 function licenseUrlOf(src: DataswornSource | null, doc: DataswornDocument): string {
-  return asString(src?.license) || asString(doc.license) || DATASWORN_LICENSE_URL;
+  // No fallback to the CC-BY URL: a MISSING license must stay empty so the caller treats it
+  // as "unknown" and skips the object, rather than silently assuming CC-BY-4.0 and mislabeling
+  // potentially non-open content as open.
+  return asString(src?.license) || asString(doc.license);
 }
 
 /**
@@ -657,7 +660,9 @@ export async function fetchDataswornDocument(
   }
 
   const text = await res.text();
-  if (text.length > MAX_DOCUMENT_BYTES) {
+  // Enforce the cap on real UTF-8 BYTES, not JS string length (chars), so a multi-byte body
+  // can't slip past a char-count check.
+  if (Buffer.byteLength(text, 'utf8') > MAX_DOCUMENT_BYTES) {
     throw new BadRequestException(`Datasworn document at ${url} exceeds the ${MAX_DOCUMENT_BYTES}-byte cap`);
   }
 
@@ -682,9 +687,11 @@ export async function fetchDataswornDocument(
   const docLicense = /creativecommons\.org\/licenses\/by\/[\d.]+\/?$/.test(docLicenseUrl.trim().toLowerCase())
     ? DATASWORN_LICENSE
     : docLicenseUrl;
-  if (docLicenseUrl && !isOpenLicense(docLicense)) {
+  if (!docLicenseUrl || !isOpenLicense(docLicense)) {
     throw new BadRequestException(
-      `Datasworn document at ${url} declares a non-open license ("${docLicenseUrl}") — only open-licensed content can be imported`,
+      `Datasworn document at ${url} ${
+        docLicenseUrl ? `declares a non-open license ("${docLicenseUrl}")` : 'declares no license'
+      } — only open-licensed content can be imported`,
     );
   }
   logger.info(`[datasworn-importer] fetched document "${asString(doc.title) || asString(doc._id)}" from ${url}`);
