@@ -3,6 +3,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import type {
   Attachment,
   GenerateMapParams,
+  GeneratedMapPreview,
   GeneratedMapResult,
   ImportMapAttribution,
   MapSource,
@@ -60,6 +61,27 @@ export class MapsService {
   }
 
   /**
+   * Render a candidate map WITHOUT persisting it (issue #409). This backs the web
+   * generation wizard's preview/reroll: the DM sees the SVG (and can reroll the seed)
+   * before committing, and because nothing is written, previewing/rerolling never leaves
+   * orphan attachments or consumes the campaign's storage quota. "Use this map" then
+   * replays the returned seed through generateForCampaign/generateForEncounter to attach
+   * the exact same map (generation is deterministic by seed). Read-only: no DB/disk write.
+   */
+  previewForCampaign(params: GenerateMapParams): GeneratedMapPreview {
+    const map = this.render(params);
+    return {
+      svg: map.svg,
+      seed: map.seed,
+      kind: map.kind,
+      widthCells: map.widthCells,
+      heightCells: map.heightCells,
+      roomCount: map.roomCount,
+      gridConfig: map.gridConfig,
+    };
+  }
+
+  /**
    * Generate a map for a campaign and save it as a hidden 'map' attachment. Returns the
    * new attachment id + the seed (for reproduction) + the grid geometry the caller can
    * apply to an encounter. Does not touch any encounter — that's the convenience path.
@@ -78,6 +100,11 @@ export class MapsService {
       { filename, mime: MAP_MIME, bytes: Buffer.from(map.svg, 'utf8') },
       user,
       role,
+      // Audit records actor/source/seed (issue #409): the actor + role come from the
+      // audit row's actor columns; this detail names the first-party generator as the
+      // source and the exact seed, so a generated map is always attributable and
+      // reproducible from the audit trail alone.
+      `map:generator-builtin:seed=${map.seed}`,
     );
     return {
       attachmentId: attachment.id,

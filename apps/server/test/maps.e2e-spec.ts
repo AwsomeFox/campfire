@@ -171,4 +171,115 @@ describe('procedural map generation (e2e, issue #306)', () => {
       .send({ kind: 'dungeon', bogus: true });
     expect(res.status).toBe(400);
   });
+
+  it('audit records the generator source + seed for a generated map (issue #409)', async () => {
+    const server = ctx.app.getHttpServer();
+    const gen = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/maps/generate`)
+      .set(dm)
+      .send({ kind: 'dungeon', size: 'small', seed: 'audit-seed' });
+    expect(gen.status).toBe(201);
+
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    expect(audit.status).toBe(200);
+    const row = audit.body.find(
+      (a: { action: string; entityId: number }) =>
+        a.action === 'attachment.generate' && a.entityId === gen.body.attachmentId,
+    );
+    expect(row).toBeDefined();
+    // actor + source (generator-builtin) + seed all recoverable from the audit trail.
+    expect(row.actor).toBeTruthy();
+    expect(row.detail).toBe('map:generator-builtin:seed=audit-seed');
+  });
+});
+
+/**
+ * Preview endpoint (issue #409): render a candidate map WITHOUT persisting it, so the
+ * web wizard can preview/reroll before committing. "Use this map" then replays the seed
+ * through the persisting endpoints for a byte-identical attach.
+ */
+describe('procedural map PREVIEW (e2e, issue #409)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Preview Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function countAttachments(server: Server): Promise<number> {
+    const meta = await request(server).get(`/api/v1/campaigns/${campaignId}/attachments`).set(dm);
+    return (meta.body as unknown[]).length;
+  }
+
+  it('returns the SVG + seed + grid config but creates NO attachment', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await countAttachments(server);
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/maps/generate/preview`)
+      .set(dm)
+      .send({ kind: 'dungeon', size: 'medium', seed: 'preview-seed' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.svg.startsWith('<svg')).toBe(true);
+    expect(res.body.seed).toBe('preview-seed');
+    expect(res.body.kind).toBe('dungeon');
+    expect(res.body.widthCells).toBe(30);
+    expect(res.body.heightCells).toBe(22);
+    expect(res.body.gridConfig.gridSize).toBeCloseTo(100 / 30, 5);
+    expect(res.body).not.toHaveProperty('attachmentId');
+
+    // No orphan attachment + no quota consumed (issue #409).
+    const after = await countAttachments(server);
+    expect(after).toBe(before);
+  });
+
+  it('rerolling many times never persists an attachment', async () => {
+    const server = ctx.app.getHttpServer();
+    const before = await countAttachments(server);
+    for (let i = 0; i < 5; i++) {
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/maps/generate/preview`)
+        .set(dm)
+        .send({ kind: 'cave', size: 'small' });
+      expect(res.status).toBe(201);
+      expect(typeof res.body.seed).toBe('string');
+    }
+    expect(await countAttachments(server)).toBe(before);
+  });
+
+  it('preview is byte-identical to the persisted generate for the same seed (reproducible Use)', async () => {
+    const server = ctx.app.getHttpServer();
+    const preview = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/maps/generate/preview`)
+      .set(dm)
+      .send({ kind: 'dungeon', size: 'small', seed: 'use-seed', complexity: 0.6, theme: 'crypt' });
+    expect(preview.status).toBe(201);
+
+    // "Use this map" replays the same seed through the persisting endpoint.
+    const gen = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/maps/generate`)
+      .set(dm)
+      .send({ kind: 'dungeon', size: 'small', seed: 'use-seed', complexity: 0.6, theme: 'crypt' });
+    expect(gen.status).toBe(201);
+
+    const file = await fetchSvg(server, gen.body.attachmentId);
+    expect(file.svg).toBe(preview.body.svg);
+  });
+
+  it('a non-DM member cannot preview a map (403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/maps/generate/preview`)
+      .set(viewer)
+      .send({ kind: 'dungeon' });
+    expect(res.status).toBe(403);
+  });
 });
