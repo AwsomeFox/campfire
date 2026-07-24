@@ -101,6 +101,12 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
     const supportPreferences = {
       listForPublicAiNarration: jest.fn(async () => []),
     };
+    const members = {
+      listForCampaign: jest.fn(async () => []),
+    };
+    const characters = {
+      getOrThrow: jest.fn(),
+    };
     const aiDm = { registerDriverSessionTeardown: jest.fn() };
     const svc = new AiDriverService(
       aiDm as unknown as Ctor[0],
@@ -113,6 +119,8 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
       undefined as unknown as Ctor[7],
       undefined as unknown as Ctor[8],
       undefined as unknown as Ctor[9], // encounters (#1048 ctor arity)
+      members as unknown as Ctor[10], // members (#1045)
+      characters as unknown as Ctor[11], // characters (#1045)
     );
     return { svc, call, mcpTools, supportPreferences };
   }
