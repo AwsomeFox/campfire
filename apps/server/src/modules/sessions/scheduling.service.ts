@@ -401,7 +401,9 @@ export class SchedulingService {
       const title =
         noteChanged && !statusChanged
           ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
-          : `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`;
+          : noteChanged && statusChanged
+            ? `${user.name || 'A player'} RSVP'd ${input.status} and updated their note for ${this.scheduleLabel(schedule)}`
+            : `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`;
       await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
         type: 'session_rsvp',
         title,
