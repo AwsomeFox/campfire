@@ -75,6 +75,77 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     expect(res.body.seat.tokensUsed).toBe(300);
   });
 
+  it('#1021 driver: executes loot/treasury tools end-to-end and persists aftermath state', async () => {
+    const campaignId = await h.createCampaign('Driver Loot Aftermath');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script(
+      {
+        text: 'You gather rewards from the fallen foe.',
+        toolCalls: [
+          { id: 'loot_gold', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: 25 } } },
+          {
+            id: 'loot_item',
+            name: 'add_inventory_item',
+            arguments: { campaignId, ownerType: 'party', name: 'Potion of Healing', qty: 1 },
+          },
+        ],
+      },
+      { text: 'The spoils are secured.' },
+    );
+
+    const grant = await h.sendMessage(campaignId, { input: 'Resolve loot.' });
+    expect(grant.status).toBe(201);
+    expect(grant.body.toolCalls).toEqual([
+      { name: 'adjust_treasury', isError: false, proposed: false },
+      { name: 'add_inventory_item', isError: false, proposed: false },
+    ]);
+
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body.gp).toBe(25);
+
+    const inventory = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(inventory.status).toBe(200);
+    const potion = inventory.body.find((i: { name: string }) => i.name === 'Potion of Healing');
+    expect(potion).toBeDefined();
+    expect(potion.ownerType).toBe('party');
+    expect(potion.qty).toBe(1);
+
+    h.script(
+      {
+        text: 'You split the stack for the party.',
+        toolCalls: [
+          {
+            id: 'loot_update',
+            name: 'update_inventory_item',
+            arguments: { itemId: potion.id, qtyDelta: 2, idempotencyKey: 'driver-loot-topup-1' },
+          },
+        ],
+      },
+      { text: 'The potion bundle is topped up.' },
+    );
+
+    const update = await h.sendMessage(campaignId, { input: 'Add two more potions.' });
+    expect(update.status).toBe(201);
+    expect(update.body.toolCalls).toEqual([{ name: 'update_inventory_item', isError: false, proposed: false }]);
+
+    const inventoryAfter = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(inventoryAfter.status).toBe(200);
+    const potionAfter = inventoryAfter.body.find((i: { id: number }) => i.id === potion.id);
+    expect(potionAfter).toBeDefined();
+    expect(potionAfter.qty).toBe(3);
+
+    const audit = await h.getAudit(campaignId);
+    const driverToolEvents = audit.body.filter((e: { action: string }) => e.action === 'ai-dm.driver.tool');
+    const seatActor = `ai-dm-seat:${campaignId}`;
+    expect(driverToolEvents).toHaveLength(3);
+    expect(driverToolEvents.every((e: { actor: string }) => e.actor === seatActor)).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'treasury.update')).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'item.create')).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'item.update')).toBe(true);
+  });
+
   it('#312 driver: multi-step tool loop terminates on a stop turn and audits each step', async () => {
     const campaignId = await h.createCampaign('Driver Audit');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
