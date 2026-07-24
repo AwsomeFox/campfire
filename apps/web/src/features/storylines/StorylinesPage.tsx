@@ -27,6 +27,7 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
@@ -91,8 +92,7 @@ const BEAT_GLYPH: Record<BeatStatus, string> = {
 export default function StorylinesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
 
   const [arcs, setArcs] = useState<StoryArcWithBeats[]>([]);
@@ -256,7 +256,7 @@ export default function StorylinesPage() {
         labelled triggers.
       </p>
 
-      {isDm && (
+      {canDmWrite && (
         <form
           className="card elev-sm"
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
@@ -309,6 +309,7 @@ export default function StorylinesPage() {
             arc={arc}
             cid={cid}
             isDm={isDm}
+            canDmWrite={canDmWrite}
             allBeats={allBeats}
             linkOptions={linkOptions}
             linkOptionState={{ options: linkOptions, failed: linkOptionsError, loading: linkOptionsLoading, onRetry: () => void loadLinkOptions() }}
@@ -324,6 +325,7 @@ function ArcCard({
   arc,
   cid,
   isDm,
+  canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
@@ -332,6 +334,7 @@ function ArcCard({
   arc: StoryArcWithBeats;
   cid: number;
   isDm: boolean;
+  canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
@@ -441,7 +444,7 @@ function ArcCard({
         >
           {arc.title}
         </h2>
-        {isDm ? (
+        {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
             <select
@@ -466,7 +469,7 @@ function ArcCard({
             {arc.status}
           </span>
         )}
-        {isDm && (
+        {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
@@ -503,6 +506,7 @@ function ArcCard({
               beat={beat}
               cid={cid}
               isDm={isDm}
+            canDmWrite={canDmWrite}
               allBeats={allBeats}
               linkOptions={linkOptions}
               linkOptionState={linkOptionState}
@@ -512,7 +516,7 @@ function ArcCard({
         </div>
       )}
 
-      {isDm && (
+      {canDmWrite && (
         <form
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', minWidth: 0 }}
           onSubmit={compositionSafeFormSubmit(beatCompositionGate, () => {
@@ -557,6 +561,7 @@ function BeatRow({
   beat,
   cid,
   isDm,
+  canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
@@ -565,6 +570,7 @@ function BeatRow({
   beat: StoryBeatWithBranches;
   cid: number;
   isDm: boolean;
+  canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
@@ -732,7 +738,7 @@ function BeatRow({
         >
           {beat.title}
         </h3>
-        {isDm ? (
+        {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>
             <select
@@ -757,7 +763,7 @@ function BeatRow({
             {beat.status}
           </span>
         )}
-        {isDm && (
+        {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
@@ -809,7 +815,7 @@ function BeatRow({
         </div>
       )}
 
-      {isDm &&
+      {canDmWrite &&
         (editingLinks ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 22, minWidth: 0 }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -903,7 +909,7 @@ function BeatRow({
             <span className="text-muted" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
               {target ? `→ ${target.title}` : branch.toBeatId != null ? '→ (unknown beat)' : '→ (open)'}
             </span>
-            {isDm && (
+            {canDmWrite && (
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -922,7 +928,7 @@ function BeatRow({
         );
       })}
 
-      {isDm &&
+      {canDmWrite &&
         (addingBranch ? (
           <form
             id={branchFormId}

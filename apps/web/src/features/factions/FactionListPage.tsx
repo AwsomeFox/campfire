@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { PageHeader } from '../../components/PageHeader';
@@ -22,9 +22,7 @@ export default function FactionListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [factions, setFactions] = useState<Faction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -113,7 +111,7 @@ export default function FactionListPage() {
           icon={<GameIcon slug="black-flag" size={18} />}
           title="Factions"
           primaryAction={
-            isDm && !creating ? (
+            canDmWrite && !creating ? (
               <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
                 + New faction
               </Btn>
@@ -121,7 +119,7 @@ export default function FactionListPage() {
           }
         />
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Faction name" placeholder="Name (e.g. Thieves' Guild)" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />

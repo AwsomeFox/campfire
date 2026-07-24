@@ -51,6 +51,7 @@ import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
@@ -534,9 +535,8 @@ export default function RunSessionPage() {
   const cid = Number(campaignId);
   const eid = Number(encounterId);
   const navigate = useNavigate();
-  const { me, roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { me } = useAuth();
+  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
 
@@ -812,8 +812,8 @@ export default function RunSessionPage() {
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
     if (encounter?.status === 'ended') return false;
-    if (isDm) return true;
-    if (role !== 'player') return false;
+    if (canDmWrite) return true;
+    if (!canPlayerWrite) return false;
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
 
@@ -1098,7 +1098,7 @@ export default function RunSessionPage() {
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
-    if (!isDm || !encounter) return;
+    if (!canDmWrite || !encounter) return;
     const patch = missingGridDefaults(encounter);
     const encounterPrefix = `${encounter.id}:`;
     if (!patch) {
@@ -1111,7 +1111,7 @@ export default function RunSessionPage() {
     const attemptKey = gridDefaultAttemptKey(encounter.id, patch);
     if (gridDefaultAttempts.current.has(attemptKey)) return;
     queueEncounterPatch(patch, attemptKey);
-  }, [encounter, isDm, queueEncounterPatch]);
+  }, [encounter, canDmWrite, queueEncounterPatch]);
 
   // Transient battle-map ping (issue #238). Fire-and-forget POST; the server broadcasts an
   // `encounter.ping` SSE signal that every client — including this one — renders and fades, so
@@ -1218,7 +1218,7 @@ export default function RunSessionPage() {
           the party sees the same one-tap prompt for their own character. */}
       <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
-      {isDm && (
+      {canDmWrite && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
@@ -1257,16 +1257,17 @@ export default function RunSessionPage() {
         </button>
         <div className="flex-1" />
         {isDm && (
+          <Btn
+            ghost
+            className="!min-h-0 !py-1.5 text-xs"
+            onClick={() => navigate(`/c/${cid}/screen`)}
+            title="Open the player display — initiative + revealed info, no secrets"
+          >
+            <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
+          </Btn>
+        )}
+        {canDmWrite && (
           <div className="flex gap-2 flex-wrap">
-            {/* Cast the secret-free player display to the table (issue #60). */}
-            <Btn
-              ghost
-              className="!min-h-0 !py-1.5 text-xs"
-              onClick={() => navigate(`/c/${cid}/screen`)}
-              title="Open the player display — initiative + revealed info, no secrets"
-            >
-              <GameIcon slug="tv" size={13} className="inline align-text-bottom mr-1" />Cast
-            </Btn>
             {lifecycle.rollInitiative && lifecycle.start && (
               <>
                 {/* Issue #702: the server treats a fully-rolled roster as a no-op (no
@@ -1358,14 +1359,14 @@ export default function RunSessionPage() {
       )}
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
-      {isDm && encounter.status === 'ended' && (
+      {canDmWrite && encounter.status === 'ended' && (
         <EncounterNextSteps campaignId={cid} sessionId={encounter.sessionId} />
       )}
 
       <EncounterLinks
         campaignId={cid}
         encounter={encounter}
-        canEdit={isDm}
+        canEdit={canDmWrite}
         onSaved={(updated) =>
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
             prev ? { ...prev, ...updated } : prev,
@@ -1373,7 +1374,7 @@ export default function RunSessionPage() {
         }
       />
 
-      {isDm && preparingSetupGuidance && (
+      {canDmWrite && preparingSetupGuidance && (
         <div
           data-testid="encounter-preparing-guidance"
           className="text-muted"
@@ -1415,6 +1416,7 @@ export default function RunSessionPage() {
           encounter={encounter}
           campaignId={cid}
           isDm={isDm}
+          canDmWrite={canDmWrite}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1423,9 +1425,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
-          onGenerateMap={isDm ? generateAndAttachMap : undefined}
+          onGenerateMap={canDmWrite ? generateAndAttachMap : undefined}
           onImportMap={
-            isDm
+            canDmWrite
               ? (id) => {
                   setEncounterMap(id);
                   setShowMapGuidance(true);
@@ -1498,10 +1500,10 @@ export default function RunSessionPage() {
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
-              canEditIdentity={isDm && encounter.status !== 'ended'}
+              canEditIdentity={canDmWrite && encounter.status !== 'ended'}
               canViewStatblock={isDm}
-              canRemove={isDm}
-              canSetInitiative={isDm && encounter.status !== 'ended'}
+              canRemove={canDmWrite}
+              canSetInitiative={canDmWrite && encounter.status !== 'ended'}
               running={encounter.status === 'running'}
               character={c.characterId != null ? charactersById.get(c.characterId) ?? null : null}
               openCardByDefault={c.characterId != null && ownedCharacterIds.has(c.characterId)}
@@ -1529,7 +1531,7 @@ export default function RunSessionPage() {
         )}
       </div>
 
-      {isDm && encounter.status !== 'ended' && (
+      {canDmWrite && encounter.status !== 'ended' && (
         <AddCombatantPanel
           encounterId={eid}
           campaignId={cid}
@@ -1544,7 +1546,7 @@ export default function RunSessionPage() {
 
       {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
           the resulting prompt above via CheckRequestPrompts. */}
-      {isDm && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
+      {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
       <SharedDiceLog campaignId={cid} />
 
@@ -1825,6 +1827,7 @@ function BattleMap({
   encounter,
   campaignId,
   isDm,
+  canDmWrite,
   busy,
   canMoveToken,
   onSetMap,
@@ -1844,6 +1847,7 @@ function BattleMap({
   encounter: EncounterWithCombatants;
   campaignId: number;
   isDm: boolean;
+  canDmWrite: boolean;
   busy: boolean;
   canMoveToken: (c: Combatant) => boolean;
   onSetMap: (attachmentId: number | null) => void;
@@ -2116,7 +2120,7 @@ function BattleMap({
       successfulPointerUpRef.current = null;
       activeGestureRef.current = { kind: 'measure', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRuler({ start: pct, end: pct });
-    } else if (tool === 'reveal' && isDm) {
+    } else if (tool === 'reveal' && canDmWrite) {
       e.currentTarget.setPointerCapture?.(e.pointerId);
       successfulPointerUpRef.current = null;
       activeGestureRef.current = { kind: 'fog', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
@@ -2277,7 +2281,7 @@ function BattleMap({
   }
 
   function onCalibrateAnchorPointerDown(e: ReactPointerEvent<HTMLDivElement>, anchor: CalibrateAnchor) {
-    if (!e.isPrimary || activeGestureRef.current || !isDm || tool !== 'calibrate') return;
+    if (!e.isPrimary || activeGestureRef.current || !canDmWrite || tool !== 'calibrate') return;
     e.preventDefault();
     e.stopPropagation();
     const point = pointerToPercent(e, true);
@@ -2290,7 +2294,7 @@ function BattleMap({
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
-    if (!e.isPrimary || activeGestureRef.current || !isDm) return;
+    if (!e.isPrimary || activeGestureRef.current || !canDmWrite) return;
     e.preventDefault();
     e.stopPropagation();
     const pct = pointerToPercent(e, true);
@@ -2372,7 +2376,7 @@ function BattleMap({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">Battle map</span>
         <div style={{ flex: 1 }} />
-        {isDm && mapImageUrl && (
+        {canDmWrite && mapImageUrl && (
           <MapUploadButton
             campaignId={campaignId}
             hasMap
@@ -2383,7 +2387,7 @@ function BattleMap({
         )}
       </div>
 
-      {isDm && !mapImageUrl && (
+      {canDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px' }}>
           <ImageUpload
             campaignId={campaignId}
@@ -2410,7 +2414,7 @@ function BattleMap({
           {/* Post-attach guidance (issue #409): after a generated map is attached it stays
               hidden (DM-only) with an aligned grid — walk the DM through the next steps so
               the map is table-ready. Dismissible; only shown right after an attach. */}
-          {isDm && showGuidance && (
+          {canDmWrite && showGuidance && (
             <div
               data-testid="map-attach-guidance"
               className="cf-inset"
@@ -2446,9 +2450,9 @@ function BattleMap({
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
-            {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
-            {isDm && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {isDm && canAoe && (
+            {canDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {canDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
+            {canDmWrite && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
                 <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
@@ -2457,7 +2461,7 @@ function BattleMap({
               </>
             )}
             <div style={{ flex: 1 }} />
-            {isDm && (
+            {canDmWrite && (
               <button
                 type="button"
                 className="cf-map-tool"
@@ -2471,7 +2475,7 @@ function BattleMap({
           </div>
 
           {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {isDm && selectedAoe && canAoe && (
+          {canDmWrite && selectedAoe && canAoe && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -2502,7 +2506,7 @@ function BattleMap({
             </div>
           )}
 
-          {isDm && gridPanelOpen && (
+          {canDmWrite && gridPanelOpen && (
             <div
               {...gridDisclosure.regionProps}
               className="flex flex-wrap gap-3 items-center"
@@ -2801,7 +2805,7 @@ function BattleMap({
                     Drag the origin anchor to a corner of the map's printed grid, then drag the
                     cell anchor to the opposite corner of ONE printed cell. The overlay previews
                     live off `calibration` (which already folds in the active drag). */}
-                {isDm && tool === 'calibrate' && calibrationPx && (() => {
+                {canDmWrite && tool === 'calibrate' && calibrationPx && (() => {
                   const rad = calibrationPx.rotationRad;
                   const cos = Math.cos(rad);
                   const sin = Math.sin(rad);
@@ -2958,7 +2962,7 @@ function BattleMap({
                     })}
                   </svg>
                 )}
-                {isDm && canAoe &&
+                {canDmWrite && canAoe &&
                   aoeTemplates.map((t) => {
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;

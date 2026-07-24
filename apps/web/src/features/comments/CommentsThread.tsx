@@ -9,6 +9,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { Character, Comment, EntityType } from '@campfire/schema';
 import { api, API, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useAnnounce } from '../../components/Announcer';
 import { Field, sanitizeFieldPrefix } from '../../components/Field';
 import {
@@ -54,9 +55,9 @@ export function CommentsThread({
   entityType: EntityType;
   entityId: number;
 }) {
-  const { me, roleIn } = useAuth();
+  const { me } = useAuth();
   const myUserId = me ? String(me.user.id) : null;
-  const isDm = roleIn(campaignId) === 'dm';
+  const { isDm, canMemberWrite } = useCampaignAccess();
 
   const [comments, setComments] = useState<Comment[]>([]);
   const [ownedCharacters, setOwnedCharacters] = useState<Character[]>([]);
@@ -132,7 +133,7 @@ export function CommentsThread({
   }, [comments]);
 
   function canModerate(c: Comment): boolean {
-    return isDm || (myUserId !== null && c.authorUserId === myUserId);
+    return canMemberWrite && (isDm || (myUserId !== null && c.authorUserId === myUserId));
   }
 
   async function remove(id: number) {
@@ -182,7 +183,7 @@ export function CommentsThread({
                   ))}
                 </ul>
               )}
-              {replyTo === root.id && (
+              {replyTo === root.id && canMemberWrite && (
                 <div className="ml-5 pl-4">
                   <ComposeBox
                     campaignId={campaignId}
@@ -204,6 +205,7 @@ export function CommentsThread({
         </ul>
       )}
 
+      {canMemberWrite && (
       <ComposeBox
         campaignId={campaignId}
         entityType={entityType}
@@ -213,6 +215,7 @@ export function CommentsThread({
         ownedCharacters={ownedCharacters}
         onPosted={load}
       />
+      )}
 
       {confirmingDelete !== null && (
         <ConfirmDialog

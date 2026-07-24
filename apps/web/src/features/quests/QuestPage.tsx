@@ -12,7 +12,7 @@ import {
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import {
   Card,
   Chip,
@@ -75,11 +75,9 @@ export default function QuestPage() {
 
 function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId: number }) {
   const { t } = useTranslation();
-  const { roleIn } = useAuth();
+  const { role, isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const canToggleObjectives = canPlayerWrite;
   const announce = useAnnounce();
-  const role = roleIn(campaignId);
-  const isDm = role === 'dm';
-  const canToggleObjectives = role === 'dm' || role === 'player';
   const navigate = useNavigate();
 
   const [quest, setQuest] = useState<QuestWithObjectives | null>(null);
@@ -467,7 +465,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && (
+      {canDmWrite && (
         <VisibleToPlayersBar
           visible={!quest.hidden}
           onHide={async () => {
@@ -491,7 +489,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
         <QuestStatusBadge status={quest.status} />
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
-        {isDm && (
+        {canDmWrite && (
           <>
             <div style={{ flex: 1 }} />
             <Btn
@@ -642,7 +640,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                     >
                       {o.text}
                     </span>
-                    {isDm && (
+                    {canDmWrite && (
                       <>
                         <button
                           onClick={() => reorderObjective(i, -1)}
@@ -669,7 +667,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 )}
               </div>
             ))}
-            {isDm && (
+            {canDmWrite && (
               <form
                 className="flex items-center gap-2 pl-1"
                 onSubmit={compositionSafeFormSubmit(objectiveCompositionGate, () => {
@@ -712,7 +710,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 ))}
               </>
             )}
-            {isDm && (
+            {canDmWrite && (
               <Link
                 to={`/c/${campaignId}/quests/new?parent=${questId}`}
                 className="text-xs text-slate-500 hover:text-slate-300 pl-1 inline-block"
@@ -763,20 +761,22 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               ) : (
                 <div className="flex items-start justify-between gap-3">
                   <p style={{ margin: 0, fontSize: 13.5, color: 'var(--color-accent-200)', whiteSpace: 'pre-wrap' }}>{quest.dmSecret}</p>
-                  <button
-                    onClick={() => {
-                      setDmSecretDraft(quest.dmSecret);
-                      setEditingDmSecret(true);
-                    }}
-                    className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
-                  >
-                    {t('quests.editSmall')}
-                  </button>
+                  {canDmWrite && (
+                    <button
+                      onClick={() => {
+                        setDmSecretDraft(quest.dmSecret);
+                        setEditingDmSecret(true);
+                      }}
+                      className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                    >
+                      {t('quests.editSmall')}
+                    </button>
+                  )}
                 </div>
               )}
             </div>
           )}
-          {isDm && !quest.dmSecret && !editingDmSecret && (
+          {canDmWrite && !quest.dmSecret && !editingDmSecret && (
             <button
               onClick={() => {
                 setDmSecretDraft('');
@@ -854,8 +854,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
 function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
-  const { roleIn } = useAuth();
-  const role = roleIn(campaignId);
+  const { isDm, canDmWrite } = useCampaignAccess();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const parentId = searchParams.get('parent');
@@ -923,7 +922,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     };
   }, [campaignId, t]);
 
-  if (role !== null && role !== 'dm') {
+  if (!isDm) {
     return (
       <PageShell campaignId={campaignId}>
         <Card>

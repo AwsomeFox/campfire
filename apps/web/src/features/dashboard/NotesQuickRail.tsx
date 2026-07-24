@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Note, NoteListPage, Role } from '@campfire/schema';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import type { Note, NoteListPage } from '@campfire/schema';
 import { NOTES_RECENT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Chip, TextInput, Btn, ErrorNote, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
@@ -29,13 +30,11 @@ function timeAgo(iso: string): string {
 export function NotesQuickRail({
   campaignId,
   openInboxCount,
-  role,
 }: {
   campaignId: number;
   openInboxCount: number;
-  role: Role | null;
 }) {
-  const isDm = role === 'dm';
+  const { isDm, canMemberWrite } = useCampaignAccess();
   const [notes, setNotes] = useState<Note[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -151,6 +150,8 @@ export function NotesQuickRail({
         ))
       )}
 
+      {canMemberWrite && (
+        <>
       {!isDm && (
         <div className="flex gap-1.5 pt-1">
           <button type="button" onClick={() => setDest('private')} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}>
@@ -184,6 +185,8 @@ export function NotesQuickRail({
       )}
       {savedTo === 'private' && <p className="text-[11px] text-emerald-400">Saved to your notes.</p>}
       {savedTo === 'inbox' && <p className="text-[11px] text-emerald-400">Sent to the DM&apos;s inbox.</p>}
+        </>
+      )}
       {!isDm && (
         <Link to={`/c/${campaignId}/notes`} className="text-[11px]" style={{ color: 'var(--color-accent-300)' }}>
           Want to share a longer note with the DM or party? Open My Notes →

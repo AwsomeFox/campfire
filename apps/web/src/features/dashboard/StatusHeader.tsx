@@ -4,6 +4,7 @@ import type { CampaignSummary, Role, Campaign, Encounter } from '@campfire/schem
 
 type DangerLevel = Campaign['dangerLevel'];
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
 import { Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
@@ -31,6 +32,7 @@ export function StatusHeader({
   liveEncounter?: Encounter | null;
 }) {
   const isDm = role === 'dm';
+  const { canDmWrite } = useCampaignAccess();
   const { campaign, currentLocation } = summary;
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(campaign.name);
@@ -160,9 +162,11 @@ export function StatusHeader({
             >
               <GameIcon slug="tv" size={14} className="inline align-text-bottom mr-1" />Cast
             </Link>
+            {canDmWrite && (
             <Btn ghost style={{ fontSize: 12 }} title="DM only" onClick={startEdit}>
               ✎ Edit
             </Btn>
+            )}
           </>
         )}
       </div>

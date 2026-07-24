@@ -18,7 +18,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { PageTitle } from '../../components/PageTitle';
 import {
   COMPENDIUM_SOURCE_COPIED_LABEL,
@@ -35,8 +35,7 @@ export default function ReaderPage() {
   const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
-  const { roleIn } = useAuth();
-  const isDm = Number.isFinite(id) && roleIn(id) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -130,7 +129,7 @@ export default function ReaderPage() {
             </span>
             <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
-            {isDm && (
+            {isDm && canDmWrite && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
                   {savingIcon ? 'Saving…' : entry.iconSlug ? 'Change icon' : 'Set icon'}

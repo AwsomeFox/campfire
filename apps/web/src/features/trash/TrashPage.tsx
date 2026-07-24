@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { TrashedEntity, TrashedEntityType } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -32,8 +33,7 @@ export default function TrashPage() {
   useFormattingLocale();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [items, setItems] = useState<TrashedEntity[]>([]);
   const [loading, setLoading] = useState(true);
@@ -139,6 +139,7 @@ export default function TrashPage() {
                     </span>
                     <span className="text-muted text-[11.5px] block mt-0.5">Deleted {formatDate(item.deletedAt)}</span>
                   </span>
+                  {canDmWrite && (
                   <Btn
                     ghost
                     className="!min-h-0 !py-1.5 text-xs shrink-0"
@@ -147,6 +148,7 @@ export default function TrashPage() {
                   >
                     {restoringId === key ? 'Restoring…' : 'Restore'}
                   </Btn>
+                  )}
                 </li>
               );
             })}

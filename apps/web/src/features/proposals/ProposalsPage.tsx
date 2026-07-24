@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Proposal } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -53,10 +53,8 @@ function EntityTitle({ slug, children }: { slug: string; children: ReactNode }) 
 export default function ProposalsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
+  const { role, isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
 
   const [pending, setPending] = useState<Proposal[] | null>(null);
   const [history, setHistory] = useState<Proposal[]>([]);
@@ -255,6 +253,7 @@ export default function ProposalsPage() {
               <GameIcon slug="robot-golem" size={13} className="inline align-text-bottom mr-1" /> AI drafts only ({aiPendingCount})
             </label>
           )}
+          {canDmWrite && (
           <BatchBar
             total={selectionScope.total}
             selectedCount={selectionScope.selectedCount}
@@ -267,6 +266,7 @@ export default function ProposalsPage() {
             onApprove={() => setBatchConfirmation({ action: 'approve', proposals: selectionScope.selected })}
             onReject={() => setBatchConfirmation({ action: 'reject', proposals: selectionScope.selected })}
           />
+          )}
           {visiblePending.length === 0 ? (
             <EmptyState icon="robot-golem" title="No AI drafts pending" hint="Turn off the filter to see the rest of the queue." />
           ) : (
@@ -275,6 +275,7 @@ export default function ProposalsPage() {
                 key={p.id}
                 proposal={p}
                 campaignId={cid}
+                canResolve={canDmWrite}
                 expanded={expandedId === p.id}
                 selected={selected.has(p.id)}
                 onSelectChange={() => toggleSelected(p.id)}
@@ -432,6 +433,7 @@ function BatchConfirmationDialog({
 function ProposalCard({
   proposal,
   campaignId,
+  canResolve,
   expanded,
   selected,
   onSelectChange,
@@ -441,6 +443,7 @@ function ProposalCard({
 }: {
   proposal: Proposal;
   campaignId: number;
+  canResolve: boolean;
   expanded: boolean;
   selected: boolean;
   onSelectChange: () => void;
@@ -562,6 +565,8 @@ function ProposalCard({
         <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-auto" onClick={onToggle}>
           {expanded ? 'Hide note field' : '+ note'}
         </button>
+        {canResolve && (
+        <>
         {canEdit && (
           <button
             type="button"
@@ -577,6 +582,8 @@ function ProposalCard({
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => act(onApprove, true)} disabled={busy}>
           {editing ? 'Approve edited' : 'Approve'}
         </Btn>
+        </>
+        )}
       </div>
     </Card>
   );

@@ -19,7 +19,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
 import {
@@ -100,8 +100,7 @@ function isEmptyCharter(c: SessionZero): boolean {
 export default function SessionZeroPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [charter, setCharter] = useState<SessionZero | null>(null);
   const [loading, setLoading] = useState(true);
@@ -277,7 +276,7 @@ export default function SessionZeroPage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <PageTitle>Session Zero</PageTitle>
         <div style={{ flex: 1 }} />
-        {isDm && !editing && !loading && (
+        {canDmWrite && !editing && !loading && (
           <Btn onClick={startEdit} style={{ fontSize: 13 }}>
             Edit charter
           </Btn>

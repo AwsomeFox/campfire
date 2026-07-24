@@ -20,6 +20,7 @@ import type { Note, NoteListPage } from '@campfire/schema';
 import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
@@ -77,8 +78,7 @@ export default function InboxPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
+  const { isDm, canDmWrite } = useCampaignAccess();
   const [searchParams] = useSearchParams();
   const inboxParam = searchParams.get('inbox');
   const deepInboxId = inboxParam != null && inboxParam !== '' ? Number(inboxParam) : Number.NaN;
@@ -168,8 +168,8 @@ export default function InboxPage() {
   }, [view, openList, historyList, loadingMore, loading, inboxUrl, t]);
 
   useEffect(() => {
-    if (Number.isFinite(cid) && role === 'dm') void load();
-  }, [cid, role, load]);
+    if (Number.isFinite(cid) && isDm) void load();
+  }, [cid, isDm, load]);
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
@@ -245,7 +245,7 @@ export default function InboxPage() {
     );
   }
 
-  if (role !== null && role !== 'dm') {
+  if (!isDm) {
     return (
       <div className="max-w-3xl mx-auto px-4 mt-5">
         <Card>
@@ -307,6 +307,7 @@ export default function InboxPage() {
                 key={item.id}
                 campaignId={cid}
                 item={item}
+                canWrite={canDmWrite}
                 expanded={expandedId === item.id}
                 onToggle={() => setExpandedId((cur) => (cur === item.id ? null : item.id))}
                 onResolve={(note, link) => resolve(item, note, link)}
@@ -405,6 +406,7 @@ function capitalize(s: string): string {
 function InboxItem({
   campaignId,
   item,
+  canWrite,
   expanded,
   onToggle,
   onResolve,
@@ -412,6 +414,7 @@ function InboxItem({
 }: {
   campaignId: number;
   item: Note;
+  canWrite: boolean;
   expanded: boolean;
   onToggle: () => void;
   onResolve: (resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) => Promise<void>;
@@ -488,7 +491,7 @@ function InboxItem({
         </div>
       </div>
 
-      {expanded && (
+      {expanded && canWrite && (
         <div className="cf-inset p-3 space-y-2.5 border-amber-500/30">
           <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">{t('notes.resolveInto')}</p>
           <TextArea
@@ -544,11 +547,13 @@ function InboxItem({
         </div>
       )}
 
+      {canWrite && (
       <div className="flex justify-end">
         <Btn className="!min-h-0 !py-1.5 text-xs" onClick={onToggle} disabled={busy}>
           {expanded ? t('notes.collapse') : t('notes.resolveArrow')}
         </Btn>
       </div>
+      )}
     </Card>
   );
 }

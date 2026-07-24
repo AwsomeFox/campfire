@@ -12,6 +12,7 @@ import { levelForXp, ddbImportSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
@@ -24,9 +25,8 @@ export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
-  const { me, roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { me } = useAuth();
+  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   // The campaign record drives the D&D Beyond import affordance (issue #714): the importer
   // produces a 5e-shaped character, so it is only offered for an explicitly-D&D-5e campaign.
   // A homebrew campaign (no pack selected) resolves to 5e for combat math but is NOT treated
@@ -46,7 +46,7 @@ export default function PartyPage() {
   const awardXpRequested = searchParams.get('action') === 'award-xp';
   // Keep the URL authoritative so Back/Forward closes and reopens the deep-linked
   // form instead of leaving local state out of sync with browser history.
-  const awarding = isDm && awardXpRequested;
+  const awarding = canDmWrite && awardXpRequested;
 
   function setAwardingOpen(open: boolean) {
     setSearchParams(
@@ -120,10 +120,10 @@ export default function PartyPage() {
   const myUserId = me?.user.id;
   // A player may own multiple characters (backup PC, familiar, companion) — the API
   // allows it, so don't cap the button at one owned character (issue #129).
-  const canCreate = isDm || role === 'player';
+  const canCreate = canPlayerWrite;
 
   const secondaryActions: PageHeaderSecondaryAction[] =
-    isDm && !awarding && characters.length > 0
+    canDmWrite && !awarding && characters.length > 0
       ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }]
       : [];
 
@@ -143,7 +143,7 @@ export default function PartyPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && awarding && (
+      {canDmWrite && awarding && (
         <AwardXpForm
           campaignId={id}
           characters={characters}
@@ -172,10 +172,10 @@ export default function PartyPage() {
               ownerLabel={ownerLabel(c.ownerUserId)}
               // Quick HP is offered on a card the viewer can edit: the DM (any card)
               // or a player on their own character (issue #68).
-              canEditHp={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              canEditHp={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
               // Move-to-Trash (issue #716): owner or DM only — the menu is not rendered
               // for an unrelated player, matching PATCH /characters/:id role gating.
-              canTrash={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              canTrash={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
               onTrashed={onCharacterTrashed}
               onError={setError}
               onChange={load}
