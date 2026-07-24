@@ -46,6 +46,9 @@ export interface OpenAiProviderOptions {
   headers?: Record<string, string>;
   /** Short provider name surfaced in results/audit. */
   name?: string;
+  /** Which OpenAI API shape to use. Defaults to 'responses' (the modern Responses API).
+   * Set to 'chat_completions' for OpenAI-compatible servers that only speak the legacy shape. */
+  endpointMode?: 'chat_completions' | 'responses';
 }
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
@@ -57,6 +60,7 @@ export class OpenAiProvider implements AiProvider {
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly retry: RetryConfig;
+  private readonly endpointMode: 'chat_completions' | 'responses';
 
   constructor(private readonly opts: OpenAiProviderOptions) {
     this.name = opts.name ?? 'openai';
@@ -65,10 +69,13 @@ export class OpenAiProvider implements AiProvider {
     if (!this.fetchImpl) throw new AiProviderError('transport', 'openai: no fetch implementation available', { provider: this.name });
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.retry = opts.retry ?? DEFAULT_RETRY;
+    this.endpointMode = opts.endpointMode ?? 'responses';
   }
 
   private url(): string {
-    return `${this.baseUrl}/chat/completions`;
+    return this.endpointMode === 'responses'
+      ? `${this.baseUrl}/responses`
+      : `${this.baseUrl}/chat/completions`;
   }
 
   private authHeaders(): Record<string, string> {
@@ -97,19 +104,51 @@ export class OpenAiProvider implements AiProvider {
     return body;
   }
 
+  private buildResponsesBody(req: AiGenerateRequest, stream: boolean): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      model: req.model || this.opts.model,
+      stream,
+    };
+
+    if (req.system) body.instructions = req.system;
+
+    body.input = req.messages.flatMap(toResponsesInputItems);
+
+    const temperature = req.temperature ?? this.opts.temperature;
+    if (temperature !== undefined) body.temperature = temperature;
+    const maxTokens = req.maxTokens ?? this.opts.maxTokens;
+    if (maxTokens !== undefined) body.max_output_tokens = maxTokens;
+
+    if (req.tools && req.tools.length > 0) {
+      body.tools = req.tools.map(toResponsesTool);
+      if (req.toolChoice === 'none') body.tool_choice = 'none';
+      else if (req.toolChoice === 'required') body.tool_choice = 'required';
+    }
+
+    return body;
+  }
+
   async generate(req: AiGenerateRequest, opts?: AiGenerateOptions): Promise<AiGenerateResult> {
-    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), this.buildBody(req, false), {
+    const body = this.endpointMode === 'responses'
+      ? this.buildResponsesBody(req, false)
+      : this.buildBody(req, false);
+    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), body, {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
       signal: opts?.signal,
     });
-    const json = (await res.json()) as OpenAiCompletion;
-    return this.parseCompletion(json, req.model || this.opts.model);
+    const json = await res.json();
+    return this.endpointMode === 'responses'
+      ? this.parseResponsesResult(json as ResponsesApiResponse, req.model || this.opts.model)
+      : this.parseCompletion(json as OpenAiCompletion, req.model || this.opts.model);
   }
 
   async *stream(req: AiGenerateRequest, opts?: AiGenerateOptions): AsyncIterable<AiStreamEvent> {
-    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), this.buildBody(req, true), {
+    const body = this.endpointMode === 'responses'
+      ? this.buildResponsesBody(req, true)
+      : this.buildBody(req, true);
+    const res = await postJson(this.fetchImpl, this.url(), this.authHeaders(), body, {
       provider: this.name,
       timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
       retry: this.retry,
@@ -117,23 +156,43 @@ export class OpenAiProvider implements AiProvider {
     });
     if (!res.body) throw new AiProviderError('transport', 'openai: streaming response had no body', { provider: this.name });
 
-    const acc = new OpenAiStreamAccumulator(req.model || this.opts.model);
-    // Idle/read timeout stays armed until the body completes or aborts (#1063).
-    for await (const { data } of parseSse(res.body, {
-      signal: opts?.signal,
-      idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-      provider: this.name,
-    })) {
-      if (data === '[DONE]') break;
-      let chunk: OpenAiChunk;
-      try {
-        chunk = JSON.parse(data) as OpenAiChunk;
-      } catch {
-        continue; // ignore keep-alive / non-JSON frames
+    if (this.endpointMode === 'responses') {
+      const acc = new ResponsesStreamAccumulator(req.model || this.opts.model);
+      for await (const { data } of parseSse(res.body, {
+        signal: opts?.signal,
+        idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+        provider: this.name,
+      })) {
+        if (data === '[DONE]') break;
+        let event: ResponsesStreamEvent;
+        try {
+          event = JSON.parse(data) as ResponsesStreamEvent;
+        } catch {
+          continue;
+        }
+        for (const ev of acc.push(event)) yield ev;
+        if (event.type === 'response.completed') break;
       }
-      for (const ev of acc.push(chunk)) yield ev;
+      yield { type: 'done', result: acc.finish() };
+    } else {
+      const acc = new OpenAiStreamAccumulator(req.model || this.opts.model);
+      // Idle/read timeout stays armed until the body completes or aborts (#1063).
+      for await (const { data } of parseSse(res.body, {
+        signal: opts?.signal,
+        idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+        provider: this.name,
+      })) {
+        if (data === '[DONE]') break;
+        let chunk: OpenAiChunk;
+        try {
+          chunk = JSON.parse(data) as OpenAiChunk;
+        } catch {
+          continue; // ignore keep-alive / non-JSON frames
+        }
+        for (const ev of acc.push(chunk)) yield ev;
+      }
+      yield { type: 'done', result: acc.finish() };
     }
-    yield { type: 'done', result: acc.finish() };
   }
 
   private parseCompletion(json: OpenAiCompletion, requestedModel: string): AiGenerateResult {
@@ -153,6 +212,37 @@ export class OpenAiProvider implements AiProvider {
         totalTokens: json.usage?.total_tokens ?? (json.usage ? (json.usage.prompt_tokens ?? 0) + (json.usage.completion_tokens ?? 0) : 0),
       },
       finishReason: mapFinishReason(choice?.finish_reason),
+      model: json.model ?? requestedModel,
+    };
+  }
+
+  private parseResponsesResult(json: ResponsesApiResponse, requestedModel: string): AiGenerateResult {
+    let text = '';
+    const toolCalls: AiToolCall[] = [];
+
+    for (const item of json.output ?? []) {
+      if (item.type === 'message') {
+        for (const part of item.content ?? []) {
+          if (part.type === 'output_text') text += part.text ?? '';
+        }
+      } else if (item.type === 'function_call') {
+        toolCalls.push({
+          id: item.call_id ?? item.id ?? `call_${toolCalls.length}`,
+          name: item.name ?? '',
+          arguments: parseJsonArgs(item.arguments),
+        });
+      }
+    }
+
+    return {
+      text,
+      toolCalls,
+      usage: {
+        promptTokens: json.usage?.input_tokens ?? 0,
+        completionTokens: json.usage?.output_tokens ?? 0,
+        totalTokens: (json.usage?.input_tokens ?? 0) + (json.usage?.output_tokens ?? 0),
+      },
+      finishReason: toolCalls.length > 0 ? 'tool_calls' : mapResponsesStatus(json.status),
       model: json.model ?? requestedModel,
     };
   }
@@ -198,6 +288,52 @@ function toOpenAiMessage(m: AiMessage): OpenAiMessage {
 
 function toOpenAiTool(t: AiToolSchema): OpenAiTool {
   return { type: 'function', function: { name: t.name, description: t.description, parameters: t.parameters } };
+}
+
+function toResponsesInputItems(m: AiMessage): ResponsesInputItem[] {
+  if (m.role === 'tool') {
+    return [{
+      type: 'function_call_output',
+      call_id: m.toolCallId ?? '',
+      output: m.content ?? '',
+    }];
+  }
+  if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+    const items: ResponsesInputItem[] = m.toolCalls.map((tc) => ({
+      type: 'function_call' as const,
+      id: tc.id,
+      call_id: tc.id,
+      name: tc.name,
+      arguments: JSON.stringify(tc.arguments ?? {}),
+    }));
+    if (m.content) {
+      items.unshift({ type: 'message', role: 'assistant', content: m.content });
+    }
+    return items;
+  }
+  return [{
+    type: 'message',
+    role: m.role as 'user' | 'assistant',
+    content: m.content ?? '',
+  }];
+}
+
+function toResponsesTool(t: AiToolSchema): ResponsesTool {
+  return {
+    type: 'function',
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+  };
+}
+
+function mapResponsesStatus(status: string | undefined): AiFinishReason {
+  switch (status) {
+    case 'completed': return 'stop';
+    case 'incomplete': return 'length';
+    case 'failed': return 'unknown';
+    default: return 'stop';
+  }
 }
 
 function mapFinishReason(reason: string | null | undefined): AiFinishReason {
@@ -292,6 +428,84 @@ class OpenAiStreamAccumulator {
   }
 }
 
+class ResponsesStreamAccumulator {
+  private text = '';
+  private readonly toolAcc = new Map<string, { id: string; name: string; args: string }>();
+  private usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  private finishReason: AiFinishReason = 'stop';
+  private model: string;
+  private currentToolCallId = '';
+
+  constructor(requestedModel: string) {
+    this.model = requestedModel;
+  }
+
+  *push(event: ResponsesStreamEvent): Generator<AiStreamEvent> {
+    switch (event.type) {
+      case 'response.output_item.added': {
+        if (event.item?.type === 'function_call') {
+          this.currentToolCallId = event.item.call_id ?? event.item.id ?? '';
+          this.toolAcc.set(this.currentToolCallId, {
+            id: this.currentToolCallId,
+            name: event.item.name ?? '',
+            args: '',
+          });
+        }
+        break;
+      }
+      case 'response.output_text.delta': {
+        const delta = event.delta ?? '';
+        this.text += delta;
+        yield { type: 'text', delta };
+        break;
+      }
+      case 'response.function_call_arguments.delta': {
+        const delta = event.delta ?? '';
+        const callId = event.call_id ?? event.item_id ?? this.currentToolCallId;
+        const entry = this.toolAcc.get(callId);
+        if (entry) entry.args += delta;
+        const idx = [...this.toolAcc.keys()].indexOf(callId);
+        yield {
+          type: 'tool_call',
+          index: idx >= 0 ? idx : 0,
+          id: callId || undefined,
+          argumentsDelta: delta,
+        };
+        break;
+      }
+      case 'response.completed': {
+        const resp = event.response;
+        if (resp?.usage) {
+          this.usage = {
+            promptTokens: resp.usage.input_tokens ?? 0,
+            completionTokens: resp.usage.output_tokens ?? 0,
+            totalTokens: (resp.usage.input_tokens ?? 0) + (resp.usage.output_tokens ?? 0),
+          };
+          yield { type: 'usage', usage: this.usage };
+        }
+        if (resp?.model) this.model = resp.model;
+        this.finishReason = mapResponsesStatus(resp?.status);
+        break;
+      }
+    }
+  }
+
+  finish(): AiGenerateResult {
+    const toolCalls: AiToolCall[] = [...this.toolAcc.values()].map((e) => ({
+      id: e.id,
+      name: e.name,
+      arguments: parseJsonArgs(e.args),
+    }));
+    return {
+      text: this.text,
+      toolCalls,
+      usage: this.usage,
+      finishReason: this.finishReason,
+      model: this.model,
+    };
+  }
+}
+
 // ---------- OpenAI wire types (private to this adapter) ----------
 
 interface OpenAiMessage {
@@ -330,4 +544,57 @@ interface OpenAiChunk {
       tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
     };
   }[];
+}
+
+// ---------- OpenAI Responses API wire types (private to this adapter) ----------
+
+interface ResponsesInputItem {
+  type: 'message' | 'function_call' | 'function_call_output';
+  role?: 'user' | 'assistant';
+  content?: string;
+  id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  output?: string;
+}
+
+interface ResponsesTool {
+  type: 'function';
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+interface ResponsesApiResponse {
+  id?: string;
+  model?: string;
+  status?: string;
+  output?: {
+    type: 'message' | 'function_call';
+    content?: { type: string; text?: string }[];
+    id?: string;
+    call_id?: string;
+    name?: string;
+    arguments?: string;
+  }[];
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+interface ResponsesStreamEvent {
+  type: string;
+  item?: {
+    type?: string;
+    id?: string;
+    call_id?: string;
+    name?: string;
+  };
+  delta?: string;
+  call_id?: string;
+  item_id?: string;
+  response?: ResponsesApiResponse;
 }
