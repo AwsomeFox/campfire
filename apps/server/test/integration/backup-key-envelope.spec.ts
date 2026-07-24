@@ -92,6 +92,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const manifest = await manifestFromArchive(buffer);
     expect(manifest.aiKeySource).toBe('keyfile');
     expect(manifest.aiKeyIncluded).toBe(false);
+    expect(manifest.version).toBe(1);
     // No envelope entry when no passphrase was supplied.
     const zip = await JSZip.loadAsync(buffer);
     expect(zip.file(KEY_ENVELOPE_ENTRY)).toBeNull();
@@ -116,6 +117,7 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const manifest = await manifestFromArchive(buffer);
     expect(manifest.aiKeySource).toBe('keyfile');
     expect(manifest.aiKeyIncluded).toBe(true);
+    expect(manifest.version).toBe(2);
     const zip = await JSZip.loadAsync(buffer);
     const entry = zip.file(KEY_ENVELOPE_ENTRY);
     expect(entry).not.toBeNull();

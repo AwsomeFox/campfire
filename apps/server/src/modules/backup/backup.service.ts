@@ -30,6 +30,7 @@ import {
 import {
   BACKUP_APP,
   BACKUP_FORMAT_VERSION,
+  BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE,
   BACKUP_KIND,
   BACKUP_VERSION,
   CURRENT_SCHEMA_REVISION,
@@ -145,6 +146,24 @@ function aiKeyMaterialToBuffer(material: Buffer): Buffer {
   const asText = material.toString('utf8').trim();
   if (/^[0-9a-fA-F]{64}$/.test(asText)) return Buffer.from(asText, 'hex');
   return material;
+}
+
+function countAiCredentialsInSnapshot(snapshotPath: string): number | null {
+  try {
+    const probe = new Database(snapshotPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = probe
+        .prepare(
+          'SELECT COUNT(*) AS n FROM ai_provider_configs WHERE encrypted_api_key IS NOT NULL',
+        )
+        .get() as { n: number };
+      return row?.n ?? 0;
+    } finally {
+      probe.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** The encryption key that will be effective after restore completes. */
@@ -446,7 +465,7 @@ export class BackupService implements OnApplicationBootstrap {
       // #496: probe the key source + credential count for the manifest, and
       // (opt-in) include an encrypted envelope of the keyfile.
       const { source: aiKeySource, keyfilePath } = this.detectAiKeySource(dataDir);
-      const aiCredentialCount = await this.countStoredAiCredentials();
+      const aiCredentialCount = countAiCredentialsInSnapshot(snapshotPath);
       let aiKeyIncluded = false;
       const requestedPassphrase = options?.keyPassphrase?.trim();
       if (requestedPassphrase && aiKeySource === 'keyfile' && keyfilePath) {
@@ -472,7 +491,7 @@ export class BackupService implements OnApplicationBootstrap {
       const manifest: BackupManifest = {
         app: BACKUP_APP,
         kind: BACKUP_KIND,
-        version: BACKUP_FORMAT_VERSION,
+        version: aiKeyIncluded ? BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE : 1,
         appVersion: serverAppVersion(),
         schemaVersion: CURRENT_SCHEMA_REVISION,
         createdAt: nowIso(),

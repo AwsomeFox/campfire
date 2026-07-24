@@ -11,7 +11,12 @@ export const BACKUP_KIND = 'server-backup';
  * layout or manifest schema changes; add an explicit migration for each older
  * version in {@link parseBackupManifest}.
  */
-export const BACKUP_FORMAT_VERSION = 1;
+export const BACKUP_FORMAT_VERSION = 2;
+
+/** Format version written for archives that include an AI keyfile envelope (#496).
+ *  Older Campfire releases only understand format 1 and will reject these archives,
+ *  preventing a silent restore that leaves credentials undecryptable. */
+export const BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE = 2;
 
 /** @deprecated Use {@link BACKUP_FORMAT_VERSION}. Kept for existing imports/tests. */
 export const BACKUP_VERSION = BACKUP_FORMAT_VERSION;
@@ -100,7 +105,7 @@ function asNonEmptyString(value: unknown): string | null {
 /** Expected db entry path for format version 1 archives (issue #997 fix 2). */
 export const DB_ENTRY_V1 = 'db/campfire.db';
 
-function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
+function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): BackupManifest {
   const createdAt = asNonEmptyString(raw.createdAt);
   const db = asNonEmptyString(raw.db);
   const dbBytes = raw.dbBytes;
@@ -146,7 +151,7 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
   return {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
-    version: BACKUP_FORMAT_VERSION,
+    version: sourceVersion,
     createdAt,
     db,
     dbBytes,
@@ -193,8 +198,8 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
   if (formatVersion === 0) {
     return normalizeManifestV1({ ...record, version: 1 });
   }
-  if (formatVersion === 1) {
-    return normalizeManifestV1(record);
+  if (formatVersion === 1 || formatVersion === 2) {
+    return normalizeManifestV1(record, formatVersion);
   }
 
   throw new BadRequestException(

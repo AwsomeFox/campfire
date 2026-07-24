@@ -16,6 +16,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { BackupService, RESTORE_CONFIRM_TOKEN } from './backup.service';
+import { BackupDownloadDto } from './backup.dto';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
@@ -53,9 +54,9 @@ export class BackupController {
   @ApiResponse({ status: 200, description: 'Zip file download (application/zip, Content-Disposition attachment).' })
   async downloadWithKeyEnvelope(
     @Res() res: Response,
-    @Body('keyPassphrase') keyPassphrase?: string,
+    @Body() body: BackupDownloadDto,
   ): Promise<void> {
-    await this.sendBackup(res, keyPassphrase);
+    await this.sendBackup(res, body.keyPassphrase);
   }
 
   private async sendBackup(res: Response, keyPassphrase?: string): Promise<void> {
