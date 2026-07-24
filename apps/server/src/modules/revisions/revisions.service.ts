@@ -156,26 +156,27 @@ export class RevisionsService {
     };
   }
 
-  /** Current unreplacd tip for an entity, if one exists. */
+  /** Current unreplaced tip for an entity, if one exists. */
   private loadTip(
     db: SyncDb,
     entityType: RevisionEntityType,
     entityId: number,
   ): typeof entityRevisions.$inferSelect | null {
-    const [row] = db
-      .select()
-      .from(entityRevisions)
-      .where(
-        and(
-          eq(entityRevisions.entityType, entityType),
-          eq(entityRevisions.entityId, entityId),
-          isNull(entityRevisions.replacedAt),
-        ),
-      )
-      .orderBy(desc(entityRevisions.id))
-      .limit(1)
-      .all();
-    return row ?? null;
+    return (
+      db
+        .select()
+        .from(entityRevisions)
+        .where(
+          and(
+            eq(entityRevisions.entityType, entityType),
+            eq(entityRevisions.entityId, entityId),
+            isNull(entityRevisions.replacedAt),
+          ),
+        )
+        .orderBy(desc(entityRevisions.id))
+        .limit(1)
+        .get() ?? null
+    );
   }
 
   /**
@@ -378,27 +379,27 @@ export class RevisionsService {
   ): { campaignId: number; prose: string; updatedAt: string } | null {
     switch (entityType) {
       case 'session': {
-        const [row] = db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1).all();
+        const row = db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.recap, updatedAt: row.updatedAt } : null;
       }
       case 'quest': {
-        const [row] = db.select().from(quests).where(eq(quests.id, entityId)).limit(1).all();
+        const row = db.select().from(quests).where(eq(quests.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'npc': {
-        const [row] = db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1).all();
+        const row = db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'location': {
-        const [row] = db.select().from(locations).where(eq(locations.id, entityId)).limit(1).all();
+        const row = db.select().from(locations).where(eq(locations.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'faction': {
-        const [row] = db.select().from(factions).where(eq(factions.id, entityId)).limit(1).all();
+        const row = db.select().from(factions).where(eq(factions.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'note': {
-        const [row] = db.select().from(notes).where(eq(notes.id, entityId)).limit(1).all();
+        const row = db.select().from(notes).where(eq(notes.id, entityId)).limit(1).get();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
     }
@@ -528,12 +529,12 @@ export class RevisionsService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<{ entityType: RevisionEntityType; entityId: number; updatedAt: string; revisions: EntityRevision[] }> {
-    const [revision] = this.db
+    const revision = this.db
       .select()
       .from(entityRevisions)
       .where(eq(entityRevisions.id, revisionId))
       .limit(1)
-      .all();
+      .get();
     if (!revision || revision.entityType !== entityType || revision.entityId !== entityId) {
       throw new NotFoundException(`Revision ${revisionId} not found for ${entityType} ${entityId}`);
     }

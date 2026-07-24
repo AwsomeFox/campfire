@@ -597,6 +597,7 @@ function NoteCard({
               entityType="note"
               entityId={liveNote.id}
               currentSnapshot={{ body: liveNote.body }}
+              expectedUpdatedAt={liveNote.updatedAt}
               label="Note history"
               reloadNonce={historyNonce}
               onRestored={() => {

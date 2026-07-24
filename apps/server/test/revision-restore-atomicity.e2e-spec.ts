@@ -229,4 +229,51 @@ describe('revision restore atomicity (e2e) — #513', () => {
     expect(after.listedRevisions[0].snapshot.recap).toBe('v2-current');
     expect(after.restoreAuditCount).toBe(before.restoreAuditCount + 1);
   });
+
+  it('concurrent restores leave exactly one open tip and prose matching one outcome', async () => {
+    const server = ctx.app.getHttpServer();
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: nextSessionNumber++, recap: 'v1-original' });
+    expect(created.status).toBe(201);
+    const sessionId = created.body.id as number;
+
+    expect((await request(server).patch(`/api/v1/sessions/${sessionId}`).set(dm).send({ recap: 'v2-mid' })).status).toBe(
+      200,
+    );
+    const v3 = await request(server).patch(`/api/v1/sessions/${sessionId}`).set(dm).send({ recap: 'v3-current' });
+    expect(v3.status).toBe(200);
+
+    const revs = await request(server).get(`/api/v1/revisions/session/${sessionId}`).set(dm);
+    expect(revs.status).toBe(200);
+    expect(revs.body).toHaveLength(2);
+    const byRecap = new Map(
+      (revs.body as Array<{ id: number; snapshot: { recap?: string } }>).map((r) => [r.snapshot.recap, r.id]),
+    );
+    const restoreV1 = byRecap.get('v1-original');
+    const restoreV2 = byRecap.get('v2-mid');
+    expect(restoreV1).toBeDefined();
+    expect(restoreV2).toBeDefined();
+
+    // Fire both restores together — better-sqlite3 serializes the transactions; the
+    // invariant under test is that tip close/open cannot leave two open tips.
+    const [a, b] = await Promise.all([
+      request(server).post(`/api/v1/revisions/session/${sessionId}/${restoreV1}/restore`).set(dm),
+      request(server).post(`/api/v1/revisions/session/${sessionId}/${restoreV2}/restore`).set(dm),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([201, 201]);
+
+    const openTips = rawDb()
+      .prepare(
+        `SELECT count(*) AS n FROM entity_revisions
+         WHERE entity_type = 'session' AND entity_id = ? AND replaced_at IS NULL`,
+      )
+      .get(sessionId) as { n: number };
+    expect(openTips.n).toBe(1);
+
+    const session = await request(server).get(`/api/v1/sessions/${sessionId}`).set(dm);
+    expect(session.status).toBe(200);
+    expect(['v1-original', 'v2-mid']).toContain(session.body.recap);
+  });
 });
