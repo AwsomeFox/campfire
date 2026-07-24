@@ -282,6 +282,19 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_npc_disposition',
   'set_faction_reputation',
   'set_location_discovery',
+  // battle-map authoring (#488) — the AI must be able to spin up a battlefield when the
+  // fiction turns to a fight and adjust its VTT overlays (grid alignment, fog wholesale,
+  // AoE templates) mid-encounter without a human dropping the driver seat. `generate_map`
+  // procedurally builds a hidden map attachment and (optionally) auto-attaches it to an
+  // encounter with an aligned grid; `update_encounter` carries fog geometry, grid config,
+  // and shared AoE templates for live spatial play. Both are DM-role-gated at the tool
+  // layer so the seat can only reach them because it runs as a DM; the `delete_` prefix
+  // guard below still blocks every map/attachment/encounter delete, and hidden handouts
+  // remain gated by attachment-visibility tools that are NOT on this allow-list — so an
+  // accidental prep-time toggle via update_encounter.hidden=false is the sole trade-off,
+  // and it is audited and reversible.
+  'generate_map',
+  'update_encounter',
   // private information delivery (#1023)
   'whisper_to_player',
   // economy / loot (#1021) — parity with award_xp
