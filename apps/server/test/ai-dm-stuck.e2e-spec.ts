@@ -226,7 +226,7 @@ describe('ai-dm stuck ladder — player levers recover or hand off (e2e)', () =>
     // The AI seat is frozen — no AI turn can run while a human holds it.
     const frozen = await h.sendMessage(campaignId, { input: 'AI, narrate' });
     expect(frozen.status).toBe(503);
-    expect(frozen.text).toContain('human');
+    expect(frozen.body.message).toContain('human');
 
     // The acting human hands the seat back with the call they made.
     const back = await h.lever(campaignId, 'handback', { note: 'the door was already open' }, player);

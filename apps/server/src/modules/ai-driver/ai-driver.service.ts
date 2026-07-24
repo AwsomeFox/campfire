@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
@@ -1401,9 +1402,14 @@ export class AiDriverService {
       // forbidden call never reaches a service. A known tool that fails the allow-list is a
       // security anomaly (audited + logged); an unknown tool falls through to a plain 404 below.
       if (tool && !isDriverToolAllowed(tool)) {
-        const text = JSON.stringify({
-          error: { status: 403, code: 'forbidden_tool', message: `The AI DM seat is not permitted to call ${call.name}.` },
-        });
+        const text = JSON.stringify(
+          buildMcpEnvelope(
+            new ForbiddenException({
+              code: 'forbidden_tool',
+              message: `The AI DM seat is not permitted to call ${call.name}.`,
+            }),
+          ),
+        );
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
         const blockedIdentity = await this.resolveToolResourceIdentity(
           campaignId,
@@ -1435,9 +1441,11 @@ export class AiDriverService {
       // are rejected at the tool's own requireRole for any other campaign. This arg-level guard is
       // the belt for tools that DO carry campaignId — an explicit mismatch never even dispatches.
       if ('campaignId' in args && Number(args.campaignId) !== campaignId) {
-        const text = JSON.stringify({
-          error: { status: 403, code: 'forbidden', message: `This AI DM seat is scoped to campaign ${campaignId}.` },
-        });
+        const text = JSON.stringify(
+          buildMcpEnvelope(
+            new ForbiddenException(`This AI DM seat is scoped to campaign ${campaignId}.`),
+          ),
+        );
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
         const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
         this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
@@ -1451,9 +1459,11 @@ export class AiDriverService {
       if (tool?.mutating) {
         const liveGuard = guardDriverLivePlayArgs(call.name, args, session);
         if (!liveGuard.ok) {
-          const text = JSON.stringify({
-            error: { status: 403, code: liveGuard.code, message: liveGuard.message },
-          });
+          const text = JSON.stringify(
+            buildMcpEnvelope(
+              new ForbiddenException({ code: liveGuard.code, message: liveGuard.message }),
+            ),
+          );
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
           const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
           this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);

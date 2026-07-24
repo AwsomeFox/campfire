@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { zodToJsonSchema as zodToJsonSchemaRaw } from 'zod-to-json-schema';
@@ -76,6 +76,7 @@ import {
   RevisionEntityType,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
+import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
 import { fromJsonText } from '../../common/json';
 import { resolveSavingThrow } from './saving-throw-math';
@@ -128,51 +129,18 @@ function ok(data: unknown): ToolResult {
 
 /**
  * Structured error content: every isError result's text is a JSON object
- * `{"error":{"status","code","message"}}` so a calling agent can branch on
- * `status`/`code` programmatically instead of string-matching prose. `code`
- * is a short machine-friendly slug derived from the HTTP status (or
- * "validation_failed" for a raw ZodError, e.g. from `.strict()` rejecting an
- * unknown arg key).
+ * `{"error":{"status","code","message","requestId"[,"errors[]"]}}` so a calling
+ * agent can branch on `status`/`code` programmatically instead of string-matching
+ * prose. The shape is the SAME `ApiErrorEnvelope` the REST API publishes (issue
+ * #682) — same `code` slug vocabulary, same `errors[]` field-error structure, and
+ * a `requestId` for cross-transport support correlation. See
+ * `common/api-error.envelope.ts` `buildMcpEnvelope()`. REST carries additional
+ * RFC 9457 fields (`type`/`title`/`instance`); MCP omits them — they have no
+ * JSON-RPC meaning.
  */
 function fail(err: unknown): ToolResult {
-  let status: number;
-  let code: string;
-  let message: string;
-  if (err instanceof HttpException) {
-    status = err.getStatus();
-    const res = err.getResponse();
-    if (typeof res === 'string') {
-      message = res;
-    } else {
-      const obj = res as { message?: unknown; error?: unknown };
-      message = typeof obj.message === 'string' ? obj.message : Array.isArray(obj.message) ? obj.message.join('; ') : JSON.stringify(res);
-    }
-    code =
-      status === 404
-        ? 'not_found'
-        : status === 403
-          ? 'forbidden'
-          : status === 400
-            ? 'bad_request'
-            : status === 409
-              ? 'conflict'
-              : status === 401
-                ? 'unauthorized'
-                : 'error';
-  } else if (err instanceof z.ZodError) {
-    status = 400;
-    code = 'validation_failed';
-    message = err.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
-  } else if (err instanceof Error) {
-    status = 500;
-    code = 'internal_error';
-    message = err.message;
-  } else {
-    status = 500;
-    code = 'internal_error';
-    message = String(err);
-  }
-  return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: { status, code, message } }) }] };
+  const envelope = buildMcpEnvelope(err);
+  return { isError: true, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
 }
 
 /**
@@ -409,10 +377,12 @@ export class McpToolsService {
         '(quests, npcs, locations, sessions, characters, notes, inbox, members, encounters, dice rolls, proposal ' +
         'submission/approval) fails with 403 until a dm sets status back to "active" via update_campaign_status. ' +
         'Reads, export_campaign, read_audit_log, delete_campaign, and the status flip itself still work.\n\n' +
-        'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message"}} (e.g. ' +
-        'status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). Every ' +
-        'tool\'s argument object is strict — an unknown/misspelled key is a validation_failed error, not a silent ' +
-        'no-op, so check the message and retry with corrected keys rather than assuming the call succeeded.\n\n' +
+        'ERRORS — a failed call returns isError:true with JSON text {"error":{"status","code","message","requestId"[,"errors[]"]}} ' +
+        '(e.g. status 404/code "not_found", status 403/code "forbidden", status 400/code "validation_failed"). The shape is ' +
+        'the SAME envelope the REST API publishes (issue #682): same `code` slug vocabulary and, for validation_failed, a ' +
+        'structured `errors[]` of {field,message}. Every tool\'s argument object is strict — an unknown/misspelled key is a ' +
+        'validation_failed error, not a silent no-op, so check the message/errors and retry with corrected keys rather than ' +
+        'assuming the call succeeded. `requestId` is a per-call correlation id; include it in any support ticket.\n\n' +
         'RESOURCES & PROMPTS — beyond tools, the server exposes read surfaces as MCP resources and a couple of ' +
         'authoring prompts. Resources: the static campfire://campaigns index, plus the per-campaign templates ' +
         'campfire://campaign/{campaignId}/summary, /party, and /recaps (each returns the same JSON as the ' +
@@ -479,8 +449,12 @@ export class McpToolsService {
       call: async (name, args) => {
         const tool = collector.get(name);
         if (!tool) {
+          // Same envelope shape as fail() — issue #682. Built inline because
+          // there's no thrown value to normalize (this is the driver runtime's
+          // own "no such tool" path, not a tool callback).
+          const env = buildMcpEnvelope(new NotFoundException(`No such tool: ${name}`));
           return {
-            text: JSON.stringify({ error: { status: 404, code: 'unknown_tool', message: `No such tool: ${name}` } }),
+            text: JSON.stringify(env),
             isError: true,
           };
         }

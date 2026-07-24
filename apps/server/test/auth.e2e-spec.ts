@@ -275,9 +275,13 @@ describe('login enumeration hardening (e2e) — uniform failure for unknown/wron
     expect(wrong.status).toBe(401);
     expect(sso.status).toBe(401);
 
-    // ...and byte-for-byte the same body (no message/error that distinguishes the case).
-    expect(wrong.body).toEqual(unknown.body);
-    expect(sso.body).toEqual(unknown.body);
+    // ...and the same semantic body (requestId is per-request and excluded).
+    const bodyWithoutRequestId = (body: Record<string, unknown>) => {
+      const { requestId: _rid, ...rest } = body;
+      return rest;
+    };
+    expect(bodyWithoutRequestId(wrong.body)).toEqual(bodyWithoutRequestId(unknown.body));
+    expect(bodyWithoutRequestId(sso.body)).toEqual(bodyWithoutRequestId(unknown.body));
     expect(unknown.body.message).toBe('Invalid username or password');
     // The old SSO-specific signal must be gone.
     expect(JSON.stringify(sso.body)).not.toMatch(/SSO/i);
@@ -289,7 +293,11 @@ describe('login enumeration hardening (e2e) — uniform failure for unknown/wron
     const sso = await request(server).post('/api/v1/auth/token').send({ username: 'ssouser', password: 'placeholder-password-1', tokenName: 'x' });
     expect(unknown.status).toBe(401);
     expect(sso.status).toBe(401);
-    expect(sso.body).toEqual(unknown.body);
+    const bodyWithoutRequestId = (body: Record<string, unknown>) => {
+      const { requestId: _rid, ...rest } = body;
+      return rest;
+    };
+    expect(bodyWithoutRequestId(sso.body)).toEqual(bodyWithoutRequestId(unknown.body));
   });
 
   it('timing: the unknown-user path still spends scrypt work (not skipped), so it is not an obvious timing oracle', async () => {

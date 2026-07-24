@@ -289,7 +289,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     // The next turn is refused outright — budget exhausted.
     const again = await h.sendMessage(campaignId, { input: 'again' });
     expect(again.status).toBe(403);
-    expect(again.text).toContain('budget exhausted');
+    expect(again.body.message).toContain('budget exhausted');
   });
 
   it('#1076 driver: estimates budget usage when provider omits streaming usage and narration is done-only', async () => {
@@ -400,7 +400,7 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
     // Confirm the stranded-session failure mode the teardown closes.
     const frozen = await h.sendMessage(campaignId, { input: 'AI, narrate' });
     expect(frozen.status).toBe(503);
-    expect(frozen.text).toContain('human');
+    expect(frozen.body.message).toContain('human');
     return campaignId;
   }
 
