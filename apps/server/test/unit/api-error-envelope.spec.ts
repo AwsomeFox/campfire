@@ -4,7 +4,6 @@ import {
   ForbiddenException,
   HttpException,
   HttpStatus,
-  InternalServerErrorException,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
