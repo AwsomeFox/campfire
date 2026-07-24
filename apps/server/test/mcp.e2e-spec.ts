@@ -141,6 +141,10 @@ const ALL_TOOLS = [
   'update_encounter',
   'reveal_map_region',
   'generate_map',
+  'generate_ai_map',
+  'get_map_generation',
+  'refine_ai_map',
+  'attach_generated_map',
   'add_combatant',
   'update_combatant',
   'remove_combatant',
@@ -265,7 +269,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(156);
+    expect(tools).toHaveLength(160);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -601,6 +605,57 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     // A viewer-scoped PAT cannot generate (dm role required).
     const denied = await viewerClient.callTool({ name: 'generate_map', arguments: { campaignId, kind: 'cave' } });
+    expect(denied.isError).toBe(true);
+    expect((denied.content as TextContent[])[0].text).toContain('403');
+  });
+
+  it('generate_ai_map (issue #410): dm generates candidates offline (procedural), fetches status, and attaches a hidden map; viewer denied', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+
+    // No AI provider is configured, so generation routes HONESTLY to the first-party
+    // procedural-blueprint renderer — deterministic + offline. A free-form theme
+    // ("volcanic") is normalized rather than rejected (#410).
+    const genRes = await dmClient.callTool({
+      name: 'generate_ai_map',
+      arguments: { campaignId, prompt: 'a volcanic dwarven forge', mode: 'battle-map', kind: 'dungeon', theme: 'volcanic', count: 2 },
+    });
+    expect(genRes.isError).toBeFalsy();
+    const gen = parseResult(genRes) as {
+      id: string;
+      status: string;
+      method: string;
+      previews: Array<{ id: string; svg: string | null; provenance: { label: string } }>;
+    };
+    expect(gen.status).toBe('succeeded');
+    expect(gen.method).toBe('procedural-blueprint');
+    expect(gen.previews).toHaveLength(2);
+    expect(gen.previews[0].provenance.label).toMatch(/procedural renderer/i);
+
+    // get_map_generation returns the job status.
+    const statusRes = await dmClient.callTool({ name: 'get_map_generation', arguments: { campaignId, jobId: gen.id } });
+    expect(statusRes.isError).toBeFalsy();
+    expect((parseResult(statusRes) as { id: string }).id).toBe(gen.id);
+
+    // attach_generated_map persists a hidden map attachment.
+    const attachRes = await dmClient.callTool({
+      name: 'attach_generated_map',
+      arguments: { campaignId, jobId: gen.id, previewId: gen.previews[0].id },
+    });
+    expect(attachRes.isError).toBeFalsy();
+    const attach = parseResult(attachRes) as { attachment: { id: number }; provenance: { method: string } };
+    expect(attach.attachment.id).toBeGreaterThan(0);
+    expect(attach.provenance.method).toBe('procedural-blueprint');
+
+    // Hidden by default (#97/#259): a viewer PAT cannot see the generated map.
+    const hidden = await viewerClient.callTool({ name: 'get_attachment', arguments: { attachmentId: attach.attachment.id } });
+    expect(hidden.isError).toBe(true);
+
+    // A viewer-scoped PAT cannot generate (dm role required).
+    const denied = await viewerClient.callTool({
+      name: 'generate_ai_map',
+      arguments: { campaignId, prompt: 'x', mode: 'battle-map' },
+    });
     expect(denied.isError).toBe(true);
     expect((denied.content as TextContent[])[0].text).toContain('403');
   });

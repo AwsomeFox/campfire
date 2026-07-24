@@ -45,6 +45,7 @@ import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { MapsModule } from './modules/maps/maps.module';
+import { AiMapModule } from './modules/ai-map/ai-map.module';
 import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -164,6 +165,7 @@ function serveStaticImports(): DynamicModule[] {
     AttachmentsModule,
     EncountersModule,
     MapsModule,
+    AiMapModule,
     EventsModule,
     RollsModule,
     NotificationsModule,
