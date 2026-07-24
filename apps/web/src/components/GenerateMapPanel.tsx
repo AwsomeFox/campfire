@@ -177,7 +177,10 @@ export function GenerateMapPanel({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${preview.kind}-${preview.seed}.svg`;
+    // Seeds are user-controllable and may contain slashes/colons/control chars; normalize to a
+    // filename-safe subset (browser sanitization is inconsistent) before building the name.
+    const safeSeed = preview.seed.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'map';
+    a.download = `${preview.kind}-${safeSeed}.svg`;
     document.body.appendChild(a);
     a.click();
     a.remove();
