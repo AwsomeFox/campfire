@@ -638,8 +638,30 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
     expect(dmRsvps).toHaveLength(2);
-    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
+    expect(dmRsvps[0].title).toMatch(/updated their note/i);
     expect(dmRsvps[0].title).not.toMatch(/RSVP'd yes/i);
+  });
+
+  it("a player's RSVP status+note update notifies the DM with both status and note change copy", async () => {
+    const future = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+    const sched = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'RSVP status+note night' });
+    expect(sched.status).toBe(201);
+    const scheduleId = sched.body.id as number;
+
+    const initial = await player.put(`/api/v1/schedule/${scheduleId}/rsvp`).send({ status: 'yes' });
+    expect(initial.status).toBe(200);
+
+    const statusAndNote = await player
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .send({ status: 'no', note: 'Can only join for the first hour' });
+    expect(statusAndNote.status).toBe(200);
+
+    const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
+    expect(dmRsvps).toHaveLength(2);
+    expect(dmRsvps[0].title).toMatch(/RSVP'd no/i);
+    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
   });
 
   it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
