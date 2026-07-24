@@ -6,7 +6,7 @@ import { Markdown } from './Markdown';
 import { useDialog } from './useDialog';
 import { useDisclosure } from './useDisclosure';
 
-type Snapshot = Record<string, string>;
+type Snapshot = Record<string, string | string[]>;
 type DialogStep = 'inspect' | 'confirm';
 
 const FIELD_LABELS: Partial<Record<RevisionEntityType, Record<string, string>>> = {
@@ -16,7 +16,18 @@ const FIELD_LABELS: Partial<Record<RevisionEntityType, Record<string, string>>> 
   location: { body: 'Location description' },
   faction: { body: 'Faction description' },
   note: { body: 'Note' },
+  timeline_calendar: { note: 'Calendar note' },
+  scheduled_session: { notes: 'Schedule notes' },
+  session_zero: {
+    lines: 'Lines',
+    veils: 'Veils',
+    safetyTools: 'Safety tools',
+    houseRules: 'House rules',
+    toneAndExpectations: 'Tone and expectations',
+  },
 };
+
+const SESSION_ZERO_FIELDS = ['lines', 'veils', 'safetyTools', 'houseRules', 'toneAndExpectations'] as const;
 
 const MARKDOWN_FIELDS = new Set(['body', 'recap', 'summary', 'description', 'dmSecret']);
 
@@ -76,13 +87,46 @@ function snapshotFields(selected: Snapshot, current: Snapshot): string[] {
   });
 }
 
-function restorableField(entityType: RevisionEntityType): 'body' | 'recap' {
-  return entityType === 'session' ? 'recap' : 'body';
+function restorableField(entityType: RevisionEntityType): string {
+  switch (entityType) {
+    case 'session':
+      return 'recap';
+    case 'timeline_calendar':
+      return 'note';
+    case 'scheduled_session':
+      return 'notes';
+    case 'session_zero':
+      return 'lines';
+    default:
+      return 'body';
+  }
+}
+
+function snapshotValue(snapshot: Snapshot, field: string): string {
+  const value = snapshot[field];
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === 'string').join('\n');
+  return typeof value === 'string' ? value : '';
+}
+
+function isMultiFieldEntity(entityType: RevisionEntityType): boolean {
+  return entityType === 'session_zero';
+}
+
+function canRestoreRevision(entityType: RevisionEntityType, snapshot: Snapshot): boolean {
+  if (isMultiFieldEntity(entityType)) {
+    return SESSION_ZERO_FIELDS.some((field) => field in snapshot);
+  }
+  const field = restorableField(entityType);
+  return field in snapshot;
 }
 
 function valuesMatch(entityType: RevisionEntityType, selected: Snapshot, current: Snapshot): boolean {
+  if (isMultiFieldEntity(entityType)) {
+    const fields = new Set([...Object.keys(selected), ...Object.keys(current)]);
+    return [...fields].every((field) => snapshotValue(selected, field) === snapshotValue(current, field));
+  }
   const field = restorableField(entityType);
-  return field in selected && selected[field] === current[field];
+  return field in selected && snapshotValue(selected, field) === snapshotValue(current, field);
 }
 
 function PreviewValue({ field, value, missing }: { field: string; value: string; missing: boolean }) {
@@ -129,7 +173,7 @@ function RevisionDialog({
   );
   const attribution = revisionAttribution(revision);
   const restoreField = restorableField(entityType);
-  const canRestore = restoreField in revision.snapshot;
+  const canRestore = canRestoreRevision(entityType, revision.snapshot);
   const restoredFrom =
     revision.restoredFromRevisionId != null ? ` Restored from version #${revision.restoredFromRevisionId}.` : '';
 
@@ -178,8 +222,8 @@ function RevisionDialog({
                 {fields.map((field) => {
                   const selectedMissing = !(field in revision.snapshot);
                   const currentMissing = !(field in currentSnapshot);
-                  const changed = revision.snapshot[field] !== currentSnapshot[field];
-                  const historicalOnly = field !== restoreField;
+                  const changed = snapshotValue(revision.snapshot, field) !== snapshotValue(currentSnapshot, field);
+                  const historicalOnly = !isMultiFieldEntity(entityType) && field !== restoreField;
                   const notRecorded = !historicalOnly && selectedMissing;
                   return (
                     <section key={field} className="cf-inset overflow-hidden p-3 sm:p-4" aria-label={fieldLabel(entityType, field)}>
@@ -205,13 +249,13 @@ function RevisionDialog({
                       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                         <div className="min-w-0 rounded-md border border-slate-700/70 p-3">
                           <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-slate-300">Current</p>
-                          <PreviewValue field={field} value={currentSnapshot[field] ?? ''} missing={currentMissing} />
+                          <PreviewValue field={field} value={snapshotValue(currentSnapshot, field)} missing={currentMissing} />
                         </div>
                         <div className="min-w-0 rounded-md border border-[var(--cf-accent)]/35 bg-[var(--cf-accent)]/5 p-3">
                           <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-violet-300">
                             Selected version
                           </p>
-                          <PreviewValue field={field} value={revision.snapshot[field] ?? ''} missing={selectedMissing} />
+                          <PreviewValue field={field} value={snapshotValue(revision.snapshot, field)} missing={selectedMissing} />
                         </div>
                       </div>
                     </section>
@@ -417,12 +461,14 @@ export function RevisionHistoryPanel({
               {revisions.map((revision) => {
                 const fields = snapshotFields(revision.snapshot, currentSnapshot);
                 const previewField = fields.find((field) => field in revision.snapshot);
-                const prior = previewField ? revision.snapshot[previewField] ?? '' : '';
+                const prior = previewField ? snapshotValue(revision.snapshot, previewField) : '';
                 const preview = prior.replace(/\s+/g, ' ').trim().slice(0, 120);
                 const attribution = revisionAttribution(revision);
                 const restoreField = restorableField(entityType);
-                const restoreLabel = fieldLabel(entityType, restoreField);
-                const restoreFieldRecorded = restoreField in revision.snapshot;
+                const restoreLabel = isMultiFieldEntity(entityType)
+                  ? 'Charter fields'
+                  : fieldLabel(entityType, restoreField);
+                const restoreFieldRecorded = canRestoreRevision(entityType, revision.snapshot);
                 const unchanged = valuesMatch(entityType, revision.snapshot, currentSnapshot);
                 const timeValue = revision.authorshipKnown ? revision.createdAt : revision.replacedAt ?? undefined;
                 return (

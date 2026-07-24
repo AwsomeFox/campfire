@@ -369,6 +369,8 @@ export class RevisionsService {
   }): Promise<void> {
     const ts = nowIso();
     const actor = revisionActorProvenance(params.user);
+    // Prior Session Zero content has no author provenance on the entity row — attribute
+    // only the replacing editor and mark authorshipKnown=false (issue #881).
     this.db
       .insert(entityRevisions)
       .values({
@@ -376,10 +378,10 @@ export class RevisionsService {
         entityType: params.entityType,
         entityId: params.entityId,
         snapshot: toJsonText(params.snapshot),
-        authorUserId: actor.userId,
-        authorName: actor.name,
-        authorSource: actor.source,
-        authorSourceDetail: actor.sourceDetail,
+        authorUserId: '',
+        authorName: '',
+        authorSource: 'human',
+        authorSourceDetail: '',
         createdAt: ts,
         replacedByUserId: actor.userId,
         replacedByName: actor.name,
@@ -387,7 +389,7 @@ export class RevisionsService {
         replacedBySourceDetail: actor.sourceDetail,
         replacedAt: ts,
         restoredFromRevisionId: null,
-        authorshipKnown: true,
+        authorshipKnown: false,
       })
       .run();
   }
