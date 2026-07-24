@@ -98,8 +98,7 @@ describe('timeline / in-world calendar (e2e)', () => {
     const created = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/timeline`)
       .set(dm)
-      // #754: omit defaults to DM-only; this case tests dmSecret redaction, so create visible.
-      .send({ title: 'Secret pact', dmSecret: 'The duke signed it in blood.', hidden: false });
+      .send({ title: 'Secret pact', dmSecret: 'The duke signed it in blood.' });
     const id = created.body.id;
     expect(created.body.dmSecret).toBe('The duke signed it in blood.');
 

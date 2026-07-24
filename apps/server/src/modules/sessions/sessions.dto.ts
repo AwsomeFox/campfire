@@ -25,7 +25,7 @@ export class SessionCreateDto extends createZodDto(SessionCreate.strict()) {}
 export class SessionUpdateDto extends createZodDto(SessionUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.strict()) {}
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
-export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.strict()) {}
+export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 export class RsvpSetDto extends createZodDto(
   RsvpSetBody.strict().refine(hasAnyRsvpSetField, {
     message: RSVP_SET_REQUIRED_MESSAGE,

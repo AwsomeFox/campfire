@@ -54,13 +54,15 @@ export class CampaignTimelineController {
   @Put('calendar')
   @ApiOperation({ summary: "Set the campaign's current in-world date", description: 'dm role required. Upserts the single per-campaign calendar row.' })
   @ApiResponse({ status: 200, description: 'The updated campaign calendar.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async setCalendar(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: TimelineCalendarUpdateDto,
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    return this.timeline.setCalendar(campaignId, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.timeline.setCalendar(campaignId, fields, user, role, { expectedUpdatedAt });
   }
 }
 
@@ -84,6 +86,7 @@ export class TimelineController {
   @Patch(':id')
   @ApiOperation({ summary: 'Update a timeline event', description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'The updated timeline event.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: TimelineEventUpdateDto,
@@ -91,7 +94,8 @@ export class TimelineController {
   ) {
     const row = await this.timeline.getEventRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.timeline.updateEvent(id, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.timeline.updateEvent(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

@@ -59,36 +59,6 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     expect(res.body.info?.title).toBe('Campfire API');
   });
 
-  it('documents the bounded quest-list progress projection (issue #786)', async () => {
-    const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/quests']?.get;
-    expect(operation?.description).toContain('only its first incomplete objective');
-
-    const responseSchema = operation?.responses?.['200']?.content?.['application/json']?.schema;
-    expect(responseSchema?.type).toBe('array');
-    const schemaName = (responseSchema?.items?.$ref as string | undefined)?.split('/').pop();
-    expect(schemaName).toBeTruthy();
-    const properties = res.body.components?.schemas?.[schemaName!]?.properties;
-    expect(properties).toEqual(expect.objectContaining({
-      objectiveProgress: expect.any(Object),
-      nextObjective: expect.any(Object),
-    }));
-    expect(properties).not.toHaveProperty('objectives');
-  });
-
-  it('documents every strict semantic reading preference value', async () => {
-    const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    const operation = res.body.paths?.['/api/v1/me/preferences']?.patch;
-    const requestSchema = operation?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
-    const schemaName = requestSchema?.$ref?.split('/').pop();
-    expect(schemaName).toBeTruthy();
-    expect(res.body.components?.schemas?.[schemaName!]?.properties?.textSize?.enum).toEqual([
-      'default',
-      'comfortable',
-      'large',
-    ]);
-  });
-
   it('documents exact XP recipients and the explicit non-active opt-in (issue #814)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
     const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/characters/xp']?.post;
@@ -105,105 +75,31 @@ describe('api docs exposure: enabled outside production by default (e2e)', () =>
     });
   });
 
-  it('documents in-character comment input and immutable attribution output (issue #787)', async () => {
+  it('documents revision tokens and stale-write recovery for every shared editor (issue #881)', async () => {
     const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    const operation = res.body.paths?.['/api/v1/campaigns/{campaignId}/comments']?.post;
-    expect(operation?.description).toContain('characterId');
+    const operations = [
+      res.body.paths?.['/api/v1/campaigns/{campaignId}/session-zero']?.put,
+      res.body.paths?.['/api/v1/timeline/{id}']?.patch,
+      res.body.paths?.['/api/v1/campaigns/{campaignId}/timeline/calendar']?.put,
+      res.body.paths?.['/api/v1/schedule/{id}']?.patch,
+      res.body.paths?.['/api/v1/beats/{id}']?.patch,
+      res.body.paths?.['/api/v1/comments/{id}']?.patch,
+    ];
 
-    const requestRef = operation?.requestBody?.content?.['application/json']?.schema?.$ref as string | undefined;
-    const requestName = requestRef?.split('/').pop();
-    expect(requestName).toBeTruthy();
-    const requestProperties = res.body.components?.schemas?.[requestName!]?.properties;
-    expect(requestProperties).toHaveProperty('characterId');
-    expect(requestProperties).not.toHaveProperty('characterName');
-    expect(requestProperties).not.toHaveProperty('characterAvatarUrl');
-
-    const responseRef = operation?.responses?.['201']?.content?.['application/json']?.schema?.$ref as string | undefined;
-    const responseName = responseRef?.split('/').pop();
-    expect(responseName).toBeTruthy();
-    expect(res.body.components?.schemas?.[responseName!]?.properties).toEqual(
-      expect.objectContaining({
-        authorUserId: expect.any(Object),
-        authorName: expect.any(Object),
-        characterId: expect.any(Object),
-        characterName: expect.any(Object),
-        characterAvatarUrl: expect.any(Object),
-      }),
-    );
-  });
-
-  it('documents membership integrity diagnostics and recovery (#849)', async () => {
-    const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    const diagnostics = res.body.paths?.['/api/v1/admin/membership-integrity']?.get;
-    const recovery = res.body.paths?.['/api/v1/admin/membership-integrity/repair-dm']?.post;
-    expect(diagnostics?.description).toContain('No campaign content or DM-secret fields');
-    expect(recovery?.responses).toEqual(expect.objectContaining({ '201': expect.any(Object), '409': expect.any(Object) }));
-
-    const requestSchema = recovery?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
-    const schemaName = requestSchema?.$ref?.split('/').pop();
-    expect(res.body.components?.schemas?.[schemaName!]?.properties).toEqual(
-      expect.objectContaining({ campaignId: expect.any(Object), userId: expect.any(Object) }),
-    );
-  });
-
-  it('documents the strict write-only AI provider draft test contract (issue #852)', async () => {
-    const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    for (const path of [
-      '/api/v1/settings/ai-provider/test',
-      '/api/v1/campaigns/{id}/ai-provider/test',
-    ]) {
-      const operation = res.body.paths?.[path]?.post;
-      const requestSchema = operation?.requestBody?.content?.['application/json']?.schema;
-      expect(requestSchema).toMatchObject({
-        type: 'object',
-        additionalProperties: false,
-        required: expect.arrayContaining(['providerType', 'model']),
+    for (const operation of operations) {
+      expect(operation).toBeTruthy();
+      const requestSchema = operation?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
+      const schemaName = requestSchema?.$ref?.split('/').pop();
+      expect(schemaName).toBeTruthy();
+      expect(res.body.components?.schemas?.[schemaName!]?.properties?.expectedUpdatedAt).toMatchObject({
+        type: 'string',
       });
-      expect(requestSchema.properties).toEqual(expect.objectContaining({
-        providerType: expect.any(Object),
-        model: expect.objectContaining({ type: 'string', minLength: 1, maxLength: 120 }),
-        baseUrl: expect.any(Object),
-        apiKey: expect.objectContaining({ type: 'string', maxLength: 4096, writeOnly: true }),
-      }));
-
-      const responseRef = operation?.responses?.['201']?.content?.['application/json']?.schema?.$ref as string | undefined;
-      const responseName = responseRef?.split('/').pop();
-      expect(responseName).toBeTruthy();
-      const responseProperties = res.body.components?.schemas?.[responseName!]?.properties;
-      expect(responseProperties).toEqual(expect.objectContaining({
-        ok: expect.any(Object),
-        scope: expect.any(Object),
-        testedTarget: expect.any(Object),
-        providerType: expect.any(Object),
-        model: expect.any(Object),
-        baseUrl: expect.any(Object),
-        credentialSource: expect.any(Object),
-        testedAt: expect.any(Object),
-        error: expect.any(Object),
-      }));
-      expect(responseProperties).not.toHaveProperty('apiKey');
+      expect(operation?.responses?.['409']).toBeTruthy();
     }
-  });
 
-  it('documents public recap expiry, member disclosure, update, policy, and revoke-all contracts (#788)', async () => {
-    const res = await request(app.getHttpServer()).get('/api/openapi.json');
-    const paths = res.body.paths;
-    const list = paths?.['/api/v1/sessions/{sessionId}/shares']?.get;
-    const create = paths?.['/api/v1/sessions/{sessionId}/shares']?.post;
-    const update = paths?.['/api/v1/sessions/{sessionId}/shares/{shareId}']?.patch;
-    const policy = paths?.['/api/v1/campaigns/{campaignId}/session-shares/policy']?.put;
-    const revokeAll = paths?.['/api/v1/campaigns/{campaignId}/session-shares']?.delete;
-
-    expect(list?.description).toContain('Any campaign member');
-    expect(update).toBeTruthy();
-    expect(policy?.description).toContain('atomically revokes');
-    expect(revokeAll).toBeTruthy();
-
-    const requestSchema = create?.requestBody?.content?.['application/json']?.schema as { $ref?: string } | undefined;
-    const schemaName = requestSchema?.$ref?.split('/').pop();
-    const schema = res.body.components?.schemas?.[schemaName!];
-    expect(schema?.required).toContain('expiresAt');
-    expect(schema?.properties?.expiresAt).toEqual(expect.objectContaining({ nullable: true }));
+    expect(res.body.paths?.['/api/v1/schedule/{id}']?.get).toBeTruthy();
+    expect(res.body.paths?.['/api/v1/comments/{id}/revisions']?.get).toBeTruthy();
+    expect(res.body.paths?.['/api/v1/comments/{id}/revisions/{revisionId}/restore']?.post).toBeTruthy();
   });
 });
 

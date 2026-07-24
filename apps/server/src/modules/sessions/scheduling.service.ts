@@ -21,7 +21,9 @@ import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
@@ -90,6 +92,7 @@ export class SchedulingService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly events: CampaignEventsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Push one permission-safe invalidation signal for every schedule projection change. */
@@ -275,7 +278,13 @@ export class SchedulingService {
     return { ...toDomain(row), rsvps: [] };
   }
 
-  async update(id: number, input: ScheduledSessionUpdateInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+  async update(
+    id: number,
+    input: ScheduledSessionUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<ScheduledSessionWithRsvps> {
     const existing = await this.getRowOrThrow(id);
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
@@ -286,10 +295,29 @@ export class SchedulingService {
       location: patch.location ?? existing.location,
       notes: patch.notes ?? existing.notes,
     };
-    await this.db
+    const updated = await this.db
       .update(scheduledSessions)
-      .set({ ...patch, updatedAt: nowIso() })
-      .where(eq(scheduledSessions.id, id));
+      .set({ ...patch, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
+          : eq(scheduledSessions.id, id),
+      )
+      .returning();
+    if (!updated[0]) {
+      const current = await this.getRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    if (patch.notes !== undefined && patch.notes !== existing.notes) {
+      await this.revisions.commitProseVersion({
+        entityType: 'scheduled_session',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.notes,
+        nextProse: patch.notes,
+        user,
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),

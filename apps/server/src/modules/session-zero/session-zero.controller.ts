@@ -33,12 +33,14 @@ export class SessionZeroController {
     description: 'dm role required. Upserts the single per-campaign row; a partial body patches only the sent fields.',
   })
   @ApiResponse({ status: 200, description: 'The updated session-zero charter.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Body() body: SessionZeroUpdateDto,
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    return this.sessionZero.update(campaignId, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.sessionZero.update(campaignId, fields, user, role, { expectedUpdatedAt });
   }
 }

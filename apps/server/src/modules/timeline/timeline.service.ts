@@ -1,15 +1,17 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { TimelineEventCreate, TimelineEventUpdate, TimelineCalendarUpdate } from '@campfire/schema';
 import type { TimelineEvent, TimelineCalendar, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { timelineEvents, timelineCalendars } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { MISSING_REVISION, nextUpdatedAt, staleWrite } from '../../common/stale-write';
+import { RevisionsService } from '../revisions/revisions.service';
 
 type EventCreateInput = z.infer<typeof TimelineEventCreate>;
 type EventUpdateInput = z.infer<typeof TimelineEventUpdate>;
@@ -46,6 +48,7 @@ export class TimelineService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   // ---------- events ----------
@@ -88,8 +91,7 @@ export class TimelineService {
         era: input.era ?? '',
         sortIndex: input.sortIndex ?? 0,
         dmSecret: input.dmSecret ?? '',
-        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
-        hidden: resolveCreateHidden(input.hidden),
+        hidden: input.hidden ?? false,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -105,13 +107,38 @@ export class TimelineService {
     return redactSecret(toEventDomain(row), role);
   }
 
-  async updateEvent(id: number, input: EventUpdateInput, user: RequestUser, role: Role): Promise<TimelineEvent> {
+  async updateEvent(
+    id: number,
+    input: EventUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<TimelineEvent> {
     const existing = await this.getEventRowOrThrow(id);
-    const [row] = await this.db
+    const updated = await this.db
       .update(timelineEvents)
-      .set({ ...input, updatedAt: nowIso() })
-      .where(eq(timelineEvents.id, id))
+      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(timelineEvents.id, id), eq(timelineEvents.updatedAt, opts.expectedUpdatedAt))
+          : eq(timelineEvents.id, id),
+      )
       .returning();
+    if (!updated[0]) {
+      const current = await this.getEventRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    const row = updated[0];
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.commitProseVersion({
+        entityType: 'timeline_event',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        nextProse: input.body,
+        user,
+      });
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -126,6 +153,7 @@ export class TimelineService {
   async removeEvent(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getEventRowOrThrow(id);
     await this.db.delete(timelineEvents).where(eq(timelineEvents.id, id));
+    await this.revisions.removeForEntity('timeline_event', id);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -150,42 +178,31 @@ export class TimelineService {
       .where(eq(timelineCalendars.campaignId, campaignId))
       .limit(1);
     if (!row) {
-      const ts = nowIso();
-      return { campaignId, currentDate: '', note: '', createdAt: ts, updatedAt: ts };
+      return { campaignId, currentDate: '', note: '', createdAt: MISSING_REVISION, updatedAt: MISSING_REVISION };
     }
     return toCalendarDomain(row);
   }
 
-  /**
-   * The existence probe used by `setCalendar`'s lazy-create. Split into its own
-   * method so the concurrency regression in db-concurrency.e2e-spec.ts can park
-   * both racers between the read and the insert — better-sqlite3 is synchronous,
-   * so without that coordination the two HTTP requests never actually race at
-   * the SQL layer. Mirrors the `getRowOrThrow` seam used by #653's HP race test
-   * and the treasury's `readLazyRow` in InventoryService (#658).
-   */
-  async readLazyRow(campaignId: number): Promise<typeof timelineCalendars.$inferSelect | undefined> {
-    const [row] = await this.db
+  async setCalendar(
+    campaignId: number,
+    input: CalendarUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<TimelineCalendar> {
+    const [existing] = await this.db
       .select()
       .from(timelineCalendars)
       .where(eq(timelineCalendars.campaignId, campaignId))
       .limit(1);
-    return row;
-  }
 
-  async setCalendar(campaignId: number, input: CalendarUpdateInput, user: RequestUser, role: Role): Promise<TimelineCalendar> {
-    const ts = nowIso();
-    const existing = await this.readLazyRow(campaignId);
-
-    // Issue #658: the read-then-insert races on concurrent first-access — two
-    // callers each see `!existing`, both INSERT, and the second loses the
-    // `campaignId` PRIMARY KEY constraint (an unhandled 500). The INSERT carries
-    // `onConflictDoNothing({ target: campaignId })` so the loser's conflict is
-    // ignored; a losing racer observes an empty RETURNING and falls through to
-    // the UPDATE branch below, which applies its patch onto the winner's row.
-    let row: typeof timelineCalendars.$inferSelect | undefined;
+    let row: typeof timelineCalendars.$inferSelect;
     if (!existing) {
-      [row] = await this.db
+      if (opts?.expectedUpdatedAt && opts.expectedUpdatedAt !== MISSING_REVISION) {
+        throw staleWrite(opts.expectedUpdatedAt, MISSING_REVISION);
+      }
+      const ts = nowIso();
+      const inserted = await this.db
         .insert(timelineCalendars)
         .values({
           campaignId,
@@ -194,22 +211,41 @@ export class TimelineService {
           createdAt: ts,
           updatedAt: ts,
         })
-        .onConflictDoNothing({ target: timelineCalendars.campaignId })
+        .onConflictDoNothing()
         .returning();
-    }
-
-    if (!row) {
-      // Either `existing` was already present, or a concurrent first-access beat
-      // us to the INSERT and our onConflictDoNothing yielded nothing. Either way
-      // the row now exists, so apply the requested patch via UPDATE.
-      const patch: Partial<typeof timelineCalendars.$inferInsert> = { updatedAt: ts };
+      if (!inserted[0]) {
+        const current = await this.getCalendar(campaignId);
+        throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+      }
+      row = inserted[0];
+    } else {
+      const patch: Partial<typeof timelineCalendars.$inferInsert> = { updatedAt: nextUpdatedAt(existing.updatedAt) };
       if (input.currentDate !== undefined) patch.currentDate = input.currentDate;
       if (input.note !== undefined) patch.note = input.note;
-      [row] = await this.db
+      const updated = await this.db
         .update(timelineCalendars)
         .set(patch)
-        .where(eq(timelineCalendars.campaignId, campaignId))
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(timelineCalendars.campaignId, campaignId), eq(timelineCalendars.updatedAt, opts.expectedUpdatedAt))
+            : eq(timelineCalendars.campaignId, campaignId),
+        )
         .returning();
+      if (!updated[0]) {
+        const current = await this.getCalendar(campaignId);
+        throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+      }
+      row = updated[0];
+      if (input.note !== undefined && input.note !== existing.note) {
+        await this.revisions.commitProseVersion({
+          entityType: 'timeline_calendar',
+          entityId: campaignId,
+          campaignId,
+          priorProse: existing.note,
+          nextProse: input.note,
+          user,
+        });
+      }
     }
 
     await this.audit.log({

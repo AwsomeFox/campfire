@@ -141,6 +141,7 @@ export class BeatsController {
   @Patch(':id')
   @ApiOperation({ summary: 'Update a beat', description: 'DM only.' })
   @ApiResponse({ status: 200, description: 'Updated beat.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: StoryBeatUpdateDto,
@@ -148,7 +149,8 @@ export class BeatsController {
   ) {
     const row = await this.storylines.getBeatRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.storylines.updateBeat(id, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.storylines.updateBeat(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Post(':id/status')
