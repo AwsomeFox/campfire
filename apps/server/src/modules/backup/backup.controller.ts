@@ -16,7 +16,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { BackupService, RESTORE_CONFIRM_TOKEN } from './backup.service';
-import { BackupDownloadDto } from './backup.dto';
+import { BackupDownloadDto, BackupRestoreBody } from './backup.dto';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
@@ -115,6 +115,16 @@ export class BackupController {
     @CurrentUser() user: RequestUser,
   ) {
     if (!file) throw new BadRequestException('Missing backup archive (multipart field "file")');
-    return this.backup.restore(file.buffer, confirm, user, keyPassphrase ? { keyPassphrase } : undefined);
+    const fields = BackupRestoreBody.safeParse({ confirm, keyPassphrase });
+    if (!fields.success) {
+      const message = fields.error.issues.map((i) => i.message).join('; ');
+      throw new BadRequestException(message || 'Invalid restore request');
+    }
+    return this.backup.restore(
+      file.buffer,
+      fields.data.confirm,
+      user,
+      fields.data.keyPassphrase ? { keyPassphrase: fields.data.keyPassphrase } : undefined,
+    );
   }
 }

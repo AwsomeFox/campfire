@@ -123,20 +123,10 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
     throw new Error('Backup key passphrase is required to decrypt the AI keyfile');
   }
 
-  let salt: Buffer;
-  let iv: Buffer;
-  let tag: Buffer;
-  let ct: Buffer;
-  try {
-    salt = decodeEnvelopeBase64(envelope.salt, 'salt');
-    iv = decodeEnvelopeBase64(envelope.iv, 'iv');
-    tag = decodeEnvelopeBase64(envelope.tag, 'tag');
-    ct = decodeEnvelopeBase64(envelope.ct, 'ct');
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : 'Backup key envelope contains malformed base64 fields';
-    throw new Error(message, { cause: err instanceof Error ? err : undefined });
-  }
+  const salt = decodeEnvelopeBase64(envelope.salt, 'salt');
+  const iv = decodeEnvelopeBase64(envelope.iv, 'iv');
+  const tag = decodeEnvelopeBase64(envelope.tag, 'tag');
+  const ct = decodeEnvelopeBase64(envelope.ct, 'ct');
   if (salt.length !== SALT_LEN || iv.length !== IV_LEN || tag.length !== TAG_LEN || ct.length === 0) {
     throw new Error('Backup key envelope has invalid field lengths');
   }

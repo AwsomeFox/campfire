@@ -1,4 +1,4 @@
-import { createHash, scryptSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,8 +14,6 @@ import JSZip from 'jszip';
 import { DB, DB_HOLDER, DbHolder, dbFilePath, resolveDataDir, type DrizzleDb } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
-import { count, isNotNull } from 'drizzle-orm';
-import { aiProviderConfigs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, type RequestUser } from '../../common/user.types';
@@ -94,8 +92,6 @@ function uploadsRoot(dataDir: string): string {
  *  as a plain string to avoid a cross-module dependency (backup already sits
  *  above provider config in the module graph). */
 const AI_KEYFILE_NAME = 'ai-config.key';
-/** Kept in sync with ai-provider-config.service.ts — passphrase stretching for AI_CONFIG_KEY. */
-const AI_CONFIG_KEY_SALT = 'campfire:ai-provider-config:v1';
 
 /** Options accepted by {@link BackupService.buildBackup}. */
 export interface BuildBackupOptions {
@@ -136,11 +132,6 @@ function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
 
-function keyMaterialFromEnvOrHex(raw: string): Buffer {
-  if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
-  return scryptSync(raw, AI_CONFIG_KEY_SALT, 32);
-}
-
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
 function aiKeyMaterialToBuffer(material: Buffer): Buffer {
   const asText = material.toString('utf8').trim();
@@ -170,22 +161,8 @@ function countAiCredentialsInSnapshot(snapshotPath: string): number | null {
   }
 }
 
-/** The encryption key that will be effective after restore completes. */
-function resolvePostRestoreAiKey(dataDir: string, restoredKeyBytes: Buffer | null): Buffer | null {
-  const env = process.env.AI_CONFIG_KEY?.trim();
-  if (env) return keyMaterialFromEnvOrHex(env);
-  if (restoredKeyBytes) return aiKeyMaterialToBuffer(restoredKeyBytes);
-  try {
-    const existing = fs.readFileSync(path.join(dataDir, AI_KEYFILE_NAME), 'utf8').trim();
-    if (/^[0-9a-fA-F]{64}$/.test(existing)) return Buffer.from(existing, 'hex');
-  } catch {
-    // no keyfile on host
-  }
-  return null;
-}
-
-/** #496: prove staged credentials decrypt with the post-restore key before overwriting live data. */
-function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buffer | null): void {
+/** #496: prove staged credentials decrypt with the restored envelope key before overwriting live data. */
+function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buffer): void {
   const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
   try {
     const row = probe
@@ -194,11 +171,6 @@ function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buf
       )
       .get() as { encryptedApiKey: string } | undefined;
     if (!row?.encryptedApiKey) return;
-    if (!key) {
-      throw new BadRequestException(
-        'Invalid backup archive — stored AI credentials cannot be decrypted without the AI encryption key',
-      );
-    }
     try {
       decryptSecret(row.encryptedApiKey, key);
     } catch {
@@ -245,29 +217,6 @@ export class BackupService implements OnApplicationBootstrap {
     }
     const keyfile = path.join(dataDir, AI_KEYFILE_NAME);
     return { source: 'keyfile', keyfilePath: fs.existsSync(keyfile) ? keyfile : null };
-  }
-
-  /**
-   * #496: Count AI provider config rows that carry a stored (encrypted)
-   * API key. Non-secret — no key material or last-4 leaks; the count is
-   * for operator observability ("15 credentials depend on this key file").
-   * Best-effort: a DB error is swallowed and the count is treated as null.
-   */
-  private async countStoredAiCredentials(): Promise<number | null> {
-    try {
-      const rows = await this.db
-        .select({ n: count() })
-        .from(aiProviderConfigs)
-        .where(isNotNull(aiProviderConfigs.encryptedApiKey));
-      return rows[0]?.n ?? 0;
-    } catch (err) {
-      this.logger.warn(
-        `Could not count stored AI credentials for backup manifest: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return null;
-    }
   }
 
   /**
@@ -492,6 +441,20 @@ export class BackupService implements OnApplicationBootstrap {
           );
         }
         const keyBytes = fs.readFileSync(keyfilePath);
+        if ((aiCredentialCount ?? 0) > 0) {
+          const key = aiKeyMaterialToBuffer(keyBytes);
+          const probe = new Database(snapshotPath, { readonly: true, fileMustExist: true });
+          try {
+            const row = probe
+              .prepare(
+                'SELECT encrypted_api_key AS encryptedApiKey FROM ai_provider_configs WHERE encrypted_api_key IS NOT NULL LIMIT 1',
+              )
+              .get() as { encryptedApiKey: string } | undefined;
+            if (row?.encryptedApiKey) decryptSecret(row.encryptedApiKey, key);
+          } finally {
+            probe.close();
+          }
+        }
         const envelope = encryptKeyfile(keyBytes, requestedPassphrase);
         zip.file(KEY_ENVELOPE_ENTRY, JSON.stringify(envelope, null, 2));
         aiKeyIncluded = true;
@@ -571,12 +534,12 @@ export class BackupService implements OnApplicationBootstrap {
     const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
     if (manifest.aiKeyIncluded && !envelopeEntry) {
       throw new BadRequestException(
-        'Invalid backup archive — manifest claims an AI key envelope but backup.key-envelope.json is missing',
+        'Invalid backup archive — manifest claims an AI key envelope but the entry is missing',
       );
     }
     if (!manifest.aiKeyIncluded && envelopeEntry) {
       throw new BadRequestException(
-        'Invalid backup archive — manifest does not include an AI key envelope but backup.key-envelope.json is present',
+        `Invalid backup archive — manifest does not include an AI key envelope but ${KEY_ENVELOPE_ENTRY} is present`,
       );
     }
 
@@ -641,10 +604,12 @@ export class BackupService implements OnApplicationBootstrap {
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
 
-      validateStagedAiCredentialDecryptability(
-        stagedDbPath,
-        resolvePostRestoreAiKey(resolveDataDir(), restoredKeyBytes),
-      );
+      if (restoredKeyBytes) {
+        validateStagedAiCredentialDecryptability(
+          stagedDbPath,
+          aiKeyMaterialToBuffer(restoredKeyBytes),
+        );
+      }
 
       // --- Collect + path-check uploads before touching anything ---
       const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
