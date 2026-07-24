@@ -1,7 +1,6 @@
 import {
   OsrAdapter,
   OSR_ADAPTER_ID,
-  OSR_RULE_SYSTEM_SLUGS,
   OSR_CONDITIONS,
   OSR_SAVES,
   ruleSystemAdapter,
