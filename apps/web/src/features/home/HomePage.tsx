@@ -25,7 +25,8 @@ import { confirmDiscardUnsavedWork } from '../../lib/unsavedWork';
 import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
-import type { Campaign, Role } from '@campfire/schema';
+import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
+import { PageTitle } from '../../components/PageTitle';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
 const COVERS = [
@@ -285,6 +286,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
   const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<Campaign | null>(null);
+  const [filesPendingNotice, setFilesPendingNotice] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -314,9 +316,15 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
   async function purge(c: Campaign) {
     setBusyId(c.id);
     setError(null);
+    setFilesPendingNotice(null);
     try {
-      await api.delete(`${API}/campaigns/${c.id}/purge`);
+      const outcome = await api.delete<PermanentDeletionResult>(`${API}/campaigns/${c.id}/purge`);
       setTrashed((prev) => prev.filter((x) => x.id !== c.id));
+      if (outcome.filesPending) {
+        setFilesPendingNotice(
+          `“${c.name}” is gone from the database, but some uploaded files could not be erased from disk yet. A server admin can finish cleanup under Storage.`,
+        );
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't permanently delete campaign.");
     } finally {
@@ -365,13 +373,22 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
         ))}
       </div>
       {error && <ErrorNote message={error} />}
+      {filesPendingNotice && (
+        <p className="text-muted" style={{ margin: '8px 0 0', fontSize: 12.5 }}>
+          {filesPendingNotice}{' '}
+          <Link to="/admin/storage#fs-cleanup" style={{ color: 'var(--color-accent-400)' }}>
+            Open Storage
+          </Link>
+        </p>
+      )}
       {purgeTarget && (
         <ConfirmDialog
           title={`Permanently delete "${purgeTarget.name}"?`}
           body={
             <p style={{ margin: 0 }}>
-              This erases every row and every uploaded file for this campaign from disk.
-              It cannot be undone.
+              This permanently removes every database row for this campaign. Uploaded files are erased from
+              disk as part of the same operation when the filesystem allows; if cleanup fails, the server
+              keeps retrying and Storage shows what is still pending.
             </p>
           }
           confirmLabel="Delete permanently"
@@ -492,7 +509,7 @@ export function HomePage() {
   return (
     <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
       <div>
-        <h3 style={{ margin: 0 }}>Your campaigns</h3>
+        <PageTitle style={{ margin: 0 }}>Your campaigns</PageTitle>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
           Everything on this server, one sign-in. Roles are per campaign. Opening a
           campaign resumes the matching module or your last place there.

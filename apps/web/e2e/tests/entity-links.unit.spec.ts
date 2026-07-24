@@ -28,6 +28,7 @@ const expected = {
   timeline: '/c/7/timeline?event=11#entity-timeline-11',
   item: '/c/7/inventory?item=11#entity-item-11',
   note: '/c/7/notes?note=11#entity-note-11',
+  inbox: '/c/7/inbox?inbox=11#entity-inbox-11',
   arc: '/c/7/storylines?arc=11#entity-arc-11',
   beat: '/c/7/storylines?beat=11#entity-beat-11',
 } as const;
@@ -117,7 +118,7 @@ test.describe('source adapters', () => {
   test('notifications route every type to its exact destination (issue #446)', () => {
     const base = {
       id: 1, userId: 2, campaignId, title: 'Notice', body: '', actorName: '', readAt: null,
-      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null,
+      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null, data: null,
     } satisfies Omit<Notification, 'type'>;
     const href = (type: Notification['type'], patch: Partial<Notification> = {}) =>
       notificationHref({ ...base, type, ...patch } as Notification);
@@ -131,6 +132,19 @@ test.describe('source adapters', () => {
     expect(href('session_scheduled', { entityType: 'session', entityId: 11 })).toBe(
       '/c/7/sessions?tab=schedule',
     );
+    // Issue #820: cancelled nights route to a stable cancelled-event detail.
+    expect(href('session_scheduled', {
+      entityId: 11,
+      data: {
+        kind: 'schedule',
+        scheduleId: 11,
+        scheduledAt: '2026-07-22T00:00:00.000Z',
+        durationMinutes: 240,
+        changeType: 'cancelled',
+        changedFields: [],
+        label: 'Game night',
+      },
+    })).toBe('/c/7/sessions?tab=schedule&cancelled=11#cancelled-schedule-11');
 
     // Quest detail route (not an ignored ?quest= query).
     expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
@@ -152,6 +166,8 @@ test.describe('source adapters', () => {
     expect(href('note_shared')).toBe('/c/7/notes');
     expect(href('proposal_submitted')).toBe('/c/7/proposals');
     expect(href('proposal_resolved')).toBe('/c/7/proposals');
+    expect(href('inbox_submitted')).toBe('/c/7/inbox');
+    expect(href('inbox_submitted', { entityId: 11 })).toBe(expected.inbox);
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
     expect(href('character_reassigned', { entityType: 'character', entityId: 11 })).toBe(expected.character);

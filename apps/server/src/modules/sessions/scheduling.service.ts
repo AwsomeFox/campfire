@@ -1,11 +1,18 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
   RsvpSet,
   partitionSchedules,
+  diffScheduleNotificationFields,
+  shouldNotifyScheduleUpdate,
+  scheduleNotificationChangeType,
+  scheduleNotificationFallbackTitle,
+  scheduleNotificationFallbackBody,
+  scheduleNotificationLabel,
+  type ScheduleNotificationData,
 } from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -13,6 +20,7 @@ import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -90,8 +98,46 @@ export class SchedulingService {
   }
 
   /** Human label for a scheduled game night — its title, or a date fallback. */
-  private scheduleLabel(row: typeof scheduledSessions.$inferSelect): string {
-    return row.title?.trim() ? row.title.trim() : 'the next session';
+  private scheduleLabel(row: { title?: string | null }): string {
+    return scheduleNotificationLabel(row.title);
+  }
+
+  /** Build structured schedule lifecycle notification payload (issue #820). */
+  private scheduleNotificationData(input: {
+    scheduleId: number;
+    scheduledAt: string;
+    durationMinutes: number;
+    title: string;
+    changeType: ScheduleNotificationData['changeType'];
+    changedFields?: ScheduleNotificationData['changedFields'];
+  }): ScheduleNotificationData {
+    return {
+      kind: 'schedule',
+      scheduleId: input.scheduleId,
+      scheduledAt: input.scheduledAt,
+      durationMinutes: input.durationMinutes,
+      changeType: input.changeType,
+      changedFields: input.changedFields ?? [],
+      label: (input.title ?? '').trim(),
+    };
+  }
+
+  private async notifyScheduleLifecycle(
+    campaignId: number,
+    user: RequestUser,
+    data: ScheduleNotificationData,
+  ): Promise<void> {
+    await this.notifications.notifyCampaign(campaignId, user, {
+      type: 'session_scheduled',
+      title: scheduleNotificationFallbackTitle(data),
+      body: scheduleNotificationFallbackBody(data),
+      // entityId alone (no EntityType for scheduled_session) — the bell routes
+      // session_scheduled to the Schedule tab and focuses this card (#446), or a
+      // cancelled-event detail when changeType is cancelled (#820).
+      entityId: data.scheduleId,
+      actorName: user.name,
+      data,
+    });
   }
 
   // ----- scheduled sessions -----
@@ -122,22 +168,24 @@ export class SchedulingService {
    */
   async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    needle = needle.trim().toLowerCase();
-    if (!needle) return [];
+    // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
+    const folded = foldForSearch(needle.trim());
+    if (!folded) return [];
+    // Fold-match in JS — SQLite lower()/instr is ASCII-only (#624).
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(
-        eq(scheduledSessions.campaignId, campaignId),
-        or(
-          sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.notes}), ${needle}) > 0`,
-        ),
-      ))
-      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id))
-      .limit(boundedLimit);
-    return rows.map(toDomain);
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
+    return rows
+      .filter(
+        (r) =>
+          foldedIncludes(r.title, folded)
+          || foldedIncludes(r.scheduledAt, folded)
+          || foldedIncludes(r.notes, folded),
+      )
+      .slice(0, boundedLimit)
+      .map(toDomain);
   }
 
   /**
@@ -211,16 +259,19 @@ export class SchedulingService {
       campaignId,
     });
     this.emitScheduleUpdated(campaignId, row.id);
-    // Tell the party a game night was put on the calendar (issue #263). Best-effort;
-    // stamp entityId so the bell opens the Schedule tab on this exact card (#446).
-    await this.notifications.notifyCampaign(campaignId, user, {
-      type: 'session_scheduled',
-      title: `${this.scheduleLabel(row)} scheduled for ${row.scheduledAt.slice(0, 10)}`,
-      // entityId alone (no EntityType for scheduled_session) — the bell routes
-      // session_scheduled to the Schedule tab and focuses this card (#446).
-      entityId: row.id,
-      actorName: user.name,
-    });
+    // Tell the party a game night was put on the calendar (issues #263/#820).
+    // Structured `data` carries the UTC instant; clients localize for the viewer.
+    await this.notifyScheduleLifecycle(
+      campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: row.id,
+        scheduledAt: row.scheduledAt,
+        durationMinutes: row.durationMinutes,
+        title: row.title,
+        changeType: 'created',
+      }),
+    );
     return { ...toDomain(row), rsvps: [] };
   }
 
@@ -228,6 +279,13 @@ export class SchedulingService {
     const existing = await this.getRowOrThrow(id);
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
+    const next = {
+      scheduledAt: patch.scheduledAt ?? existing.scheduledAt,
+      durationMinutes: patch.durationMinutes ?? existing.durationMinutes,
+      title: patch.title ?? existing.title,
+      location: patch.location ?? existing.location,
+      notes: patch.notes ?? existing.notes,
+    };
     await this.db
       .update(scheduledSessions)
       .set({ ...patch, updatedAt: nowIso() })
@@ -242,16 +300,23 @@ export class SchedulingService {
       campaignId: existing.campaignId,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
-    // Re-notify the party only when the game night actually MOVES (issue #263) —
-    // a title/location/notes tweak isn't worth a ping. Mirrors sessions.service's
-    // playedAt-changed guard so an unrelated edit doesn't spam the schedule.
-    if (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt) {
-      await this.notifications.notifyCampaign(existing.campaignId, user, {
-        type: 'session_scheduled',
-        title: `${this.scheduleLabel(existing)} rescheduled for ${patch.scheduledAt.slice(0, 10)}`,
-        entityId: id,
-        actorName: user.name,
-      });
+    // Issue #820: one coalesced ping per update for time/duration/venue/notes —
+    // never drop those lifecycle changes, but skip title-only edits (spam).
+    const changedFields = diffScheduleNotificationFields(existing, next);
+    if (shouldNotifyScheduleUpdate(changedFields)) {
+      const changeType = scheduleNotificationChangeType(changedFields);
+      await this.notifyScheduleLifecycle(
+        existing.campaignId,
+        user,
+        this.scheduleNotificationData({
+          scheduleId: id,
+          scheduledAt: next.scheduledAt,
+          durationMinutes: next.durationMinutes,
+          title: next.title,
+          changeType,
+          changedFields,
+        }),
+      );
     }
     return this.getWithRsvps(id);
   }
@@ -269,6 +334,19 @@ export class SchedulingService {
       campaignId: existing.campaignId,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
+    // Issue #820: cancellation is a lifecycle event — notify with a snapshot of
+    // the removed night so the bell can still show a localized cancelled detail.
+    await this.notifyScheduleLifecycle(
+      existing.campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: existing.id,
+        scheduledAt: existing.scheduledAt,
+        durationMinutes: existing.durationMinutes,
+        title: existing.title,
+        changeType: 'cancelled',
+      }),
+    );
   }
 
   // ----- RSVPs (availability) -----

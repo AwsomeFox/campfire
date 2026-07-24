@@ -628,6 +628,23 @@ CREATE TABLE IF NOT EXISTS attachments (
   updated_at TEXT NOT NULL
 );
 
+-- Filesystem cleanup retry queue (issue #727). Rows describe upload paths whose DB
+-- metadata was removed but bytes could not be verified erased. No FKs so entries
+-- survive campaign purge.
+CREATE TABLE IF NOT EXISTS fs_deletion_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rel_path TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  campaign_id INTEGER,
+  entity_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS encounters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -680,6 +697,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   entity_type TEXT,
   entity_id INTEGER,
   comment_id INTEGER,
+  data TEXT,
   actor_name TEXT NOT NULL DEFAULT '',
   read_at TEXT,
   created_at TEXT NOT NULL
@@ -696,6 +714,17 @@ CREATE TABLE IF NOT EXISTS inventory_items (
   icon_slug TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+-- Issue #782: per-action idempotency for inventory quantity deltas / CAS sets.
+-- Pruned by created_at TTL on write; idx_inventory_qty_idempotency_created keeps that cheap.
+CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
+  key TEXT PRIMARY KEY,
+  item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  response_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS party_treasury (
@@ -910,6 +939,8 @@ CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created ON inventory_qty_idempotency(created_at);
 `;
 
 /**

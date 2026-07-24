@@ -95,6 +95,7 @@ type InputFieldProps = CommonProps & {
   placeholder?: string;
   min?: number | string;
   max?: number | string;
+  step?: number | string;
   autoFocus?: boolean;
   /** Optional; omitted by default so browsers can autocomplete non-sensitive fields. */
   autoComplete?: InputHTMLAttributes<HTMLInputElement>['autoComplete'];
@@ -185,6 +186,7 @@ export function LabeledField(props: LabeledFieldProps) {
       disabled,
       min: props.min,
       max: props.max,
+      step: props.step,
       autoFocus: props.autoFocus,
       'aria-invalid': invalid,
       'aria-describedby': ariaDescribedBy,

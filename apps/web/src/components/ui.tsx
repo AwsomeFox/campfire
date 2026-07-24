@@ -127,13 +127,16 @@ export function EmptyState({ icon = 'candle-flame', title, hint }: { icon?: stri
 }
 
 export function Skeleton({ lines = 3 }: { lines?: number }) {
+  // Bars stay visible when animate-pulse is frozen under reduced motion (#594).
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" role="status" aria-busy="true" data-testid="skeleton">
+      <span className="sr-only">Loading…</span>
       {Array.from({ length: lines }, (_, i) => (
         <div
           key={i}
           className="h-3 rounded animate-pulse bg-[var(--color-neutral-800)]"
           style={{ width: `${85 - i * 15}%` }}
+          aria-hidden="true"
         />
       ))}
     </div>

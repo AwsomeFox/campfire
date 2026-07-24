@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { InventoryItem, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { inventoryItems, partyTreasury, characters } from '../../db/schema';
+import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -16,6 +16,34 @@ type InventoryItemUpdateInput = z.infer<typeof InventoryItemUpdate>;
 type TreasuryPatchInput = z.infer<typeof TreasuryPatch>;
 
 type CoinKey = 'cp' | 'sp' | 'ep' | 'gp' | 'pp';
+
+/**
+ * How long qty idempotency rows are honored before opportunistic prune-on-write
+ * drops them (issue #782). Retries after this window may re-apply; keep larger
+ * than any realistic lost-response retry, short enough the table stays bounded.
+ */
+export const INVENTORY_QTY_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Bind an idempotency key to one qty operation *and* its accompanying mutable
+ * fields so key reuse with a different payload 409s (qty, move, name, notes, icon).
+ */
+function qtyFingerprint(input: InventoryItemUpdateInput): string {
+  const qtyPart =
+    input.qtyDelta !== undefined
+      ? `delta:${input.qtyDelta}`
+      : `set:${input.qty}@${input.expectedUpdatedAt ?? ''}`;
+  // Deterministic JSON with explicit nulls for omitted fields — undefined must
+  // not collapse into "absent key" vs "present null" differences across retries.
+  const restPart = JSON.stringify({
+    name: input.name ?? null,
+    notes: input.notes ?? null,
+    iconSlug: input.iconSlug ?? null,
+    ownerType: input.ownerType ?? null,
+    characterId: input.characterId ?? null,
+  });
+  return `${qtyPart}|${restPart}`;
+}
 
 function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
   return {
@@ -162,17 +190,167 @@ export class InventoryService {
       await this.assertCanWriteOwner(finalOwnerType, finalCharacterId, existing.campaignId, user, role);
     }
 
-    const update: Partial<typeof inventoryItems.$inferInsert> = { updatedAt: nowIso() };
-    if (input.name !== undefined) update.name = input.name;
-    if (input.qty !== undefined) update.qty = input.qty;
-    if (input.notes !== undefined) update.notes = input.notes;
-    if (input.iconSlug !== undefined) update.iconSlug = input.iconSlug;
-    if (moved) {
-      update.ownerType = finalOwnerType;
-      update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
+    // Issue #782: quantity writes — atomic delta (preferred) or absolute CAS set.
+    const hasQtyDelta = input.qtyDelta !== undefined;
+    const hasQtySet = input.qty !== undefined;
+    if (hasQtyDelta && hasQtySet) {
+      throw new BadRequestException('Provide qty or qtyDelta, not both');
+    }
+    if (hasQtyDelta && !input.idempotencyKey) {
+      throw new BadRequestException('qtyDelta requires idempotencyKey');
+    }
+    // Absolute qty is inherently racy against concurrent +/- — require CAS, mirroring
+    // treasury { set } (#582). Use qtyDelta for increments/decrements.
+    if (hasQtySet && input.expectedUpdatedAt === undefined) {
+      throw new BadRequestException(
+        'An absolute qty requires expectedUpdatedAt (CAS); use qtyDelta for +/-',
+      );
     }
 
-    const [row] = await this.db.update(inventoryItems).set(update).where(eq(inventoryItems.id, id)).returning();
+    const qtyTouch = hasQtyDelta || hasQtySet;
+    const idempotencyKey = qtyTouch ? input.idempotencyKey : undefined;
+    const fingerprint = qtyTouch ? qtyFingerprint(input) : undefined;
+
+    // Auth checks above may await; the write itself must be one synchronous
+    // better-sqlite3 transaction so concurrent qtyDelta compose and idempotent
+    // retries observe a single committed apply (issue #782).
+    let committed!: InventoryItem;
+    let replayed = false;
+    let qtyConflict: InventoryItem | null = null;
+
+    try {
+      this.db.transaction((tx) => {
+        if (idempotencyKey && fingerprint) {
+          // Opportunistic TTL prune (issue #782): drop rows older than the replay
+          // window so the table cannot grow unbounded. Indexed on created_at.
+          const cutoff = new Date(Date.now() - INVENTORY_QTY_IDEMPOTENCY_TTL_MS).toISOString();
+          tx.delete(inventoryQtyIdempotency).where(lt(inventoryQtyIdempotency.createdAt, cutoff)).run();
+
+          const [prior] = tx
+            .select()
+            .from(inventoryQtyIdempotency)
+            .where(eq(inventoryQtyIdempotency.key, idempotencyKey))
+            .limit(1)
+            .all();
+          if (prior) {
+            if (prior.itemId !== id || prior.fingerprint !== fingerprint || prior.userId !== user.id) {
+              throw new ConflictException({
+                code: 'IDEMPOTENCY_KEY_REUSE',
+                message: 'idempotencyKey was already used for a different inventory quantity action',
+              });
+            }
+            committed = JSON.parse(prior.responseJson) as InventoryItem;
+            replayed = true;
+            return;
+          }
+        }
+
+        const [fresh] = tx.select().from(inventoryItems).where(eq(inventoryItems.id, id)).limit(1).all();
+        if (!fresh) throw new NotFoundException(`Item ${id} not found`);
+
+        const ts = nowIso();
+        const update: Record<string, unknown> = { updatedAt: ts };
+        if (input.name !== undefined) update.name = input.name;
+        if (input.notes !== undefined) update.notes = input.notes;
+        if (input.iconSlug !== undefined) update.iconSlug = input.iconSlug;
+        if (moved) {
+          update.ownerType = finalOwnerType;
+          update.characterId = finalOwnerType === 'party' ? null : finalCharacterId;
+        }
+
+        if (hasQtyDelta) {
+          // Atomic `qty = qty + ?` — SQLite resolves the RHS column to the live row
+          // inside this statement, so two concurrent increments from qty=1 both land
+          // (1→2 and 2→3) instead of both writing absolute 2 from a stale snapshot.
+          update.qty = sql`${inventoryItems.qty} + ${input.qtyDelta!}`;
+        } else if (hasQtySet) {
+          update.qty = input.qty!;
+        }
+
+        const casCondition =
+          hasQtySet && input.expectedUpdatedAt !== undefined
+            ? sql`${inventoryItems.updatedAt} = ${input.expectedUpdatedAt}`
+            : undefined;
+
+        const updated = tx
+          .update(inventoryItems)
+          .set(update)
+          .where(casCondition !== undefined ? and(eq(inventoryItems.id, id), casCondition) : eq(inventoryItems.id, id))
+          .returning()
+          .all();
+
+        if (updated.length === 0) {
+          // CAS mismatch on absolute qty: another client wrote between the snapshot
+          // and this write. Stash live values for the 409 body, then roll back.
+          qtyConflict = toDomain(fresh);
+          throw new InventoryQtyConflictMarker();
+        }
+
+        const next = updated[0];
+        if (hasQtyDelta && next.qty < 0) {
+          throw new BadRequestException(
+            `Quantity cannot go negative (${fresh.qty} ${input.qtyDelta! >= 0 ? '+' : ''}${input.qtyDelta})`,
+          );
+        }
+
+        committed = toDomain(next);
+
+        if (idempotencyKey && fingerprint) {
+          try {
+            tx.insert(inventoryQtyIdempotency)
+              .values({
+                key: idempotencyKey,
+                itemId: id,
+                userId: user.id,
+                fingerprint,
+                // Persist the domain JSON the client already expects from PATCH.
+                responseJson: JSON.stringify(committed),
+                createdAt: ts,
+              })
+              .run();
+          } catch (insertErr) {
+            // Rare: another racer committed the same key between our SELECT and
+            // INSERT. Roll back this apply and return their committed response
+            // (or 409 if the fingerprint differs).
+            const message = insertErr instanceof Error ? insertErr.message : String(insertErr);
+            if (!/UNIQUE|unique/i.test(message)) throw insertErr;
+            throw new InventoryIdempotencyRaceMarker(idempotencyKey, fingerprint, id, user.id);
+          }
+        }
+      });
+    } catch (err) {
+      if (err instanceof InventoryQtyConflictMarker) {
+        throw new ConflictException({
+          code: 'INVENTORY_QTY_CONFLICT',
+          message: 'The item quantity changed since you last loaded it.',
+          current: qtyConflict,
+        });
+      }
+      if (err instanceof InventoryIdempotencyRaceMarker) {
+        const [prior] = await this.db
+          .select()
+          .from(inventoryQtyIdempotency)
+          .where(eq(inventoryQtyIdempotency.key, err.key))
+          .limit(1);
+        if (
+          prior &&
+          prior.itemId === err.itemId &&
+          prior.fingerprint === err.fingerprint &&
+          prior.userId === err.userId
+        ) {
+          return JSON.parse(prior.responseJson) as InventoryItem;
+        }
+        throw new ConflictException({
+          code: 'IDEMPOTENCY_KEY_REUSE',
+          message: 'idempotencyKey was already used for a different inventory quantity action',
+        });
+      }
+      throw err;
+    }
+
+    // Idempotent replay returns the first committed response without re-auditing.
+    if (replayed) return committed;
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -180,8 +358,18 @@ export class InventoryService {
       entityType: 'inventory_item',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: qtyTouch
+        ? JSON.stringify({
+            actor: { id: user.id, name: user.name, role },
+            kind: hasQtyDelta ? 'delta' : 'set',
+            ...(hasQtyDelta ? { qtyDelta: input.qtyDelta } : { qty: input.qty }),
+            after: committed.qty,
+            ...(input.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: input.expectedUpdatedAt } : {}),
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+          })
+        : undefined,
     });
-    return toDomain(row);
+    return committed;
   }
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
@@ -395,10 +583,44 @@ export class InventoryService {
  * Throwing rolls the (synchronous better-sqlite3) transaction back; the outer try/catch in
  * patchTreasury catches this exact class and translates it into a 409 with the live values.
  * Kept private to this file so the Nest exception layer never sees it directly.
+ *
+ * Deliberately NOT merged with {@link InventoryQtyConflictMarker}: each CAS path
+ * catches a distinct class (`instanceof`) and attaches a different `current` snapshot
+ * shape (Treasury vs InventoryItem). A shared generic would save ~6 lines but force a
+ * typed payload / dual catch mapping for little gain.
  */
 class TreasuryConflictMarker extends Error {
   constructor() {
     super('treasury CAS mismatch');
     this.name = 'TreasuryConflictMarker';
+  }
+}
+
+/**
+ * Internal sentinel for inventory absolute-qty CAS mismatch (issue #782). Same
+ * roll-back-then-409 pattern as {@link TreasuryConflictMarker}; kept as a separate
+ * class so `instanceof` can discriminate the two CAS flows (see note above).
+ */
+class InventoryQtyConflictMarker extends Error {
+  constructor() {
+    super('inventory qty CAS mismatch');
+    this.name = 'InventoryQtyConflictMarker';
+  }
+}
+
+/**
+ * Thrown inside the qty transaction when the idempotency-key INSERT loses a
+ * UNIQUE race. The outer catch rolls back the duplicate apply and returns the
+ * winner's stored response.
+ */
+class InventoryIdempotencyRaceMarker extends Error {
+  constructor(
+    readonly key: string,
+    readonly fingerprint: string,
+    readonly itemId: number,
+    readonly userId: string,
+  ) {
+    super('inventory qty idempotency race');
+    this.name = 'InventoryIdempotencyRaceMarker';
   }
 }

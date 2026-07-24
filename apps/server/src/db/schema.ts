@@ -886,6 +886,8 @@ export const notifications = sqliteTable('notifications', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
+  // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
+  data: text('data'),
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
@@ -905,6 +907,20 @@ export const inventoryItems = sqliteTable('inventory_items', {
   iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// Issue #782: per-action idempotency for inventory quantity writes. A client-generated
+// key records the committed item JSON so a lost-response retry returns the same
+// result without re-applying a qtyDelta. Fingerprint binds the key to one operation
+// (qty + accompanying mutable fields) — reuse with a different payload is a 409.
+// Rows are pruned opportunistically on write once past the TTL window (created_at).
+export const inventoryQtyIdempotency = sqliteTable('inventory_qty_idempotency', {
+  key: text('key').primaryKey(),
+  itemId: integer('item_id').notNull(),
+  userId: text('user_id').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  responseJson: text('response_json').notNull(),
+  createdAt: text('created_at').notNull(),
 });
 
 // Party treasury — one coin-totals row per campaign, created lazily on first read/write.
@@ -1029,6 +1045,22 @@ export const combatants = sqliteTable('combatants', {
 // ids for role-aware projection (issue #869). `detail` never carries a monster's exact
 // HP total (only the delta) and must not embed combatant names that could bypass
 // actor/target redaction for hidden NPCs.
+// Durable retry queue for upload paths that survived metadata deletion (issue #727).
+// No FKs: campaign rows may already be purged while bytes remain on disk.
+export const fsDeletionQueue = sqliteTable('fs_deletion_queue', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  relPath: text('rel_path').notNull().unique(),
+  kind: text('kind').notNull(), // 'file' | 'directory'
+  scope: text('scope').notNull(), // 'attachment' | 'campaign_purge'
+  campaignId: integer('campaign_id'),
+  entityId: integer('entity_id'),
+  status: text('status').notNull().default('pending'), // 'held' | 'pending' | 'failed'
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const encounterEvents = sqliteTable('encounter_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
