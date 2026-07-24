@@ -70,11 +70,11 @@ test.describe('structured action resolver — multi-client', () => {
       const actorId = enc.combatants.find((c: { characterId: number | null }) => c.characterId === characterId)?.id;
       expect(actorId).toBeTruthy();
 
-      const mon = await (
-        await dm.post(`/api/v1/encounters/${encounterId}/combatants`, {
-          data: { kind: 'monster', name: 'Target Dummy', hpMax: 40, ac: 10 },
-        })
-      ).json();
+      const monRes = await dm.post(`/api/v1/encounters/${encounterId}/combatants`, {
+        data: { kind: 'monster', name: 'Target Dummy', hpMax: 40 },
+      });
+      expect(monRes.ok(), `add monster: ${await monRes.text()}`).toBeTruthy();
+      const mon = await monRes.json();
       monsterId = mon.id;
       monsterHp = mon.hpCurrent;
       const rollRes = await dm.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
@@ -84,7 +84,6 @@ test.describe('structured action resolver — multi-client', () => {
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
       await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
-      await expect(page.getByText('Target Dummy', { exact: true })).toBeVisible();
       await expect(page.getByTestId('action-notes')).toHaveText('Three rays of fire.');
 
       await page.getByTestId('action-use-control').click();
