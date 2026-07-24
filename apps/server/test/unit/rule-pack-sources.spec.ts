@@ -28,7 +28,7 @@ describe('rule-pack install-source honesty metadata (#346)', () => {
   });
 
   it('wires the systems with a real open source as `api`, installable without a url', () => {
-    for (const source of ['open5e', 'pf2e', 'sf2e', 'open-legend', 'other'] as const) {
+    for (const source of ['open5e', 'pf2e', 'sf2e', 'open-legend', 'cepheus', 'other'] as const) {
       const meta = rulePackSourceMeta(source);
       expect(meta.sourceKind).toBe('api');
       expect(meta.installableWithoutUrl).toBe(true);

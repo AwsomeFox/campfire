@@ -1466,6 +1466,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
  *   - 'open-legend' — Open Legend community codex (issue #299)
  *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
+ *   - 'cepheus'     — Cepheus Engine SRD (2D6 sci-fi; mdBook Markdown, issue #406)
  *   - 'datasworn'   — Ironsworn: Starforged, via the canonical rsek/datasworn CC-BY-4.0
  *                     JSON dataset (issue #405; a PbtA reference-text pack — one real
  *                     statblock section, NPCs, the rest reference text)
@@ -1482,6 +1483,7 @@ export const RulePackInstallSource = z.enum([
   'archmage',
   'open-legend',
   'osr',
+  'cepheus',
   'datasworn',
   'other',
 ]);
@@ -1669,6 +1671,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     license: 'CC-BY-SA-4.0 (Basic Fantasy) / OGL v1.0a (OSRIC, S&W, Labyrinth Lord, OSE)',
     note: 'Basic Fantasy is CC-BY-SA but published only as PDF/ODT — not machine-readable — and the OGL retroclones have no JSON API. Upload a converted pack, or pass `url`.',
     candidateSourceUrl: 'https://basicfantasy.org/downloads.html',
+  },
+  cepheus: {
+    source: 'cepheus',
+    label: 'Cepheus Engine SRD',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'Open Game License v1.0a',
+    note: 'Live import of the section-level SRD text (2D6 sci-fi) from the first-party mdBook Markdown at orffen/cepheus-srd (raw GitHub). Open Game Content only; the "Cepheus Engine"/"Samardan Press" trademarks are not claimed.',
+    candidateSourceUrl: 'https://github.com/orffen/cepheus-srd',
   },
   datasworn: {
     source: 'datasworn',
@@ -2878,7 +2889,12 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'datasworn', 'upload']),
+  // Derived from RulePackInstallSource so the two lists can't drift: a new install source
+  // automatically becomes a valid job source. 'other' is excluded — it's a back-compat install
+  // alias that routes through the Open5e path (newJob('open5e', …)), so a job's source is never
+  // literally 'other'. 'upload' is added — it's the one source that only ever exists as a job
+  // (RulePackUpload), never as a RulePackInstall.source.
+  source: z.enum([...RulePackInstallSource.exclude(['other']).options, 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),

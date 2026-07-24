@@ -1363,6 +1363,50 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     }
   });
 
+  it('source: cepheus -> Cepheus importer -> cepheus-srd pack of section entries (installable without a url, but accepts a url override pointed at the fake mdBook server here)', async () => {
+    const { startFakeCepheus } = await import('./fake-cepheus');
+    const fake = await startFakeCepheus();
+    try {
+      // Cepheus is installableWithoutUrl by default (its live default base URL is wired); the
+      // test passes a `url` override so the whole install runs offline against the fake server.
+      const job = await installSource({ source: 'cepheus', url: fake.baseUrl });
+      expect(job.status).toBe('completed');
+      expect(job.pack.slug).toBe('cepheus-srd');
+      expect(job.pack.name).toMatch(/Cepheus Engine SRD/);
+      expect(job.pack.license).toMatch(/Open Game License/);
+      // Progress is reported per mdBook "book" (the five parts).
+      expect(job.progress.length).toBe(5);
+      expect(job.pack.entryCount).toBeGreaterThan(25); // ~28 chapters, with the big Equipment one split
+
+      // Chapters land as `section`-typed entries carrying the OGL license + attribution.
+      const skills = await request(server).get('/api/v1/rules/search').query({ q: 'Skills', type: 'section' }).set(dm);
+      expect(skills.status).toBe(200);
+      const skillsEntry = searchItems(skills.body).find((e: { name: string }) => e.name === 'Skills');
+      expect(skillsEntry).toBeDefined();
+      expect(skillsEntry.type).toBe('section');
+      expect(skillsEntry.license).toMatch(/Open Game License/);
+      expect(String(skillsEntry.attribution)).toMatch(/Samardan Press/);
+
+      // The oversized Equipment chapter was split at headings — "Equipment: Weapons" is searchable.
+      const weapons = await request(server).get('/api/v1/rules/search').query({ q: 'Weapons', type: 'section' }).set(dm);
+      expect(searchItems(weapons.body).some((e: { name: string }) => e.name === 'Equipment: Weapons')).toBe(true);
+
+      // A campaign can select the installed Cepheus pack (validateRuleSystem requires it exist).
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Cepheus Campaign' });
+      const patchRes = await request(server).patch(`/api/v1/campaigns/${campRes.body.id}`).set(dm).send({ ruleSystem: 'cepheus-srd' });
+      expect(patchRes.status).toBe(200);
+      expect(patchRes.body.ruleSystem).toBe('cepheus-srd');
+
+      // Cepheus has no per-statblock section vocabulary; a 5e section is rejected 400.
+      const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'cepheus', url: fake.baseUrl, sections: ['spells'] });
+      expect(bad.status).toBe(400);
+
+      await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
+    } finally {
+      await fake.close();
+    }
+  });
+
   it('sources without a verified live default API require an explicit url (400, no job)', async () => {
     // pf1e/starfinder/archmage/osr have dead/placeholder defaults (#346) — a missing url is
     // a synchronous 400, not a job that fails obscurely against a dead default.
@@ -1391,13 +1435,15 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     expect(res.status).toBe(200);
     const bySource = Object.fromEntries(res.body.map((m: { source: string }) => [m.source, m]));
     // Every install source is described.
-    for (const s of ['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'other']) {
+    for (const s of ['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'cepheus', 'other']) {
       expect(bySource[s]).toBeDefined();
     }
     // Wired live sources install without a url.
     expect(bySource['open-legend']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     expect(bySource['open5e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     expect(bySource['sf2e']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
+    // Cepheus is a wired live source too (first-party mdBook Markdown, issue #406).
+    expect(bySource['cepheus']).toMatchObject({ sourceKind: 'api', installableWithoutUrl: true });
     // Systems with no open source are honestly flagged manual-upload (and carry a note + license).
     for (const s of ['pf1e', 'starfinder', 'archmage', 'osr']) {
       expect(bySource[s]).toMatchObject({ sourceKind: 'manual-upload', installableWithoutUrl: false });
