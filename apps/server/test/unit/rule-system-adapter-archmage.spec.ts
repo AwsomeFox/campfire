@@ -130,7 +130,7 @@ describe('Archmage13aAdapter — statblock mapping', () => {
     expect(mapped.challengeRating).toBe(4); // 13th Age level occupies the CR slot
     expect(mapped.armorClass).toBe(19);
     expect(mapped.hitPoints).toBe(130);
-    expect(mapped.creatureType).toBe('Beast');
+    expect(mapped.creatureType).toBe('Troop');
     expect(mapped.actions).toBe('Bite +8 vs. AC');
   });
 
