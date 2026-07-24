@@ -127,10 +127,10 @@ function safeStorage(): Storage | null {
 
 /**
  * Read the in-progress acquisition for a campaign, or null when there is none / it's
- * malformed / it has expired. A read that finds an expired marker clears it as a
- * side-effect so a long-abandoned round trip doesn't resurrect the checklist forever.
+ * malformed / it has expired. Also prunes expired or malformed markers from storage so a
+ * long-abandoned round trip doesn't resurrect the checklist forever.
  */
-export function loadAcquisition(campaignId: number, now: number = Date.now()): AcquisitionState | null {
+export function loadAndPruneAcquisition(campaignId: number, now: number): AcquisitionState | null {
   const store = safeStorage();
   if (!store) return null;
   const raw = store.getItem(acquisitionKey(campaignId));
@@ -153,7 +153,7 @@ export function loadAcquisition(campaignId: number, now: number = Date.now()): A
 }
 
 /** Record that the DM opened a generator and is mid round trip (persists across reload). */
-export function saveAcquisition(campaignId: number, sourceId: string, now: number = Date.now()): AcquisitionState {
+export function saveAcquisition(campaignId: number, sourceId: string, now: number): AcquisitionState {
   const state: AcquisitionState = { sourceId, openedAt: now };
   const store = safeStorage();
   if (store) {
@@ -165,6 +165,9 @@ export function saveAcquisition(campaignId: number, sourceId: string, now: numbe
   }
   return state;
 }
+
+/** @deprecated Use {@link loadAndPruneAcquisition}. */
+export const loadAcquisition = loadAndPruneAcquisition;
 
 /** Forget the in-progress acquisition (on successful import or explicit "later"). */
 export function clearAcquisition(campaignId: number): void {

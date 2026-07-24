@@ -83,8 +83,14 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     // (schema permits any case) still resolve on the sheet / initiative engine (issue #48).
     stats: normalizeStats(fromJsonText<Record<string, number>>(row.stats, {})),
     ac: row.ac,
+    eac: row.eac,
+    kac: row.kac,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
+    spCurrent: row.spCurrent,
+    spMax: row.spMax,
+    rpCurrent: row.rpCurrent,
+    rpMax: row.rpMax,
     // Issue #711: persistent echo of the combat death/temp-HP subsystem. The
     // encounter tracker is the source of truth during a fight; on /end these
     // fields are reconciled back onto the sheet so a dead PC stays dead and a
@@ -453,7 +459,7 @@ export class CharactersService {
     characterId: number,
     hpCurrent: number,
     hpMax?: number,
-    opts?: { campaignId?: number },
+    opts?: { campaignId?: number; spCurrent?: number; spMax?: number; rpCurrent?: number; rpMax?: number; deathState?: string },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -474,13 +480,19 @@ export class CharactersService {
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
+      const updatePayload: Partial<typeof combatants.$inferInsert> = {
+        hpCurrent: nextCurrent,
+        hpMax: nextMax,
+        ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+      };
+      if (opts?.spCurrent !== undefined) updatePayload.spCurrent = opts.spCurrent;
+      if (opts?.spMax !== undefined) updatePayload.spMax = opts.spMax;
+      if (opts?.rpCurrent !== undefined) updatePayload.rpCurrent = opts.rpCurrent;
+      if (opts?.rpMax !== undefined) updatePayload.rpMax = opts.rpMax;
+      if (opts?.deathState !== undefined) updatePayload.deathState = opts.deathState;
       await this.db
         .update(combatants)
-        .set({
-          hpCurrent: nextCurrent,
-          hpMax: nextMax,
-          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
-        })
+        .set(updatePayload)
         .where(eq(combatants.id, combatant.id));
       touchedEncounterIds.add(encounterId);
       campaignId ??= encCampaignId;
@@ -636,8 +648,14 @@ export class CharactersService {
         status: input.status ?? 'active',
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
+        eac: clampAc(input.eac ?? null),
+        kac: clampAc(input.kac ?? null),
         hpCurrent,
         hpMax,
+        spCurrent: input.spCurrent ?? 0,
+        spMax: input.spMax ?? 0,
+        rpCurrent: input.rpCurrent ?? 0,
+        rpMax: input.rpMax ?? 0,
         conditions: toJsonText(input.conditions ?? []),
         saveProficiencies: toJsonText(input.saveProficiencies ?? []),
         skills: toJsonText(input.skills ?? {}),
@@ -710,7 +728,13 @@ export class CharactersService {
     if (input.status !== undefined) update.status = input.status;
     if (input.stats !== undefined) update.stats = toJsonText(normalizeStats(input.stats));
     if (input.ac !== undefined) update.ac = clampAc(input.ac);
+    if (input.eac !== undefined) update.eac = clampAc(input.eac);
+    if (input.kac !== undefined) update.kac = clampAc(input.kac);
     if (input.hpMax !== undefined) update.hpMax = input.hpMax;
+    if (input.spCurrent !== undefined) update.spCurrent = input.spCurrent;
+    if (input.spMax !== undefined) update.spMax = input.spMax;
+    if (input.rpCurrent !== undefined) update.rpCurrent = input.rpCurrent;
+    if (input.rpMax !== undefined) update.rpMax = input.rpMax;
     // Clamp to [0, finalHpMax] whenever either hp field is touched — mirrors patchHp's
     // clamp (and the combatant equivalent). Without this, PATCHing hpMax below the
     // standing hpCurrent (or hpCurrent above hpMax) would write an out-of-range value
@@ -869,6 +893,70 @@ export class CharactersService {
       entityId: id,
       campaignId: row.campaignId,
       detail: JSON.stringify(patch),
+    });
+    this.emitCharacterUpdated(row.campaignId, id, user.id);
+    return redactSecret(toDomain(row), role);
+  }
+
+  async rest(id: number, restType: 'stamina' | 'night' | 'short' | 'long', user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const isStaminaRest = restType === 'stamina' || restType === 'short';
+    let row!: typeof characters.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(characters).where(eq(characters.id, id)).limit(1).all();
+      if (!fresh || fresh.deletedAt !== null) throw new NotFoundException(`Character ${id} not found`);
+
+      if (isStaminaRest) {
+        if (fresh.rpCurrent < 1) {
+          throw new BadRequestException('Cannot take a Stamina Rest: requires at least 1 Resolve Point.');
+        }
+        const [updated] = tx
+          .update(characters)
+          .set({
+            rpCurrent: Math.max(0, fresh.rpCurrent - 1),
+            spCurrent: fresh.spMax,
+            updatedAt: nowIso(),
+          })
+          .where(eq(characters.id, id))
+          .returning()
+          .all();
+        row = updated;
+      } else {
+        const hpHealed = Math.min(fresh.hpMax - fresh.hpCurrent, Math.max(1, fresh.level));
+        const [updated] = tx
+          .update(characters)
+          .set({
+            spCurrent: fresh.spMax,
+            rpCurrent: fresh.rpMax,
+            hpCurrent: Math.min(fresh.hpMax, fresh.hpCurrent + hpHealed),
+            deathState: fresh.hpCurrent + hpHealed > 0 ? 'none' : fresh.deathState,
+            updatedAt: nowIso(),
+          })
+          .where(eq(characters.id, id))
+          .returning()
+          .all();
+        row = updated;
+      }
+    });
+
+    await this.syncActiveCombatants(id, row.hpCurrent, undefined, {
+      campaignId: row.campaignId,
+      spCurrent: row.spCurrent,
+      spMax: row.spMax,
+      rpCurrent: row.rpCurrent,
+      rpMax: row.rpMax,
+      deathState: row.deathState,
+    });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.rest',
+      entityType: 'character',
+      entityId: id,
+      campaignId: row.campaignId,
+      detail: restType,
     });
     this.emitCharacterUpdated(row.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);

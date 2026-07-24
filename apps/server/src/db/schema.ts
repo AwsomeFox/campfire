@@ -82,8 +82,14 @@ export const characters = sqliteTable('characters', {
   status: text('status').notNull().default('active'),
   stats: text('stats').notNull().default('{}'),
   ac: integer('ac'),
+  eac: integer('eac'),
+  kac: integer('kac'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  spCurrent: integer('sp_current').notNull().default(0),
+  spMax: integer('sp_max').notNull().default(0),
+  rpCurrent: integer('rp_current').notNull().default(0),
+  rpMax: integer('rp_max').notNull().default(0),
   // Issue #711: the combat death/temp-HP subsystem (issue #57) mirrored back
   // from the encounter at /end. `hpTemp` is the carried-over temp-HP pool; the
   // three death-save fields echo the combatant lifecycle so a dead PC stays
@@ -1188,6 +1194,12 @@ export const combatants = sqliteTable('combatants', {
   initiativeGroup: text('initiative_group'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
+  spCurrent: integer('sp_current').notNull().default(0),
+  spMax: integer('sp_max').notNull().default(0),
+  rpCurrent: integer('rp_current').notNull().default(0),
+  rpMax: integer('rp_max').notNull().default(0),
+  eac: integer('eac'),
+  kac: integer('kac'),
   // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
   // see db/db.module.ts migrateCombatantsTableForHpModel().
   hpTemp: integer('hp_temp').notNull().default(0),

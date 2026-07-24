@@ -53,11 +53,24 @@ export async function startFakeAiProvider(): Promise<FakeAiProvider> {
       }
 
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({
-        model: body.model ?? 'fake-model',
-        choices: [{ message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      }));
+      if (req.url?.endsWith('/responses')) {
+        res.end(
+          JSON.stringify({
+            model: body.model ?? 'fake-model',
+            status: 'completed',
+            output: [{ type: 'message', content: [{ type: 'output_text', text: 'pong' }] }],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            model: body.model ?? 'fake-model',
+            choices: [{ message: { role: 'assistant', content: 'pong' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+        );
+      }
     });
   });
 

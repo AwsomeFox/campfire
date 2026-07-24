@@ -13,6 +13,8 @@ import { seed, stateFor } from './seed';
  *  - Server errors are announced + associated via aria-invalid/aria-errormessage
  *  - Escape closes the dialog
  *  - axe-core passes on the open dialog
+ *
+ * Covered by PR #1260; this spec guards regressions for #775.
  */
 
 const CAMPAIGN_NAME = 'E2E — Cinderhaven';
