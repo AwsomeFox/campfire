@@ -178,8 +178,11 @@ export function GenerateMapPanel({
 
   async function copySeed() {
     if (!preview) return;
+    // Only flip to "Copied" if the Clipboard API actually exists — otherwise the write is a
+    // no-op and claiming success would mislead. The seed stays visible/selectable regardless.
+    if (!navigator.clipboard?.writeText) return;
     try {
-      await navigator.clipboard?.writeText(preview.seed);
+      await navigator.clipboard.writeText(preview.seed);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
