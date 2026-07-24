@@ -122,7 +122,7 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
   });
 
   test('successful delete routes away from settings', async ({ page }) => {
-    const { campaignId } = seed();
+    seed();
     const trashName = `E2E trash ${Date.now()}`;
     const createRes = await page.request.post('/api/v1/campaigns', { data: { name: trashName } });
     expect(createRes.ok()).toBeTruthy();
