@@ -1,7 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import {
   BACKUP_APP,
-  BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
   DB_ENTRY_V1,
   manifestToInspectView,
