@@ -53,6 +53,7 @@ export type AiDmStopReason =
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
   | 'max_steps' // the tool loop hit its iteration ceiling
   | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
+  | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
   | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
@@ -85,15 +86,20 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
 /**
+ * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
+ * it at compile time but concurrent pause/takeover can change it at runtime. Returns true for
+ * deliberate DM freeze states (`paused` / `human_control`).
+ */
+export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
+  return state === 'paused' || state === 'human_control';
+}
+
+/**
  * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
- * (#1057) to abort early when a concurrent lever fires mid-turn. TS narrows `session.state`
- * inside the loop (where the initial guard proved it was `running`), so a plain comparison is
- * flagged as TS2367; this helper performs a runtime-safe check on the mutable property that
- * cannot be narrowed away, because the lever handlers mutate the object between await points.
+ * (#1057) to abort early with stopReason `'frozen'` when a concurrent lever fires mid-turn.
  */
 function isFrozen(session: AiDmSessionState): boolean {
-  const s: string = session.state;
-  return s === 'paused' || s === 'human_control';
+  return isMidTurnFrozenState(session.state);
 }
 
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
@@ -893,11 +899,15 @@ export class AiDriverService {
       for (let step = 0; step < maxSteps; step++) {
         // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
         // before the next provider call so we cannot interleave with a replacement session.
-        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
-        // 'paused' or 'human_control'; abort early so the AI doesn't burn further budget,
-        // stream narration, or execute tool calls against a table that's now human-owned.
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          break;
+        }
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'. Distinct from `'aborted'` (mode-switch teardown): the
+        // stuck ladder must not park on top of the human's explicit freeze.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           break;
         }
         if (budgetRemaining <= 0) {
@@ -916,9 +926,20 @@ export class AiDriverService {
           if (currentRemaining <= 0) {
             return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
-          if (session.detached || isFrozen(session)) {
+          // Detach (#1071) vs freeze (#1057) must stay distinct — `frozen` keeps the stuck
+          // ladder from parking on top of an explicit human pause/takeover.
+          if (session.detached) {
             return {
               kind: 'aborted' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
+          }
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
               seat: currentSeat,
               budgetRemaining: currentRemaining,
               text: '',
@@ -969,9 +990,20 @@ export class AiDriverService {
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
           });
-          if (aborted || session.detached || isFrozen(session)) {
+          // streamStep sets `aborted` only on mode-switch detach mid-stream (#1071).
+          if (aborted || session.detached) {
             return {
               kind: 'aborted' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
+          // #1057: re-check after streaming — a pause/takeover can land while we streamed.
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
               seat: metered.seat,
               budgetRemaining: metered.budgetRemaining,
               text,
@@ -995,14 +1027,27 @@ export class AiDriverService {
           if (spend.text) finalNarration = spend.text;
           break;
         }
+        if (spend.kind === 'frozen') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'frozen';
+          if (spend.text) finalNarration = spend.text;
+          break;
+        }
 
         const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           if (text) finalNarration = text;
           break;
         }
@@ -1031,8 +1076,13 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          break;
+        }
+        // #1057: re-check after tool execution — a pause/takeover can land between steps.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           break;
         }
         if (toolErrored) {
@@ -2210,13 +2260,16 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
  * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
  * narration / a verbatim loop) since it's the more actionable diagnosis.
  */
-function classifyStuck(ctx: {
+export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;
   prevNarration: string | null;
 }): AiDmStuckReason | null {
   // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
   if (ctx.stopReason === 'aborted') return null;
+  // #1057: a freeze (DM pause/takeover mid-turn) is not a stuck condition — the human
+  // deliberately froze the seat, so parking the ladder would conflict with their action.
+  if (ctx.stopReason === 'frozen') return null;
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
