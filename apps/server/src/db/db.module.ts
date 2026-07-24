@@ -2137,6 +2137,10 @@ function migrateCampaignPurgeTombstones(sqlite: Database.Database): void {
  * it is the canonical sequence in which an old-shaped DB is upgraded (mirrors the
  * historical call order in openDatabase). Append new migrations to the END only.
  */
+function migrateImportJobsTable(sqlite: Database.Database): void {
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_hash TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued', progress TEXT NOT NULL DEFAULT '{}', cursor TEXT, actor_id TEXT NOT NULL DEFAULT '', started_at TEXT, updated_at TEXT NOT NULL, completed_at TEXT, outcome TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status); CREATE INDEX IF NOT EXISTS idx_import_jobs_created_at ON import_jobs(created_at);`);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2215,6 +2219,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0075_check_requests', run: migrateCheckRequestsTable },
   { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
   { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
+  { name: '0078_import_jobs', run: migrateImportJobsTable },
 ];
 
 /**
