@@ -744,6 +744,11 @@ export class ExportService {
       lines.push('_This campaign has no attachments._', '');
       return lines.join('\n');
     }
+    // Authoritative "was it embedded" truth: membership in `skipped` (which reflects the
+    // actual readBytesIfPresent() result), not the earlier existsSync-based `a.present`.
+    // This keeps the File column consistent with what the zip contains even if a file
+    // disappears between the existence check and the byte read.
+    const skippedIds = new Set(skipped.map((s) => s.id));
     lines.push(
       'Image bytes are embedded in this archive under `uploads/`. The table maps each',
       'attachment to its file and to what references it (campaign map, character',
@@ -761,7 +766,7 @@ export class ExportService {
       for (const e of encounters) {
         if (e.mapAttachmentId === a.id) refs.push(`encounter map: ${this.mdCell(e.name)} (encounter:${e.id})`);
       }
-      const fileCell = a.present ? `\`${this.mdCell(a.file)}\`` : '_missing — skipped_';
+      const fileCell = skippedIds.has(a.id) ? '_missing — skipped_' : `\`${this.mdCell(a.file)}\``;
       lines.push(`| ${a.id} | ${this.mdCell(a.kind)} | ${this.mdCell(a.filename)} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
     }
     if (skipped.length) {
