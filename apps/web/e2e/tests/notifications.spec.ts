@@ -46,13 +46,16 @@ test.describe('shared notification controller', () => {
     }));
 
     await page.goto(`/c/${campaignId}`);
+    // See mobile empty-dialog test — wait out RouteChangeFocus's deferred main focus.
+    await expect(page.locator('#main-content')).toBeFocused();
     const bell = page.getByRole('button', { name: 'Notifications (2 unread)' });
     await expect(bell).toHaveAttribute('aria-haspopup', 'dialog');
     await expect(bell).toHaveAttribute('aria-expanded', 'false');
     await expect(bell).not.toHaveAttribute('aria-controls');
 
     await bell.focus();
-    await page.keyboard.press('Enter');
+    await expect(bell).toBeFocused();
+    await bell.press('Enter');
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     const markAllRead = dialog.getByRole('button', { name: 'Mark all read' });
@@ -102,9 +105,15 @@ test.describe('shared notification controller', () => {
     await page.route(LIST_URL, (route) => route.fulfill({ json: [] }));
 
     await page.goto(`/c/${campaignId}`);
+    // Dashboard has no route h1, so RouteChangeFocus lands on <main> via rAF.
+    // Wait for that settle before focusing the bell — otherwise the deferred
+    // focus steal leaves Enter landing outside the trigger (issue #591).
+    await expect(page.locator('#main-content')).toBeFocused();
     const bell = page.getByRole('button', { name: 'Notifications', exact: true });
+    await expect(bell).toBeVisible();
     await bell.focus();
-    await page.keyboard.press('Enter');
+    await expect(bell).toBeFocused();
+    await bell.press('Enter');
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     await expect(dialog).toBeVisible();

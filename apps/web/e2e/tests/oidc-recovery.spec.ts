@@ -65,6 +65,8 @@ test.describe('OIDC recovery page', () => {
     const retry = page.getByRole('link', { name: 'Try SSO again' });
     const local = page.getByRole('link', { name: 'Sign in with username and password' });
     await expect(heading).toBeFocused();
+    // Local login is gated on auth/status; wait until it mounts so Tab order is stable.
+    await expect(local).toBeVisible();
     await page.keyboard.press('Tab');
     await expect(retry).toBeFocused();
     await page.keyboard.press('Tab');
