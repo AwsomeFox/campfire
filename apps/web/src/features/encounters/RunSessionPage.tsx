@@ -81,6 +81,7 @@ import {
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
+import { combatantsInAoe, type AoeHitTestContext } from './aoeHitTest';
 import {
   calibrationToPx,
   computeContainedRect,
@@ -1517,9 +1518,24 @@ export default function RunSessionPage() {
           amount={pendingApply.amount}
           label={pendingApply.label}
           targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          aoeTemplates={encounter.aoe ?? []}
+          aoeHitContext={
+            encounter.gridSize != null &&
+            encounter.gridSize > 0 &&
+            encounter.gridScale != null &&
+            encounter.gridScale > 0
+              ? { gridSize: encounter.gridSize, gridScale: encounter.gridScale }
+              : null
+          }
           isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
             hpDelta.mutate({ combatantId, delta });
+            setPendingApply(null);
+          }}
+          onApplyToAll={(combatantIds, delta) => {
+            for (const combatantId of combatantIds) {
+              hpDelta.mutate({ combatantId, delta });
+            }
             setPendingApply(null);
           }}
           onDismiss={() => setPendingApply(null)}
@@ -3266,15 +3282,21 @@ function ApplyDamageBar({
   amount,
   label,
   targets,
+  aoeTemplates = [],
+  aoeHitContext,
   isStarfinder = false,
   onApply,
+  onApplyToAll,
   onDismiss,
 }: {
   amount: number;
   label: string;
   targets: Combatant[];
+  aoeTemplates?: AoeTemplate[];
+  aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
   onApply: (combatantId: number, delta: number) => void;
+  onApplyToAll: (combatantIds: number[], delta: number) => void;
   onDismiss: () => void;
 }) {
   const [mode, setMode] = useState<'damage' | 'heal'>('damage');
@@ -3362,6 +3384,38 @@ function ApplyDamageBar({
             );
           })}
         </div>
+      )}
+      {aoeHitContext && aoeTemplates.length > 0 && (
+        <>
+          <span className="text-muted" style={{ fontSize: 11.5, width: '100%' }}>
+            AoE templates:
+          </span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', width: '100%' }}>
+            {aoeTemplates.map((t) => {
+              const inTemplate = combatantsInAoe(targets, t, aoeHitContext);
+              const label = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  className="btn btn-secondary cf-target-44"
+                  style={{ fontSize: 12, padding: '0 12px' }}
+                  disabled={inTemplate.length === 0}
+                  title={
+                    inTemplate.length === 0
+                      ? `No editable targets inside this ${t.shape} template`
+                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${inTemplate.map((c) => c.name).join(', ')}`
+                  }
+                  data-testid={`apply-damage-aoe-${t.id}`}
+                  onClick={() => onApplyToAll(inTemplate.map((c) => c.id), delta)}
+                >
+                  {label}
+                  {inTemplate.length > 0 ? ` (${inTemplate.length})` : ''}
+                </button>
+              );
+            })}
+          </div>
+        </>
       )}
       <button
         type="button"
