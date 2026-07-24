@@ -448,6 +448,25 @@ export function guardDriverLivePlayArgs(
     return { ok: true, args: { ...args } };
   }
 
+  if (toolName === 'adjust_treasury') {
+    if ('delta' in args && args.delta && typeof args.delta === 'object') {
+      const d = args.delta as Record<string, unknown>;
+      const cp = Number(d.cp ?? 0);
+      const sp = Number(d.sp ?? 0);
+      const ep = Number(d.ep ?? 0);
+      const gp = Number(d.gp ?? 0);
+      const pp = Number(d.pp ?? 0);
+      if (cp < 0 || sp < 0 || ep < 0 || gp < 0 || pp < 0) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_deduction',
+          message: 'The driver may only grant treasury coins (positive delta), not deduct coins from the party treasury.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
   return { ok: true, args: { ...args } };
 }
 

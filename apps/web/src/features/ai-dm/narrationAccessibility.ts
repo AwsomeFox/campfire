@@ -72,7 +72,7 @@ export function isAnnounceableEntry(entry: TranscriptEntry): boolean {
   if (entry.kind === 'dm') return entry.status === 'done' && dmEntryText(entry).trim().length > 0;
   if (entry.kind === 'player') return entry.text.trim().length > 0;
   if (entry.kind === 'system') return true;
-  // Tool chips are visual activity; status/lock copy covers the turn itself.
+  if (entry.kind === 'tool') return true;
   return false;
 }
 
@@ -109,6 +109,14 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
       variant: entry.variant,
       text: entry.text,
       data: entry.data,
+    };
+  }
+  if (entry.kind === 'tool') {
+    return {
+      id: entry.id,
+      kind: 'system',
+      variant: 'info',
+      text: entry.label,
     };
   }
   return null;
