@@ -1,9 +1,16 @@
-import { ConflictException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
-import { eq, sql } from 'drizzle-orm';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  Logger,
+} from '@nestjs/common';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats } from '../../db/schema';
+import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -67,12 +74,23 @@ function defaultSeat(campaignId: number): AiDmSeat {
  */
 @Injectable()
 export class AiDmService {
+  private readonly logger = new Logger(AiDmService.name);
+
   /**
    * Optional hook invoked when configure leaves Driver mode (#1071). Wired by
    * AiDriverService at construction so the seat path can tear down the live
    * in-memory driver session without creating an AiDm→AiDriver DI cycle.
    */
   private driverSessionTeardown: ((campaignId: number) => void) | null = null;
+
+  /**
+   * Per-campaign, in-process budget-spend queues (#1058). Each value is the tail
+   * promise for that campaign. Appending synchronously before awaiting the prior
+   * tail gives FIFO mutex semantics even when multiple waiters arrive together.
+   * Campfire's SQLite server is a single-process deployment; this advisory mutex
+   * deliberately coordinates spenders inside that process.
+   */
+  private readonly spendLockTails = new Map<number, Promise<void>>();
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -81,6 +99,36 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /**
+   * Run one provider-spend operation while holding the campaign's advisory
+   * mutex (#1058). The queue is planted before awaiting its predecessor, so
+   * simultaneous waiters cannot wake and both become owners. Cleanup lives in
+   * `finally`: provider, config, and metering failures cannot strand the lock.
+   *
+   * Callers must keep the budget re-check, provider call, and metering inside
+   * `operation`; checking before entering the mutex would reintroduce the TOCTOU
+   * race this helper closes.
+   */
+  async withSpendLock<T>(campaignId: number, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.spendLockTails.get(campaignId) ?? Promise.resolve();
+    let release!: () => void;
+    const owned = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = predecessor.then(() => owned);
+    this.spendLockTails.set(campaignId, tail);
+
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.spendLockTails.get(campaignId) === tail) {
+        this.spendLockTails.delete(campaignId);
+      }
+    }
+  }
 
   /** Register the driver-session teardown used when the seat leaves Driver mode (#1071). */
   registerDriverSessionTeardown(fn: (campaignId: number) => void): void {
@@ -392,6 +440,17 @@ export class AiDmService {
       detail: `${input.kind} via ${this.provider.name} model=${execModel || 'default'} (+${tokensUsed} tokens, ${newTokensUsed}/${seat.tokenBudget})`,
     });
 
+    // #1060: same per-turn history contract as meterTurn — takeTurn meters
+    // independently and must not skip the history row.
+    await this.recordUsageHistory({
+      campaignId,
+      tokensUsed,
+      action: 'ai-dm.turn',
+      model: execModel || existing?.model || seat.model || '',
+      actor: auditActor(user),
+      createdAt: ts,
+    });
+
     const updatedSeat = await this.getSeat(campaignId);
     return {
       narration: result.narration,
@@ -449,7 +508,7 @@ export class AiDmService {
   async meterTurn(
     campaignId: number,
     tokensUsed: number,
-    audit: { actor: string; action?: string; detail?: string },
+    audit: { actor: string; action?: string; detail?: string; model?: string },
   ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
     const cost = Math.max(0, Math.floor(tokensUsed));
     const ts = nowIso();
@@ -486,10 +545,95 @@ export class AiDmService {
       detail: audit.detail ?? `+${cost} tokens, ${newTokensUsed}/${tokenBudget}`,
     });
 
+    // Fall back to the seat's configured model when callers omit audit.model so
+    // history rows stay populated for existing driver/scribe/co-DM call sites.
+    const model = (audit.model?.trim() || existing?.model || '').trim();
+    await this.recordUsageHistory({
+      campaignId,
+      tokensUsed: cost,
+      action: audit.action ?? 'ai-dm.driver.turn',
+      model,
+      actor: audit.actor,
+      createdAt: ts,
+    });
+
     return {
       seat: await this.getSeat(campaignId),
       tokensUsed: cost,
       budgetRemaining: Math.max(0, tokenBudget - newTokensUsed),
     };
   }
+
+  /**
+   * Best-effort per-turn history write (#1060). Shared by takeTurn + meterTurn so
+   * every successfully metered spend produces one history row. Failures are logged
+   * but never rethrown — metering/budget must not fail because history did.
+   */
+  private async recordUsageHistory(row: {
+    campaignId: number;
+    tokensUsed: number;
+    action: string;
+    model: string;
+    actor: string;
+    createdAt: string;
+  }): Promise<void> {
+    if (row.tokensUsed <= 0) return;
+    try {
+      await this.db.insert(aiDmUsageHistory).values(row);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `ai_dm_usage_history insert failed for campaign ${row.campaignId} action=${row.action} tokens=${row.tokensUsed}: ${message}`,
+      );
+    }
+  }
+
+  /**
+   * List per-turn usage history for a campaign (issue #1060). Newest-first, capped at
+   * `limit` (default 100, max 500). Used by the DM's usage sparkline and the audit view.
+   * The endpoint that exposes this is DM-only; the read itself is unfiltered because
+   * history is DM-only material by construction.
+   */
+  async listUsageHistory(
+    campaignId: number,
+    opts: { limit?: number; sinceIso?: string } = {},
+  ): Promise<AiDmUsageHistoryResponse> {
+    const limit = Math.min(500, Math.max(1, opts.limit ?? 100));
+    const conditions = [eq(aiDmUsageHistory.campaignId, campaignId)];
+    if (opts.sinceIso) {
+      conditions.push(gte(aiDmUsageHistory.createdAt, normalizeSinceIso(opts.sinceIso)));
+    }
+    const rows = await this.db
+      .select()
+      .from(aiDmUsageHistory)
+      .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+      // id DESC breaks ties when concurrent meters share a millisecond timestamp.
+      .orderBy(desc(aiDmUsageHistory.createdAt), desc(aiDmUsageHistory.id))
+      .limit(limit);
+
+    const items: AiDmUsageHistoryEntry[] = rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      tokensUsed: r.tokensUsed,
+      action: r.action,
+      model: r.model,
+      actor: r.actor,
+      createdAt: r.createdAt,
+    }));
+    const totalTokens = items.reduce((sum, r) => sum + r.tokensUsed, 0);
+    return { items, totalTokens, count: items.length };
+  }
+}
+
+/** Validate + canonicalize `?since=` to UTC ISO so TEXT comparisons are chronological. */
+function normalizeSinceIso(sinceIso: string): string {
+  const trimmed = sinceIso.trim();
+  if (!trimmed) {
+    throw new BadRequestException('since must be a valid ISO-8601 timestamp');
+  }
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) {
+    throw new BadRequestException('since must be a valid ISO-8601 timestamp');
+  }
+  return new Date(ms).toISOString();
 }

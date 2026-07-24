@@ -877,7 +877,15 @@ export const SessionRsvp = z.object({
   ...timestamps,
 });
 export type SessionRsvp = z.infer<typeof SessionRsvp>;
-export const RsvpSet = z.object({ status: RsvpStatus, note: z.string().max(500).optional() });
+export const RsvpSetBody = z.object({ status: RsvpStatus.optional(), note: z.string().max(500).optional() });
+export const RSVP_SET_REQUIRED_MESSAGE = 'status or note is required';
+export function hasAnyRsvpSetField(value: z.infer<typeof RsvpSetBody>): boolean {
+  return value.status !== undefined || value.note !== undefined;
+}
+export const RsvpSet = RsvpSetBody
+  .refine(hasAnyRsvpSetField, {
+    message: RSVP_SET_REQUIRED_MESSAGE,
+  });
 export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
@@ -1650,11 +1658,79 @@ export interface MonsterStatblockData {
   reactions?: unknown;
 }
 
+/**
+ * One user-facing statblock label (issue #763). `full` is the accessible term shown by
+ * default; `short` is an optional visual abbreviation (e.g. AC, HD, CR) for compact
+ * surfaces that still expose `full` via tooltip / screen-reader text.
+ */
+export interface StatblockPresentationLabel {
+  /** Full accessible term (e.g. "Armor Class", "Guard", "Hit Dice"). */
+  readonly full: string;
+  /** Optional short visual form (e.g. "AC", "HD"). Omit when the full term is always shown. */
+  readonly short?: string;
+}
+
+/**
+ * Adapter-native presentation metadata for the shared StatBlock renderer (issue #763).
+ * Mechanical fields stay generic (`challengeRating` / `armorClass`); labels are what the
+ * UI says — Level / Hit Dice / Guard instead of hardcoded "Challenge" / "Armor Class".
+ */
+export interface StatblockPresentation {
+  /** Difficulty / threat rating (Challenge, Level, Hit Dice, Rating, …). */
+  readonly rating: StatblockPresentationLabel;
+  /** Primary defense number (Armor Class, Guard, Kinetic Armor Class, Defense, …). */
+  readonly defense: StatblockPresentationLabel;
+  /** Hit-point / vitality pool label. */
+  readonly hitPoints: StatblockPresentationLabel;
+  /** Ability-score / attribute block label. */
+  readonly abilities: StatblockPresentationLabel;
+  /** Actions / attacks section heading. */
+  readonly actions: StatblockPresentationLabel;
+  /** Creature-type / traits / descriptor / role label. */
+  readonly creatureType: StatblockPresentationLabel;
+}
+
+/**
+ * Neutral labels for unknown / homebrew rule systems (issue #763). Mechanical mapping may
+ * still fall back to the 5e adapter, but the UI must not claim "Challenge" / "Armor Class"
+ * for a pack that never defined those terms.
+ */
+export const NEUTRAL_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Rating' },
+  defense: { full: 'Defense' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** D&D 5e / Open5e SRD presentation — Challenge + Armor Class. */
+export const DND5E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge', short: 'CR' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** Pick the visible form of a presentation label (`short` when requested and present). */
+export function statblockLabelText(label: StatblockPresentationLabel, preferShort = false): string {
+  return preferShort && label.short ? label.short : label.full;
+}
+
 export interface RuleSystemAdapter {
   /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
+  /**
+   * User-facing statblock field labels for this system (issue #763). The shared StatBlock
+   * renderer reads these instead of hardcoding "Challenge" / "Armor Class".
+   * Optional for external / custom adapters — {@link statblockPresentation} falls back to
+   * {@link NEUTRAL_STATBLOCK_PRESENTATION} when omitted.
+   */
+  readonly presentation?: StatblockPresentation;
   /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
@@ -1682,6 +1758,18 @@ export interface RuleSystemAdapter {
     representation?: AbilityRepresentation,
     level?: number,
   ): number;
+  /**
+   * OPTIONAL — resolve an initiative modifier, or `null` when it cannot be derived
+   * (issue #764). Systems that implement this (PF1e) let encounter/generator callers
+   * surface "unavailable" instead of inventing a silent +0; the numeric
+   * {@link initiativeModifier} seam remains for rollers that need a default. Other
+   * adapters leave this undefined and keep returning 0 from `initiativeModifier`.
+   */
+  initiativeModifierOrNull?(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+    level?: number,
+  ): number | null;
   /**
    * Compare two combatants with equal initiative totals for running-order sort (issue #611).
    * Return negative if `a` should act before `b`. Called only after initiative totals match
@@ -1779,6 +1867,7 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  presentation: DND5E_STATBLOCK_PRESENTATION,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -1968,9 +2057,20 @@ function openLegendAgility(abilities: Record<string, unknown> | null | undefined
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
+/** Open Legend presentation — Level + Guard (not Challenge / Armor Class). */
+export const OPEN_LEGEND_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Guard' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Attributes' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Descriptor' },
+};
+
 export const OpenLegendAdapter: RuleSystemAdapter = {
   id: OPEN_LEGEND_ADAPTER_ID,
   label: 'Open Legend',
+  presentation: OPEN_LEGEND_STATBLOCK_PRESENTATION,
   // Open Legend attributes are used directly (no floor((score-10)/2) offset) — an attribute
   // both indexes the dice table and, where a flat value is wanted, IS that value.
   abilityModifier(score: number): number {
@@ -2236,9 +2336,20 @@ export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
   degreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess;
 }
 
+/** PF2e / SF2e presentation — Level + Armor Class; creature type is Traits. */
+export const PF2E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Traits' },
+};
+
 export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
+  presentation: PF2E_STATBLOCK_PRESENTATION,
   // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
   // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {
@@ -2300,10 +2411,14 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
         : typeof perception === 'number'
           ? { perception }
           : undefined;
+    // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits). An
+    // empty traits array joins to "" — treat that (and a blank string) as absent so the
+    // creatureType/type fallback still applies instead of surfacing an empty label.
+    const traitsRaw = Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits;
+    const traits = typeof traitsRaw === 'string' && traitsRaw.trim() === '' ? undefined : traitsRaw;
     return {
       size: d.size,
-      // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
-      creatureType: d.creatureType ?? d.type ?? (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits),
+      creatureType: traits ?? d.creatureType ?? d.type,
       // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
       challengeRating: d.level ?? d.challengeRating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
@@ -2389,6 +2504,38 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
   if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
   return Dnd5eAdapter;
+}
+
+/**
+ * Resolve statblock presentation labels for a campaign's `ruleSystem` (issue #763).
+ *
+ * Unlike {@link ruleSystemAdapter}, unknown / empty / homebrew slugs do **not** inherit
+ * the 5e "Challenge" / "Armor Class" copy — they return {@link NEUTRAL_STATBLOCK_PRESENTATION}
+ * ("Rating" / "Defense") so a homebrew pack isn't mislabeled with 5e jargon. Registered
+ * adapters (including explicit 5e) return their native `presentation`.
+ */
+export function statblockPresentation(ruleSystem?: string | null): StatblockPresentation {
+  if (ruleSystem && ADAPTERS[ruleSystem]) {
+    return ADAPTERS[ruleSystem].presentation ?? NEUTRAL_STATBLOCK_PRESENTATION;
+  }
+  return NEUTRAL_STATBLOCK_PRESENTATION;
+}
+
+/**
+ * Unique registered adapters (by family id), stable order — for snapshot / parity tests
+ * that must cover every system once (issue #763).
+ */
+export function listRuleSystemAdapters(): RuleSystemAdapter[] {
+  const seen = new Set<string>();
+  const out: RuleSystemAdapter[] = [];
+  for (const adapter of Object.values(ADAPTERS)) {
+    if (seen.has(adapter.id)) continue;
+    seen.add(adapter.id);
+    out.push(adapter);
+  }
+  // Sort by id so snapshot order does not depend on ADAPTERS insertion order.
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
 }
 
 /**
@@ -3426,6 +3573,27 @@ export const AiDmTurnResult = z.object({
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
+// Per-turn usage history (issue #1060). One row per metered token spend
+// (driver step, co-DM draft, scribe run). Powers the DM's usage sparkline and
+// audit view. Returned by GET /campaigns/:id/ai-dm/usage-history newest-first.
+export const AiDmUsageHistoryEntry = z.object({
+  id: Id,
+  campaignId: Id,
+  tokensUsed: z.number().int().nonnegative(),
+  action: z.string(),   // e.g. 'ai-dm.driver.turn', 'ai-dm.scribe'
+  model: z.string(),
+  actor: z.string(),
+  createdAt: IsoDate,
+});
+export type AiDmUsageHistoryEntry = z.infer<typeof AiDmUsageHistoryEntry>;
+
+export const AiDmUsageHistoryResponse = z.object({
+  items: z.array(AiDmUsageHistoryEntry),
+  totalTokens: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative(),
+});
+export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and
@@ -3434,7 +3602,7 @@ export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.

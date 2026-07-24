@@ -4,6 +4,12 @@ import type { ScheduledSessionWithRsvps } from '@campfire/schema';
 import {
   datetimeLocalDaysFromNow,
   RSVP_GROUP_LEGEND,
+  RSVP_NOTE_CLEAR_LABEL,
+  RSVP_NOTE_LABEL,
+  RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
+  RSVP_NOTE_SAVE_LABEL,
+  RSVP_NOTE_SAVED_ANNOUNCEMENT,
+  RSVP_NOTE_CLEARED_ANNOUNCEMENT,
   SCHEDULE_WHEN_HELP,
   rsvpOptionDescription,
 } from '../../src/features/sessions/schedulePanelA11y';
@@ -36,6 +42,14 @@ function appAssertiveAnnouncer(page: Page) {
 
 function scheduleCard(page: Page, scheduleId: number) {
   return page.locator(`[data-entity-id="${scheduleId}"]`);
+}
+
+function noteStatusRegion(page: Page, scheduleId: number) {
+  return scheduleCard(page, scheduleId).locator(`#schedule-rsvp-note-${scheduleId}-status`);
+}
+
+async function ensureRsvpYes(page: Page, scheduleId: number): Promise<void> {
+  await page.request.put(`/api/v1/schedule/${scheduleId}/rsvp`, { data: { status: 'yes' } });
 }
 
 /**
@@ -106,6 +120,111 @@ test.describe('Schedule panel accessibility (issue #645)', () => {
     await chooser.getByRole('radio', { name: /^maybe —/i }).click();
     await expect(chooser.getByRole('radio', { name: /^maybe —/i })).toHaveAttribute('aria-checked', 'true');
     await expect(appPoliteAnnouncer(page)).toContainText(/RSVP saved: maybe/i);
+  });
+});
+
+test.describe('Schedule panel RSVP note editor (issue #552)', () => {
+  test.use({ storageState: stateFor('player') });
+
+  test('creates and edits a note via Save and Enter', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const scheduleId = navigation.scheduledSessionId;
+    await ensureRsvpYes(page, scheduleId);
+    await page.goto(`/c/${campaignId}/sessions?tab=schedule`);
+
+    const card = scheduleCard(page, scheduleId);
+    const note = card.getByLabel(RSVP_NOTE_LABEL);
+    await expect(note).toBeVisible();
+
+    await note.fill('running 15 min late');
+    await card.getByRole('button', { name: RSVP_NOTE_SAVE_LABEL }).click();
+    await expect(appPoliteAnnouncer(page)).toContainText(RSVP_NOTE_SAVED_ANNOUNCEMENT);
+
+    await note.fill('sorry, traffic');
+    await note.press('Enter');
+    await expect(appPoliteAnnouncer(page)).toContainText(RSVP_NOTE_SAVED_ANNOUNCEMENT);
+    await expect(note).toHaveValue('sorry, traffic');
+  });
+
+  test('clears a persisted note and reloads from the server', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const scheduleId = navigation.scheduledSessionId;
+    await page.request.put(`/api/v1/schedule/${scheduleId}/rsvp`, {
+      data: { status: 'yes', note: 'bringing snacks' },
+    });
+    await page.goto(`/c/${campaignId}/sessions?tab=schedule`);
+
+    const card = scheduleCard(page, scheduleId);
+    const note = card.getByLabel(RSVP_NOTE_LABEL);
+    await expect(note).toHaveValue('bringing snacks');
+
+    await card.getByRole('button', { name: RSVP_NOTE_CLEAR_LABEL }).click();
+    await expect(appPoliteAnnouncer(page)).toContainText(RSVP_NOTE_CLEARED_ANNOUNCEMENT);
+    await expect(note).toHaveValue('');
+
+    await page.reload();
+    await expect(note).toHaveValue('');
+  });
+
+  test('announces note save failures only via the assertive region', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const scheduleId = navigation.scheduledSessionId;
+    await ensureRsvpYes(page, scheduleId);
+    await page.goto(`/c/${campaignId}/sessions?tab=schedule`);
+
+    await page.route(`**/api/v1/schedule/${scheduleId}/rsvp`, async (route) => {
+      const body = route.request().postDataJSON() as { note?: string } | undefined;
+      if (route.request().method() === 'PUT' && body?.note !== undefined) {
+        await route.fulfill({ status: 503, json: { message: 'Temporary note failure' } });
+        return;
+      }
+      await route.continue();
+    });
+
+    const card = scheduleCard(page, scheduleId);
+    const note = card.getByLabel(RSVP_NOTE_LABEL);
+    await note.fill('might be late');
+    await card.getByRole('button', { name: RSVP_NOTE_SAVE_LABEL }).click();
+
+    await expect(card.getByText(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT)).toBeVisible();
+    await expect(appAssertiveAnnouncer(page)).toContainText(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT);
+    await expect(noteStatusRegion(page, scheduleId)).not.toContainText(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT);
+
+    await page.unroute(`**/api/v1/schedule/${scheduleId}/rsvp`);
+  });
+
+  test('disables the note field and Save while a note PUT is in flight', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    const scheduleId = navigation.scheduledSessionId;
+    await ensureRsvpYes(page, scheduleId);
+    await page.goto(`/c/${campaignId}/sessions?tab=schedule`);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await page.route(`**/api/v1/schedule/${scheduleId}/rsvp`, async (route) => {
+      const body = route.request().postDataJSON() as { note?: string } | undefined;
+      if (route.request().method() === 'PUT' && body?.note !== undefined) {
+        await gate;
+      }
+      await route.continue();
+    });
+
+    const card = scheduleCard(page, scheduleId);
+    const note = card.getByLabel(RSVP_NOTE_LABEL);
+    const save = card.getByRole('button', { name: RSVP_NOTE_SAVE_LABEL });
+    await note.fill('on my way');
+    await save.click();
+
+    await expect(note).toBeDisabled();
+    await expect(save).toBeDisabled();
+    await expect(noteStatusRegion(page, scheduleId)).toContainText(/Saving RSVP note/i);
+
+    release();
+    await expect(note).toBeEnabled();
+    await page.unroute(`**/api/v1/schedule/${scheduleId}/rsvp`);
   });
 });
 

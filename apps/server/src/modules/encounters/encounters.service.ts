@@ -498,6 +498,29 @@ export class EncountersService {
    * projected from CURRENT hidden-NPC visibility so a later reveal unmasks
    * historical lines; stable actorId/targetId are always returned.
    */
+  /**
+   * DM-view batch fetch of events for many encounters in ONE query, keyed by encounterId
+   * (empty array when an encounter has no events). Avoids the N+1 of calling listEvents()
+   * per encounter on the campaign-export path (issue #863). No viewer redaction — callers
+   * are DM-scoped (full campaign export).
+   */
+  async listEventsForEncounters(encounterIds: number[]): Promise<Map<number, EncounterEvent[]>> {
+    const result = new Map<number, EncounterEvent[]>();
+    for (const id of encounterIds) result.set(id, []);
+    if (encounterIds.length === 0) return result;
+    const rows = await this.db
+      .select()
+      .from(encounterEvents)
+      .where(inArray(encounterEvents.encounterId, encounterIds))
+      .orderBy(encounterEvents.id);
+    for (const row of rows) {
+      const list = result.get(row.encounterId);
+      if (list) list.push(eventToDomain(row));
+      else result.set(row.encounterId, [eventToDomain(row)]);
+    }
+    return result;
+  }
+
   async listEvents(encounterId: number, viewerRole?: Role): Promise<EncounterEvent[]> {
     const row = await this.getRowOrThrow(encounterId);
     if (viewerRole !== undefined && !isVisibleTo({ hidden: row.hidden }, viewerRole)) {
@@ -1627,7 +1650,22 @@ export class EncountersService {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
-        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
+        // Issue #764: when the adapter can distinguish "unavailable" from a genuine +0
+        // (PF1e), refuse to invent a silent zero — the DM must supply initMod explicitly.
+        if (adapter.initiativeModifierOrNull) {
+          const resolved = adapter.initiativeModifierOrNull(
+            mapped.abilityScores,
+            mapped.abilityRepresentation,
+          );
+          if (resolved === null) {
+            throw new BadRequestException(
+              'Unable to resolve initiative for this combatant — provide "initMod" explicitly (statblock has no native Init or DEX)',
+            );
+          }
+          initMod = resolved;
+        } else {
+          initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
+        }
       }
     }
 

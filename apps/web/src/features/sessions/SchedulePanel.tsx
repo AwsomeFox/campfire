@@ -5,7 +5,7 @@
  * DM: schedule/edit/cancel sessions, enable/rotate/disable the feed.
  * Everyone: see what's coming, one-tap RSVP.
  */
-import { useCallback, useEffect, useId, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
@@ -38,9 +38,22 @@ import {
   initialRsvpSaveState,
   reduceRsvpSave,
   RSVP_GROUP_LEGEND,
+  RSVP_NOTE_CLEAR_LABEL,
+  RSVP_NOTE_CLEARED_ANNOUNCEMENT,
+  RSVP_NOTE_HELP,
+  RSVP_NOTE_LABEL,
+  RSVP_NOTE_MAX_LEN,
+  RSVP_NOTE_PLACEHOLDER,
+  RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
+  RSVP_NOTE_SAVE_LABEL,
+  RSVP_NOTE_SAVED_ANNOUNCEMENT,
+  RSVP_NOTE_SAVING_STATUS,
   RSVP_SAVE_FAILED_ANNOUNCEMENT,
   RSVP_SAVING_STATUS,
   rsvpDisplayStatus,
+  rsvpNoteSaveRequest,
+  rsvpNoteTooLongMessage,
+  syncRsvpNoteDraft,
   rsvpSavedAnnouncement,
   rsvpStatusSummary,
   SCHEDULE_DURATION_HELP,
@@ -298,20 +311,51 @@ function ScheduleItem({
     initialRsvpSaveState,
   );
 
+  // Issue #552: local draft of the RSVP note. Kept in a separate reducer-like
+  // state so the caller can type freely without racing every keystroke against
+  // the server; save-on-button-click (and clear-with-explicit-button) mirrors
+  // the coarse-grained RSVP status control right above it.
+  const persistedNote = mine?.note ?? '';
+  const [noteDraft, setNoteDraft] = useState<string>(persistedNote);
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const lastScheduleIdRef = useRef(schedule.id);
+  const lastSyncedPersistedRef = useRef(persistedNote);
+
   useEffect(() => {
     dispatchRsvp({ type: 'sync', persisted: mine?.status ?? null });
-  }, [mine?.status]);
+    const scheduleChanged = lastScheduleIdRef.current !== schedule.id;
+    if (scheduleChanged) {
+      lastScheduleIdRef.current = schedule.id;
+      lastSyncedPersistedRef.current = persistedNote;
+      setNoteDraft(persistedNote);
+      return;
+    }
+    setNoteDraft((prev) => {
+      const next = syncRsvpNoteDraft(prev, lastSyncedPersistedRef.current, persistedNote, false);
+      if (next !== prev) lastSyncedPersistedRef.current = persistedNote;
+      return next;
+    });
+  }, [mine?.status, persistedNote, schedule.id]);
 
   const displayRsvp = rsvpDisplayStatus(rsvpState);
   const rsvpSaving = rsvpState.phase === 'saving';
+  const noteFieldId = `schedule-rsvp-note-${schedule.id}`;
+  const noteHelpId = `${noteFieldId}-help`;
+  const noteStatusId = `${noteFieldId}-status`;
+  const noteDraftLength = noteDraft.trim().length;
+  const noteDirty = noteDraft.trim() !== persistedNote.trim();
+  const noteTooLong = noteDraftLength > RSVP_NOTE_MAX_LEN;
 
   async function setRsvp(status: RsvpStatus) {
-    if (rsvpSaving) return;
+    if (rsvpSaving || noteSaving) return;
     const prior = rsvpState.persisted;
     if (status === prior && rsvpState.pending == null) return;
     dispatchRsvp({ type: 'select', status });
     setError(null);
     try {
+      // #552: status-only change omits the note field so the server preserves
+      // the existing note (see scheduling.service.setRsvp: `note ?? existing.note`).
       await api.put<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/rsvp`, { status });
       dispatchRsvp({ type: 'saved', status });
       announce(rsvpSavedAnnouncement(status));
@@ -321,6 +365,42 @@ function ScheduleItem({
       setError(RSVP_SAVE_FAILED_ANNOUNCEMENT);
       announce(RSVP_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
     }
+  }
+
+  async function saveNote(explicitDraft?: string) {
+    if (noteSaving || rsvpSaving) return;
+    const draft = explicitDraft ?? noteDraft;
+    if (draft.trim().length > RSVP_NOTE_MAX_LEN) {
+      setNoteError(rsvpNoteTooLongMessage(draft.trim().length));
+      announce(rsvpNoteTooLongMessage(draft.trim().length), { assertive: true });
+      return;
+    }
+    const request = rsvpNoteSaveRequest(persistedNote, draft);
+    if (!request) return; // no-op — draft matches persisted
+    setNoteSaving(true);
+    setNoteError(null);
+    try {
+      const updated = await api.put<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/rsvp`, request);
+      const savedNote =
+        updated.rsvps.find((r) => myIds.has(r.userId))?.note ?? request.note;
+      announce(
+        request.note.length === 0 ? RSVP_NOTE_CLEARED_ANNOUNCEMENT : RSVP_NOTE_SAVED_ANNOUNCEMENT,
+      );
+      setNoteDraft(savedNote);
+      lastSyncedPersistedRef.current = savedNote;
+      onChange();
+    } catch {
+      setNoteError(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT);
+      announce(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
+    } finally {
+      setNoteSaving(false);
+    }
+  }
+
+  async function clearNote() {
+    if (noteSaving) return;
+    setNoteDraft('');
+    await saveNote('');
   }
 
   async function cancel() {
@@ -398,7 +478,7 @@ function ScheduleItem({
             aria-labelledby={rsvpLegendId}
             value={displayRsvp}
             onChange={(status) => void setRsvp(status)}
-            disabled={busy || rsvpSaving}
+            disabled={busy || rsvpSaving || noteSaving}
           />
           <span
             id={rsvpStatusId}
@@ -410,6 +490,89 @@ function ScheduleItem({
             {rsvpSaving ? RSVP_SAVING_STATUS : rsvpStatusSummary(displayRsvp)}
           </span>
         </div>
+
+        {/* Issue #552: RSVP note editor. Only meaningful once the viewer has
+            picked a status — hide it entirely when no RSVP is set. Explicit
+            Save + Clear buttons; the note is intentionally NOT saved on
+            keystroke (avoids racing the coarser RSVP status control). */}
+        {displayRsvp && (
+          <div className="space-y-1">
+            <label
+              htmlFor={noteFieldId}
+              className="text-[11px] font-bold text-slate-500 uppercase tracking-wide block"
+            >
+              {RSVP_NOTE_LABEL}
+            </label>
+            <p id={noteHelpId} className="text-[11px] text-muted m-0">
+              {RSVP_NOTE_HELP}
+            </p>
+            <div className="flex items-start gap-2 flex-wrap">
+              <input
+                id={noteFieldId}
+                type="text"
+                value={noteDraft}
+                onChange={(e) => {
+                  setNoteDraft(e.target.value);
+                  if (noteError) setNoteError(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && noteDirty && !noteTooLong) {
+                    e.preventDefault();
+                    void saveNote();
+                  }
+                }}
+                placeholder={RSVP_NOTE_PLACEHOLDER}
+                aria-describedby={`${noteHelpId} ${noteStatusId}`}
+                aria-invalid={noteTooLong || undefined}
+                maxLength={RSVP_NOTE_MAX_LEN + 100 /* let the operator paste + trim rather than truncate silently */}
+                disabled={noteSaving || rsvpSaving}
+                className="input flex-1 min-w-0 !text-sm"
+              />
+              <Btn
+                ghost
+                className="!min-h-0 !py-1 text-xs"
+                disabled={!noteDirty || noteSaving || rsvpSaving || noteTooLong}
+                busy={noteSaving}
+                onClick={() => void saveNote()}
+              >
+                {RSVP_NOTE_SAVE_LABEL}
+              </Btn>
+              {persistedNote && (
+                <Btn
+                  ghost
+                  className="!min-h-0 !py-1 text-xs"
+                  disabled={noteSaving || rsvpSaving}
+                  onClick={() => void clearNote()}
+                >
+                  {RSVP_NOTE_CLEAR_LABEL}
+                </Btn>
+              )}
+            </div>
+            {noteTooLong && (
+              <p className="text-xs" style={{ color: 'var(--color-danger, #ef4444)' }}>
+                {rsvpNoteTooLongMessage(noteDraftLength)}
+              </p>
+            )}
+            {noteError && !noteTooLong && (
+              <p className="text-xs" style={{ color: 'var(--color-danger, #ef4444)' }}>
+                {noteError}
+              </p>
+            )}
+            <span
+              id={noteStatusId}
+              className="sr-only"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {noteSaving
+                ? RSVP_NOTE_SAVING_STATUS
+                : noteTooLong
+                  ? rsvpNoteTooLongMessage(noteDraftLength)
+                  : ''}
+            </span>
+          </div>
+        )}
 
         {schedule.rsvps.length > 0 && <RsvpList rsvps={schedule.rsvps} />}
 
