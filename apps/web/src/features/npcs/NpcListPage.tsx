@@ -4,7 +4,7 @@
  * DM can inline-create (name + role); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -20,6 +20,7 @@ export default function NpcListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
@@ -27,7 +28,27 @@ export default function NpcListPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState('');
   // #754: quick-create defaults to DM-only.
@@ -79,7 +100,7 @@ export default function NpcListPage() {
       setNewName('');
       setNewRole('');
       setAudience('dm');
-      setCreating(false);
+      closeCreating();
       await load();
       navigate(`/c/${id}/npcs/${npc.id}`);
     } catch (err) {
@@ -146,7 +167,7 @@ export default function NpcListPage() {
                 ghost
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
-                  setCreating(false);
+                  closeCreating();
                   setNewName('');
                   setNewRole('');
                   setAudience('dm');
@@ -183,8 +204,8 @@ export default function NpcListPage() {
                     />
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="font-bold text-slate-200 text-sm truncate">{npc.name}</p>
-                    {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}
+                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={npc.name} aria-label={`NPC: ${npc.name}`}>{npc.name}</p>
+                    {npc.role && <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={npc.role}>{npc.role}</p>}
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">

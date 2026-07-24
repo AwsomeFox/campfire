@@ -145,12 +145,12 @@ test.describe('acquisition persistence — issue #411', () => {
 
   test('returns null (and clears) for malformed stored JSON', () => {
     globalThis.localStorage.setItem('cf.mapAcquisition.9', '{not json');
-    expect(loadAcquisition(9)).toBeNull();
+    expect(loadAcquisition(9, 1_000_000)).toBeNull();
     expect(globalThis.localStorage.getItem('cf.mapAcquisition.9')).toBeNull();
   });
 
   test('returns null for a structurally-invalid marker', () => {
     globalThis.localStorage.setItem('cf.mapAcquisition.10', JSON.stringify({ sourceId: 5 }));
-    expect(loadAcquisition(10)).toBeNull();
+    expect(loadAcquisition(10, 1_000_000)).toBeNull();
   });
 });

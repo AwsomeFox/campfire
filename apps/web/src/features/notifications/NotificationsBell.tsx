@@ -132,8 +132,10 @@ function typeIcon(type: Notification['type']): string {
     case 'character_reassigned':
       return 'meeple';
     case 'session_scheduled':
+    case 'session_reminder':
       return 'calendar';
     case 'session_rsvp':
+    case 'rsvp_nudge':
       return 'hand';
     case 'quest_updated':
       return 'scroll-unfurled';

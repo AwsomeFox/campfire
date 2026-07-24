@@ -1,10 +1,15 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
 // rather than being silently dropped, consistent with the other encounter write bodies.
 export class EncounterGenerateDto extends createZodDto(EncounterGenerate.strict()) {}
+// Preview-and-tune wizard (issue #412). .strict() rejects unknown keys. The nested tune op is a
+// discriminated union already validated by the zod schema.
+export class EncounterPreviewDto extends createZodDto(EncounterPreviewRequest.strict()) {}
+// Idempotent atomic commit of a tuned roster (issue #412).
+export class EncounterCommitDto extends createZodDto(EncounterCommit.strict()) {}
 // .strict() (see CombatantUpdateDto below): an unknown key in an encounter PATCH body
 // 400s instead of silently no-op'ing. expectedUpdatedAt (issue #532) added here, not in
 // the shared EncounterUpdate — it's a request-time CAS concern, not a stored field (see
@@ -33,3 +38,9 @@ export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {
 // the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
 export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}
+// Issue #414: structured action resolver. Resolve (with optional atomic commit), apply a
+// previewed resolution (DM confirm path), and undo an applied resolution. Not .strict() on
+// the nested resolution/token — they echo server-produced objects with many defaulted fields.
+export class ActionResolveRequestDto extends createZodDto(ActionResolveRequest.strict()) {}
+export class ActionResolutionDto extends createZodDto(ActionResolution) {}
+export class ActionUndoTokenDto extends createZodDto(ActionUndoToken) {}

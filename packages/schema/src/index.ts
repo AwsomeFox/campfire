@@ -23,6 +23,8 @@ import {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
   type EncounterDifficultyInput,
 } from './encounter-difficulty';
 import {
@@ -30,6 +32,10 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
+import { ActionSpec } from './action-resolver';
+// Structured action resolver (issue #414): data model + pure, system-aware resolution math.
+// Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
+export * from './action-resolver';
 
 export {
   DifficultyBand,
@@ -43,6 +49,8 @@ export {
   encounterMultiplier,
   computeDnd5eEncounterDifficulty,
   unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
   initModDescThenSortOrderAsc,
   sortOrderAscTiebreak,
 };
@@ -293,13 +301,24 @@ export type DeathState = z.infer<typeof DeathState>;
 export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
 export type CharacterStatus = z.infer<typeof CharacterStatus>;
 
-/** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
+/**
+ * One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5",
+ * "1d8+3 slashing") so non-attack actions stay valid, and `notes` is always preserved (and,
+ * as of issue #414, rendered). The OPTIONAL `spec` (issue #414) carries the structured action
+ * model — mode, action-economy cost, DC source, range/shape, target rules, outcome branches,
+ * effects/durations, uses/recharge/concentration, damage types, healing/temp HP, and rule
+ * provenance — that powers the guided Use flow (roll → classify → preview → apply atomically).
+ * It is optional and fully defaulted, so every pre-#414 action parses unchanged and simply has
+ * no structured resolver (the card falls back to the freeform toHit/damage/notes statblock).
+ */
 export const CharacterAction = z.object({
   name: z.string().min(1).max(120),
   kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
   toHit: z.string().max(20).default(''),
   damage: z.string().max(80).default(''),
+  targetAc: z.string().max(20).default(''), // "EAC", "KAC", "AC" etc.
   notes: z.string().max(500).default(''),
+  spec: ActionSpec.optional(),
 });
 export type CharacterAction = z.infer<typeof CharacterAction>;
 
@@ -331,8 +350,14 @@ export const Character = z.object({
   ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
+  eac: z.number().int().nullable().default(null),
+  kac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
   hpMax: z.number().int().min(1).default(10),
+  spCurrent: z.number().int().min(0).default(0),
+  spMax: z.number().int().min(0).default(0),
+  rpCurrent: z.number().int().min(0).default(0),
+  rpMax: z.number().int().min(0).default(0),
   // Issue #711: persistent echo of the per-combatant death/temp-HP subsystem
   // (originally issue #57). The encounter tracker is the source of truth during
   // a fight; on /end these four fields are reconciled back onto the sheet so a
@@ -1359,6 +1384,10 @@ export const NotificationType = z.enum([
   'character_reassigned',
   'session_scheduled',
   'session_rsvp',
+  // Issue #789: deduplicated pre-session reminder and the optional unanswered-RSVP
+  // nudge. Both belong to the `schedule` notification category (see notificationCategory).
+  'session_reminder',
+  'rsvp_nudge',
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
@@ -1398,6 +1427,124 @@ export type Notification = z.infer<typeof Notification>;
 
 export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
 export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
+
+// ---------- notification preferences (issue #789) ----------
+// Per-user, per-campaign control over which notification CATEGORIES are delivered
+// and how. Every NotificationType maps to exactly one category (see
+// notificationCategory below); users tune preferences by category, not by the
+// finer-grained type. Preferences are consulted during fan-out
+// (NotificationsService.dispatch) BEFORE a row is written — except the ALWAYS-ON
+// critical categories (`access`, `security`), which ignore preferences AND quiet
+// hours so a member can never silence a security/access notice.
+
+/** Coarse grouping a NotificationType belongs to — the unit users actually tune. */
+export const NotificationCategory = z.enum([
+  'recaps', // recap_posted, recap_share_enabled, recap_share_extended
+  'notes', // note_reply, note_shared
+  'comments', // comment_reply
+  'schedule', // session_scheduled, session_rsvp, session_reminder, rsvp_nudge
+  'quests', // quest_updated
+  'proposals', // proposal_submitted, proposal_resolved
+  'inbox', // inbox_submitted
+  'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
+  'security', // ai_dm_alert — ALWAYS ON (security/recovery)
+]);
+export type NotificationCategory = z.infer<typeof NotificationCategory>;
+
+/** How a (non-critical) category is delivered. */
+export const NotificationDeliveryMode = z.enum([
+  'immediate', // write the row now (subject to quiet hours)
+  'digest', // defer; flushed in a batch on the digest cadence
+  'muted', // drop entirely
+]);
+export type NotificationDeliveryMode = z.infer<typeof NotificationDeliveryMode>;
+
+/** Every category value, in display order. */
+export const NOTIFICATION_CATEGORIES = NotificationCategory.options;
+
+/**
+ * Critical categories are ALWAYS delivered immediately regardless of stored
+ * preferences or quiet hours — silencing access-control or security/recovery
+ * notices would be a footgun (issue #789). The UI renders these as locked.
+ */
+export const CRITICAL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = ['access', 'security'];
+
+export function isCriticalNotificationCategory(category: NotificationCategory): boolean {
+  return CRITICAL_NOTIFICATION_CATEGORIES.includes(category);
+}
+
+/** Static NotificationType -> NotificationCategory map (single source of truth). */
+export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCategory> = {
+  recap_posted: 'recaps',
+  recap_share_enabled: 'recaps',
+  recap_share_extended: 'recaps',
+  note_reply: 'notes',
+  note_shared: 'notes',
+  comment_reply: 'comments',
+  added_to_campaign: 'access',
+  character_reassigned: 'access',
+  session_scheduled: 'schedule',
+  session_rsvp: 'schedule',
+  session_reminder: 'schedule',
+  rsvp_nudge: 'schedule',
+  quest_updated: 'quests',
+  proposal_submitted: 'proposals',
+  proposal_resolved: 'proposals',
+  inbox_submitted: 'inbox',
+  ai_dm_alert: 'security',
+};
+
+/** Resolve the category a notification type belongs to. */
+export function notificationCategory(type: NotificationType): NotificationCategory {
+  return NOTIFICATION_TYPE_CATEGORY[type];
+}
+
+/** Sensible default mode for a category — everything is `immediate` out of the box. */
+export function defaultNotificationMode(_category: NotificationCategory): NotificationDeliveryMode {
+  // Critical categories are effectively immediate-and-locked; everything else
+  // defaults to immediate so behavior matches the pre-preferences fan-out until a
+  // user opts into digest/muted.
+  return 'immediate';
+}
+
+// Quiet hours are a per-user, per-campaign local-time window during which
+// non-critical IMMEDIATE notifications are held (deferred) instead of delivered,
+// then flushed once the window passes. Stored as minutes-of-day in the member's
+// chosen IANA timezone; the window may wrap past midnight (start > end).
+export const QuietHours = z.object({
+  enabled: z.boolean().default(false),
+  startMinute: z.number().int().min(0).max(1439).default(1320), // 22:00 local
+  endMinute: z.number().int().min(0).max(1439).default(420), // 07:00 local
+  timezone: z.string().min(1).max(64).default('UTC'), // IANA tz id
+});
+export type QuietHours = z.infer<typeof QuietHours>;
+
+/** Fully-resolved preferences for a single campaign (defaults filled in). */
+export const NotificationCampaignPreferences = z.object({
+  campaignId: Id,
+  campaignName: z.string().default(''),
+  // one mode per category (critical categories always report 'immediate')
+  categories: z.record(NotificationCategory, NotificationDeliveryMode),
+  quietHours: QuietHours,
+});
+export type NotificationCampaignPreferences = z.infer<typeof NotificationCampaignPreferences>;
+
+/** GET /notifications/preferences — one entry per campaign the caller belongs to. */
+export const NotificationPreferences = z.object({
+  campaigns: z.array(NotificationCampaignPreferences),
+});
+export type NotificationPreferences = z.infer<typeof NotificationPreferences>;
+
+/**
+ * PUT /notifications/preferences/:campaignId body. Additive/partial: only the
+ * provided categories/quiet-hours fields are changed. Attempts to set a critical
+ * category to anything other than 'immediate' are ignored server-side.
+ */
+export const NotificationPreferencesUpdate = z.object({
+  categories: z.record(NotificationCategory, NotificationDeliveryMode).optional(),
+  quietHours: QuietHours.partial().optional(),
+});
+export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferencesUpdate>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
@@ -5528,6 +5675,211 @@ export const EncounterSuggestion = z.object({
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
+// ---------- encounter preview / tune / idempotent commit wizard (issue #412) ----------
+// The generator (#304) produced a one-shot homogeneous suggestion. The DM wizard needs a
+// richer, INTERACTIVE contract: a non-mutating preview that returns a multi-slot roster with
+// per-creature inspection data + a difficulty EXPLANATION + actionable warnings, a set of
+// deterministic TUNE operations (reroll all / reroll one slot / swap / adjust count / pin) that
+// round-trip a plan so re-rolls are reproducible and pinned slots are preserved, and an
+// IDEMPOTENT commit that atomically creates the encounter + combatants (+ links/map/grid/tokens)
+// with no partial encounters or duplicate combatants. Preview stays read-only; commit is the
+// single write. All three are reused by REST and MCP.
+
+/**
+ * Per-creature inspection data lifted from a compendium statblock for the preview roster
+ * (issue #412): the AC/HP/actions/saves/traits a DM expands inline. Every field is best-effort
+ * and nullable — a manual/partial statblock simply omits what it lacks (surfaced as a warning),
+ * never fabricated. Labels come from the adapter's presentation metadata upstream; the values
+ * here are the raw mechanical facts.
+ */
+export const EncounterCreatureInspection = z.object({
+  /** True when the linked rule entry resolved to a usable statblock. */
+  hasStatblock: z.boolean(),
+  size: z.string().max(60).nullable().default(null),
+  creatureType: z.string().max(120).nullable().default(null),
+  armorClass: z.number().int().nullable().default(null),
+  hitPointsMax: z.number().int().nullable().default(null),
+  hitPointsText: z.string().max(80).nullable().default(null),
+  speed: z.string().max(200).nullable().default(null),
+  challengeRating: z.number().nullable().default(null),
+  xp: z.number().int().nonnegative(),
+  /** Ability scores/mods as the statblock lists them (raw, adapter representation applies). */
+  abilities: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  savingThrows: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  traits: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+  actions: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+});
+export type EncounterCreatureInspection = z.infer<typeof EncounterCreatureInspection>;
+
+/** Machine-readable warning category surfaced on a preview (issue #412). */
+export const EncounterWarningCode = z.enum([
+  'role-duplication', // the same statblock fills 2+ slots
+  'action-economy', // monster/PC action-count imbalance (solo vs party, or swarm)
+  'missing-statblock', // a slot's creature has no resolvable HP/CR
+  'unsupported-system', // the rule system has no encounter-budget math
+  'difficulty-unknown', // monsters present but carry no CR/XP to score
+  'swinginess', // high-variance fight (a lone big creature, or well over Deadly)
+  'empty-roster', // no monsters were selected
+  'no-candidates', // the compendium had nothing to pick from
+  'band-miss', // the requested band could not be assembled from the compendium
+]);
+export type EncounterWarningCode = z.infer<typeof EncounterWarningCode>;
+
+export const EncounterWarning = z.object({
+  code: EncounterWarningCode,
+  severity: z.enum(['info', 'warn']),
+  message: z.string().min(1).max(400),
+});
+export type EncounterWarning = z.infer<typeof EncounterWarning>;
+
+/**
+ * One resolved slot in a preview roster (issue #412). `slotId` is a stable handle the tune
+ * operations target; `seed` makes a per-slot reroll reproducible; `pinned` protects a slot from
+ * reroll-all. A slot is a stack of `count` identical creatures (maps cleanly onto add_combatant).
+ */
+export const EncounterRosterSlot = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  name: z.string(),
+  entryType: z.enum(['monster', 'hazard']).default('monster'),
+  cr: z.number().nullable(),
+  xp: z.number().int().nonnegative(),
+  hpMax: z.number().int().nullable(),
+  count: z.number().int().min(1),
+  pinned: z.boolean(),
+  seed: z.number().int().nonnegative(),
+  inspection: EncounterCreatureInspection,
+});
+export type EncounterRosterSlot = z.infer<typeof EncounterRosterSlot>;
+
+/**
+ * The slot state a client rounds-trips back into a preview/tune/commit request (issue #412) —
+ * just the plan (no resolved inspection). The server re-resolves creatures + difficulty from
+ * these, so tuning is stateless: reroll/pin/swap are pure functions of the plan + a seed.
+ */
+export const EncounterRosterSlotInput = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  count: z.number().int().min(1).max(50),
+  pinned: z.boolean().default(false),
+  seed: z.number().int().nonnegative().max(4294967295),
+  entryType: z.enum(['monster', 'hazard']).optional(),
+});
+export type EncounterRosterSlotInput = z.infer<typeof EncounterRosterSlotInput>;
+
+/**
+ * A single tune operation applied to the current plan (issue #412). Deterministic: `reroll-*`
+ * mint/accept a seed so the same seed reproduces the same pick; `pin` protects a slot from
+ * `reroll-all`; `swap-slot` replaces a slot's creature with an explicit compendium entry;
+ * `adjust-count` changes the stack size; add/remove grow or shrink the roster.
+ */
+export const EncounterTuneOp = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('reroll-all'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('reroll-slot'), slotId: z.string().min(1).max(40), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('swap-slot'), slotId: z.string().min(1).max(40), ruleEntryId: Id }),
+  z.object({ op: z.literal('adjust-count'), slotId: z.string().min(1).max(40), count: z.number().int().min(1).max(50) }),
+  z.object({ op: z.literal('pin'), slotId: z.string().min(1).max(40), pinned: z.boolean() }),
+  z.object({ op: z.literal('add-slot'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('remove-slot'), slotId: z.string().min(1).max(40) }),
+]);
+export type EncounterTuneOp = z.infer<typeof EncounterTuneOp>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/preview (issue #412) and the preview_encounter
+ * MCP tool. A first call with just `difficulty` (+ optional filters/party/shape/count/seed)
+ * generates a fresh roster; passing back `roster` (the plan) with an optional `tune` op applies
+ * a deterministic tuning step. NON-MUTATING — nothing is persisted.
+ */
+export const EncounterPreviewRequest = z.object({
+  difficulty: DifficultyBand,
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  filters: EncounterGenerateFilters.optional(),
+  count: z.number().int().min(1).max(30).optional(),
+  shape: EncounterShape.optional(),
+  seed: z.number().int().nonnegative().max(4294967295).optional(),
+  /** The current plan being tuned; omit for a fresh generation. */
+  roster: z.array(EncounterRosterSlotInput).max(30).optional(),
+  /** A tuning operation to apply to `roster`. */
+  tune: EncounterTuneOp.optional(),
+});
+export type EncounterPreviewRequest = z.infer<typeof EncounterPreviewRequest>;
+
+/**
+ * Read-only preview result (issue #412): the resolved multi-slot roster, the adapter-owned
+ * difficulty + a human-readable explanation, actionable warnings, and, when the compendium or
+ * the rule system can't support the request, actionable `fallbacks` (never a dead end). The
+ * `plan` echoes the round-trippable slot inputs so a client can send them straight back into a
+ * tune/commit call.
+ */
+export const EncounterPreview = z.object({
+  roster: z.array(EncounterRosterSlot),
+  plan: z.array(EncounterRosterSlotInput),
+  targetBand: DifficultyBand,
+  difficulty: EncounterDifficulty,
+  explanation: EncounterDifficultyExplanation,
+  totalXp: z.number().int().nonnegative(),
+  shape: EncounterShape,
+  seed: z.number().int().nonnegative(),
+  matchedBand: z.boolean(),
+  party: z.array(z.number().int()),
+  warnings: z.array(EncounterWarning),
+  /** Actionable next steps when the compendium is empty or the system lacks budget math. */
+  fallbacks: z.array(z.string().max(400)),
+});
+export type EncounterPreview = z.infer<typeof EncounterPreview>;
+
+/** Optional per-slot token placement applied atomically at commit (issue #412). */
+export const EncounterCommitTokenPlacement = z.object({
+  slotId: z.string().min(1).max(40),
+  /** Base position (0–100 percent of the map). Copies in a stack fan out from here. */
+  tokenX: z.number().min(0).max(100),
+  tokenY: z.number().min(0).max(100),
+});
+export type EncounterCommitTokenPlacement = z.infer<typeof EncounterCommitTokenPlacement>;
+
+/** Optional map + grid to attach atomically at commit (issue #412). */
+export const EncounterCommitMap = z.object({
+  /** An existing campaign attachment (kind map|image) to set as the battle map. */
+  mapAttachmentId: Id,
+  gridSize: z.number().min(1).max(100).optional(),
+  gridScale: z.number().positive().optional(),
+  gridUnit: z.string().max(12).optional(),
+  gridType: GridType.optional(),
+});
+export type EncounterCommitMap = z.infer<typeof EncounterCommitMap>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/commit (issue #412) and the commit_encounter
+ * MCP tool. Commits a tuned roster to a real encounter in ONE atomic transaction. `idempotencyKey`
+ * makes a retried commit a no-op that returns the SAME encounter (never a duplicate). The
+ * encounter defaults hidden + preparing (DM prep, #262). Links/map/grid/token placement are all
+ * applied inside the same transaction — either everything lands or nothing does.
+ */
+export const EncounterCommit = z.object({
+  idempotencyKey: z.string().min(1).max(120),
+  name: z.string().min(1).max(120).optional(),
+  targetBand: DifficultyBand.optional(),
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  roster: z.array(EncounterRosterSlotInput).min(1).max(30),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  sessionId: Id.nullable().optional(),
+  hidden: z.boolean().optional(),
+  map: EncounterCommitMap.optional(),
+  tokens: z.array(EncounterCommitTokenPlacement).max(30).optional(),
+  /** Provenance for the audit trail (which surface committed, and any manual edits). */
+  source: z.string().max(60).optional(),
+  manualEdits: z.array(z.string().max(200)).max(50).optional(),
+});
+export type EncounterCommit = z.infer<typeof EncounterCommit>;
+
+/** Result of a commit (issue #412): the created encounter + whether this was an idempotent replay. */
+export const EncounterCommitResult = z.object({
+  encounter: z.lazy(() => EncounterWithCombatants),
+  idempotent: z.boolean(),
+});
+export type EncounterCommitResult = z.infer<typeof EncounterCommitResult>;
+
 // 'npc' combatants are DM-controlled like monsters (exact HP redacted for non-DM
 // viewers, no death saves) but carry an `npcId` link to the campaign NPC for
 // identity, and may optionally borrow a compendium statblock via `ruleEntryId`.
@@ -5647,6 +5999,12 @@ export const Combatant = z.object({
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
   hpMax: z.number().int().min(1).nullable().default(10),
+  spCurrent: z.number().int().min(0).nullable().default(0),
+  spMax: z.number().int().min(0).nullable().default(0),
+  rpCurrent: z.number().int().min(0).nullable().default(0),
+  rpMax: z.number().int().min(0).nullable().default(0),
+  eac: z.number().int().nullable().default(null),
+  kac: z.number().int().nullable().default(null),
   // Temporary HP (issue #57): a separate pool that absorbs damage BEFORE hpCurrent,
   // does not stack (taking the higher of the two), and is not bounded by hpMax.
   // Nullable so it's redacted alongside exact HP for non-DM monster viewers (#43).
@@ -5709,6 +6067,12 @@ export const CombatantCreate = z.object({
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
   hpSet: z.number().int().nonnegative().optional(),
+  spDelta: z.number().int().optional(),
+  spSet: z.number().int().nonnegative().optional(),
+  rpDelta: z.number().int().optional(),
+  rpSet: z.number().int().nonnegative().optional(),
+  eac: z.number().int().nullable().optional(),
+  kac: z.number().int().nullable().optional(),
   // Temp HP absolute set (issue #57). 0 clears it.
   hpTemp: z.number().int().min(0).optional(),
   // Issue #620: explicit attacker attribution for damage/heal/death log events. When
@@ -5725,6 +6089,7 @@ export const CombatantUpdate = z.object({
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
+  deathState: DeathState.optional(),
   // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
   // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
   // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at
@@ -5765,6 +6130,10 @@ export const CombatantUpdate = z.object({
 export const HpSyncSlice = z.object({
   hpCurrent: z.number().int(),
   hpTemp: z.number().int().min(0),
+  spCurrent: z.number().int().min(0).default(0),
+  spMax: z.number().int().min(0).default(0),
+  rpCurrent: z.number().int().min(0).default(0),
+  rpMax: z.number().int().min(0).default(0),
   deathState: DeathState,
   deathSaveSuccesses: z.number().int().min(0).max(3),
   deathSaveFailures: z.number().int().min(0).max(3),

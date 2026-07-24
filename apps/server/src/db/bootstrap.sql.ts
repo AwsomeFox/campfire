@@ -71,8 +71,14 @@ CREATE TABLE IF NOT EXISTS characters (
   status TEXT NOT NULL DEFAULT 'active',
   stats TEXT NOT NULL DEFAULT '{}',
   ac INTEGER,
+  eac INTEGER,
+  kac INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  sp_current INTEGER NOT NULL DEFAULT 0,
+  sp_max INTEGER NOT NULL DEFAULT 0,
+  rp_current INTEGER NOT NULL DEFAULT 0,
+  rp_max INTEGER NOT NULL DEFAULT 0,
   -- Issue #711: persistent echo of the combat death/temp-HP subsystem. The
   -- encounter tracker has tracked these since issue #57, but the per-fight
   -- write-back only persisted hpCurrent, so a dead PC was resurrected on
@@ -745,6 +751,65 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 
+-- Issue #789: per-user, per-campaign, per-category notification delivery mode.
+CREATE TABLE IF NOT EXISTS notification_preferences (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  category TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'immediate',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_prefs_user_campaign_category
+  ON notification_preferences(user_id, campaign_id, category);
+
+-- Issue #789: per-user, per-campaign quiet-hours window (local minutes in timezone).
+CREATE TABLE IF NOT EXISTS notification_quiet_hours (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  start_minute INTEGER NOT NULL DEFAULT 1320,
+  end_minute INTEGER NOT NULL DEFAULT 420,
+  timezone TEXT NOT NULL DEFAULT 'UTC',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_quiet_hours_user_campaign
+  ON notification_quiet_hours(user_id, campaign_id);
+
+-- Issue #789: deferred notifications (digest mode or quiet-hours hold), drained
+-- by NotificationsService.flushDigests() into real notifications on the cadence.
+CREATE TABLE IF NOT EXISTS notification_digest_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  entity_type TEXT,
+  entity_id INTEGER,
+  comment_id INTEGER,
+  data TEXT,
+  actor_name TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT 'digest',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_digest_queue_campaign
+  ON notification_digest_queue(campaign_id, user_id);
+
+-- Issue #789: dedup ledger for session reminders / unanswered-RSVP nudges.
+CREATE TABLE IF NOT EXISTS notification_reminders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheduled_session_id INTEGER NOT NULL REFERENCES scheduled_sessions(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_reminders_session_user_kind
+  ON notification_reminders(scheduled_session_id, user_id, kind);
+
 -- Issue #415: DM-initiated check requests (one row per request × target character).
 CREATE TABLE IF NOT EXISTS check_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -892,6 +957,12 @@ CREATE TABLE IF NOT EXISTS combatants (
   initiative_group TEXT,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  sp_current INTEGER NOT NULL DEFAULT 0,
+  sp_max INTEGER NOT NULL DEFAULT 0,
+  rp_current INTEGER NOT NULL DEFAULT 0,
+  rp_max INTEGER NOT NULL DEFAULT 0,
+  eac INTEGER,
+  kac INTEGER,
   hp_temp INTEGER NOT NULL DEFAULT 0,
   death_state TEXT NOT NULL DEFAULT 'none',
   death_save_successes INTEGER NOT NULL DEFAULT 0,

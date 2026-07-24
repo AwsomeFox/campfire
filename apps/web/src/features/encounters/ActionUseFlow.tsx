@@ -1,0 +1,226 @@
+/**
+ * Structured action Use flow (issue #414) — pick legal targets, resolve to a preview,
+ * commit atomically (or hand off to the DM under dm-confirmed / player-declares policy),
+ * and offer undo. Player-safe preview text is shown before commit; DM-only mechanics stay
+ * out of the player-facing lines.
+ */
+import { useMemo, useState } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import type {
+  ActionApplyPolicy,
+  ActionResolution,
+  ActionResolveResult,
+  ActionSpec,
+  ActionTargetAllow,
+  ActionUndoToken,
+  Combatant,
+} from '@campfire/schema';
+import { api, API, ApiError } from '../../lib/api';
+import { Btn } from '../../components/ui';
+import { useAnnounce } from '../../components/Announcer';
+
+type Step = 'targets' | 'preview';
+
+function isEnemyTarget(actor: Combatant, target: Combatant): boolean {
+  return actor.kind === 'character'
+    ? target.kind === 'monster' || target.kind === 'npc'
+    : target.kind === 'character';
+}
+
+function isAllyTarget(actor: Combatant, target: Combatant): boolean {
+  return actor.kind === 'character'
+    ? target.kind === 'character'
+    : target.kind === 'monster' || target.kind === 'npc';
+}
+
+function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+  const actor = combatants.find((c) => c.id === actorId);
+  if (!actor) return [];
+  if (allow === 'self') return combatants.filter((c) => c.id === actorId);
+  const others = combatants.filter((c) => c.id !== actorId);
+  if (allow === 'enemy') return others.filter((c) => isEnemyTarget(actor, c));
+  if (allow === 'ally') return others.filter((c) => isAllyTarget(actor, c));
+  return others;
+}
+
+export function ActionUsePanel({
+  encounterId,
+  actorCombatantId,
+  actorName,
+  actionIndex,
+  actionName,
+  spec,
+  combatants,
+  isDm,
+  onDismiss,
+  onApplied,
+  onError,
+}: {
+  encounterId: number;
+  actorCombatantId: number;
+  actorName: string;
+  actionIndex: number;
+  actionName: string;
+  spec: ActionSpec;
+  combatants: Combatant[];
+  isDm: boolean;
+  onDismiss: () => void;
+  onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy) => void;
+  onError: (msg: string | null) => void;
+}) {
+  const announce = useAnnounce();
+  const [step, setStep] = useState<Step>('targets');
+  const [targetIds, setTargetIds] = useState<number[]>([]);
+  const [preview, setPreview] = useState<ActionResolveResult | null>(null);
+
+  const candidates = useMemo(
+    () => legalTargets(combatants, actorCombatantId, spec.targets.allow),
+    [combatants, actorCombatantId, spec.targets.allow],
+  );
+  const needsTarget = spec.targets.count > 0;
+
+  const resolvePreview = useMutation({
+    mutationFn: () =>
+      api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
+        actorCombatantId,
+        actionIndex,
+        targetIds,
+        commit: false,
+      }),
+    onMutate: () => onError(null),
+    onSuccess: (res) => {
+      setPreview(res);
+      setStep('preview');
+      announce(res.resolution.playerSummary);
+    },
+    onError: (err) => onError(err instanceof ApiError ? err.message : "Couldn't resolve that action."),
+  });
+
+  const commit = useMutation({
+    mutationFn: (resolution: ActionResolution) =>
+      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, resolution).then((r) => ({
+        ...preview!,
+        applied: true,
+        undoToken: r.undoToken,
+      })),
+    onMutate: () => onError(null),
+    onSuccess: (res) => {
+      if (res.undoToken) onApplied(res.undoToken, res.policy);
+      announce(`${actionName} applied.`);
+      onDismiss();
+    },
+    onError: (err) => onError(err instanceof ApiError ? err.message : "Couldn't apply that action."),
+  });
+
+  function toggleTarget(id: number) {
+    setTargetIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      const max = spec.targets.count > 0 ? spec.targets.count : 50;
+      if (prev.length >= max) return prev;
+      return [...prev, id];
+    });
+  }
+
+  const canPreview = !needsTarget || targetIds.length > 0;
+
+  return (
+    <div
+      className="cf-inset"
+      role="region"
+      aria-label={`Use ${actionName}`}
+      data-testid="action-use-panel"
+      style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', marginBottom: 10 }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>{actorName} · {actionName}</span>
+        <span className="text-muted" style={{ fontSize: 11.5 }}>{spec.mode} · {spec.cost.count > 0 ? `${spec.cost.count} ${spec.cost.slot}` : 'free'}</span>
+        <button type="button" className="btn btn-ghost" onClick={onDismiss} style={{ marginLeft: 'auto', minHeight: 32 }} aria-label="Cancel action use">
+          Cancel
+        </button>
+      </div>
+
+      {step === 'targets' && (
+        <>
+          {spec.range.range && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+              Range: {spec.range.range}{spec.range.size ? ` · ${spec.range.shape || 'area'} ${spec.range.size}` : ''}
+            </p>
+          )}
+          {needsTarget && (
+            <div>
+              <span className="card-kicker" style={{ marginBottom: 6, display: 'block' }}>
+                Pick target{spec.targets.count === 1 ? '' : 's'} ({targetIds.length}/{spec.targets.count || '∞'})
+              </span>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }} data-testid="action-use-targets">
+                {candidates.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    className={targetIds.includes(c.id) ? 'tag tag-accent' : 'tag tag-neutral'}
+                    aria-pressed={targetIds.includes(c.id)}
+                    onClick={() => toggleTarget(c.id)}
+                    style={{ minHeight: 44, minWidth: 44, cursor: 'pointer', border: 0 }}
+                  >
+                    {c.name}
+                  </button>
+                ))}
+                {candidates.length === 0 && <span className="text-muted" style={{ fontSize: 12 }}>No legal targets.</span>}
+              </div>
+            </div>
+          )}
+          <Btn
+            data-testid="action-use-preview"
+            disabled={!canPreview || resolvePreview.isPending}
+            onClick={() => resolvePreview.mutate()}
+          >
+            {resolvePreview.isPending ? 'Resolving…' : 'Preview'}
+          </Btn>
+        </>
+      )}
+
+      {step === 'preview' && preview && (
+        <>
+          <div data-testid="action-use-preview-text" style={{ fontSize: 12.5, lineHeight: 1.45 }}>
+            <p style={{ margin: '0 0 6px' }}>{preview.resolution.playerSummary}</p>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {preview.resolution.targets.map((t) => (
+                <li key={t.combatantId}>
+                  <strong>{t.name}</strong>: {t.playerText}
+                </li>
+              ))}
+            </ul>
+          </div>
+          {preview.policy === 'dm-confirmed' && !isDm && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+              Your DM will apply the consequences — this is a declaration only.
+            </p>
+          )}
+          {preview.policy === 'player-declares' && !isDm && (
+            <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+              Declared — waiting for the DM to apply.
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-ghost" onClick={() => { setStep('targets'); setPreview(null); }}>
+              Back
+            </button>
+            {(preview.canApply || (isDm && !preview.applied)) && (
+              <Btn
+                data-testid="action-use-apply"
+                disabled={commit.isPending || preview.applied}
+                onClick={() => commit.mutate(preview.resolution)}
+              >
+                {commit.isPending ? 'Applying…' : 'Apply'}
+              </Btn>
+            )}
+            {!preview.canApply && !isDm && (
+              <Btn data-testid="action-use-done" onClick={onDismiss}>
+                Done
+              </Btn>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

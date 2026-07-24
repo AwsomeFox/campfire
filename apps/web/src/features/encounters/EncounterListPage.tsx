@@ -6,7 +6,7 @@
  * for the DM, cards linking to the live tracker.
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -31,6 +31,7 @@ import {
   ENCOUNTER_NAME_LABEL,
   ENCOUNTER_NAME_PLACEHOLDER,
 } from './postCreateGuidance';
+import { GenerateEncounterWizard } from './GenerateEncounterWizard';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -47,12 +48,34 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 export default function EncounterListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
+  const [generating, setGenerating] = useState(false);
   const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
     campaignId: id,
     target: 'encounter',
@@ -90,10 +113,15 @@ export default function EncounterListPage() {
         title="Encounters"
         secondaryActions={secondaryActions}
         primaryAction={
-          canDmWrite && !creating ? (
-            <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
-              + New encounter
-            </Btn>
+          canDmWrite && !creating && !generating ? (
+            <div className="flex gap-2 flex-wrap">
+              <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)}>
+                Generate encounter
+              </Btn>
+              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New encounter
+              </Btn>
+            </div>
           ) : undefined
         }
       />
@@ -101,8 +129,12 @@ export default function EncounterListPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {canDmWrite && generating && (
+        <GenerateEncounterWizard campaignId={id} onCancel={() => setGenerating(false)} />
+      )}
+
       {canDmWrite && creating && (
-        <NewEncounterForm campaignId={id} onCancel={() => setCreating(false)} />
+        <NewEncounterForm campaignId={id} onCancel={closeCreating} />
       )}
 
       {loading ? (

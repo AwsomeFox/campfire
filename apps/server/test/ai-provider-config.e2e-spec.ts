@@ -327,7 +327,7 @@ describe('ai-provider-config visible draft connection tests (issue #852, e2e)', 
     expect(JSON.stringify(res.body)).not.toContain(candidateKey);
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0]).toMatchObject({
-      url: '/v1/chat/completions',
+      url: '/v1/responses',
       authorization: `Bearer ${candidateKey}`,
       body: { model: 'unsaved-first-model' },
     });
@@ -549,6 +549,7 @@ describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
     server = ctx.app.getHttpServer();
     const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Effective Indicator Campaign' });
     campaignId = campRes.body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ username: 'aipc-player', role: 'player' });
   });
 
   afterAll(async () => {

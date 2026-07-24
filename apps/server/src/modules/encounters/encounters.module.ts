@@ -7,12 +7,13 @@ import { RevisionsModule } from '../revisions/revisions.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { EncountersService } from './encounters.service';
 import { EncounterMapService } from './encounter-map.service';
+import { ActionResolverService } from './action-resolver.service';
 import { CampaignEncountersController, CampaignRollController, EncountersController } from './encounters.controller';
 
 @Module({
   imports: [AuditModule, RoleAccessModule, EventsModule, RollsModule, RevisionsModule, AttachmentsModule],
   controllers: [CampaignEncountersController, CampaignRollController, EncountersController],
-  providers: [EncountersService, EncounterMapService],
-  exports: [EncountersService],
+  providers: [EncountersService, EncounterMapService, ActionResolverService],
+  exports: [EncountersService, ActionResolverService],
 })
 export class EncountersModule {}

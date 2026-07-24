@@ -308,3 +308,115 @@ export function computeDnd5eEncounterDifficulty(input: EncounterDifficultyInput)
     assumptions: [...DND5E_ASSUMPTIONS],
   };
 }
+
+// ---------- difficulty EXPLANATION (issue #412) ----------
+// The encounter preview wizard shows a human-readable "why this is Moderate/Severe"
+// rather than only a color band. The explanation is derived PURELY from an already
+// computed EncounterDifficulty, so the rule-system adapter still owns the underlying
+// vocabulary/math/status: an unsupported system yields an unsupported explanation, an
+// under-specified fight yields an "unknown" explanation, never a fabricated 5e band.
+
+/** Structured, adapter-neutral rendering of an {@link EncounterDifficulty} for the wizard. */
+export const EncounterDifficultyExplanation = z.object({
+  status: EncounterDifficultyStatus,
+  band: DifficultyBand.nullable(),
+  /** Adapter-owned display label ("Deadly", "Unknown—add XP/CR", "Not calculated for …"). */
+  label: z.string(),
+  /** One-line plain-language summary of why the fight lands where it does. */
+  headline: z.string(),
+  /** Supporting bullet points (threshold comparison, multiplier, caveats). */
+  detail: z.array(z.string()),
+  thresholds: z.object({
+    easy: z.number().int().nonnegative(),
+    medium: z.number().int().nonnegative(),
+    hard: z.number().int().nonnegative(),
+    deadly: z.number().int().nonnegative(),
+  }),
+  adjustedXp: z.number().int().nonnegative(),
+  multiplier: z.number(),
+  monsterCount: z.number().int().nonnegative(),
+  partySize: z.number().int().nonnegative(),
+});
+export type EncounterDifficultyExplanation = z.infer<typeof EncounterDifficultyExplanation>;
+
+/** Group a whole number with thousands separators for the explanation prose. */
+function fmtXp(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
+/**
+ * Build a human-readable explanation of a computed encounter difficulty (issue #412).
+ * Pure over the supplied {@link EncounterDifficulty}; adds NO new math or vocabulary, so
+ * unsupported/unknown statuses stay honest instead of inventing a band. The `detail`
+ * lines echo the party thresholds, the monster-XP × multiplier arithmetic, and any
+ * caveats the adapter already surfaced (action economy, missing CR, etc.).
+ */
+export function buildDifficultyExplanation(d: EncounterDifficulty): EncounterDifficultyExplanation {
+  const base = {
+    status: d.status,
+    band: d.band,
+    label: d.label,
+    thresholds: { ...d.thresholds },
+    adjustedXp: d.adjustedXp,
+    multiplier: d.multiplier,
+    monsterCount: d.monsterCount,
+    partySize: d.partySize,
+  };
+
+  if (d.status === 'unsupported') {
+    return {
+      ...base,
+      headline: d.label,
+      detail: [...d.warnings],
+    };
+  }
+
+  if (d.status === 'unknown') {
+    return {
+      ...base,
+      headline: 'Difficulty is unknown — the enemies carry no CR/XP to score.',
+      detail: [
+        'Add a challenge rating (or explicit XP) to each statblock so the party budget can be compared.',
+        ...d.warnings,
+      ],
+    };
+  }
+
+  // status === 'ok'
+  const t = d.thresholds;
+  const detail: string[] = [];
+  if (d.partySize > 0) {
+    detail.push(
+      `Party of ${d.partySize} — thresholds Easy ${fmtXp(t.easy)} · Medium ${fmtXp(t.medium)} · Hard ${fmtXp(t.hard)} · Deadly ${fmtXp(t.deadly)} XP.`,
+    );
+  } else {
+    detail.push('No party PCs supplied — thresholds are zero, so any monsters read above budget.');
+  }
+  if (d.monsterCount > 0) {
+    detail.push(
+      `Monster XP ${fmtXp(d.totalMonsterXp)} × ${d.multiplier} action-economy multiplier (${d.monsterCount} ${d.monsterCount === 1 ? 'monster' : 'monsters'}) = adjusted ${fmtXp(d.adjustedXp)} XP.`,
+    );
+  } else {
+    detail.push('No monsters in the roster yet.');
+  }
+
+  let headline: string;
+  if (d.band === 'trivial') {
+    headline =
+      d.partySize > 0
+        ? `Trivial — adjusted ${fmtXp(d.adjustedXp)} XP sits below the party's Easy threshold of ${fmtXp(t.easy)} XP.`
+        : 'Trivial — no meaningful threat against this party.';
+  } else {
+    const crossed =
+      d.band === 'deadly'
+        ? `at or above the Deadly threshold (${fmtXp(t.deadly)} XP)`
+        : d.band === 'hard'
+          ? `between the Hard (${fmtXp(t.hard)}) and Deadly (${fmtXp(t.deadly)}) thresholds`
+          : d.band === 'medium'
+            ? `between the Medium (${fmtXp(t.medium)}) and Hard (${fmtXp(t.hard)}) thresholds`
+            : `between the Easy (${fmtXp(t.easy)}) and Medium (${fmtXp(t.medium)}) thresholds`;
+    headline = `${d.label} — adjusted ${fmtXp(d.adjustedXp)} XP lands ${crossed}.`;
+  }
+  detail.push(...d.warnings);
+  return { ...base, headline, detail };
+}

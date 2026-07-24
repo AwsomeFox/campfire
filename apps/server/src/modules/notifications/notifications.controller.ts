@@ -1,8 +1,9 @@
-import { Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from './notifications.service';
+import { NotificationPreferencesUpdateDto } from './notifications.dto';
 
 /**
  * User-scoped (never campaign-scoped): every route operates on the CALLER's own
@@ -35,6 +36,32 @@ export class NotificationsController {
   @ApiResponse({ status: 200, description: '{ count }' })
   async unreadCount(@CurrentUser() user: RequestUser) {
     return { count: await this.notifications.unreadCount(user) };
+  }
+
+  @Get('preferences')
+  @ApiOperation({
+    summary: 'Get my notification preferences',
+    description:
+      'Per-campaign, per-category delivery modes + quiet hours for every campaign the caller belongs to. Defaults are filled in for unset categories/campaigns (issue #789).',
+  })
+  @ApiResponse({ status: 200, description: '{ campaigns: NotificationCampaignPreferences[] }' })
+  async getPreferences(@CurrentUser() user: RequestUser) {
+    return this.notifications.getPreferences(user);
+  }
+
+  @Put('preferences/:campaignId')
+  @ApiOperation({
+    summary: 'Update my notification preferences for a campaign',
+    description:
+      'Additive/partial upsert of category delivery modes and/or the quiet-hours window. Critical (access/security) categories stay always-on. 404 when the caller is not a member.',
+  })
+  @ApiResponse({ status: 200, description: 'The resolved NotificationCampaignPreferences for the campaign.' })
+  async updatePreferences(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: NotificationPreferencesUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.notifications.setPreferences(user, campaignId, body);
   }
 
   @Post(':id/read')

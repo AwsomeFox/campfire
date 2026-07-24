@@ -162,7 +162,7 @@ test.describe('reduced-motion global policy (issue #594)', () => {
 
     // Cast / player display: loading title stays; control + HP transitions are 0s.
     await page.goto(`/c/${campaignId}/screen`);
-    await expect(page.getByText(/Loading display|Party|No scene|Cast/i).first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText(/Loading display|Initiative|Round|Cinderhaven/i).first()).toBeVisible({ timeout: 15_000 });
     const castMotion = await page.evaluate(() => {
       const stack = document.querySelector('.cf-screen-control-stack');
       const hpFill = document.querySelector('.cf-hp > div');

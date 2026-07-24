@@ -4,7 +4,7 @@
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -54,13 +54,34 @@ export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   const [newName, setNewName] = useState('');
   const [newKind, setNewKind] = useState('');
   const [newParentId, setNewParentId] = useState('');
@@ -110,7 +131,7 @@ export default function LocationListPage() {
       setNewName('');
       setNewKind('');
       setNewParentId('');
-      setCreating(false);
+      closeCreating();
       await load();
       navigate(`/c/${id}/locations/${loc.id}`);
     } catch (err) {
@@ -188,7 +209,7 @@ export default function LocationListPage() {
                 ghost
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
-                  setCreating(false);
+                  closeCreating();
                   setNewName('');
                   setNewKind('');
                   setNewParentId('');
@@ -218,14 +239,14 @@ export default function LocationListPage() {
                 {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
+                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={loc.name} aria-label={`Location: ${loc.name}`}>{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}><LocationStatusLabel status={loc.status} /></Chip>
                     {isDm && loc.status === 'unexplored' && (
                       <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
                     )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
-                  <p className="text-xs text-slate-400 truncate mt-0.5">{loc.kind || firstLine(loc.body) || ' '}</p>
+                  <p className="text-xs text-slate-400 truncate cf-name-reveal mt-0.5" title={loc.kind || firstLine(loc.body) || undefined} aria-label={loc.kind || firstLine(loc.body) || undefined}>{loc.kind || firstLine(loc.body) || ' '}</p>
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
                   <span className="text-[11px] text-slate-500 shrink-0">
