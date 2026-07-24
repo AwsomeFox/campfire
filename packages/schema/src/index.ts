@@ -1937,7 +1937,7 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
 }
 
 export interface RuleSystemAdapter {
-  /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
+  /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
@@ -5615,6 +5615,19 @@ export const EMPTY_TURN_STATE: CombatantTurnState = {
   readied: null,
 };
 
+/** OSR group-initiative side label. Trims; empty/whitespace normalizes to null. */
+export const InitiativeGroup = z.preprocess(
+  (val) => {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      return trimmed.length === 0 ? null : trimmed;
+    }
+    return val;
+  },
+  z.string().min(1).max(40).nullable(),
+);
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -5629,7 +5642,7 @@ export const Combatant = z.object({
   // Initiative side/group for OSR group-initiative variants (issue #765). Combatants sharing
   // the same group name (e.g. "party", "monsters") roll one d6 for the whole side. null =
   // individual initiative (default for 5e and individual-mode OSR).
-  initiativeGroup: z.string().max(40).nullable().default(null),
+  initiativeGroup: InitiativeGroup.default(null),
   // Nullable so a monster's exact HP can be redacted to `null` for non-DM viewers
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
@@ -5687,7 +5700,7 @@ export const CombatantCreate = z.object({
   // OSR group-initiative side label (issue #765). When the campaign adapter uses group
   // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
   // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.
-  initiativeGroup: z.string().max(40).nullable().optional(),
+  initiativeGroup: InitiativeGroup.optional(),
   // Add N identical combatants in one call (issue #114). When >1 the names are
   // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
   // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.

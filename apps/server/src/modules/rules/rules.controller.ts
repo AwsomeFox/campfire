@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import { listRulePackSources, previewOsrMigration, type RuleEntryType } from '@campfire/schema';
+import { isOsrSlug, listRulePackSources, previewOsrMigration, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { type RequestUser } from '../../common/user.types';
@@ -66,10 +66,18 @@ export class RulesController {
   @ApiQuery({ name: 'to', required: true, description: 'Target rule-pack slug (e.g. old-school-essentials).' })
   @ApiResponse({ status: 200, description: 'Migration preview with list of mechanics changes.' })
   osrMigrationPreview(@Query('from') from: string, @Query('to') to: string) {
-    if (!from?.trim() || !to?.trim()) {
+    const fromSlug = from?.trim();
+    const toSlug = to?.trim();
+    if (!fromSlug || !toSlug) {
       throw new BadRequestException('Both "from" and "to" query parameters are required');
     }
-    return previewOsrMigration(from.trim(), to.trim());
+    if (!isOsrSlug(fromSlug)) {
+      throw new BadRequestException(`Unknown OSR variant slug: ${fromSlug}`);
+    }
+    if (!isOsrSlug(toSlug)) {
+      throw new BadRequestException(`Unknown OSR variant slug: ${toSlug}`);
+    }
+    return previewOsrMigration(fromSlug, toSlug);
   }
 
   /**

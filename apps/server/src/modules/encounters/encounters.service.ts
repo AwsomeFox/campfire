@@ -2421,8 +2421,7 @@ export class EncountersService {
           groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
         }
         const base = groupRolls.get(group)!;
-        const mod = initModel.usesDexModifier ? row.initMod : 0;
-        return { id: row.id, initiative: base + mod };
+        return { id: row.id, initiative: base };
       });
     } else {
       rolled = unrolled.map((row) => ({
