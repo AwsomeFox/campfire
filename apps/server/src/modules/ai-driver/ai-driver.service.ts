@@ -285,10 +285,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'roll_dice',
   'roll_initiative',
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
-  // during play (#1075). update_encounter is NOT included: encounter-level field edits
-  // (name, links, hidden) are prep-time actions the DM should approve manually.
-  // generate_map is also excluded: map generation is expensive and prep-time; the AI
-  // should use reveal_map_region for live exploration instead.
+  // during play (#1075).
   'create_encounter',
   'begin_encounter',
   'end_encounter',
