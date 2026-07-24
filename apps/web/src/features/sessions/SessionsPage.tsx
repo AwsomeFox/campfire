@@ -17,6 +17,8 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useAuth } from '../../app/auth';
+import { useProtectedForm } from '../../lib/useProtectedForm';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -48,9 +50,13 @@ import {
   RECAP_TITLE_HELP,
   editRecapFieldIds,
   firstInvalidRecapControlId,
+  isRecapEditorDirty,
   newRecapFieldIds,
   recapDescribedBy,
+  recapEditorDraftFromSession,
+  recapEditorDraftsEqual,
   validateRecapFields,
+  type RecapEditorDraft,
   type RecapFieldErrors,
 } from './recapFormFields';
 
@@ -599,6 +605,7 @@ function SessionDetail({
    *  recap is opened from the list so SR users land on the new content. */
   detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
+  const { me } = useAuth();
   const { canDmWrite } = useCampaignAccess();
   const [editing, setEditing] = useState(canDmWrite && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
@@ -607,6 +614,7 @@ function SessionDetail({
   const [recap, setRecap] = useState('');
   const [recapLoading, setRecapLoading] = useState(true);
   const [recapDraft, setRecapDraft] = useState('');
+  const [recapBaseline, setRecapBaseline] = useState<RecapEditorDraft | null>(null);
   const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -631,6 +639,7 @@ function SessionDetail({
     // A's prose editable against B (key= remounts help; sequencer covers races).
     setRecap('');
     setRecapDraft('');
+    setRecapBaseline(null);
     setLoadedSessionId(null);
     setLoadedUpdatedAt(null);
     setConflict(false);
@@ -644,8 +653,17 @@ function SessionDetail({
       .then((full) => {
         const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, session.id, full);
         if (decision.kind !== 'commit') return;
+        setTitleDraft(decision.record.title);
+        setDateDraft(toDateInputValue(decision.record.playedAt));
         setRecap(decision.record.recap);
         setRecapDraft(decision.record.recap);
+        setRecapBaseline(
+          recapEditorDraftFromSession({
+            title: decision.record.title,
+            playedAt: decision.record.playedAt,
+            recap: decision.record.recap,
+          }),
+        );
         setLoadedUpdatedAt(decision.record.updatedAt);
         setLoadedSessionId(decision.record.id);
         setConflict(false);
@@ -672,20 +690,28 @@ function SessionDetail({
     recapLoading,
   );
 
-  async function save() {
-    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
+  const effectiveRecapBaseline: RecapEditorDraft = recapBaseline ?? {
+    title: session.title,
+    playedAt: toDateInputValue(session.playedAt),
+    recap: '',
+  };
+  const recapCurrent = { title: titleDraft, playedAt: dateDraft, recap: recapDraft };
+  const recapDirty =
+    editing && detailReady && recapBaseline != null && isRecapEditorDirty(recapCurrent, effectiveRecapBaseline);
+  const clearPersistedDraftRef = useRef<() => void>(() => {});
+
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return false;
     const nextErrors = validateRecapFields({
       title: titleDraft,
       playedAt: dateDraft,
       recap: recapDraft,
     });
     setFieldErrors(nextErrors);
-    // Keep an active 409 conflict banner until validation passes and we actually
-    // attempt a save — a failed client check must not dismiss Reload latest.
     const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
     if (invalidId) {
       document.getElementById(invalidId)?.focus();
-      return;
+      return false;
     }
 
     setSaving(true);
@@ -696,8 +722,6 @@ function SessionDetail({
         title: titleDraft,
         playedAt: dateDraft ? dateDraft : null,
         recap: recapDraft,
-        // Optimistic-concurrency guard (#157): echo back the updatedAt we loaded, so a
-        // concurrent edit is caught (409) instead of overwriting the other author's work.
         ...(loadedUpdatedAt ? { expectedUpdatedAt: loadedUpdatedAt } : {}),
       });
       setRecap(updated.recap);
@@ -706,11 +730,11 @@ function SessionDetail({
       setEditing(false);
       onEditActionHandled();
       setHistoryNonce((n) => n + 1);
+      clearPersistedDraftRef.current();
       onChange();
+      return true;
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        // Someone saved between our load and this save — keep the user's draft intact,
-        // stop them from clobbering, and prompt a reload of the latest version.
         setConflict(true);
         setError(
           e.message ||
@@ -720,10 +744,50 @@ function SessionDetail({
         setError("Couldn't save the recap.");
       }
       document.getElementById(fieldIds.title.controlId)?.focus();
+      return false;
     } finally {
       setSaving(false);
     }
-  }
+  }, [
+    dateDraft,
+    fieldIds,
+    loadedSessionId,
+    loadedUpdatedAt,
+    onChange,
+    onEditActionHandled,
+    recapDraft,
+    session.id,
+    titleDraft,
+  ]);
+
+  const protectedRecap = useProtectedForm({
+    formId: `session-recap:${session.id}`,
+    userId: me?.user.id,
+    campaignId,
+    active: editing && recapBaseline != null,
+    dirty: recapDirty,
+    draft: recapCurrent,
+    baseline: effectiveRecapBaseline,
+    serverUpdatedAt: loadedUpdatedAt,
+    isDraftEqual: recapEditorDraftsEqual,
+    onRestoreDraft: (restored) => {
+      setTitleDraft(restored.title);
+      setDateDraft(restored.playedAt);
+      setRecapDraft(restored.recap);
+    },
+    onDiscard: () => {
+      setTitleDraft(effectiveRecapBaseline.title);
+      setDateDraft(effectiveRecapBaseline.playedAt);
+      setRecapDraft(effectiveRecapBaseline.recap);
+      setEditing(false);
+      setFieldErrors({});
+      setError(null);
+      setConflict(false);
+      onEditActionHandled();
+    },
+    onSave: save,
+  });
+  clearPersistedDraftRef.current = protectedRecap.clearPersistedDraft;
 
   async function reloadLatest() {
     setError(null);
@@ -732,8 +796,17 @@ function SessionDetail({
     setRecapLoading(true);
     try {
       const full = await api.get<Session>(`${API}/sessions/${session.id}`);
+      setTitleDraft(full.title);
+      setDateDraft(toDateInputValue(full.playedAt));
       setRecap(full.recap);
       setRecapDraft(full.recap);
+      setRecapBaseline(
+        recapEditorDraftFromSession({
+          title: full.title,
+          playedAt: full.playedAt,
+          recap: full.recap,
+        }),
+      );
       setLoadedUpdatedAt(full.updatedAt);
       setLoadedSessionId(full.id);
     } catch {
@@ -782,6 +855,8 @@ function SessionDetail({
 
       {editing ? (
         <Card className="edit-recap-form min-w-0 space-y-3">
+          {protectedRecap.restorePrompt}
+          {protectedRecap.leavePrompt}
           <form
             className="min-w-0 space-y-3"
             noValidate
@@ -896,6 +971,11 @@ function SessionDetail({
               )}
             </div>
             <div className="flex flex-wrap gap-2 justify-end items-center">
+              {protectedRecap.saveStatusLabel ? (
+                <span className="text-xs text-slate-400 mr-auto" role="status" aria-live="polite">
+                  {protectedRecap.saveStatusLabel}
+                </span>
+              ) : null}
               {conflict && (
                 <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
                   Reload latest
@@ -906,6 +986,10 @@ function SessionDetail({
                 type="button"
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
+                  protectedRecap.clearPersistedDraft();
+                  setTitleDraft(effectiveRecapBaseline.title);
+                  setDateDraft(effectiveRecapBaseline.playedAt);
+                  setRecapDraft(effectiveRecapBaseline.recap);
                   setEditing(false);
                   setFieldErrors({});
                   setError(null);
@@ -1416,6 +1500,7 @@ function AddRecapForm({
   onCreated: (session: Session) => void;
   onCancel?: () => void;
 }) {
+  const { me } = useAuth();
   const [title, setTitle] = useState('');
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
   const dateWasEdited = useRef(false);
@@ -1424,6 +1509,59 @@ function AddRecapForm({
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
   const fieldIds = newRecapFieldIds();
+  const newRecapBaseline: RecapEditorDraft = { title: '', playedAt: '', recap: '' };
+  const newRecapDraft = { title, playedAt, recap };
+  const newRecapDirty = title.trim() !== '' || recap.trim() !== '' || dateWasEdited.current;
+
+  const publish = useCallback(async (): Promise<boolean> => {
+    const nextErrors = validateRecapFields({ title, playedAt, recap });
+    setFieldErrors(nextErrors);
+    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
+    if (invalidId) {
+      document.getElementById(invalidId)?.focus();
+      return false;
+    }
+
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await api.post<Session>(`${API}/campaigns/${campaignId}/sessions`, {
+        number: nextNumber,
+        title: title.trim(),
+        playedAt: playedAt || null,
+        recap,
+      });
+      setTitle('');
+      setRecap('');
+      setFieldErrors({});
+      onCreated(created);
+      return true;
+    } catch {
+      setError("Couldn't publish the recap.");
+      document.getElementById(fieldIds.title.controlId)?.focus();
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [campaignId, fieldIds, nextNumber, onCreated, playedAt, recap, title]);
+
+  const protectedNewRecap = useProtectedForm({
+    formId: 'session-recap-new',
+    userId: me?.user.id,
+    campaignId,
+    active: true,
+    dirty: newRecapDirty,
+    draft: newRecapDraft,
+    baseline: newRecapBaseline,
+    isDraftEqual: recapEditorDraftsEqual,
+    onRestoreDraft: (restored) => {
+      setTitle(restored.title);
+      setPlayedAt(restored.playedAt);
+      setRecap(restored.recap);
+      dateWasEdited.current = restored.playedAt.trim() !== '';
+    },
+    onSave: publish,
+  });
 
   // A form can stay open while a session runs across midnight. Keep the
   // suggested date aligned with the user's local calendar until they make an
@@ -1465,45 +1603,14 @@ function AddRecapForm({
     };
   }, []);
 
-  async function publish() {
-    const nextErrors = validateRecapFields({ title, playedAt, recap });
-    setFieldErrors(nextErrors);
-    // Keep an existing API failure banner until validation passes and we actually
-    // attempt a publish — a failed client check must not drop formErrorId from
-    // the title's aria-describedby.
-    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
-    if (invalidId) {
-      document.getElementById(invalidId)?.focus();
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-    try {
-      const created = await api.post<Session>(`${API}/campaigns/${campaignId}/sessions`, {
-        number: nextNumber,
-        title: title.trim(),
-        playedAt: playedAt || null,
-        recap,
-      });
-      setTitle('');
-      setRecap('');
-      setFieldErrors({});
-      onCreated(created);
-    } catch {
-      setError("Couldn't publish the recap.");
-      document.getElementById(fieldIds.title.controlId)?.focus();
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
     <Card className="new-recap-form min-w-0 space-y-3">
+      {protectedNewRecap.restorePrompt}
+      {protectedNewRecap.leavePrompt}
       <h2 className="font-bold text-white text-sm">+ Add recap (Session {nextNumber})</h2>
       {error && (
         <div id={fieldIds.formErrorId}>
-          <ErrorNote message={error} onRetry={publish} />
+          <ErrorNote message={error} onRetry={() => { void publish(); }} />
         </div>
       )}
       <form
@@ -1616,11 +1723,25 @@ function AddRecapForm({
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <p className="text-[11px] text-slate-400 break-words">
-            Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
+            {protectedNewRecap.saveStatusLabel ? (
+              <span role="status" aria-live="polite">{protectedNewRecap.saveStatusLabel}</span>
+            ) : (
+              <>
+                Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
+              </>
+            )}
           </p>
           <div className="flex flex-wrap gap-2 sm:shrink-0">
             {onCancel && (
-              <Btn ghost type="button" className="!min-h-0 !py-2 text-sm" onClick={onCancel}>
+              <Btn
+                ghost
+                type="button"
+                className="!min-h-0 !py-2 text-sm"
+                onClick={() => {
+                  protectedNewRecap.clearPersistedDraft();
+                  onCancel();
+                }}
+              >
                 Cancel
               </Btn>
             )}

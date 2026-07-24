@@ -1,0 +1,186 @@
+import { expect, test } from '@playwright/test';
+import {
+  buildFormDraftEnvelope,
+  clearFormDraft,
+  formDraftStorageKey,
+  isFormDraftStale,
+  readFormDraft,
+  writeFormDraft,
+  type FormDraftEnvelope,
+} from '../../src/lib/formDraftStorage';
+import {
+  deriveProtectedFormSaveStatus,
+  protectedFormSaveStatusLabel,
+  recordsEqual,
+} from '../../src/lib/protectedFormState';
+import {
+  isRecapEditorDirty,
+  isNewRecapDraftMeaningful,
+  recapEditorDraftsEqual,
+} from '../../src/features/sessions/recapFormFields';
+import {
+  isSessionZeroCharterDirty,
+  sessionZeroCharterDraftsEqual,
+} from '../../src/features/session-zero/sessionZeroFormState';
+import {
+  characterSheetDraftFrom,
+  characterSheetDraftsEqual,
+  isCharacterSheetDirty,
+} from '../../src/features/characters/characterSheetFormState';
+import type { Character } from '@campfire/schema';
+
+class MemoryStorage implements Storage {
+  private data = new Map<string, string>();
+
+  get length() {
+    return this.data.size;
+  }
+
+  clear(): void {
+    this.data.clear();
+  }
+
+  getItem(key: string): string | null {
+    return this.data.get(key) ?? null;
+  }
+
+  key(index: number): string | null {
+    return [...this.data.keys()][index] ?? null;
+  }
+
+  removeItem(key: string): void {
+    this.data.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.data.set(key, value);
+  }
+}
+
+function character(overrides: Partial<Character> = {}): Character {
+  return {
+    id: 9,
+    campaignId: 4,
+    ownerUserId: '42',
+    name: 'Astra',
+    species: 'Human',
+    className: 'Fighter',
+    level: 3,
+    xp: 0,
+    background: 'Soldier',
+    status: 'active',
+    stats: { STR: 16, DEX: 12 },
+    ac: 16,
+    eac: null,
+    kac: null,
+    hpCurrent: 20,
+    hpMax: 20,
+    spCurrent: 0,
+    spMax: 0,
+    rpCurrent: 0,
+    rpMax: 0,
+    hpTemp: 0,
+    deathState: 'none',
+    deathSaveSuccesses: 0,
+    deathSaveFailures: 0,
+    conditions: [],
+    saveProficiencies: [],
+    skills: {},
+    actions: [],
+    spellSlots: {},
+    portraitUrl: null,
+    ddbId: null,
+    notes: '',
+    dmSecret: '',
+    createdAt: '2026-07-01T00:00:00.000Z',
+    updatedAt: '2026-07-01T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/**
+ * Issue #641 — local draft persistence, stale detection, and dirty helpers.
+ */
+test.describe('form draft storage (issue #641)', () => {
+  test('keys are namespaced by user, campaign, and form id', () => {
+    expect(formDraftStorageKey(7, 4, 'session-zero-charter')).toBe(
+      'cf.formDraft.v1:7:4:session-zero-charter',
+    );
+  });
+
+  test('write/read/clear round-trip', () => {
+    const store = new MemoryStorage();
+    const key = formDraftStorageKey(1, 2, 'session-recap:5');
+    const envelope = buildFormDraftEnvelope({ title: 'Ash', recap: 'We fought.' }, '2026-07-01T12:00:00.000Z');
+    expect(writeFormDraft(key, envelope, store)).toBe(true);
+    expect(readFormDraft<{ title: string; recap: string }>(key, store)).toEqual(envelope);
+    clearFormDraft(key, store);
+    expect(readFormDraft(key, store)).toBeNull();
+  });
+
+  test('stale detection compares baselineUpdatedAt to the live server revision', () => {
+    const fresh: FormDraftEnvelope<{ body: string }> = {
+      v: 1,
+      savedAt: '2026-07-02T00:00:00.000Z',
+      baselineUpdatedAt: '2026-07-01T12:00:00.000Z',
+      data: { body: 'draft' },
+    };
+    expect(isFormDraftStale(fresh, '2026-07-01T12:00:00.000Z')).toBe(false);
+    expect(isFormDraftStale(fresh, '2026-07-02T08:00:00.000Z')).toBe(true);
+    expect(isFormDraftStale(fresh, null)).toBe(false);
+  });
+});
+
+test.describe('protected form state (issue #641)', () => {
+  test('save status labels distinguish dirty server work from local-only drafts', () => {
+    expect(protectedFormSaveStatusLabel(deriveProtectedFormSaveStatus({ dirty: true, saving: false, hasStoredDraft: true }))).toBe(
+      'Unsaved changes',
+    );
+    expect(
+      protectedFormSaveStatusLabel(
+        deriveProtectedFormSaveStatus({ dirty: false, saving: false, hasStoredDraft: true }),
+      ),
+    ).toBe('Draft saved locally — not on the server yet');
+  });
+
+  test('recordsEqual compares stat maps', () => {
+    expect(recordsEqual({ STR: '16' }, { STR: '16' })).toBe(true);
+    expect(recordsEqual({ STR: '16' }, { STR: '14' })).toBe(false);
+  });
+});
+
+test.describe('session-zero charter dirty detection (issue #641)', () => {
+  const baseline = {
+    lines: ['No torture'],
+    veils: [],
+    safetyTools: ['X-card'],
+    houseRules: 'Phones down',
+    toneAndExpectations: 'Heroic',
+  };
+
+  test('detects meaningful charter edits and ignores identical drafts', () => {
+    expect(sessionZeroCharterDraftsEqual(baseline, { ...baseline })).toBe(true);
+    expect(isSessionZeroCharterDirty({ ...baseline, houseRules: 'Phones away' }, baseline)).toBe(true);
+  });
+});
+
+test.describe('recap editor dirty detection (issue #641)', () => {
+  test('new recap drafts are meaningful after title or recap input', () => {
+    expect(isNewRecapDraftMeaningful({ title: 'Vault', playedAt: '', recap: '' })).toBe(true);
+    expect(isNewRecapDraftMeaningful({ title: '', playedAt: '', recap: '' })).toBe(false);
+  });
+
+  test('edit recap dirty detection ignores unchanged loaded recap', () => {
+    const baseline = { title: 'Vault', playedAt: '2026-07-01', recap: 'We escaped.' };
+    expect(recapEditorDraftsEqual(baseline, { ...baseline })).toBe(true);
+    expect(isRecapEditorDirty({ ...baseline, recap: 'We escaped!\n' }, baseline)).toBe(true);
+  });
+});
+
+test.describe('character sheet dirty detection (issue #641)', () => {
+  test('sheet draft snapshot round-trips from a character record', () => {
+    const baseline = characterSheetDraftFrom(character());
+    expect(isCharacterSheetDirty({ ...baseline, level: '4' }, baseline)).toBe(true);
+    expect(characterSheetDraftsEqual(baseline, characterSheetDraftFrom(character()))).toBe(true);
+  });
+});
