@@ -40,7 +40,7 @@ import { ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
-import { queryKeys, invalidateCampaignCharacters, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
   inlineCharacterSheetsInteractive,
@@ -53,6 +53,7 @@ import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -715,6 +716,12 @@ export default function RunSessionPage() {
           invalidateCampaignCharacters(queryClient, cid);
           return;
         }
+        // Issue #415: a DM check request landed (or was answered) — refetch the campaign
+        // check-request feed so the targeted player's prompt appears / the DM's panel updates.
+        if (event.type === 'check.requested' || event.type === 'check.resolved') {
+          invalidateCampaignCheckRequests(queryClient, cid);
+          return;
+        }
         if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
@@ -734,11 +741,13 @@ export default function RunSessionPage() {
     onReconnect: useCallback(() => {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -1204,6 +1213,11 @@ export default function RunSessionPage() {
         />
       )}
 
+      {/* Issue #415: the targeted player's in-page check-request prompt(s). Shown for any viewer
+          who owns a targeted character (a player their PC, or the DM their own PC), so a DM asking
+          the party sees the same one-tap prompt for their own character. */}
+      <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
+
       {isDm && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
@@ -1527,6 +1541,10 @@ export default function RunSessionPage() {
       )}
 
       <CombatLog events={events} />
+
+      {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
+          the resulting prompt above via CheckRequestPrompts. */}
+      {isDm && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
       <SharedDiceLog campaignId={cid} />
 

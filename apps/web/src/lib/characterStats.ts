@@ -8,37 +8,23 @@
  * (a sheet roll and an encounter roll must produce identical expressions/labels).
  */
 import type { Character, RuleSystemAdapter } from '@campfire/schema';
+// Issue #415: the 5e skill list and proficiency-bonus formula are now owned by the shared
+// @campfire/schema roll catalog — the SINGLE source of truth the server, the character sheet,
+// and the encounter card all read. Re-exported here under the historical names so existing
+// import sites keep working while the math lives in exactly one place.
+import { DND5E_ABILITY_KEYS, DND5E_SKILLS, dnd5eProficiencyBonus } from '@campfire/schema';
 
-export const ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
+export const ABILITY_KEYS = DND5E_ABILITY_KEYS;
 export type Ability = (typeof ABILITY_KEYS)[number];
 
-/** SRD 5e skill list with governing abilities. */
-export const SKILLS: ReadonlyArray<{ name: string; ability: Ability }> = [
-  { name: 'Acrobatics', ability: 'DEX' },
-  { name: 'Animal Handling', ability: 'WIS' },
-  { name: 'Arcana', ability: 'INT' },
-  { name: 'Athletics', ability: 'STR' },
-  { name: 'Deception', ability: 'CHA' },
-  { name: 'History', ability: 'INT' },
-  { name: 'Insight', ability: 'WIS' },
-  { name: 'Intimidation', ability: 'CHA' },
-  { name: 'Investigation', ability: 'INT' },
-  { name: 'Medicine', ability: 'WIS' },
-  { name: 'Nature', ability: 'INT' },
-  { name: 'Perception', ability: 'WIS' },
-  { name: 'Performance', ability: 'CHA' },
-  { name: 'Persuasion', ability: 'CHA' },
-  { name: 'Religion', ability: 'INT' },
-  { name: 'Sleight of Hand', ability: 'DEX' },
-  { name: 'Stealth', ability: 'DEX' },
-  { name: 'Survival', ability: 'WIS' },
-];
+/** SRD 5e skill list with governing abilities (from the shared schema catalog). */
+export const SKILLS: ReadonlyArray<{ name: string; ability: Ability }> = DND5E_SKILLS;
 
 export const SPELL_LEVELS = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const;
 
-/** 5e proficiency bonus by level: +2 at 1-4 up to +6 at 17-20. */
+/** 5e proficiency bonus by level: +2 at 1-4 up to +6 at 17-20 (from the shared schema catalog). */
 export function profBonus(level: number): number {
-  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+  return dnd5eProficiencyBonus(level);
 }
 
 /**

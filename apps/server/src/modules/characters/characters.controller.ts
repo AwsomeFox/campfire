@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { CharacterCreate, CharacterUpdate } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, CheckRequestStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -235,6 +235,37 @@ export class CharactersController {
     return this.characters.patchConditions(id, body, user, role);
   }
 
+  @Get(':id/checks')
+  @ApiOperation({
+    summary: 'List a character\'s rollable checks (roll catalog)',
+    description:
+      'Requires campaign membership. Returns the adapter-owned roll catalog for the character (issue #415): every rollable check — ability checks, skills (proficient AND unproficient), saves/defenses, and initiative — each with an authoritative modifier and a transparent breakdown ("DEX +3, proficient +2 = +5"), favorites (trained/proficient) first. The character sheet and the encounter card render this identical list; the modifier math is computed by the campaign\'s rule system, so no client reinvents proficiency math.',
+  })
+  @ApiResponse({ status: 200, description: 'The character\'s roll catalog, favorites first.' })
+  async listChecks(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.characters.listChecks(id);
+  }
+
+  @Post(':id/checks/roll')
+  @ApiOperation({
+    summary: 'Roll a catalog check for a character',
+    description:
+      'Any campaign member (write). Rolls a check from the character\'s roll catalog (issue #415): the SERVER resolves the authoritative modifier + dice expression from the rule-system adapter (the client only names a `checkId` and roll `mode`), rolls with the shared crypto roller, records the result to the campaign dice log with a transparent breakdown label, and — for a system that reports degrees of success (PF2e) with a DC — returns the degree/outcome. Advantage/disadvantage apply only where the system supports them.',
+  })
+  @ApiResponse({ status: 201, description: 'The resolved check + persisted roll (with breakdown and, for PF2e, degree of success).' })
+  @ApiResponse({ status: 404, description: 'No such check id in the character\'s catalog.' })
+  async rollCheck(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CheckRollRequestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.characters.rollCheck(id, body, user, role);
+  }
+
   @Post(':id/spell-slots')
   @ApiOperation({ summary: 'Spend or restore spell slots', description: 'dm or the owning player. Body is { level, delta }: delta +1 spends a slot, -1 restores; `used` is clamped to [0, max]. 400 if the character has no slots at that level (set maxima via PATCH spellSlots).' })
   @ApiResponse({ status: 201, description: 'Updated character.' })
@@ -247,5 +278,83 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchSpellSlots(id, body, user, role);
+  }
+}
+
+/**
+ * DM-initiated check requests (issue #415) — the interactive "DM asks selected players to roll
+ * a check/save with a DC + consequence" loop. Create is DM-only; list is member-scoped (the DM
+ * sees all, a player sees only requests for a character they own — the targeted player). The
+ * actual roll is submitted through CheckRequestsController below and reuses the catalog-roll path.
+ */
+@ApiTags('characters')
+@Controller('campaigns/:campaignId/check-requests')
+export class CampaignCheckRequestsController {
+  constructor(
+    private readonly characters: CharactersService,
+    private readonly access: CampaignAccessService,
+  ) {}
+
+  @Post()
+  @ApiOperation({
+    summary: 'Request a check/save from one or more characters',
+    description:
+      'dm role required (issue #415). Names a `checkId` (e.g. "save:DEX") and one or more target `characterIds`, plus an optional `dc` and `consequence` text. One pending request is persisted per character; each targeted player receives a thin real-time signal and reads the request back over the list endpoint to roll it once. The check must exist in each target character\'s catalog (404 otherwise).',
+  })
+  @ApiResponse({ status: 201, description: 'The created check request(s), one per target character.' })
+  @ApiResponse({ status: 400, description: 'A target character is outside this campaign.' })
+  @ApiResponse({ status: 404, description: 'The checkId is not in a target character\'s catalog.' })
+  async create(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: CheckRequestCreateDto,
+    @CurrentUser() user: RequestUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    res.status(201);
+    return this.characters.requestChecks(campaignId, body, user, role);
+  }
+
+  @Get()
+  @ApiOperation({
+    summary: 'List check requests visible to the caller',
+    description:
+      'Requires campaign membership (issue #415). The DM sees every request in the campaign; a player sees only requests targeting a character they own (the targeted player). Optional `?status=pending|resolved` filter. Newest first.',
+  })
+  @ApiQuery({ name: 'status', required: false, enum: ['pending', 'resolved'], description: 'Filter by request status.' })
+  @ApiResponse({ status: 200, description: 'Visible check requests, newest first.' })
+  async list(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Query('status') status: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const parsed = status ? CheckRequestStatus.parse(status) : undefined;
+    return this.characters.listCheckRequests(campaignId, user, role, { status: parsed });
+  }
+}
+
+@ApiTags('characters')
+@Controller('check-requests')
+export class CheckRequestsController {
+  constructor(
+    private readonly characters: CharactersService,
+    private readonly access: CampaignAccessService,
+  ) {}
+
+  @Post(':id/roll')
+  @ApiOperation({
+    summary: 'Answer a check request by rolling once',
+    description:
+      'The targeted player (owner of the character) or the DM (issue #415). Rolls the requested check ONCE via the same server-resolved catalog-roll path (records to the shared dice log with a transparent breakdown, audits, and returns the PF2e degree of success where applicable). The DM\'s DC + consequence text ride through to the roll and are returned with the resolved request. A request that was already answered is a 400.',
+  })
+  @ApiResponse({ status: 201, description: 'The resolved request plus the roll result (breakdown + persisted roll + optional degree).' })
+  @ApiResponse({ status: 400, description: 'This check request has already been answered.' })
+  @ApiResponse({ status: 403, description: 'Not the dm or the owning player.' })
+  @ApiResponse({ status: 404, description: 'No such check request.' })
+  async roll(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const campaignId = await this.characters.campaignIdForCheckRequest(id);
+    const role = await this.access.requireMember(user, campaignId, { write: true });
+    return this.characters.resolveCheckRequest(id, user, role);
   }
 }

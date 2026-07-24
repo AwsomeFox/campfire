@@ -1,0 +1,308 @@
+/**
+ * DM-initiated check requests (issue #415) — the interactive
+ * DM-request → player-prompt → consequence loop, surfaced inside the run-session view.
+ *
+ * Two surfaces share this file:
+ *  - {@link CheckRequestPanel} (DM only): pick a character + a catalog check, optionally a DC and
+ *    consequence text, and send it. POSTs /campaigns/:id/check-requests; each targeted player is
+ *    nudged over SSE (a thin `check.requested` tick) to read it back and roll once.
+ *  - {@link CheckRequestPrompts} (the targeted player): renders an in-page prompt for every pending
+ *    request against a character the viewer owns. Rolling posts /check-requests/:id/roll, which
+ *    reuses the server-resolved catalog-roll path (shared dice log + transparent breakdown), and
+ *    then shows the DM's consequence text alongside the outcome. Each request can be rolled ONCE.
+ *
+ * Live-region announcements route through the app-wide Announcer (useAnnounce) — never a second
+ * aria-live region. Visible copy is scoped with data-testid to keep strict Playwright locators happy.
+ */
+import { useMemo, useState } from 'react';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import type { Character, CheckRequest, CheckRequestResolution, RollCheckDefinition } from '@campfire/schema';
+import { api, API, ApiError } from '../../lib/api';
+import { queryKeys } from '../../lib/query';
+import { Card, Btn, TextInput } from '../../components/ui';
+import { useAnnounce } from '../../components/Announcer';
+
+/** Human summary of a resolved outcome for the announcer + result line. */
+function outcomeText(res: CheckRequestResolution): string {
+  const { roll } = res.result;
+  const dc = roll.dc != null ? ` vs DC ${roll.dc}` : '';
+  const pass = roll.dc != null ? (roll.success ? ' — success' : ' — failure') : '';
+  const degree = res.result.degree ? ` (${res.result.degree})` : '';
+  return `${res.result.check.label}: ${roll.total}${dc}${pass}${degree}`;
+}
+
+/**
+ * DM control: request a check/save from a single character. Kept intentionally small — a
+ * character picker, a check picker (populated from that character's catalog), a DC and a
+ * consequence field. DM-only; the parent gates rendering on role.
+ */
+export function CheckRequestPanel({
+  campaignId,
+  characters,
+  encounterId,
+  onError,
+}: {
+  campaignId: number;
+  characters: Character[];
+  encounterId?: number;
+  onError?: (msg: string | null) => void;
+}) {
+  const announce = useAnnounce();
+  const [characterId, setCharacterId] = useState<number | ''>('');
+  const [checkId, setCheckId] = useState('');
+  const [dc, setDc] = useState('');
+  const [consequence, setConsequence] = useState('');
+
+  // The picked character's catalog drives the check dropdown (favorites first, server math).
+  const checksQuery = useQuery({
+    queryKey: ['characters', characterId, 'checks'],
+    queryFn: () => api.get<RollCheckDefinition[]>(`${API}/characters/${characterId}/checks`),
+    enabled: typeof characterId === 'number',
+  });
+  const checks = useMemo(() => checksQuery.data ?? [], [checksQuery.data]);
+
+  const send = useMutation({
+    mutationFn: () =>
+      api.post<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests`, {
+        characterIds: [characterId],
+        checkId,
+        ...(dc.trim() ? { dc: Number(dc) } : {}),
+        ...(consequence.trim() ? { consequence: consequence.trim() } : {}),
+        ...(encounterId != null ? { encounterId } : {}),
+      }),
+    onMutate: () => onError?.(null),
+    onSuccess: (created) => {
+      const req = created[0];
+      if (req) {
+        announce(`Requested ${req.checkLabel} from ${req.characterName}${req.dc != null ? ` at DC ${req.dc}` : ''}.`);
+      }
+      setCheckId('');
+      setDc('');
+      setConsequence('');
+    },
+    onError: (err) => onError?.(err instanceof ApiError ? err.message : "Couldn't send the check request."),
+  });
+
+  const canSend = typeof characterId === 'number' && checkId.trim().length > 0 && !send.isPending;
+
+  return (
+    <Card className="space-y-2.5" data-testid="request-check-panel">
+      <span className="card-kicker">Request a check</span>
+      <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+        Ask a player to roll a check or save. They get an in-page prompt and roll once; the result
+        lands in the shared dice log with your consequence text.
+      </p>
+      <div className="flex gap-2 flex-wrap items-end">
+        <div className="field" style={{ flex: 1, minWidth: 150 }}>
+          <label htmlFor="check-request-character">Character</label>
+          <select
+            id="check-request-character"
+            aria-label="Character"
+            className="cf-select"
+            value={characterId === '' ? '' : String(characterId)}
+            onChange={(e) => {
+              setCharacterId(e.target.value ? Number(e.target.value) : '');
+              setCheckId('');
+            }}
+          >
+            <option value="">Choose a character…</option>
+            {characters.map((c) => (
+              <option key={c.id} value={String(c.id)}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ flex: 1, minWidth: 150 }}>
+          <label htmlFor="check-request-check">Check</label>
+          <select
+            id="check-request-check"
+            aria-label="Check"
+            className="cf-select"
+            value={checkId}
+            disabled={typeof characterId !== 'number' || checksQuery.isLoading}
+            onChange={(e) => setCheckId(e.target.value)}
+          >
+            <option value="">{typeof characterId === 'number' ? 'Choose a check…' : 'Pick a character first'}</option>
+            {checks.map((def) => (
+              <option key={def.id} value={def.id}>
+                {def.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ width: 80 }}>
+          <label htmlFor="check-request-dc">DC</label>
+          <TextInput
+            id="check-request-dc"
+            aria-label="DC"
+            type="number"
+            min={1}
+            max={99}
+            placeholder="15"
+            value={dc}
+            onChange={(e) => setDc(e.target.value)}
+          />
+        </div>
+      </div>
+      <div className="field">
+        <label htmlFor="check-request-consequence">Consequence (optional)</label>
+        <TextInput
+          id="check-request-consequence"
+          aria-label="Consequence"
+          placeholder="On a failure, the bridge gives way…"
+          value={consequence}
+          maxLength={500}
+          onChange={(e) => setConsequence(e.target.value)}
+        />
+      </div>
+      <div>
+        <Btn disabled={!canSend} onClick={() => send.mutate()}>
+          {send.isPending ? 'Sending…' : 'Send request'}
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
+/** One pending prompt for the targeted player: shows the ask + consequence, rolls once. */
+function PromptCard({
+  request,
+  onResolved,
+  onError,
+}: {
+  request: CheckRequest;
+  onResolved: (res: CheckRequestResolution) => void;
+  onError?: (msg: string | null) => void;
+}) {
+  const announce = useAnnounce();
+  const roll = useMutation({
+    mutationFn: () => api.post<CheckRequestResolution>(`${API}/check-requests/${request.id}/roll`, {}),
+    onMutate: () => onError?.(null),
+    onSuccess: (res) => {
+      announce(outcomeText(res));
+      onResolved(res);
+    },
+    onError: (err) => onError?.(err instanceof ApiError ? err.message : "Couldn't roll the check."),
+  });
+
+  return (
+    <div
+      className="cf-inset"
+      data-testid={`check-request-prompt-${request.id}`}
+      style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 12px' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{request.characterName}</span>
+        <span className="text-muted" style={{ fontSize: 12 }}>
+          {request.requestedByName || 'The DM'} asks for a roll
+        </span>
+      </div>
+      <div style={{ fontSize: 13 }}>
+        <strong>{request.checkLabel}</strong>
+        {request.dc != null ? <span className="text-muted"> · DC {request.dc}</span> : null}
+      </div>
+      {request.consequence && (
+        <p className="text-muted" style={{ fontSize: 12, margin: 0 }} data-testid={`check-request-consequence-${request.id}`}>
+          {request.consequence}
+        </p>
+      )}
+      <div>
+        <Btn
+          disabled={roll.isPending}
+          onClick={() => roll.mutate()}
+          data-testid={`check-request-roll-${request.id}`}
+          aria-label={`Roll ${request.checkLabel} for ${request.characterName}`}
+        >
+          {roll.isPending ? 'Rolling…' : 'Roll'}
+        </Btn>
+      </div>
+    </div>
+  );
+}
+
+/** The resolved result the player just rolled — total, pass/fail, and the DM's consequence text. */
+function ResultCard({ resolution }: { resolution: CheckRequestResolution }) {
+  const { request, result } = resolution;
+  return (
+    <div
+      className="cf-inset"
+      data-testid={`check-request-result-${request.id}`}
+      style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '10px 12px' }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 700, color: 'var(--color-text)' }}>{request.characterName}</span>
+        <span className="text-muted" style={{ fontSize: 12 }}>{result.check.label}</span>
+      </div>
+      <div style={{ fontSize: 13 }}>
+        <span>Rolled </span>
+        <strong style={{ color: 'var(--color-accent)' }}>{result.roll.total}</strong>
+        {result.roll.dc != null && (
+          <span
+            style={{ marginLeft: 6, fontWeight: 600, color: result.roll.success ? 'var(--color-success, #4ade80)' : 'var(--color-danger, #f87171)' }}
+          >
+            {result.roll.success ? 'Success' : 'Failure'}
+          </span>
+        )}
+        {result.degree && <span className="text-muted" style={{ marginLeft: 6 }}>({result.degree})</span>}
+      </div>
+      <span className="text-muted" style={{ fontSize: 11.5 }}>{result.check.breakdownText}</span>
+      {request.consequence && (
+        <p style={{ fontSize: 12, margin: 0 }} data-testid={`check-request-result-consequence-${request.id}`}>
+          <span className="text-muted">Consequence: </span>
+          {request.consequence}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The targeted player's in-page prompts. Renders one prompt per pending request against a
+ * character the viewer owns; once rolled, the prompt is replaced by a result card showing the
+ * outcome + consequence (kept locally so it survives the request leaving the pending feed).
+ */
+export function CheckRequestPrompts({
+  campaignId,
+  ownedCharacterIds,
+  onError,
+}: {
+  campaignId: number;
+  ownedCharacterIds: ReadonlySet<number>;
+  onError?: (msg: string | null) => void;
+}) {
+  const [resolved, setResolved] = useState<Record<number, CheckRequestResolution>>({});
+
+  const pendingQuery = useQuery({
+    queryKey: queryKeys.campaignCheckRequests(campaignId),
+    queryFn: () => api.get<CheckRequest[]>(`${API}/campaigns/${campaignId}/check-requests?status=pending`),
+    enabled: Number.isFinite(campaignId),
+    refetchInterval: 15_000,
+  });
+
+  const mine = useMemo(
+    () => (pendingQuery.data ?? []).filter((r) => ownedCharacterIds.has(r.characterId) && r.status === 'pending'),
+    [pendingQuery.data, ownedCharacterIds],
+  );
+
+  const pendingPrompts = mine.filter((r) => resolved[r.id] == null);
+  const results = Object.values(resolved);
+
+  if (pendingPrompts.length === 0 && results.length === 0) return null;
+
+  return (
+    <div data-testid="check-request-prompts" className="flex flex-col gap-2">
+      {pendingPrompts.map((request) => (
+        <PromptCard
+          key={request.id}
+          request={request}
+          onError={onError}
+          onResolved={(res) => setResolved((prev) => ({ ...prev, [request.id]: res }))}
+        />
+      ))}
+      {results.map((res) => (
+        <ResultCard key={res.request.id} resolution={res} />
+      ))}
+    </div>
+  );
+}

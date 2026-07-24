@@ -712,6 +712,25 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT NOT NULL
 );
 
+-- Issue #415: DM-initiated check requests (one row per request × target character).
+CREATE TABLE IF NOT EXISTS check_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  encounter_id INTEGER,
+  check_id TEXT NOT NULL,
+  check_label TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'flat',
+  dc INTEGER,
+  consequence TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by_user_id TEXT NOT NULL,
+  requested_by_name TEXT NOT NULL DEFAULT '',
+  roll_id INTEGER,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS inventory_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -966,6 +985,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(enc
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);

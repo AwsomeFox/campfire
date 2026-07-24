@@ -1993,6 +1993,18 @@ export interface RuleSystemAdapter {
    * `supportsEncounterDifficulty` is true; unsupported adapters omit it.
    */
   estimateEncounterDifficulty?(input: EncounterDifficultyInput): EncounterDifficulty;
+  /**
+   * OPTIONAL — the encounter/sheet ROLL CATALOG for a character (issue #415): every rollable
+   * check (ability checks, skills — proficient AND unproficient — saves/defenses, initiative)
+   * with the modifier already computed by this system's authoritative math and a transparent
+   * breakdown. Adapters that model their own proficiency (5e's fixed bonus, PF2e's level+rank)
+   * implement it; every other adapter omits it and {@link checkCatalogForAdapter} falls back to
+   * the honest, configurable {@link neutralCheckCatalog} derived from the character's own data.
+   * This is the single source of truth the character sheet, the encounter card, the server
+   * roll resolver, and the MCP tools all read — so a sheet roll and an encounter roll are
+   * identical by construction and no surface reinvents proficiency math.
+   */
+  buildCheckCatalog?(character: CheckCatalogCharacter): RollCheckDefinition[];
 }
 
 /**
@@ -2096,6 +2108,11 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   supportsEncounterDifficulty: true,
   estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
     return computeDnd5eEncounterDifficulty(input);
+  },
+  // 5e roll catalog (issue #415): all six ability checks/saves, EVERY skill (incl. unproficient),
+  // and initiative — fixed proficiency bonus, with a transparent breakdown for each.
+  buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
+    return dnd5eCheckCatalog(this, character);
   },
 };
 
@@ -2364,6 +2381,477 @@ export function rollActionDice(score: number, roll: (sides: number) => number): 
   return { score: pool.score, pool: pool.dice, dice, disadvantage: false, total: sum(dice) };
 }
 
+// ---------- encounter / character-sheet roll catalog (issue #415) ----------
+// The encounter character card used to bake in the fixed 5e skill list and proficiency-bonus
+// math, and only surfaced PROFICIENT skills — so an ordinary unproficient check could not be
+// rolled inline, and a non-5e system displayed or rolled the wrong modifier. The ROLL CATALOG
+// moves that decision onto the adapter: every rollable check a character can make (ability
+// checks, skills, saves/defenses, initiative, and custom checks) is described once, with a
+// transparent server-computable breakdown ("DEX +3, proficient +2 = +5"). The character sheet
+// AND the encounter card read the SAME catalog, so a sheet roll and an encounter roll are
+// identical by construction — there is no second proficiency formula for either to drift from.
+//
+// The catalog is pure and deterministic (no RNG, no I/O), so the server resolves the roll
+// expression from it authoritatively and clients never invent proficiency math — they render
+// what the catalog already computed. Adapters that model their own proficiency (5e's fixed
+// bonus, PF2e's level+rank) implement `buildCheckCatalog`; every other adapter falls back to
+// an honest, configurable catalog derived from the character's own stored data.
+
+/** The kind of a rollable check in the catalog. */
+export type RollCheckCategory = 'ability' | 'skill' | 'save' | 'initiative' | 'custom';
+
+/** One transparent term of a check's modifier, e.g. `{ label: 'DEX', value: 3 }`. */
+export interface RollBreakdownComponent {
+  /** Short human label ("DEX", "proficient", "trained", "armor"). */
+  readonly label: string;
+  /** Signed integer contribution to the total modifier. */
+  readonly value: number;
+}
+
+/**
+ * A single rollable check for a character (issue #415). Everything a surface needs to render,
+ * search, and roll it — with the modifier already computed by the authoritative adapter math
+ * and a transparent breakdown of how it was reached. `id` is stable within a character's
+ * catalog (e.g. `skill:Athletics`, `save:DEX`, `ability:STR`, `initiative`) so the server can
+ * resolve "roll this check" from an id alone.
+ */
+export interface RollCheckDefinition {
+  readonly id: string;
+  readonly label: string;
+  readonly category: RollCheckCategory;
+  /** Governing ability key (STR/DEX/… or a system-native attribute), or null when none applies. */
+  readonly ability: string | null;
+  /** Proficiency / training / rank label ("proficient", "expertise", "trained", "expert"…) or null when untrained. */
+  readonly proficiency: string | null;
+  /** True when the character is trained/proficient in this check — surfaced FIRST (favorites). */
+  readonly favorite: boolean;
+  /** Flat modifier applied to the check die. */
+  readonly modifier: number;
+  /** Ordered, transparent breakdown of how `modifier` was computed. */
+  readonly breakdown: readonly RollBreakdownComponent[];
+  /** The check die (5e/PF2e/d20 systems: 20). Kept explicit so a non-d20 system can differ. */
+  readonly die: number;
+  /** Whether advantage/disadvantage (roll-two-keep) applies to this check in this system. */
+  readonly supportsAdvantage: boolean;
+  /** Whether the system reports degrees of success (PF2e) for this check. */
+  readonly supportsDegrees: boolean;
+  /**
+   * True when the catalog could not compute this check from complete data (missing ability
+   * score, an unmodeled system) and the surface should flag it rather than trust a silent 0.
+   */
+  readonly incomplete?: boolean;
+}
+
+/** Format a signed integer with an explicit leading sign ("+3", "-1", "+0"). */
+export function signedModifier(n: number): string {
+  return n >= 0 ? `+${n}` : `${n}`;
+}
+
+/**
+ * Render a check's transparent breakdown, e.g. "DEX +3, proficient +2, armor -1 = +4"
+ * (issue #415). This is the SAME text the sheet, the encounter card, and the combat log show.
+ */
+export function formatCheckBreakdown(def: Pick<RollCheckDefinition, 'breakdown' | 'modifier'>): string {
+  const parts = def.breakdown.map((c) => `${c.label} ${signedModifier(c.value)}`);
+  const lhs = parts.length > 0 ? parts.join(', ') : signedModifier(def.modifier);
+  return `${lhs} = ${signedModifier(def.modifier)}`;
+}
+
+/** The three roll modes a d20-style check can be taken with (mirrors the sheet's chooser). */
+export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+
+/**
+ * Build the restricted dice expression for a catalog check + roll mode (issue #415). Uses the
+ * keep-highest / keep-lowest advantage grammar the shared roller already understands. A system
+ * that does not support advantage always rolls a single die regardless of the requested mode.
+ */
+export function checkRollExpr(
+  def: Pick<RollCheckDefinition, 'modifier' | 'die' | 'supportsAdvantage'>,
+  mode: CheckRollMode = 'flat',
+): string {
+  const die = def.die > 0 ? def.die : 20;
+  const tail = def.modifier === 0 ? '' : signedModifier(def.modifier);
+  if (def.supportsAdvantage && mode === 'advantage') return `2d${die}kh1${tail}`;
+  if (def.supportsAdvantage && mode === 'disadvantage') return `2d${die}kl1${tail}`;
+  return `1d${die}${tail}`;
+}
+
+/** Case-insensitive substring search over a catalog's labels / ability keys (issue #415). */
+export function filterCheckCatalog(catalog: readonly RollCheckDefinition[], query: string): RollCheckDefinition[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...catalog];
+  return catalog.filter(
+    (c) => c.label.toLowerCase().includes(q) || (c.ability ?? '').toLowerCase().includes(q) || c.category.includes(q),
+  );
+}
+
+/**
+ * Order a catalog for display: favorites (trained/proficient) first, then by category, then by
+ * label (issue #415). Stable and pure so the sheet and encounter card show the same order.
+ */
+export function sortCheckCatalog(catalog: readonly RollCheckDefinition[]): RollCheckDefinition[] {
+  const categoryOrder: Record<RollCheckCategory, number> = { initiative: 0, save: 1, ability: 2, skill: 3, custom: 4 };
+  return [...catalog].sort((a, b) => {
+    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+    if (categoryOrder[a.category] !== categoryOrder[b.category]) return categoryOrder[a.category] - categoryOrder[b.category];
+    return a.label.localeCompare(b.label);
+  });
+}
+
+/** The six 5e ability keys, in canonical order. */
+export const DND5E_ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
+export type Dnd5eAbilityKey = (typeof DND5E_ABILITY_KEYS)[number];
+
+/** SRD 5e skill list with the ability each is governed by (single source of truth, issue #415). */
+export const DND5E_SKILLS: ReadonlyArray<{ readonly name: string; readonly ability: Dnd5eAbilityKey }> = [
+  { name: 'Acrobatics', ability: 'DEX' },
+  { name: 'Animal Handling', ability: 'WIS' },
+  { name: 'Arcana', ability: 'INT' },
+  { name: 'Athletics', ability: 'STR' },
+  { name: 'Deception', ability: 'CHA' },
+  { name: 'History', ability: 'INT' },
+  { name: 'Insight', ability: 'WIS' },
+  { name: 'Intimidation', ability: 'CHA' },
+  { name: 'Investigation', ability: 'INT' },
+  { name: 'Medicine', ability: 'WIS' },
+  { name: 'Nature', ability: 'INT' },
+  { name: 'Perception', ability: 'WIS' },
+  { name: 'Performance', ability: 'CHA' },
+  { name: 'Persuasion', ability: 'CHA' },
+  { name: 'Religion', ability: 'INT' },
+  { name: 'Sleight of Hand', ability: 'DEX' },
+  { name: 'Stealth', ability: 'DEX' },
+  { name: 'Survival', ability: 'WIS' },
+];
+
+/** 5e proficiency bonus by level: +2 at 1–4 up to +6 at 17–20 (single source of truth, issue #415). */
+export function dnd5eProficiencyBonus(level: number): number {
+  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+}
+
+/** Read an ability score from a stats record tolerantly (uppercase-folded; default 10). */
+function readAbilityScore(stats: Record<string, number>, ability: string): number {
+  const up = ability.toUpperCase();
+  const raw = stats[up] ?? stats[ability] ?? stats[ability.toLowerCase()];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 10;
+}
+
+/** The minimal character shape the catalog reads — the full {@link Character} satisfies it. */
+export interface CheckCatalogCharacter {
+  readonly level: number;
+  readonly stats: Record<string, number>;
+  readonly saveProficiencies: readonly string[];
+  readonly skills: Record<string, SkillRank>;
+}
+
+/**
+ * Build the full D&D 5e roll catalog for a character (issue #415): initiative, all six ability
+ * checks and saves, and EVERY skill — proficient or not — so an unproficient skill rolls inline
+ * with the correct DEX/… modifier instead of being hidden. Proficiency adds the fixed bonus
+ * (expertise doubles it); each entry carries a transparent breakdown. Pure and deterministic.
+ */
+export function dnd5eCheckCatalog(adapter: Pick<RuleSystemAdapter, 'abilityModifier'>, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const pb = dnd5eProficiencyBonus(character.level);
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  const out: RollCheckDefinition[] = [];
+
+  const dex = readAbilityScore(stats, 'DEX');
+  const dexMod = adapter.abilityModifier(dex);
+  out.push({
+    id: 'initiative',
+    label: 'Initiative',
+    category: 'initiative',
+    ability: 'DEX',
+    proficiency: null,
+    favorite: true,
+    modifier: dexMod,
+    breakdown: [{ label: 'DEX', value: dexMod }],
+    die: 20,
+    supportsAdvantage: true,
+    supportsDegrees: false,
+  });
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const proficient = saveProfs.has(ability);
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (proficient) breakdown.push({ label: 'proficient', value: pb });
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: proficient ? 'proficient' : null,
+      favorite: proficient,
+      modifier: mod + (proficient ? pb : 0),
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const { name, ability } of DND5E_SKILLS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank = character.skills?.[name];
+    const profTerm = rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0;
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (rank === 'expertise') breakdown.push({ label: 'expertise', value: profTerm });
+    else if (rank === 'proficient') breakdown.push({ label: 'proficient', value: profTerm });
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability,
+      proficiency: rank ?? null,
+      favorite: rank != null,
+      modifier: mod + profTerm,
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Map the app's stored 5e-shaped skill rank onto the closest PF2e rank so a PF2e character
+ * (whose sheet stores `proficient`/`expertise`) gets honest level-based math. `proficient`
+ * → trained, `expertise` → expert; absent → untrained.
+ */
+function pf2eRankFromSkillRank(rank: SkillRank | undefined): Pf2eProficiencyRank {
+  if (rank === 'expertise') return 'expert';
+  if (rank === 'proficient') return 'trained';
+  return 'untrained';
+}
+
+/**
+ * Build a PF2e roll catalog for a character (issue #415). PF2e proficiency ADDS YOUR LEVEL on
+ * top of a rank bonus, so the breakdown is "ability + level + rank". The app stores 5e-shaped
+ * ranks, so they are mapped to PF2e ranks (trained/expert); untrained adds nothing (no level).
+ * Degrees of success apply; PF2e has no generic advantage/disadvantage, so roll modes collapse
+ * to a single die.
+ */
+export function pf2eCheckCatalog(adapter: Pf2eRuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const level = Math.max(0, Math.trunc(character.level));
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  const out: RollCheckDefinition[] = [];
+
+  const buildProfBreakdown = (ability: string, abilityMod: number, rank: Pf2eProficiencyRank): { modifier: number; breakdown: RollBreakdownComponent[] } => {
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: abilityMod }];
+    let modifier = abilityMod;
+    if (rank !== 'untrained') {
+      breakdown.push({ label: 'level', value: level });
+      const rankBonus = adapter.proficiencyBonus(0, rank); // rank bonus only (level term added separately)
+      breakdown.push({ label: rank, value: rankBonus });
+      modifier += adapter.proficiencyBonus(level, rank);
+    }
+    return { modifier, breakdown };
+  };
+
+  // Initiative is a Perception check in PF2e (WIS, at least trained for PCs).
+  const wisMod = adapter.abilityModifier(readAbilityScore(stats, 'WIS'));
+  const perc = buildProfBreakdown('WIS', wisMod, 'trained');
+  out.push({
+    id: 'initiative',
+    label: 'Initiative (Perception)',
+    category: 'initiative',
+    ability: 'WIS',
+    proficiency: 'trained',
+    favorite: true,
+    modifier: perc.modifier,
+    breakdown: perc.breakdown,
+    die: 20,
+    supportsAdvantage: false,
+    supportsDegrees: true,
+  });
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank: Pf2eProficiencyRank = saveProfs.has(ability) ? 'trained' : 'untrained';
+    const built = buildProfBreakdown(ability, mod, rank);
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: rank === 'untrained' ? null : rank,
+      favorite: rank !== 'untrained',
+      modifier: built.modifier,
+      breakdown: built.breakdown,
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  for (const { name, ability } of DND5E_SKILLS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank = pf2eRankFromSkillRank(character.skills?.[name]);
+    const built = buildProfBreakdown(ability, mod, rank);
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability,
+      proficiency: rank === 'untrained' ? null : rank,
+      favorite: rank !== 'untrained',
+      modifier: built.modifier,
+      breakdown: built.breakdown,
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Honest, configurable fallback catalog for adapters that do not model their own proficiency
+ * (issue #415). Everything is derived from the character's OWN stored data rather than a fixed
+ * 5e list, so it never claims skills or math a homebrew/unknown system doesn't have:
+ *  - ability checks for every attribute the sheet actually stores;
+ *  - saves for every attribute the sheet stores, +2 flat when the ability is save-proficient;
+ *  - skills for every skill the character has recorded (with a flat proficiency term);
+ *  - initiative via the adapter's own `initiativeModifier`.
+ * Modes: advantage is offered (harmless d20 keep grammar); degrees are not (only PF2e reports them).
+ */
+export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const abilityKeys = Object.keys(stats);
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  // A neutral, flat proficiency term. Systems in this bucket vary, so we use a modest +2 and
+  // label it plainly; the breakdown makes the assumption visible rather than hidden.
+  const FLAT_PROFICIENCY = 2;
+  const out: RollCheckDefinition[] = [];
+
+  const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+  out.push({
+    id: 'initiative',
+    label: 'Initiative',
+    category: 'initiative',
+    ability: null,
+    proficiency: null,
+    favorite: true,
+    modifier: initMod,
+    breakdown: [{ label: 'initiative', value: initMod }],
+    die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+    supportsAdvantage: true,
+    supportsDegrees: false,
+  });
+
+  for (const ability of abilityKeys) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const ability of abilityKeys) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const proficient = saveProfs.has(ability.toUpperCase());
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (proficient) breakdown.push({ label: 'proficient', value: FLAT_PROFICIENCY });
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: proficient ? 'proficient' : null,
+      favorite: proficient,
+      modifier: mod + (proficient ? FLAT_PROFICIENCY : 0),
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const [name, rank] of Object.entries(character.skills ?? {})) {
+    const profTerm = rank === 'expertise' ? FLAT_PROFICIENCY * 2 : FLAT_PROFICIENCY;
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability: null,
+      proficiency: rank,
+      favorite: true,
+      modifier: profTerm,
+      breakdown: [{ label: rank, value: profTerm }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+      incomplete: true, // no governing-ability math for a homebrew skill — flag it honestly
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Resolve the roll catalog for a campaign's adapter + a character (issue #415). Adapters that
+ * implement `buildCheckCatalog` (5e, PF2e) own their math; every other adapter gets the honest
+ * configurable {@link neutralCheckCatalog}. This is the single entry point the server, the MCP
+ * tools, the character sheet, and the encounter card all call — so the math is identical.
+ */
+export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  return adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+}
+
+/** Find a single check by its stable id within a character's catalog, or null. */
+export function findCheckInCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter, checkId: string): RollCheckDefinition | null {
+  return checkCatalogForAdapter(adapter, character).find((c) => c.id === checkId) ?? null;
+}
+
 // ---------- Pathfinder 2e adapter (issue #295) ----------
 // PF2e is the flagship non-5e rule system and the pattern the other Tier-1 systems
 // (#296-300) follow: a system-specific adapter object that (a) satisfies the shared
@@ -2619,6 +3107,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
+  // PF2e roll catalog (issue #415): proficiency adds your LEVEL plus a rank bonus, and checks
+  // report degrees of success — a concrete demonstration that the catalog math is adapter-owned.
+  buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
+    return pf2eCheckCatalog(this, character);
+  },
 };
 
 /** Stable family id of the Starfinder 2e adapter. */
@@ -5253,6 +5746,12 @@ export const CampaignEventType = z.enum([
   'treasury.updated',
   // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
   'character.updated',
+  // Issue #415: a DM asked one or more players to roll a check/save (check.requested), and a
+  // targeted player answered it (check.resolved). Both are THIN id-only signals like the
+  // encounter.* ticks — the payload (DC, consequence text, breakdown) is read back over the
+  // permission-checked REST endpoints, never carried on the wire.
+  'check.requested',
+  'check.resolved',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -5338,6 +5837,30 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     userId: z.string().max(120),
     at: IsoDate,
   }),
+  z.object({
+    // Issue #415: a DM requested a check/save from a character. Thin invalidation only —
+    // `requestId` identifies the persisted request, `characterId` the target sheet, `userId`
+    // the requesting DM (String(users.id)). The targeted player's client refetches the pending
+    // request over GET /campaigns/:id/check-requests (permission-checked) to render the prompt;
+    // the DC + consequence text never ride the wire.
+    type: z.literal('check.requested'),
+    campaignId: Id,
+    requestId: Id,
+    characterId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #415: a targeted player answered a check request (rolled once). Thin signal so the
+    // DM's client can drop the pending row / refetch; the roll itself is already in the shared
+    // dice feed. `userId` is the roller (String(users.id)).
+    type: z.literal('check.resolved'),
+    campaignId: Id,
+    requestId: Id,
+    characterId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
 ]);
 export type CampaignEvent = z.infer<typeof CampaignEvent>;
 
@@ -5369,6 +5892,90 @@ export const DiceRoll = RollResult.extend({
   createdAt: IsoDate,
 });
 export type DiceRoll = z.infer<typeof DiceRoll>;
+
+// ---------- catalog check roll (issue #415) ----------
+// A request to roll a catalog check for a character. The server resolves the authoritative
+// modifier + expression from the adapter's roll catalog (clients never send the math), rolls,
+// records the roll to the shared dice log, and returns the transparent breakdown + outcome.
+export const CheckRollRequest = z.object({
+  checkId: z.string().min(1).max(60).describe('Stable catalog id from GET .../checks, e.g. "skill:Athletics", "save:DEX", "initiative"'),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
+  consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
+});
+export type CheckRollRequest = z.infer<typeof CheckRollRequest>;
+
+/** The resolved check + persisted roll returned by the check-roll endpoint / MCP tool (issue #415). */
+export const CheckRollResponse = z.object({
+  check: z.object({
+    id: z.string(),
+    label: z.string(),
+    category: z.string(),
+    ability: z.string().nullable(),
+    proficiency: z.string().nullable(),
+    modifier: z.number().int(),
+    breakdown: z.array(z.object({ label: z.string(), value: z.number().int() })),
+    breakdownText: z.string(),
+    incomplete: z.boolean().optional(),
+  }),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']),
+  roll: DiceRoll,
+  // PF2e degree of success (only present when the system reports degrees AND a dc was given).
+  degree: z.enum(['criticalFailure', 'failure', 'success', 'criticalSuccess']).optional(),
+});
+export type CheckRollResponse = z.infer<typeof CheckRollResponse>;
+
+// ---------- DM-initiated check requests (issue #415) ----------
+// The interactive "DM asks selected players to roll a check/save with a DC + consequence"
+// loop. A DM POSTs one request naming a checkId and one or more target characters; the server
+// fans it out to one persisted row per character. Each targeted player reads their pending
+// request(s) over a permission-checked REST read (the thin `check.requested` SSE tick only
+// tells them to refetch), rolls ONCE via the existing catalog-roll path, and sees the DM's
+// consequence text alongside the outcome. The request is then marked resolved.
+export const CheckRequestMode = z.enum(['flat', 'advantage', 'disadvantage']);
+export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
+export const CheckRequestStatus = z.enum(['pending', 'resolved']);
+export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
+
+/** DM input: request `checkId` from one or more target characters, with an optional DC + consequence. */
+export const CheckRequestCreate = z.object({
+  characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
+  checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
+  mode: CheckRequestMode.default('flat').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
+  consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text surfaced to the player with the prompt/result'),
+  encounterId: Id.optional().describe('Optional encounter this request is tied to (context only)'),
+});
+export type CheckRequestCreate = z.infer<typeof CheckRequestCreate>;
+
+/** A persisted, permission-checked check request as read by the DM / targeted player. */
+export const CheckRequest = z.object({
+  id: Id,
+  campaignId: Id,
+  characterId: Id,
+  characterName: z.string(),
+  encounterId: Id.nullable(),
+  checkId: z.string(),
+  checkLabel: z.string(),
+  mode: CheckRequestMode,
+  dc: z.number().int().nullable(),
+  consequence: z.string().nullable(),
+  status: CheckRequestStatus,
+  requestedByUserId: z.string(),
+  requestedByName: z.string(),
+  // The persisted dice-log roll id once resolved (null while pending).
+  rollId: Id.nullable(),
+  createdAt: IsoDate,
+  resolvedAt: IsoDate.nullable(),
+});
+export type CheckRequest = z.infer<typeof CheckRequest>;
+
+/** The resolved request plus the roll result returned when a player answers a check request. */
+export const CheckRequestResolution = z.object({
+  request: CheckRequest,
+  result: CheckRollResponse,
+});
+export type CheckRequestResolution = z.infer<typeof CheckRequestResolution>;
 
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
