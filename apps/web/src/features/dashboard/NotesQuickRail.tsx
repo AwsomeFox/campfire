@@ -128,7 +128,25 @@ export function NotesQuickRail({
       {loading && notes.length === 0 ? (
         <Skeleton lines={3} />
       ) : notes.length === 0 ? (
-        <EmptyState icon="quill-ink" title="No notes yet" hint="Jot your first thought below." />
+        <EmptyState
+          icon="quill-ink"
+          title="No notes yet"
+          hint={canMemberWrite ? 'Jot down quick thoughts, session notes, or ideas for the campaign.' : 'Notes created during sessions or shared with you will appear here.'}
+          action={
+            canMemberWrite ? (
+              <Btn
+                type="button"
+                className="!min-h-0 !py-1.5 text-xs btn-primary"
+                onClick={() => {
+                  const input = document.getElementById('dashboard-quick-note-input');
+                  input?.focus();
+                }}
+              >
+                + Write a note
+              </Btn>
+            ) : undefined
+          }
+        />
       ) : (
         notes.map((n) => (
           <div
@@ -165,6 +183,7 @@ export function NotesQuickRail({
 
       <form className="flex gap-2 pt-1" onSubmit={saveQuickNote}>
         <TextInput
+          id="dashboard-quick-note-input"
           style={{ minHeight: 0, paddingTop: 8, paddingBottom: 8 }}
           placeholder={dest === 'inbox' ? 'Leave a note for the DM… goes to their inbox' : 'Quick note… (private, just for you)'}
           value={quickNote}

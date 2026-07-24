@@ -680,6 +680,19 @@ export function RegionMap({
         </div>
       )}
 
+      {locations.length === 0 && (
+        <div className="flex items-center justify-between flex-wrap gap-2" style={{ padding: '0 14px 10px' }}>
+          <span className="text-xs text-[var(--color-neutral-400)]">
+            {canDmWrite ? 'No locations added to this map yet.' : 'Discovered locations will appear here as the party explores.'}
+          </span>
+          {canDmWrite && (
+            <Link to={`/c/${campaignId}/locations?action=new`} className="btn btn-primary" style={{ fontSize: 12, gap: 6 }}>
+              + Add location
+            </Link>
+          )}
+        </div>
+      )}
+
       {/* Keyboard-accessible pin positioning panel (#807) */}
       {canDmWrite && kbMovingId != null && kbPos != null && kbMovingLoc && (
         <div

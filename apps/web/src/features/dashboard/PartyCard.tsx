@@ -1,10 +1,14 @@
 import { Link } from 'react-router-dom';
 import type { Character } from '@campfire/schema';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { StatusTag } from '../characters/status';
 import { initials } from '../../lib/avatarText';
 
 export function PartyCard({ campaignId, characters }: { campaignId: number; characters: Character[] }) {
+  const { canPlayerWrite, canDmWrite } = useCampaignAccess();
+  const canCreate = canPlayerWrite || canDmWrite;
+
   return (
     <div className="card elev-sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -15,7 +19,18 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
         </Link>
       </div>
       {characters.length === 0 ? (
-        <EmptyState icon="shield" title="No characters yet" />
+        <EmptyState
+          icon="shield"
+          title="No characters yet"
+          hint={canCreate ? 'Add player characters to track party HP, conditions, and stats.' : 'Party members and their stats will appear here once added.'}
+          action={
+            canCreate ? (
+              <Link to={`/c/${campaignId}/party?action=new`} className="btn btn-primary" style={{ fontSize: 13, gap: 6 }}>
+                + Add party member
+              </Link>
+            ) : undefined
+          }
+        />
       ) : (
         characters.map((c) => {
           const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
