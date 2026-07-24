@@ -230,3 +230,182 @@ describe('storylines (e2e)', () => {
     expect((await request(server).patch(`/api/v1/beats/${beatId}`).set(dm).send({ sessionId: 999999 })).status).toBe(400);
   });
 });
+
+// Issue #856 / #881: arc summary and beat body authoring with optimistic concurrency.
+describe('storylines prose authoring (#856)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (
+      await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Prose Authoring Campaign' })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('creates an arc with markdown summary and a beat with markdown body', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Prose Arc', summary: '**Bold** arc overview' });
+    expect(arc.status).toBe(201);
+    expect(arc.body.summary).toBe('**Bold** arc overview');
+
+    const beat = await request(server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Prose Beat', body: '- first clue\n- second clue' });
+    expect(beat.status).toBe(201);
+    expect(beat.body.body).toBe('- first clue\n- second clue');
+  });
+
+  it('patches arc summary and beat body', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Patch Arc' });
+    const beat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Patch Beat' });
+
+    const arcPatch = await request(server)
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .set(dm)
+      .send({ summary: 'Updated **summary**' });
+    expect(arcPatch.status).toBe(200);
+    expect(arcPatch.body.summary).toBe('Updated **summary**');
+
+    const beatPatch = await request(server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ body: 'Updated beat prose' });
+    expect(beatPatch.status).toBe(200);
+    expect(beatPatch.body.body).toBe('Updated beat prose');
+  });
+});
+
+// Issue #881: optimistic concurrency for story arcs AND beats.
+describe('storylines optimistic concurrency (#881)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (
+      await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'SL OC Campaign' })
+    ).body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('arc: omitting expectedUpdatedAt is back-compat', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Original Arc' });
+    const res = await request(server).patch(`/api/v1/arcs/${arc.body.id}`).set(dm).send({ title: 'Back compat' });
+    expect(res.status).toBe(200);
+    expect(res.body.title).toBe('Back compat');
+  });
+
+  it('arc: stale expectedUpdatedAt 409s with STALE_WRITE and does NOT mutate', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Stale Arc', summary: 'v1' });
+    const before = await request(server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    const conflict = await request(server)
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .set(dm)
+      .send({ summary: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+    const after = await request(server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    expect(after.body.summary).toBe('v1');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('arc: matching expectedUpdatedAt succeeds', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Match Arc' });
+    const current = await request(server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    const ok = await request(server)
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .set(dm)
+      .send({ title: 'Arc v2', expectedUpdatedAt: current.body.updatedAt });
+    expect(ok.status).toBe(200);
+    expect(ok.body.title).toBe('Arc v2');
+  });
+
+  it('arc: two concurrent updates — second (stale) 409s, first survives', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Concurrent Arc' });
+    const loaded = await request(server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    const loadedAt = loaded.body.updatedAt;
+
+    const firstSave = await request(server)
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .set(dm)
+      .send({ summary: 'Tab A summary', expectedUpdatedAt: loadedAt });
+    expect(firstSave.status).toBe(200);
+
+    const staleSave = await request(server)
+      .patch(`/api/v1/arcs/${arc.body.id}`)
+      .set(dm)
+      .send({ title: 'Tab B Wins', expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    const after = await request(server).get(`/api/v1/arcs/${arc.body.id}`).set(dm);
+    expect(after.body.title).toBe('Concurrent Arc');
+    expect(after.body.summary).toBe('Tab A summary');
+  });
+
+  it('beat: stale expectedUpdatedAt 409s with STALE_WRITE and does NOT mutate body', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Beat Arc B' });
+    const beat = await request(server)
+      .post(`/api/v1/arcs/${arc.body.id}/beats`)
+      .set(dm)
+      .send({ title: 'Stale Beat', body: 'v1' });
+    const before = await request(server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    const conflict = await request(server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ body: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('STALE_WRITE');
+    const after = await request(server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(after.body.body).toBe('v1');
+    expect(after.body.updatedAt).toBe(before.body.updatedAt);
+  });
+
+  it('beat: two concurrent body updates — second (stale) 409s, first survives', async () => {
+    const server = ctx.app.getHttpServer();
+    const arc = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Beat Arc D' });
+    const beat = await request(server).post(`/api/v1/arcs/${arc.body.id}/beats`).set(dm).send({ title: 'Concurrent Beat' });
+    const loaded = await request(server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    const loadedAt = loaded.body.updatedAt;
+
+    const firstSave = await request(server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ body: 'Tab A body', expectedUpdatedAt: loadedAt });
+    expect(firstSave.status).toBe(200);
+
+    const staleSave = await request(server)
+      .patch(`/api/v1/beats/${beat.body.id}`)
+      .set(dm)
+      .send({ title: 'Tab B Wins', expectedUpdatedAt: loadedAt });
+    expect(staleSave.status).toBe(409);
+    expect(staleSave.body.code).toBe('STALE_WRITE');
+
+    const after = await request(server).get(`/api/v1/beats/${beat.body.id}`).set(dm);
+    expect(after.body.title).toBe('Concurrent Beat');
+    expect(after.body.body).toBe('Tab A body');
+  });
+});
