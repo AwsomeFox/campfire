@@ -15,6 +15,7 @@ import { CharactersModule } from '../characters/characters.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { ProactiveService } from './proactive.service';
 import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-resolver';
 
 /**
@@ -58,8 +59,9 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
   providers: [
     AiDriverService,
     AiDmStreamService,
+    ProactiveService,
     { provide: AI_PROVIDER_RESOLVER, useClass: ConfigAiProviderResolver },
   ],
-  exports: [AiDriverService, AiDmStreamService],
+  exports: [AiDriverService, AiDmStreamService, ProactiveService],
 })
 export class AiDriverModule {}

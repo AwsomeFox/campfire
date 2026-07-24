@@ -873,6 +873,7 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   tokens_used INTEGER NOT NULL DEFAULT 0,
   turn_count INTEGER NOT NULL DEFAULT 0,
   last_turn_at TEXT,
+  proactive_settings TEXT DEFAULT '{}',
   action_queue_depth INTEGER DEFAULT 8,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
