@@ -215,7 +215,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
         sessionId: sessionId ? Number(sessionId) : undefined,
         hidden,
       });
-      navigate(`/c/${campaignId}/encounters/${created.id}`, { state: { justCreatedVisible: !hidden } });
+      navigate(`/c/${campaignId}/encounters/${created.id}`);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't create the encounter.");
       setSaving(false);

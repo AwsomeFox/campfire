@@ -78,7 +78,7 @@ export default function NpcListPage() {
       setAudience('dm');
       setCreating(false);
       await load();
-      navigate(`/c/${id}/npcs/${npc.id}`, { state: { justCreatedVisible: !hidden } });
+      navigate(`/c/${id}/npcs/${npc.id}`);
     } catch (err) {
       setCreateError(err instanceof ApiError ? err.message : "Couldn't create the NPC.");
     } finally {

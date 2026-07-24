@@ -227,13 +227,17 @@ export class EncountersService {
     /** Fallback when the row is already gone (hard delete) or unavailable. */
     hiddenFallback = false,
   ): void {
-    // Re-read visibility at emit time so a concurrent hide cannot leak the id on
-    // the shared stream after a lifecycle handler loaded a stale `hidden: false`.
-    const [current] = this.db
+    // A caller that already knows the encounter is hidden (hiddenFallback) must
+    // never emit — skip the visibility query entirely on that hot path.
+    if (hiddenFallback) return;
+    // Otherwise re-read visibility at emit time so a concurrent hide cannot leak
+    // the id on the shared stream after a lifecycle handler loaded a stale
+    // `hidden: false`. Single-row lookup via .get() (not .all()).
+    const current = this.db
       .select({ hidden: encounters.hidden })
       .from(encounters)
       .where(eq(encounters.id, encounterId))
-      .all();
+      .get();
     const hidden = current ? Boolean(current.hidden) : hiddenFallback;
     if (hidden) return;
     this.events.emit({ type, campaignId, encounterId });

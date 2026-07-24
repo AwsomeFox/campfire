@@ -246,7 +246,7 @@ export default async function globalSetup(config: FullConfig) {
 
   const statblockEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'E2E — Complete Statblock',
-      hidden: false
+    hidden: false,
   });
   const statblockEncounterId: number = statblockEncounter.id;
   await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
@@ -259,7 +259,7 @@ export default async function globalSetup(config: FullConfig) {
     role: 'Tavern keeper',
     body: 'A round, cheerful man who runs the Ember Hearth inn.',
     dmSecret: NPC_SECRET,
-      hidden: false
+    hidden: false,
   });
   const npcId: number = npc.id;
 
@@ -270,12 +270,12 @@ export default async function globalSetup(config: FullConfig) {
   const navNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Wayfinder',
     role: 'Navigation fixture',
-      hidden: false
+    hidden: false,
   });
   const navFaction = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/factions`, {
     name: 'DLRNAV Lantern Guild',
     body: 'Navigation fixture',
-      hidden: false
+    hidden: false,
   });
   const navLocation = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/locations`, {
     name: 'DLRNAV Moon Gate',
@@ -301,7 +301,7 @@ export default async function globalSetup(config: FullConfig) {
     title: 'DLRNAV Sundering',
     body: 'Navigation fixture',
     inWorldDate: 'Year 1',
-      hidden: false
+    hidden: false,
   });
   const navArc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/arcs`, {
     title: 'DLRNAV Ember Arc',
@@ -342,7 +342,7 @@ export default async function globalSetup(config: FullConfig) {
       navBeat.title,
     ].join(' · '),
     status: 'active',
-      hidden: false
+    hidden: false,
   });
   // Identity-persisted mention fixtures (issue #739). A quest whose body embeds
   // TYPED mention tokens — `[label](/.cf/<type>/<id>)` — alongside plain-text
@@ -352,22 +352,22 @@ export default async function globalSetup(config: FullConfig) {
   const renamedNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twiceborn',
     role: 'Identity fixture',
-      hidden: false
+    hidden: false,
   });
   const twinA = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twin Bob',
     role: 'Twin A',
-      hidden: false
+    hidden: false,
   });
   const twinB = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twin Bob',
     role: 'Twin B',
-      hidden: false
+    hidden: false,
   });
   const deadTargetNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Ghosttarget',
     role: 'Will be deleted',
-      hidden: false
+    hidden: false,
   });
   const identityQuest = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/quests`, {
     title: 'DLRNAV Identity Links',
@@ -379,7 +379,7 @@ export default async function globalSetup(config: FullConfig) {
       `Dead target: [DLRNAV Ghosttarget](/.cf/npc/${deadTargetNpc.id})`,
     ].join('\n\n'),
     status: 'active',
-      hidden: false
+    hidden: false,
   });
   // Rename the once-named NPC so the typed token's authored label ("DLRNAV
   // Twiceborn") no longer matches its current name — the renderer must refresh
@@ -448,7 +448,7 @@ export default async function globalSetup(config: FullConfig) {
     questId: navQuest.id,
     locationId: navLocation.id,
     sessionId: navSession.id,
-      hidden: false
+    hidden: false,
   });
   const navScheduledSession = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/schedule`, {
     title: 'DLRNAV Saturday Game',
@@ -476,7 +476,7 @@ export default async function globalSetup(config: FullConfig) {
   const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Linked Aftermath at the Moon Gate',
     sessionId: navSession.id,
-      hidden: false
+    hidden: false,
   });
   const linkedEndedEncounterId: number = linkedEndedEncounter.id;
   {
@@ -500,7 +500,7 @@ export default async function globalSetup(config: FullConfig) {
   // PATCH the server would reject via assertMutable.
   const endedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Aftermath at the Ember Hearth',
-      hidden: false
+    hidden: false,
   });
   const endedEncounterId: number = endedEncounter.id;
   const endedCombatant = await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/combatants`, {
@@ -521,7 +521,7 @@ export default async function globalSetup(config: FullConfig) {
 
   const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Ambush at the Ember Hearth',
-      hidden: false
+    hidden: false,
   });
   const encounterId: number = encounter.id;
 

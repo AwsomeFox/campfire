@@ -70,7 +70,7 @@ export default function FactionListPage() {
       setAudience('dm');
       setCreating(false);
       await load();
-      navigate(`/c/${id}/factions/${faction.id}`, { state: { justCreatedVisible: !hidden } });
+      navigate(`/c/${id}/factions/${faction.id}`);
     } catch (err) {
       setCreateError(err instanceof ApiError ? err.message : "Couldn't create the faction.");
     } finally {

@@ -3619,7 +3619,10 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       const encRes = await request(server)
         .post(`/api/v1/campaigns/${secrecyCampId}/encounters`)
         .set(dm)
-        .send({ name: 'Traitor Fight' });
+        // #754: encounters are private-by-default now; this suite asserts players
+        // can VIEW the encounter's events (with hidden NPC names masked), so it
+        // must be created explicitly player-visible.
+        .send({ name: 'Traitor Fight', hidden: false });
       secrecyEncounterId = encRes.body.id;
 
       const traitorAdd = await request(server)
