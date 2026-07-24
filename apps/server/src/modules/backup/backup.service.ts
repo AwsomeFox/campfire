@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -159,6 +159,20 @@ function countAiCredentialsInSnapshot(snapshotPath: string): number | null {
   } catch {
     return null;
   }
+}
+
+/** #496: Kept in sync with AI_CONFIG_KEY_SALT in ai-provider-config.service.ts. */
+const AI_CONFIG_KEY_SALT = 'campfire:ai-provider-config:v1';
+
+/**
+ * #496: Derive the key that `AiProviderConfigService` will use on THIS host
+ * from `AI_CONFIG_KEY`. Mirrors `resolveAiConfigKey` in ai-provider-config.service.ts
+ * (duplicated to avoid a circular dependency and to keep the logic local to restore).
+ */
+function deriveEnvManagedKey(): Buffer {
+  const env = (process.env.AI_CONFIG_KEY ?? '').trim();
+  if (/^[0-9a-fA-F]{64}$/.test(env)) return Buffer.from(env, 'hex');
+  return scryptSync(env, AI_CONFIG_KEY_SALT, 32);
 }
 
 /** #496: prove staged credentials decrypt with the restored envelope key before overwriting live data. */
@@ -611,6 +625,24 @@ export class BackupService implements OnApplicationBootstrap {
         );
       }
 
+      // #496: When the restore host has AI_CONFIG_KEY set, the keyfile from the
+      // envelope will NOT be written (env takes precedence). Validate that the
+      // env-managed key can actually decrypt the staged credentials BEFORE the
+      // destructive apply — a key mismatch here would silently leave every
+      // restored credential undecryptable. The check is skipped when there are
+      // no credentials in the archive (no encrypted rows → no key needed).
+      const envSetOnHost = !!process.env.AI_CONFIG_KEY && process.env.AI_CONFIG_KEY.trim().length > 0;
+      if (envSetOnHost && restoredKeyBytes) {
+        try {
+          validateStagedAiCredentialDecryptability(stagedDbPath, deriveEnvManagedKey());
+        } catch {
+          throw new BadRequestException(
+            'Cannot restore: AI_CONFIG_KEY on this host does not match the key used to encrypt the archive credentials. ' +
+              'Either unset AI_CONFIG_KEY so the archive keyfile can be installed, or set AI_CONFIG_KEY to the value used when these credentials were stored.',
+          );
+        }
+      }
+
       // --- Collect + path-check uploads before touching anything ---
       const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
       for (const name of Object.keys(zip.files)) {
@@ -647,10 +679,9 @@ export class BackupService implements OnApplicationBootstrap {
         // asserted external key management — do NOT overwrite what they might
         // already have configured on disk (which would be silently ignored
         // anyway, but writing it would leak the source keyfile onto a host
-        // that is not supposed to keep one).
+        // that is not supposed to keep one). The env key was already validated
+        // against the staged credentials before this destructive block.
         if (restoredKeyBytes) {
-          const envSetOnHost =
-            !!process.env.AI_CONFIG_KEY && process.env.AI_CONFIG_KEY.trim().length > 0;
           if (!envSetOnHost) {
             const keyfilePath = path.join(dataDir, AI_KEYFILE_NAME);
             fs.mkdirSync(path.dirname(keyfilePath), { recursive: true });

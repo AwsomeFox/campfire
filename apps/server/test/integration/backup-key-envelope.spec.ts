@@ -155,9 +155,11 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const restored = fs.readFileSync(path.join(dataDir, 'ai-config.key'), 'utf8').trim();
     expect(restored).toBe('deadbeef'.repeat(8));
     // AND it has restrictive permissions (0600). On some CI filesystems the
-    // mode bits are masked; we assert only the read/write triple for owner.
+    // mode bits are masked; we assert the full owner read/write triple and
+    // confirm group/world bits are clear.
     const mode = fs.statSync(path.join(dataDir, 'ai-config.key')).mode & 0o777;
     expect(mode & 0o600).toBe(0o600);
+    expect(mode & 0o077).toBe(0);
   });
 
   it('rejects a restore that omits the passphrase when the archive has an envelope', async () => {
@@ -196,12 +198,48 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
 
     // ...then simulate restoring on a DIFFERENT host that uses env-managed key.
     fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
+    // Use the SAME key material as the archive keyfile so the env-key validation
+    // passes (archive has no ai_provider_configs rows, so the check is a no-op).
     process.env.AI_CONFIG_KEY = 'b'.repeat(64);
 
     await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
 
     // The archive's keyfile should NOT be materialized — the env var takes
     // precedence and the local keyfile would just be a source of drift.
+    expect(fs.existsSync(path.join(dataDir, 'ai-config.key'))).toBe(false);
+  });
+
+  it('rejects restore when AI_CONFIG_KEY is set but does not match the archive credentials', async () => {
+    // Insert a credential encrypted with the archive keyfile ('deadbeef' * 8).
+    const archiveKey = Buffer.from('deadbeef'.repeat(8), 'hex');
+    const encrypted = encryptSecret('sk-test-secret', archiveKey);
+    const db = holder.proxy as DrizzleDb;
+    const now = new Date().toISOString();
+    await db.insert(aiProviderConfigs).values({
+      scope: 'server',
+      providerType: 'openai',
+      model: 'gpt-4',
+      params: '{}',
+      encryptedApiKey: encrypted,
+      keyLast4: 'ecre',
+      allowedModels: '[]',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const service = makeService();
+    const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
+
+    // Now switch to a DIFFERENT env key on the "restore host".
+    process.env.AI_CONFIG_KEY = 'c'.repeat(64); // Different from archive key
+    fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
+
+    await expect(
+      service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
+    ).rejects.toThrow(/AI_CONFIG_KEY on this host does not match/i);
+
+    // Server untouched — keyfile not written.
     expect(fs.existsSync(path.join(dataDir, 'ai-config.key'))).toBe(false);
   });
 
