@@ -1,0 +1,181 @@
+{
+  "archmage": {
+    "rating": {
+      "full": "Level"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Role"
+    }
+  },
+  "dnd5e": {
+    "rating": {
+      "full": "Challenge",
+      "short": "CR"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "open-legend": {
+    "rating": {
+      "full": "Level"
+    },
+    "defense": {
+      "full": "Guard"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Attributes"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Descriptor"
+    }
+  },
+  "osr": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "pathfinder-1e": {
+    "rating": {
+      "full": "Challenge Rating",
+      "short": "CR"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "pf2e": {
+    "rating": {
+      "full": "Level"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Traits"
+    }
+  },
+  "sf2e": {
+    "rating": {
+      "full": "Level"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Traits"
+    }
+  },
+  "starfinder-1e": {
+    "rating": {
+      "full": "Challenge Rating",
+      "short": "CR"
+    },
+    "defense": {
+      "full": "Kinetic Armor Class",
+      "short": "KAC"
+    },
+    "hitPoints": {
+      "full": "Stamina + Hit Points",
+      "short": "SP + HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  }
+}
