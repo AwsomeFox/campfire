@@ -28,6 +28,7 @@ import {
   type LocalePreference,
 } from '../../i18n';
 import { useAuth } from '../../app/auth';
+import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 import {
   applyAccentColor,
   buildAccentPalette,
@@ -495,19 +496,18 @@ export default function PreferencesPage() {
  * sessions/tokens/memberships, de-links (keeps) owned character sheets, and
  * refuses (409) if you're the last admin or the sole DM of a campaign — the copy
  * points you at the fix rather than dead-ending.
+ *
+ * Issue #775 — shared ConfirmDestructiveDialog for alertdialog semantics,
+ * focus management, typed confirmation, and announced errors.
  */
 function DeleteAccountCard({ username }: { username: string }) {
   const { t } = useTranslation();
   const { logout } = useAuth();
   const [open, setOpen] = useState(false);
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canDelete = confirmText.trim() === username;
-
   async function remove() {
-    if (!canDelete) return;
     setDeleting(true);
     setError(null);
     try {
@@ -522,60 +522,55 @@ function DeleteAccountCard({ username }: { username: string }) {
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="delete-account-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>{t('preferences.deleteAccount')}</span>
-      {!open ? (
-        <div className="flex items-center gap-2 flex-wrap">
-          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            {t('preferences.deleteBlurb')}
-          </p>
-          <div className="flex-1" />
-          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
-            {t('preferences.deleteMyAccountEllipsis')}
-          </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
+      <div className="flex items-center gap-2 flex-wrap">
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          {t('preferences.deleteBlurb')}
+        </p>
+        <div className="flex-1" />
+        <button
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
+          onClick={() => setOpen(true)}
+          data-testid="delete-account-trigger"
+        >
+          {t('preferences.deleteMyAccountEllipsis')}
+        </button>
+      </div>
+      {open && (
+        <ConfirmDestructiveDialog
+          title={t('preferences.deleteAccount')}
+          consequence={
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              <Trans
+                i18nKey="preferences.deleteConfirmPrompt"
+                values={{ username }}
+                components={[<strong key="u" />]}
+              />
+            </p>
+          }
+          confirmValue={username}
+          inputLabel={
             <Trans
-              i18nKey="preferences.deleteConfirmPrompt"
+              i18nKey="preferences.deleteTypeLabel"
               values={{ username }}
               components={[<strong key="u" />]}
             />
-          </p>
-          <input
-            className="input"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={username}
-            autoComplete="off"
-          />
-          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-          <div className="flex gap-2 items-center">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5 }}
-              onClick={() => {
-                setOpen(false);
-                setConfirmText('');
-                setError(null);
-              }}
-              disabled={deleting}
-            >
-              {t('preferences.cancel')}
-            </button>
-            <div className="flex-1" />
-            <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={!canDelete || deleting}
-              aria-busy={deleting || undefined}
-              onClick={remove}
-            >
-              {deleting ? t('preferences.deleting') : t('preferences.deleteMyAccount')}
-            </button>
-          </div>
-        </div>
+          }
+          hintMismatch={t('preferences.deleteTypeHintMismatch', { username })}
+          hintConfirmed={t('preferences.deleteTypeHintConfirmed')}
+          confirmLabel={t('preferences.deleteMyAccount')}
+          pendingLabel={t('preferences.deleting')}
+          cancelLabel={t('preferences.cancel')}
+          busy={deleting}
+          error={error}
+          onConfirm={() => void remove()}
+          onCancel={() => {
+            setOpen(false);
+            setError(null);
+          }}
+        />
       )}
     </div>
   );
