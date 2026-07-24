@@ -3596,8 +3596,11 @@ function AddCombatantPanel({
       try {
         const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
         if (rulePack) baseParams.set('pack', rulePack);
+        // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
+        // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
+        const types = tab === 'compendium' ? (['monster', 'hazard'] as const) : (['monster'] as const);
         const pages = await Promise.all(
-          (['monster', 'hazard'] as const).map((type) => {
+          types.map((type) => {
             const params = new URLSearchParams(baseParams);
             params.set('type', type);
             return api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
