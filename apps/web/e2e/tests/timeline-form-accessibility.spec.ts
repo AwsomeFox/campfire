@@ -80,8 +80,9 @@ test.describe('timeline authoring form accessibility (issue #453)', () => {
     await expect(dmSecret).toBeFocused();
     await page.keyboard.press('Tab');
     // Create form uses Audience radios (DM-only default) instead of a hidden checkbox (#754).
+    // Tab lands on the checked radio; arrow keys move within the group (native radio semantics).
     await expect(form.getByRole('radio', { name: /DM only/ })).toBeFocused();
-    await page.keyboard.press('Tab');
+    await page.keyboard.press('ArrowDown');
     await expect(form.getByRole('radio', { name: /Visible to players/ })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(form.getByRole('button', { name: 'Create event' })).toBeFocused();
