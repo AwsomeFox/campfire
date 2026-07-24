@@ -182,7 +182,8 @@ test.describe('revision restore preview and confirmation', () => {
     await expect(dialog.getByRole('button', { name: 'Cancel restore' })).toBeFocused();
 
     let restoreRequests = 0;
-    await page.route(`**/api/v1/revisions/quest/${navigation.questId}/*/restore`, async (route) => {
+    // Match `/restore` and `/restore?expectedUpdatedAt=…` (Playwright globs treat `?` as literal).
+    await page.route(`**/api/v1/revisions/quest/${navigation.questId}/*/restore**`, async (route) => {
       restoreRequests += 1;
       await route.fulfill({ status: 201, json: { revisions } });
     });
@@ -215,7 +216,7 @@ test.describe('revision restore preview and confirmation', () => {
     const revisions = revisionFixtures(quest.body);
     const historyAttempts = await mockHistory(page, revisions, 1);
     let restoreAttempts = 0;
-    await page.route(`**/api/v1/revisions/quest/${navigation.questId}/*/restore`, async (route) => {
+    await page.route(`**/api/v1/revisions/quest/${navigation.questId}/*/restore**`, async (route) => {
       restoreAttempts += 1;
       if (restoreAttempts === 1) {
         await route.fulfill({ status: 500, json: { message: 'Restore failed' } });

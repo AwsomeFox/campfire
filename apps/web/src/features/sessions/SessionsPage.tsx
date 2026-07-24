@@ -945,6 +945,7 @@ function SessionDetail({
           entityType="session"
           entityId={session.id}
           currentSnapshot={{ recap }}
+          expectedUpdatedAt={loadedUpdatedAt}
           label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {

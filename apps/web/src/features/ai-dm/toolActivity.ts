@@ -71,6 +71,7 @@ const RESOURCE_BY_NAME: Record<string, ToolResource> = {
   set_character_conditions: 'party',
   level_up_character: 'party',
   award_xp: 'party',
+  adjust_treasury: 'party',
   add_inventory_item: 'party',
   update_inventory_item: 'party',
   // map / fog / reveal → the map
