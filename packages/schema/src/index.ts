@@ -4226,6 +4226,92 @@ export const AI_DM_MODE_CAPABILITIES: Readonly<
   },
 };
 
+/**
+ * Canonical privacy boundary for optional external AI providers (issue #455).
+ * Campfire is local-by-default: campaign data lives on your server. When an admin
+ * or DM configures an OpenAI-compatible, Anthropic, or Gemini provider, selected
+ * campaign context is sent to that endpoint for AI DM turns, Co-DM drafts, scribe
+ * recaps, and map generation. Trust copy (login page, provider settings, docs) and
+ * the policy-backed unit test both read from here so the words stay anchored to
+ * what the server actually sends.
+ */
+export interface AiExternalProviderContextCategory {
+  /** Short label for UI lists. */
+  label: string;
+  /** One-line description of what may leave the server when a provider is enabled. */
+  description: string;
+  /**
+   * A keyword the privacy notice must mention so a copy edit cannot quietly drop a
+   * category the server may send (mirrors AI_DM_MODE_CAPABILITIES.copyKeyword).
+   */
+  copyKeyword: string;
+}
+
+export const AI_EXTERNAL_PROVIDER_PRIVACY = {
+  /** Deep-link anchor for the provider privacy notice in settings / admin UI. */
+  settingsAnchorId: 'ai-provider-privacy',
+  loginTagline:
+    'Open-source and free to self-host · your campaign data stays on your server by default; enabling an external AI provider sends only the context listed in its privacy notice.',
+  loginFeatureTitle: 'Self-hosted & private',
+  loginFeatureBody:
+    'Your table, your server, your data. Campaign content stays local unless you opt in to an external AI provider — then only the disclosed context leaves for generation. Export the whole campaign to JSON or Markdown anytime.',
+  noticeTitle: 'External AI provider privacy',
+  localByDefault:
+    'By default Campfire stores your campaign on this server and does not contact any LLM vendor. Connected MCP agents read through the API; their traffic stays between your agent and your server unless you point the agent at an external model.',
+  externalException:
+    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context below is included; DM-only secrets are stripped unless you explicitly opt in (map generation only).',
+  contextCategories: [
+    {
+      label: 'Campaign summary',
+      description: 'Player-visible campaign overview (hidden entities and dmSecret fields excluded).',
+      copyKeyword: 'summary',
+    },
+    {
+      label: 'Session-zero charter',
+      description: 'Agreed lines, veils, safety tools, and house rules.',
+      copyKeyword: 'charter',
+    },
+    {
+      label: 'Live world state',
+      description: 'Calendar, running encounters, party status, and current location/environment.',
+      copyKeyword: 'world',
+    },
+    {
+      label: 'DM steering',
+      description: 'Per-campaign persona and house rules you write in AI DM settings (DM-only).',
+      copyKeyword: 'steering',
+    },
+    {
+      label: 'Turn prompts & tool reads',
+      description: 'What players said, plus player-scoped tool results during AI turns (secrets redacted).',
+      copyKeyword: 'tool',
+    },
+    {
+      label: 'Co-DM / scribe source material',
+      description: 'Your brief or session notes sent for drafting proposals or recaps.',
+      copyKeyword: 'scribe',
+    },
+    {
+      label: 'Map generation prompts',
+      description: 'Your map prompt and theme; campaign secrets only if you check the explicit opt-in.',
+      copyKeyword: 'map',
+    },
+    {
+      label: 'Authorized supports',
+      description: 'Practical access supports a participant has explicitly consented to share with AI narration.',
+      copyKeyword: 'consent',
+    },
+  ] satisfies readonly AiExternalProviderContextCategory[],
+  exclusions: [
+    'Stored API keys (write-only; never sent to any provider)',
+    'DM-only secrets by default (hidden entities, dmSecret fields, unexplored locations)',
+    "Other campaigns' data",
+    'Map campaign secrets unless you explicitly opt in per request',
+  ],
+  retentionNote:
+    "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
+} as const;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
