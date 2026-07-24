@@ -1232,6 +1232,23 @@ h1, h2, h3, h4, h5, h6 {
   overflow-wrap: anywhere;
 }
 
+/* Accessible name reveal on focus/hover/touch (issue #632) */
+.cf-name-reveal {
+  min-width: 0;
+  max-width: 100%;
+}
+.cf-name-reveal:focus-visible,
+.cf-name-reveal:hover,
+.cf-card-hover:focus-within .cf-name-reveal,
+.cf-card-hover:hover .cf-name-reveal,
+a:focus-visible .cf-name-reveal,
+a:hover .cf-name-reveal {
+  overflow: visible;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 /* Mobile bottom tab bar */
 .cf-tabbar {
   position: fixed;
