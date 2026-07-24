@@ -26,11 +26,10 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build once, share everywhere. Installs deps (cached) and builds every
-  # workspace's dist a single time, then publishes schema/server/web dist as an
-  # artifact. Downstream jobs download it instead of rebuilding — this removes
-  # the ~4 redundant `npm run build` invocations the matrix + coverage + e2e
-  # jobs used to each perform.
+  # Build once for jobs that consume shared dist (build-test-24, e2e-web).
+  # Installs deps (cached) and builds every workspace's dist a single time,
+  # then publishes schema/server/web dist as an artifact. The coverage job is
+  # independent: it starts immediately and builds only packages/schema itself.
   # ---------------------------------------------------------------------------
   build:
     runs-on: ubuntu-latest
@@ -159,8 +158,9 @@ jobs:
 
   # Authoritative server test gate: the full unit (test/unit/*.spec.ts) + e2e
   # (test/*.e2e-spec.ts) suite, run exactly once, with coverage instrumentation.
-  # `test:cov` runs `nest build` internally, so it only needs the schema dist
-  # (server compiles against @campfire/schema) — supplied by the `build` artifact.
+  # Starts immediately (no `needs: build`) so coverage can overlap the build
+  # job. `test:cov` runs `nest build` internally and only needs schema dist
+  # first — built locally in this job rather than downloaded from `build`.
   coverage:
     runs-on: ubuntu-latest
     steps:
