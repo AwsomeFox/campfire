@@ -33,21 +33,40 @@ const SERVER_DIST_ENTRY = path.resolve(__dirname, '..', 'dist', 'main.js');
 const CHILD_BOOT_TIMEOUT_MS = 15_000;
 const CHILD_POLL_INTERVAL_MS = 100;
 const CHILD_KILL_GRACE_MS = 2_000;
+/** Retries when another Jest worker claims the same ephemeral port between probe and listen. */
+const SPAWN_PORT_ATTEMPTS = 5;
 
-/** Picks a free TCP port by binding to port 0 and reading back what the OS assigned. */
-async function getFreePort(): Promise<number> {
+interface ReservedPort {
+  port: number;
+  /** Keep holding the bind until release — used for "unreachable issuer" fixtures. */
+  release(): Promise<void>;
+}
+
+/**
+ * Allocates an ephemeral TCP port the same way Nest's `app.listen(port)` binds
+ * (all interfaces). Holding the socket open until `release()` prevents another
+ * parallel Jest worker from stealing the port in the probe→listen window.
+ */
+async function reservePort(): Promise<ReservedPort> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
     srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
+    // No host argument: match Nest's default listen family (`::` / dual-stack on
+    // Linux). Probing only `127.0.0.1` left `:::port` free for other workers.
+    srv.listen(0, () => {
       const address = srv.address();
       if (!address || typeof address === 'string') {
         srv.close();
         reject(new Error('failed to allocate a free port'));
         return;
       }
-      const { port } = address;
-      srv.close((err) => (err ? reject(err) : resolve(port)));
+      resolve({
+        port: address.port,
+        release: () =>
+          new Promise((res, rej) => {
+            srv.close((err) => (err ? rej(err) : res()));
+          }),
+      });
     });
   });
 }
@@ -68,6 +87,11 @@ interface AppProcess {
  * `envOverrides` may be a plain object, or a function of the allocated port
  * (needed for OIDC_REDIRECT_URI, which must match this app instance's own
  * port — see oidcEnvFor below).
+ *
+ * Port allocation races under parallel Jest workers (`maxWorkers > 1`): the
+ * probe socket must be closed before the child can bind, so another suite can
+ * claim the same ephemeral port. We close immediately before spawn and retry
+ * on EADDRINUSE.
  */
 async function spawnApp(
   envOverrides: Record<string, string | undefined> | ((port: number) => Record<string, string | undefined>),
@@ -78,7 +102,30 @@ async function spawnApp(
     );
   }
 
-  const port = await getFreePort();
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= SPAWN_PORT_ATTEMPTS; attempt++) {
+    try {
+      return await spawnAppOnce(envOverrides);
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('EADDRINUSE') || attempt === SPAWN_PORT_ATTEMPTS) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function spawnAppOnce(
+  envOverrides: Record<string, string | undefined> | ((port: number) => Record<string, string | undefined>),
+): Promise<AppProcess> {
+  // Reserve, then release immediately: Nest needs the port free to bind. The
+  // outer spawnApp retries if another worker wins the race.
+  const reserved = await reservePort();
+  const port = reserved.port;
+  await reserved.release();
+
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-oidc-e2e-'));
   const baseUrl = `http://127.0.0.1:${port}`;
   const resolvedOverrides = typeof envOverrides === 'function' ? envOverrides(port) : envOverrides;
@@ -583,9 +630,11 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
   });
 
   it('maps an unreachable discovery endpoint to provider unavailable recovery', async () => {
-    const unreachablePort = await getFreePort();
+    // Port 1 is unprivileged and never listening — avoid getFreePort() here:
+    // under parallel Jest workers another suite can bind that ephemeral port
+    // and make the "unreachable" issuer unexpectedly reachable.
     const app = await bootApp((port) => ({
-      OIDC_ISSUER: `http://127.0.0.1:${unreachablePort}`,
+      OIDC_ISSUER: 'http://127.0.0.1:1',
       OIDC_CLIENT_ID: 'test-client',
       OIDC_CLIENT_SECRET: 'test-secret',
       OIDC_REDIRECT_URI: `http://127.0.0.1:${port}/api/v1/auth/oidc/callback`,
