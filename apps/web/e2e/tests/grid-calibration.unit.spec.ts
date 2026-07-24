@@ -97,11 +97,15 @@ test.describe('snapLayerPxToGrid honours offset, cell size, and rotation (issue 
   });
 
   test('rotated snap centres are exactly one cell apart along the rotated axis', () => {
-    const cal = calibrationToPx(resolveGridCalibration({ gridSize: 10, gridRotation: 90 })!, 1000);
-    // At 90°, the grid's +x axis points down the screen. Snapped centres still tile a
-    // 100px lattice; two nearby points one cell apart along that axis differ by ~100px.
-    const a = snapLayerPxToGrid({ x: 10, y: 40 }, cal);
-    const b = snapLayerPxToGrid({ x: 10, y: 160 }, cal);
+    // Rotation stays within the encounter schema's validated ±45° domain (issue #417).
+    const deg = 45;
+    const cal = calibrationToPx(resolveGridCalibration({ gridSize: 10, gridRotation: deg })!, 1000);
+    // Snapped centres tile a 100px lattice rotated by 45°. Stepping a start point by exactly
+    // one cell along the rotated +x axis lands it in the adjacent cell, so the two snapped
+    // centres are ~100px apart.
+    const rad = (deg * Math.PI) / 180;
+    const a = snapLayerPxToGrid({ x: 300, y: 300 }, cal);
+    const b = snapLayerPxToGrid({ x: 300 + 100 * Math.cos(rad), y: 300 + 100 * Math.sin(rad) }, cal);
     const dist = Math.hypot(b.x - a.x, b.y - a.y);
     expect(dist).toBeCloseTo(100, 3);
   });

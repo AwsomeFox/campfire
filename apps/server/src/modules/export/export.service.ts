@@ -945,13 +945,19 @@ export class ExportService {
       `- Size: ${e.gridSize ?? '_off_'}`,
       `- Scale: ${e.gridScale != null ? `${e.gridScale} ${e.gridUnit ?? ''}`.trim() : '_unset_'}`,
       `- Snap: ${e.gridSnap ? 'yes' : 'no'}`,
-      // Grid calibration (issue #417) — only surfaced when it differs from the top-left
-      // square default so an unaligned export stays terse.
-      ...(e.gridOffsetX || e.gridOffsetY || e.gridRotation || e.gridCellHeight != null
+      // Grid calibration (issue #417) — surfaced whenever ANY field differs from the top-left
+      // square default (origin 0,0; square cells; no rotation; default opacity 0.35) so an
+      // unaligned export stays terse but no persisted calibration state is ever lost.
+      ...(e.gridOffsetX ||
+      e.gridOffsetY ||
+      e.gridRotation ||
+      e.gridCellHeight != null ||
+      (e.gridOpacity != null && e.gridOpacity !== 0.35)
         ? [
             `- Origin offset: ${e.gridOffsetX}%, ${e.gridOffsetY}% (of map width)`,
             `- Cell height: ${e.gridCellHeight != null ? `${e.gridCellHeight}%` : '_square_'}`,
             `- Rotation: ${e.gridRotation}°`,
+            `- Opacity: ${e.gridOpacity ?? 0.35}`,
           ]
         : []),
       '',

@@ -93,6 +93,11 @@ test.describe('grid calibration — issue #417', () => {
   });
 
   test.describe('DM-only', () => {
+    // Declared at the TOP of the block so the player storage state actually applies to the
+    // test below (a test.use placed after the test does not reliably scope to it) — the
+    // forbidden PATCH must run as a player for this to prove DM-only enforcement.
+    test.use({ storageState: stateFor('player') });
+
     test('a player cannot calibrate the grid', async ({ page, browser }) => {
       // Create + enable the grid as DM, then attempt the calibration PATCH as a player.
       const dm = await browser.newContext({ storageState: stateFor('dm') });
@@ -105,7 +110,6 @@ test.describe('grid calibration — issue #417', () => {
       expect(forbidden.ok()).toBe(false);
       expect([401, 403]).toContain(forbidden.status());
     });
-    test.use({ storageState: stateFor('player') });
   });
 
   test.describe('calibration controls', () => {
