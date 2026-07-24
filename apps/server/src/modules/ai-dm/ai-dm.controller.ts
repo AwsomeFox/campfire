@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Put } from '@nestjs/common';
+import { Body, Controller, DefaultValuePipe, Get, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -76,5 +76,28 @@ export class AiDmController {
   async reset(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return this.aiDm.resetUsage(id, user);
+  }
+
+  @Get('usage-history')
+  @ApiOperation({
+    summary: 'Per-turn AI DM usage history (issue #1060)',
+    description:
+      'dm role required. Returns per-turn token usage records (newest-first), used by the DM settings usage sparkline ' +
+      'and the audit view. Each row records one metered spend: driver step, co-DM draft, or scribe run. ' +
+      'Response contains items + summary (totalTokens, count). Bounded by ?limit= (default 100, max 500); optional ' +
+      '?since=ISO date to scope to a time window.',
+  })
+  @ApiResponse({ status: 200, description: 'The usage-history entries + summary.' })
+  async usageHistory(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+    @Query('since') since: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.aiDm.listUsageHistory(id, {
+      limit,
+      ...(since && typeof since === 'string' && since.length > 0 ? { sinceIso: since } : {}),
+    });
   }
 }

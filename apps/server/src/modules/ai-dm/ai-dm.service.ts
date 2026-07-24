@@ -1,9 +1,9 @@
 import { ConflictException, ForbiddenException, Inject, Injectable } from '@nestjs/common';
-import { eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, Role } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats } from '../../db/schema';
+import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -449,7 +449,7 @@ export class AiDmService {
   async meterTurn(
     campaignId: number,
     tokensUsed: number,
-    audit: { actor: string; action?: string; detail?: string },
+    audit: { actor: string; action?: string; detail?: string; model?: string },
   ): Promise<{ seat: AiDmSeat; tokensUsed: number; budgetRemaining: number }> {
     const cost = Math.max(0, Math.floor(tokensUsed));
     const ts = nowIso();
@@ -486,10 +486,60 @@ export class AiDmService {
       detail: audit.detail ?? `+${cost} tokens, ${newTokensUsed}/${tokenBudget}`,
     });
 
+    // #1060: record per-turn usage for the history/sparkline. Best-effort — a failure
+    // here must not break the metering transaction the driver depends on.
+    if (cost > 0) {
+      try {
+        await this.db.insert(aiDmUsageHistory).values({
+          campaignId,
+          tokensUsed: cost,
+          action: audit.action ?? 'ai-dm.driver.turn',
+          model: audit.model ?? '',
+          actor: audit.actor,
+          createdAt: ts,
+        });
+      } catch {
+        // best-effort; the metering transaction above already succeeded
+      }
+    }
+
     return {
       seat: await this.getSeat(campaignId),
       tokensUsed: cost,
       budgetRemaining: Math.max(0, tokenBudget - newTokensUsed),
     };
+  }
+
+  /**
+   * List per-turn usage history for a campaign (issue #1060). Newest-first, capped at
+   * `limit` (default 100, max 500). Used by the DM's usage sparkline and the audit view.
+   * The endpoint that exposes this is DM-only; the read itself is unfiltered because
+   * history is DM-only material by construction.
+   */
+  async listUsageHistory(
+    campaignId: number,
+    opts: { limit?: number; sinceIso?: string } = {},
+  ): Promise<AiDmUsageHistoryResponse> {
+    const limit = Math.min(500, Math.max(1, opts.limit ?? 100));
+    const conditions = [eq(aiDmUsageHistory.campaignId, campaignId)];
+    if (opts.sinceIso) conditions.push(gte(aiDmUsageHistory.createdAt, opts.sinceIso));
+    const rows = await this.db
+      .select()
+      .from(aiDmUsageHistory)
+      .where(conditions.length === 1 ? conditions[0] : and(...conditions))
+      .orderBy(desc(aiDmUsageHistory.createdAt))
+      .limit(limit);
+
+    const items: AiDmUsageHistoryEntry[] = rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      tokensUsed: r.tokensUsed,
+      action: r.action,
+      model: r.model,
+      actor: r.actor,
+      createdAt: r.createdAt,
+    }));
+    const totalTokens = items.reduce((sum, r) => sum + r.tokensUsed, 0);
+    return { items, totalTokens, count: items.length };
   }
 }
