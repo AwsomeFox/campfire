@@ -38,7 +38,13 @@ export default function PartyPage() {
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   // Move-to-Trash from the roster (issue #716): a trashed card is removed from the
   // list immediately and an Undo snackbar offers a same-page restore. Delayed restore
   // remains available from the campaign Trash. Only one undo is outstanding at a time.

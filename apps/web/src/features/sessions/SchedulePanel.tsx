@@ -96,7 +96,13 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(() => searchParams.get('action') === 'new');
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setShowAddForm(true);
+    }
+  }, [searchParams]);
 
   // Issue #820: cancelled-night deep link from the notifications bell.
   const cancelledIdRaw = searchParams.get('cancelled');

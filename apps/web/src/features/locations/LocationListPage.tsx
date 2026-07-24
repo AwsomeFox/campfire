@@ -4,7 +4,7 @@
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -54,13 +54,20 @@ export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   const [newName, setNewName] = useState('');
   const [newKind, setNewKind] = useState('');
   const [newParentId, setNewParentId] = useState('');

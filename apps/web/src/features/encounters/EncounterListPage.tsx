@@ -6,7 +6,7 @@
  * for the DM, cards linking to the live tracker.
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -48,12 +48,19 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 export default function EncounterListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
+  const [searchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   const [generating, setGenerating] = useState(false);
   const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
     campaignId: id,
