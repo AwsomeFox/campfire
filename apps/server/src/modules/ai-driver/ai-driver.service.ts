@@ -284,7 +284,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
-  // encounter / turn flow
+  // encounter / turn flow — includes create_encounter so the AI can originate a fight
+  // during play (#1075).
+  'create_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',
