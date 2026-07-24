@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import JSZip from 'jszip';
 import { eq } from 'drizzle-orm';
-import type { EncounterWithCombatants } from '@campfire/schema';
+import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs } from '../../db/schema';
 import { CampaignsService } from '../campaigns/campaigns.service';
@@ -25,8 +25,19 @@ import { SupportPreferencesService } from '../session-zero/support-preferences.s
 import { InventoryService } from '../inventory/inventory.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import type { RequestUser } from '../../common/user.types';
+import {
+  archiveDisplayStem,
+  archiveRecordFilename,
+  buildMarkdownArchiveManifest,
+  sha256Hex,
+  stemCollisionWarnings,
+  typedRecordId,
+  type ArchiveModuleRepresentation,
+  type ArchiveRecordEntry,
+  type ArchiveTruncation,
+} from './markdown-archive';
 
-/** Filesystem/URL-safe slug for filenames — lowercase, alnum + hyphens. */
+/** Filesystem/URL-safe ASCII slug for download filenames — lowercase, alnum + hyphens. */
 export function slugify(name: string): string {
   const slug = name
     .toLowerCase()
@@ -37,19 +48,10 @@ export function slugify(name: string): string {
 }
 
 /**
- * De-duplicating filename allocator (issue #530). JSZip's `folder.file(name, ...)`
- * silently overwrites an existing entry, so two NPCs named "Bob" collapse into a
- * single `bob.md` and one row of data is lost. This helper hands out distinct
- * names within a folder: the first "bob" gets `bob`, the second gets `bob-2`,
- * then `bob-3`, and so on.
- *
- * `seen` is a Set the caller owns (one per folder) so it tracks names across
- * successive calls. Returns the allocated base name (no extension) — the caller
- * appends `.md`. Deterministic ONLY insofar as the caller's iteration order is:
- * the `-2` suffix attaches to the second occurrence in that order. The markdown
- * loops below sort each entity list by id before allocating so the result is
- * reproducible regardless of the underlying DB row order (several list services
- * have no ORDER BY).
+ * De-duplicating filename allocator retained for callers that still need
+ * order-based `-2` suffixes (issue #530). Markdown archive entity paths no
+ * longer use this — issue #863 switched them to stable `{stem}__{type}-{id}.md`
+ * names via {@link archiveRecordFilename}.
  */
 export function uniqueFilename(seen: Set<string>, base: string): string {
   if (!seen.has(base)) {
@@ -63,41 +65,10 @@ export function uniqueFilename(seen: Set<string>, base: string): string {
   return name;
 }
 
-/**
- * Builds one human-readable warning line per slug that collided in a folder
- * (issue #530). `allocations` is the ordered list of [originalSlug, allocatedBase]
- * pairs the loop recorded — one entry per entity, in iteration order. A slug
- * appears in a warning only when it occurred 2+ times, and the filenames listed
- * are the ACTUAL bases uniqueFilename handed out for those occurrences — NOT a
- * reconstruction from the count. Reconstruction would lie when a real entity's
- * slug is itself a de-dup suffix (e.g. slugs `bob`, `bob`, `bob-2`: the allocator
- * hands out `bob`, `bob-3`, `bob-2`, but naive `bob, bob-2` reconstruction would
- * claim the second file is `bob-2` when it is actually `bob-3`). Tracking the
- * real allocations keeps the warning truthful in every case.
- */
-function pushCollisionWarning(
-  warnings: string[],
-  label: string,
-  allocations: Array<[originalSlug: string, allocatedBase: string]>,
-): void {
-  // Group the allocated bases by the ORIGINAL slug each entity passed in, keeping
-  // insertion order so the filenames read in the order they were written.
-  const bySlug = new Map<string, string[]>();
-  for (const [slug, allocated] of allocations) {
-    const list = bySlug.get(slug);
-    if (list) list.push(allocated);
-    else bySlug.set(slug, [allocated]);
-  }
-  for (const [slug, allocatedBases] of bySlug) {
-    if (allocatedBases.length < 2) continue;
-    // The warning names the SLUG (the slugified filename base), not the original
-    // display name — multiple distinct display names can collapse to one slug
-    // (case/punctuation), so naming the slug is the honest, unambiguous framing.
-    warnings.push(
-      `${allocatedBases.length} ${label}s shared the slug '${slug}' and were exported as ${allocatedBases.map((b) => `${b}.md`).join(', ')}.`,
-    );
-  }
-}
+/** Re-export path helpers so unit tests can import from the service module. */
+export { archiveDisplayStem, archiveRecordFilename, typedRecordId } from './markdown-archive';
+
+type ExportData = Awaited<ReturnType<ExportService['buildExport']>>;
 
 @Injectable()
 export class ExportService {
@@ -374,153 +345,391 @@ export class ExportService {
   }
 
   /**
-   * Renders the same export data as a zip of markdown files.
+   * Renders the same export data as a zip of markdown files (issue #863).
    *
-   * Returns the zip buffer plus a `warnings` array (issue #530): one human-readable
-   * line per folder where two or more entities shared a slug and would have silently
-   * overwritten each other under the old `${slugify(name)}.md` scheme. The buffer is
-   * what the controller streams as `application/zip`; the warnings are surfaced for
-   * any caller (UI, MCP, future JSON-wrapped variant) to flag the collision. They are
-   * also written into the archive as `warnings.txt` when non-empty, so a human
-   * unzipping the download sees the note without a UI — and they never enter
-   * `campaign.json`, which is the strict manifest POST /campaigns/import/archive
-   * reads back, so the round-trip is untouched.
+   * Entity paths use collision-proof `{stem}__{type}-{id}.md` names that preserve
+   * Unicode display stems. A versioned `archive-manifest.json` records app/schema
+   * version, secrecy profile, per-type counts, checksums, exclusions/truncations,
+   * and asserts every machine-export module is represented or declared excluded.
+   *
+   * Returns `{ buffer, warnings }`: warnings are informational (shared display
+   * stems, skipped attachment bytes) and also written as `warnings.txt` when
+   * non-empty. They never enter `campaign.json` (the import round-trip payload).
    */
   async buildMarkdownZip(campaignId: number, user: RequestUser): Promise<{ buffer: Buffer; warnings: string[] }> {
     const data = await this.buildExport(campaignId, user);
     const zip = new JSZip();
     const warnings: string[] = [];
+    const fileChecksums: Record<string, string> = {};
+    const records: ArchiveRecordEntry[] = [];
+
+    const writeFile = (path: string, content: string | Buffer) => {
+      zip.file(path, content);
+      fileChecksums[path] = sha256Hex(content);
+    };
+
+    const writeRecord = (
+      folder: string,
+      type: string,
+      id: number | string,
+      name: string,
+      content: string,
+      stemAllocations?: Array<{ stem: string; filename: string }>,
+    ) => {
+      const filename = archiveRecordFilename(type, id, name);
+      const path = `${folder}/${filename}`;
+      writeFile(path, content);
+      records.push({ type, id, path, checksum: fileChecksums[path] });
+      stemAllocations?.push({ stem: archiveDisplayStem(name), filename });
+    };
 
     // Machine-readable manifest (issue #236): embed the full structured export as
     // campaign.json so the zip is round-trippable. The markdown files below are for
     // humans; campaign.json is what POST /campaigns/import/archive reads to recreate
     // every row, and it names each attachment's bytes under uploads/ (attachments[].file)
     // so maps/portraits come back with their references remapped rather than dropped.
-    zip.file('campaign.json', JSON.stringify(data));
+    const campaignJson = JSON.stringify(data);
+    zip.file('campaign.json', campaignJson);
 
-    zip.file('campaign.md', this.campaignMarkdown(data.campaign, data.notes));
+    // Backlink index: notes/comments anchored to entities, plus NPC→faction membership.
+    const backlinks = this.buildBacklinkIndex(data);
 
-    // Per-folder seen-sets drive uniqueFilename (issue #530): each folder de-dups
-    // independently, so a quest and an NPC sharing a slug don't interfere. Each
-    // loop also records its [originalSlug, allocatedBase] allocations so the
-    // collision warning can name the ACTUAL filenames written (see
-    // pushCollisionWarning for why reconstruction-from-counts would lie).
-    //
-    // Determinism: filename allocation (-2, -3 suffix assignment) is order-
-    // dependent, and several list services return rows without a guaranteed
-    // ORDER BY. Each list is sorted by id (a stable, monotonic key) before
-    // allocation so the same campaign exports to the same filenames on every
-    // run and across DB engines — the lowest-id entity keeps the bare slug,
-    // the next collision gets -2, etc.
-    const questsFolder = zip.folder('quests')!;
-    const questsSeen = new Set<string>();
-    const questsAllocated: Array<[string, string]> = [];
+    writeFile('campaign.md', this.campaignMarkdown(data.campaign, data.notes));
+
+    const questAlloc: Array<{ stem: string; filename: string }> = [];
     for (const q of [...data.quests].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(q.title);
-      const base = uniqueFilename(questsSeen, slug);
-      questsAllocated.push([slug, base]);
-      questsFolder.file(`${base}.md`, this.questMarkdown(q));
+      writeRecord('quests', 'quest', q.id, q.title, this.questMarkdown(q, backlinks), questAlloc);
     }
-    pushCollisionWarning(warnings, 'quest', questsAllocated);
+    warnings.push(...stemCollisionWarnings('quest', questAlloc));
 
-    const npcsFolder = zip.folder('npcs')!;
-    const npcsSeen = new Set<string>();
-    const npcsAllocated: Array<[string, string]> = [];
+    const npcAlloc: Array<{ stem: string; filename: string }> = [];
     for (const n of [...data.npcs].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(n.name);
-      const base = uniqueFilename(npcsSeen, slug);
-      npcsAllocated.push([slug, base]);
-      npcsFolder.file(`${base}.md`, this.npcMarkdown(n));
+      writeRecord('npcs', 'npc', n.id, n.name, this.npcMarkdown(n, backlinks), npcAlloc);
     }
-    pushCollisionWarning(warnings, 'NPC', npcsAllocated);
+    warnings.push(...stemCollisionWarnings('NPC', npcAlloc));
 
-    const locationsFolder = zip.folder('locations')!;
-    const locationsSeen = new Set<string>();
-    const locationsAllocated: Array<[string, string]> = [];
+    const locationAlloc: Array<{ stem: string; filename: string }> = [];
     for (const l of [...data.locations].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(l.name);
-      const base = uniqueFilename(locationsSeen, slug);
-      locationsAllocated.push([slug, base]);
-      locationsFolder.file(`${base}.md`, this.locationMarkdown(l));
+      writeRecord('locations', 'location', l.id, l.name, this.locationMarkdown(l, backlinks), locationAlloc);
     }
-    pushCollisionWarning(warnings, 'location', locationsAllocated);
+    warnings.push(...stemCollisionWarnings('location', locationAlloc));
 
-    const sessionsFolder = zip.folder('sessions')!;
-    const sessionsSeen = new Set<string>();
-    const sessionsAllocated: Array<[string, string]> = [];
+    const sessionAlloc: Array<{ stem: string; filename: string }> = [];
     for (const s of [...data.sessions].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(s.title || `session-${s.number}`);
-      const base = uniqueFilename(sessionsSeen, slug);
-      sessionsAllocated.push([slug, base]);
-      sessionsFolder.file(`${base}.md`, this.sessionMarkdown(s));
+      const name = s.title || `Session ${s.number}`;
+      writeRecord('sessions', 'session', s.id, name, this.sessionMarkdown(s, backlinks), sessionAlloc);
     }
-    pushCollisionWarning(warnings, 'session', sessionsAllocated);
+    warnings.push(...stemCollisionWarnings('session', sessionAlloc));
 
-    const charactersFolder = zip.folder('characters')!;
-    const charactersSeen = new Set<string>();
-    const charactersAllocated: Array<[string, string]> = [];
+    const characterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const c of [...data.characters].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(c.name);
-      const base = uniqueFilename(charactersSeen, slug);
-      charactersAllocated.push([slug, base]);
-      charactersFolder.file(`${base}.md`, this.characterMarkdown(c));
+      writeRecord('characters', 'character', c.id, c.name, this.characterMarkdown(c, backlinks), characterAlloc);
     }
-    pushCollisionWarning(warnings, 'character', charactersAllocated);
+    warnings.push(...stemCollisionWarnings('character', characterAlloc));
 
-    const encountersFolder = zip.folder('encounters')!;
-    const encountersSeen = new Set<string>();
-    const encountersAllocated: Array<[string, string]> = [];
+    // Encounter combat logs are markdown-only enrichment (not part of campaign.json).
+    // Batch-fetch all encounters' events in a single query to avoid an N+1 on large
+    // campaigns (issue #863). Export is DM-scoped, so no viewer redaction is needed.
+    const encounterEvents = await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id));
+
+    const encounterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {
-      const slug = slugify(e.name);
-      const base = uniqueFilename(encountersSeen, slug);
-      encountersAllocated.push([slug, base]);
-      encountersFolder.file(`${base}.md`, this.encounterMarkdown(e));
+      writeRecord(
+        'encounters',
+        'encounter',
+        e.id,
+        e.name,
+        this.encounterMarkdown(e, encounterEvents.get(e.id) ?? [], backlinks),
+        encounterAlloc,
+      );
     }
-    pushCollisionWarning(warnings, 'encounter', encountersAllocated);
+    warnings.push(...stemCollisionWarnings('encounter', encounterAlloc));
 
-    // Issue #87: embed the actual attachment bytes (maps, portraits, images) under
-    // uploads/ so the export is self-contained and its references resolve. A file
-    // missing on disk is skipped (not fatal — same row-without-file case as #84) and
-    // recorded in the manifest as skipped so the loss is visible, never silent.
+    const factionAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const f of [...data.factions].sort((a, b) => a.id - b.id)) {
+      writeRecord('factions', 'faction', f.id, f.name, this.factionMarkdown(f, backlinks), factionAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('faction', factionAlloc));
+
+    const storyAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const a of [...data.storyArcs].sort((x, y) => x.id - y.id)) {
+      writeRecord('storylines', 'story-arc', a.id, a.title, this.storyArcMarkdown(a), storyAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('story-arc', storyAlloc));
+
+    writeFile('timeline.md', this.timelineCalendarMarkdown(data.timelineCalendar));
+    const timelineAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const ev of [...data.timelineEvents].sort((a, b) => a.id - b.id)) {
+      writeRecord('timeline-events', 'timeline-event', ev.id, ev.title, this.timelineEventMarkdown(ev), timelineAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('timeline-event', timelineAlloc));
+
+    writeFile('session-zero.md', this.sessionZeroMarkdown(data.sessionZero));
+    writeFile('inventory.md', this.inventoryMarkdown(data.inventory, data.treasury));
+
+    const noteAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const n of [...data.notes].sort((a, b) => a.id - b.id)) {
+      const name = n.body.trim().slice(0, 60) || `note-${n.id}`;
+      writeRecord('notes', 'note', n.id, name, this.noteMarkdown(n), noteAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('note', noteAlloc));
+
+    const commentAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const c of [...data.comments].sort((a, b) => a.id - b.id)) {
+      const name = c.body.trim().slice(0, 60) || `comment-${c.id}`;
+      writeRecord('comments', 'comment', c.id, name, this.commentMarkdown(c), commentAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('comment', commentAlloc));
+
+    writeFile('members.md', this.membersMarkdown(data.members));
+
+    // Only record a truncation when the audit snapshot actually dropped rows. The export
+    // path (AuditService.listForCampaignExport) keyset-pages the full retained trail, so
+    // `auditMeta.truncated` — not a fixed 500-row cap — is the real omission count
+    // (retention pruning during the walk and/or rows appended after the snapshot ceiling).
+    const auditTruncated = data.auditMeta.truncated;
+    const truncations: ArchiveTruncation[] =
+      auditTruncated > 0
+        ? [
+            {
+              module: 'audit',
+              exported: data.audit.length,
+              note:
+                `${auditTruncated} audit row(s) are missing from this snapshot relative to the ` +
+                `capture ceiling (id <= ${data.auditMeta.cutoff.snapshotMaxId}): retention pruning ` +
+                `during export and/or rows appended after the cutoff. See auditMeta in campaign.json ` +
+                `and page GET /api/v1/campaigns/:id/audit for the live log.`,
+            },
+          ]
+        : [];
+    writeFile('audit.md', this.auditMarkdown(data.audit, auditTruncated));
+
+    const proposalAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const p of [...data.proposals].sort((a, b) => a.id - b.id)) {
+      const name = `${p.entityType}-${p.entityId ?? 'new'}-${p.status}`;
+      writeRecord('proposals', 'proposal', p.id, name, this.proposalMarkdown(p), proposalAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('proposal', proposalAlloc));
+
+    const revisionAlloc: Array<{ stem: string; filename: string }> = [];
+    for (const r of [...data.revisions].sort((a, b) => a.id - b.id)) {
+      const name = `${r.entityType}-${r.entityId}-${r.id}`;
+      writeRecord('revisions', 'revision', r.id, name, this.revisionMarkdown(r), revisionAlloc);
+    }
+    warnings.push(...stemCollisionWarnings('revision', revisionAlloc));
+
+    // Issue #87 / #863: embed attachment bytes; build references from every owner type
+    // (campaign map, character portraits, encounter battle maps).
     const skipped: typeof data.attachments = [];
     for (const a of data.attachments) {
       const bytes = this.attachments.readBytesIfPresent({ campaignId, id: a.id, mime: a.mime });
       if (bytes) {
         zip.file(a.file, bytes);
+        fileChecksums[a.file] = sha256Hex(bytes);
       } else {
         skipped.push(a);
+        warnings.push(`Attachment ${a.id} (${a.filename}) missing on disk — bytes omitted from uploads/.`);
       }
     }
-    zip.file('attachments.md', this.attachmentsManifestMarkdown(data.campaign, data.characters, data.attachments, skipped));
+    writeFile(
+      'attachments.md',
+      this.attachmentsManifestMarkdown(data.campaign, data.characters, data.encounters, data.attachments, skipped),
+    );
 
-    // Issue #530: surface filename collisions inside the archive itself. The
-    // warnings are informational only — the structured campaign.json manifest is
-    // what import reads, so distinct markdown filenames don't affect round-trip.
+    // AI DM seat + scribe config (issue #1078) are first-class exported data, so give
+    // them a human-readable file rather than leaving them only in campaign.json.
+    writeFile('ai.md', this.aiConfigMarkdown(data.aiSeat, data.aiScribeConfig));
+
+    const modules: Record<string, ArchiveModuleRepresentation> = {
+      campaign: { kind: 'markdown-file', path: 'campaign.md' },
+      quests: { kind: 'markdown-folder', path: 'quests/' },
+      npcs: { kind: 'markdown-folder', path: 'npcs/' },
+      locations: { kind: 'markdown-folder', path: 'locations/' },
+      sessions: { kind: 'markdown-folder', path: 'sessions/' },
+      characters: { kind: 'markdown-folder', path: 'characters/' },
+      notes: { kind: 'markdown-folder', path: 'notes/' },
+      comments: { kind: 'markdown-folder', path: 'comments/' },
+      members: { kind: 'markdown-file', path: 'members.md' },
+      audit: { kind: 'markdown-file', path: 'audit.md' },
+      auditMeta: {
+        kind: 'embedded',
+        path: 'audit.md',
+        note: 'Audit snapshot metadata (cutoff/truncation counts) lives in campaign.json; audit.md summarizes any truncation.',
+      },
+      auditNote: {
+        kind: 'embedded',
+        path: 'audit.md',
+        note: 'Human-readable audit portability note; machine copy in campaign.json.',
+      },
+      aiSeat: { kind: 'markdown-file', path: 'ai.md' },
+      aiScribeConfig: { kind: 'markdown-file', path: 'ai.md' },
+      proposals: { kind: 'markdown-folder', path: 'proposals/' },
+      encounters: { kind: 'markdown-folder', path: 'encounters/' },
+      factions: { kind: 'markdown-folder', path: 'factions/' },
+      storyArcs: { kind: 'markdown-folder', path: 'storylines/' },
+      timelineEvents: { kind: 'markdown-folder', path: 'timeline-events/' },
+      timelineCalendar: { kind: 'markdown-file', path: 'timeline.md' },
+      sessionZero: { kind: 'markdown-file', path: 'session-zero.md' },
+      inventory: { kind: 'embedded', path: 'inventory.md', note: 'Items listed in inventory.md' },
+      treasury: { kind: 'embedded', path: 'inventory.md', note: 'Coin totals listed in inventory.md' },
+      revisions: { kind: 'markdown-folder', path: 'revisions/' },
+      attachments: { kind: 'markdown-file', path: 'attachments.md' },
+      attachmentsNote: {
+        kind: 'embedded',
+        path: 'attachments.md',
+        note: 'Human-readable attachment cross-reference; machine note lives in campaign.json',
+      },
+      participantSupportNote: {
+        kind: 'excluded',
+        reason:
+          'Participant-owned access-support preferences are intentionally excluded from campaign exports; use GET /campaigns/:id/export/me or full-server backup.',
+      },
+    };
+
+    const counts: Record<string, number> = {
+      quests: data.quests.length,
+      npcs: data.npcs.length,
+      locations: data.locations.length,
+      sessions: data.sessions.length,
+      characters: data.characters.length,
+      notes: data.notes.length,
+      comments: data.comments.length,
+      members: data.members.length,
+      audit: data.audit.length,
+      proposals: data.proposals.length,
+      encounters: data.encounters.length,
+      factions: data.factions.length,
+      storyArcs: data.storyArcs.length,
+      timelineEvents: data.timelineEvents.length,
+      inventory: data.inventory.length,
+      revisions: data.revisions.length,
+      attachments: data.attachments.length,
+      // Derive present from the ACTUAL byte reads (data.attachments.length - skipped),
+      // not the earlier existsSync-based `a.present` flag, so the two counts can never
+      // disagree if a file disappears between the existence check and the read.
+      attachmentsPresent: data.attachments.length - skipped.length,
+      attachmentsSkipped: skipped.length,
+    };
+
+    // warnings.txt is content, so write it BEFORE building the manifest via writeFile() —
+    // that checksums it into manifest.checksums.files. The manifest itself is written last
+    // and is not (cannot be) checksummed against itself.
     if (warnings.length) {
-      zip.file('warnings.txt', warnings.join('\n') + '\n');
+      writeFile('warnings.txt', warnings.join('\n') + '\n');
     }
+
+    const manifest = buildMarkdownArchiveManifest({
+      campaignId,
+      counts,
+      campaignJson,
+      fileChecksums,
+      modules,
+      exclusions: [
+        {
+          module: 'participantSupportNote',
+          reason:
+            'Participant-owned access-support preferences are intentionally excluded from campaign exports; use GET /campaigns/:id/export/me or full-server backup.',
+        },
+      ],
+      truncations,
+      // Locale-independent code-unit sort so record order is identical across machines
+      // and locales (localeCompare is locale-sensitive and would make the manifest
+      // non-deterministic).
+      records: records.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
+    });
+    zip.file('archive-manifest.json', JSON.stringify(manifest, null, 2));
 
     return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings };
   }
 
   /**
+   * Escape a free-text value for a GitHub-flavored-markdown TABLE cell. Entity names,
+   * notes, and conditions are user-authored, so an embedded `|` (column delimiter) or
+   * newline (row delimiter) would otherwise corrupt the table and desync every following
+   * cell — breaking the "verifiable manifest" guarantee (issue #863). Pipes are
+   * backslash-escaped and CR/LF collapsed to a single space; the result is trimmed.
+   */
+  private mdCell(value: unknown): string {
+    return String(value ?? '')
+      .replace(/\r\n?|\n/g, ' ')
+      .replace(/\|/g, '\\|')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private buildBacklinkIndex(data: ExportData): Map<string, string[]> {
+    const index = new Map<string, string[]>();
+    const push = (type: string, id: number | null | undefined, label: string) => {
+      if (id == null) return;
+      const key = typedRecordId(type, id);
+      const list = index.get(key);
+      if (list) list.push(label);
+      else index.set(key, [label]);
+    };
+
+    for (const n of data.notes) {
+      if (n.entityType && n.entityId != null) {
+        push(n.entityType, n.entityId, `note:${n.id}`);
+      }
+    }
+    for (const c of data.comments) {
+      push(c.entityType, c.entityId, `comment:${c.id}`);
+    }
+    for (const n of data.npcs) {
+      push('faction', n.factionId, `npc:${n.id} (${n.name})`);
+      push('location', n.locationId, `npc:${n.id} (${n.name})`);
+    }
+    for (const l of data.locations) {
+      push('location', l.parentId, `child-location:${l.id} (${l.name})`);
+    }
+    for (const q of data.quests) {
+      push('quest', q.parentId, `subquest:${q.id} (${q.title})`);
+    }
+    for (const e of data.encounters) {
+      push('location', e.locationId, `encounter:${e.id} (${e.name})`);
+      push('quest', e.questId, `encounter:${e.id} (${e.name})`);
+      push('session', e.sessionId, `encounter:${e.id} (${e.name})`);
+      if (e.mapAttachmentId != null) {
+        push('attachment', e.mapAttachmentId, `encounter-map:${e.id} (${e.name})`);
+      }
+    }
+    for (const c of data.characters) {
+      if (c.portraitUrl) {
+        const match = /\/attachments\/(\d+)\/file/.exec(c.portraitUrl);
+        if (match) push('attachment', Number(match[1]), `portrait:${c.id} (${c.name})`);
+      }
+    }
+    if (data.campaign.mapAttachmentId != null) {
+      push('attachment', data.campaign.mapAttachmentId, 'campaign-map');
+    }
+    return index;
+  }
+
+  private backlinkSection(type: string, id: number, backlinks: Map<string, string[]>): string[] {
+    const refs = backlinks.get(typedRecordId(type, id));
+    if (!refs?.length) return [];
+    return ['', '## Backlinks', '', ...refs.map((r) => `- ${r}`)];
+  }
+
+  private identityHeader(type: string, id: number, title: string): string[] {
+    return [
+      `<!-- campfire:type=${type} id=${id} -->`,
+      `# ${title}`,
+      '',
+      `- Typed ID: \`${typedRecordId(type, id)}\``,
+    ];
+  }
+
+  /**
    * Human-readable manifest cross-referencing every attachment to its embedded file
-   * and to what points at it (the campaign map, or the characters whose portrait it
-   * is), plus an explicit list of any files that were missing on disk and skipped.
+   * and to what points at it — campaign map, character portraits, AND encounter
+   * battle maps (issue #863).
    */
   private attachmentsManifestMarkdown(
-    campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>,
-    characters: Awaited<ReturnType<CharactersService['listForCampaign']>>,
-    attachments: {
-      id: number;
-      kind: string;
-      filename: string;
-      mime: string;
-      size: number;
-      file: string;
-      fileRoute: string;
-      present: boolean;
-    }[],
+    campaign: ExportData['campaign'],
+    characters: ExportData['characters'],
+    encounters: ExportData['encounters'],
+    attachments: ExportData['attachments'],
     skipped: { id: number; file: string; filename: string }[],
   ): string {
     const lines = ['# Attachments', ''];
@@ -528,9 +737,15 @@ export class ExportService {
       lines.push('_This campaign has no attachments._', '');
       return lines.join('\n');
     }
+    // Authoritative "was it embedded" truth: membership in `skipped` (which reflects the
+    // actual readBytesIfPresent() result), not the earlier existsSync-based `a.present`.
+    // This keeps the File column consistent with what the zip contains even if a file
+    // disappears between the existence check and the byte read.
+    const skippedIds = new Set(skipped.map((s) => s.id));
     lines.push(
       'Image bytes are embedded in this archive under `uploads/`. The table maps each',
-      'attachment to its file and to what references it.',
+      'attachment to its file and to what references it (campaign map, character',
+      'portraits, encounter battle maps).',
       '',
       '| ID | Kind | Filename | File | Referenced by |',
       '| --- | --- | --- | --- | --- |',
@@ -539,10 +754,13 @@ export class ExportService {
       const refs: string[] = [];
       if (campaign.mapAttachmentId === a.id) refs.push('campaign map');
       for (const c of characters) {
-        if (c.portraitUrl && c.portraitUrl.endsWith(a.fileRoute)) refs.push(`portrait: ${c.name}`);
+        if (c.portraitUrl && c.portraitUrl.endsWith(a.fileRoute)) refs.push(`portrait: ${this.mdCell(c.name)} (character:${c.id})`);
       }
-      const fileCell = a.present ? `\`${a.file}\`` : '_missing — skipped_';
-      lines.push(`| ${a.id} | ${a.kind} | ${a.filename} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
+      for (const e of encounters) {
+        if (e.mapAttachmentId === a.id) refs.push(`encounter map: ${this.mdCell(e.name)} (encounter:${e.id})`);
+      }
+      const fileCell = skippedIds.has(a.id) ? '_missing — skipped_' : `\`${this.mdCell(a.file)}\``;
+      lines.push(`| ${a.id} | ${this.mdCell(a.kind)} | ${this.mdCell(a.filename)} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
     }
     if (skipped.length) {
       lines.push('', '## Skipped (file missing on disk)', '');
@@ -553,33 +771,36 @@ export class ExportService {
     return lines.join('\n') + '\n';
   }
 
-  private campaignMarkdown(campaign: Awaited<ReturnType<CampaignsService['getOrThrow']>>, notes: Awaited<ReturnType<NotesService['listAllForCampaign']>>): string {
+  private campaignMarkdown(campaign: ExportData['campaign'], notes: ExportData['notes']): string {
     const lines = [
-      `# ${campaign.name}`,
-      '',
+      ...this.identityHeader('campaign', campaign.id, campaign.name),
       `- Status: ${campaign.status}`,
       `- Danger level: ${campaign.dangerLevel}`,
       `- Sessions played: ${campaign.sessionCount}`,
+      `- Map attachment: ${campaign.mapAttachmentId != null ? `\`${typedRecordId('attachment', campaign.mapAttachmentId)}\`` : '_none_'}`,
       '',
       '## Description',
       '',
       campaign.description || '_none_',
     ];
     if (notes.length) {
-      lines.push('', '## Notes', '');
+      lines.push('', '## Notes', '', `_${notes.length} note(s) — see \`notes/\` for full bodies._`, '');
       for (const n of notes) {
-        lines.push(`- **${n.authorName || n.authorUserId}** (${n.visibility}): ${n.body}`);
+        lines.push(`- \`${typedRecordId('note', n.id)}\` (${n.visibility}) by ${n.authorName || n.authorUserId}`);
       }
     }
     return lines.join('\n') + '\n';
   }
 
-  private questMarkdown(q: Awaited<ReturnType<QuestsService['listForCampaignWithObjectives']>>[number]): string {
+  private questMarkdown(
+    q: ExportData['quests'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
     const lines = [
-      `# ${q.title}`,
-      '',
+      ...this.identityHeader('quest', q.id, q.title),
       `- Status: ${q.status}`,
       `- Reward: ${q.reward || '_none_'}`,
+      `- Parent: ${q.parentId != null ? `\`${typedRecordId('quest', q.parentId)}\`` : '_none_'}`,
       '',
       '## Description',
       '',
@@ -594,15 +815,20 @@ export class ExportService {
     if (q.dmSecret) {
       lines.push('', '## DM Secret', '', q.dmSecret);
     }
+    lines.push(...this.backlinkSection('quest', q.id, backlinks));
     return lines.join('\n') + '\n';
   }
 
-  private npcMarkdown(n: Awaited<ReturnType<NpcsService['listForCampaign']>>[number]): string {
+  private npcMarkdown(
+    n: ExportData['npcs'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
     const lines = [
-      `# ${n.name}`,
-      '',
+      ...this.identityHeader('npc', n.id, n.name),
       `- Role: ${n.role || '_unknown_'}`,
       `- Disposition: ${n.disposition}`,
+      `- Location: ${n.locationId != null ? `\`${typedRecordId('location', n.locationId)}\`` : '_none_'}`,
+      `- Faction: ${n.factionId != null ? `\`${typedRecordId('faction', n.factionId)}\`` : '_none_'}`,
       '',
       '## Description',
       '',
@@ -611,15 +837,19 @@ export class ExportService {
     if (n.dmSecret) {
       lines.push('', '## DM Secret', '', n.dmSecret);
     }
+    lines.push(...this.backlinkSection('npc', n.id, backlinks));
     return lines.join('\n') + '\n';
   }
 
-  private locationMarkdown(l: Awaited<ReturnType<LocationsService['listForCampaign']>>[number]): string {
+  private locationMarkdown(
+    l: ExportData['locations'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
     const lines = [
-      `# ${l.name}`,
-      '',
+      ...this.identityHeader('location', l.id, l.name),
       `- Kind: ${l.kind || '_unknown_'}`,
       `- Status: ${l.status}`,
+      `- Parent: ${l.parentId != null ? `\`${typedRecordId('location', l.parentId)}\`` : '_none_'}`,
       '',
       '## Description',
       '',
@@ -628,13 +858,17 @@ export class ExportService {
     if (l.dmSecret) {
       lines.push('', '## DM Secret', '', l.dmSecret);
     }
+    lines.push(...this.backlinkSection('location', l.id, backlinks));
     return lines.join('\n') + '\n';
   }
 
-  private sessionMarkdown(s: Awaited<ReturnType<SessionsService['listRecapsForCampaign']>>[number]): string {
+  private sessionMarkdown(
+    s: ExportData['sessions'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
+    const title = `Session ${s.number}${s.title ? `: ${s.title}` : ''}`;
     const lines = [
-      `# Session ${s.number}${s.title ? `: ${s.title}` : ''}`,
-      '',
+      ...this.identityHeader('session', s.id, title),
       `- Played at: ${s.playedAt ?? '_unrecorded_'}`,
       '',
       '## Recap',
@@ -644,50 +878,436 @@ export class ExportService {
     if (s.dmSecret) {
       lines.push('', '## DM Secret', '', s.dmSecret);
     }
+    lines.push(...this.backlinkSection('session', s.id, backlinks));
     return lines.join('\n') + '\n';
   }
 
-  private characterMarkdown(c: Awaited<ReturnType<CharactersService['listForCampaign']>>[number]): string {
+  private characterMarkdown(
+    c: ExportData['characters'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
     const lines = [
-      `# ${c.name}`,
-      '',
+      ...this.identityHeader('character', c.id, c.name),
       `- Species: ${c.species || '_unknown_'}`,
       `- Class: ${c.className || '_unknown_'}`,
       `- Level: ${c.level}`,
       `- XP: ${c.xp}`,
       `- HP: ${c.hpCurrent}/${c.hpMax}`,
       `- AC: ${c.ac ?? '_unset_'}`,
+      `- Portrait: ${c.portraitUrl || '_none_'}`,
       '',
       '## Notes',
       '',
       c.notes || '_none_',
     ];
+    if (c.actions?.length) {
+      lines.push('', '## Actions / Resources', '');
+      lines.push('| Name | Kind | To hit | Damage | Notes |', '| --- | --- | --- | --- | --- |');
+      for (const a of c.actions) {
+        lines.push(`| ${this.mdCell(a.name)} | ${this.mdCell(a.kind) || '_'} | ${this.mdCell(a.toHit) || '_'} | ${this.mdCell(a.damage) || '_'} | ${this.mdCell(a.notes) || '_'} |`);
+      }
+    }
+    // Numeric sort so spell-slot levels order 1,2,…,10 rather than lexicographic 1,10,2.
+    const slotKeys = c.spellSlots
+      ? Object.keys(c.spellSlots).sort((a, b) => Number(a) - Number(b))
+      : [];
+    if (slotKeys.length) {
+      lines.push('', '## Spell slots', '');
+      for (const level of slotKeys) {
+        const slot = c.spellSlots[level];
+        lines.push(`- Level ${level}: ${slot.used}/${slot.max} used`);
+      }
+    }
     if (c.dmSecret) {
       lines.push('', '## DM Secret', '', c.dmSecret);
     }
+    lines.push(...this.backlinkSection('character', c.id, backlinks));
     return lines.join('\n') + '\n';
   }
 
-  private encounterMarkdown(e: EncounterWithCombatants): string {
+  private encounterMarkdown(
+    e: EncounterWithCombatants,
+    events: EncounterEvent[],
+    backlinks: Map<string, string[]>,
+  ): string {
     const lines = [
-      `# ${e.name}`,
-      '',
+      ...this.identityHeader('encounter', e.id, e.name),
       `- Status: ${e.status}`,
       `- Round: ${e.round}`,
+      `- Location: ${e.locationId != null ? `\`${typedRecordId('location', e.locationId)}\`` : '_none_'}`,
+      `- Quest: ${e.questId != null ? `\`${typedRecordId('quest', e.questId)}\`` : '_none_'}`,
+      `- Session: ${e.sessionId != null ? `\`${typedRecordId('session', e.sessionId)}\`` : '_none_'}`,
+      `- Map attachment: ${e.mapAttachmentId != null ? `\`${typedRecordId('attachment', e.mapAttachmentId)}\`` : '_none_'}`,
       '',
-      '## Combatants',
+      '## Grid',
+      '',
+      `- Type: ${e.gridType}`,
+      `- Size: ${e.gridSize ?? '_off_'}`,
+      `- Scale: ${e.gridScale != null ? `${e.gridScale} ${e.gridUnit ?? ''}`.trim() : '_unset_'}`,
+      `- Snap: ${e.gridSnap ? 'yes' : 'no'}`,
+      '',
+      '## Fog',
       '',
     ];
+    if (e.fog) {
+      lines.push(
+        `- Enabled: ${e.fog.enabled ? 'yes' : 'no'}`,
+        `- Revealed regions: ${e.fog.revealed.length}`,
+        '',
+        '```json',
+        JSON.stringify(e.fog, null, 2),
+        '```',
+      );
+    } else {
+      lines.push('_none_');
+    }
+
+    lines.push('', '## Combatants', '');
     if (e.combatants.length) {
-      lines.push('| Name | Kind | Initiative | HP | Conditions |', '| --- | --- | --- | --- | --- |');
+      lines.push(
+        '| Name | Kind | Initiative | HP | Token | Conditions | Links |',
+        '| --- | --- | --- | --- | --- | --- | --- |',
+      );
       for (const c of e.combatants) {
+        const token =
+          c.tokenX != null && c.tokenY != null
+            ? `${c.tokenX},${c.tokenY} (${c.tokenSize})`
+            : '_unplaced_';
+        const links = [
+          c.characterId != null ? typedRecordId('character', c.characterId) : null,
+          c.npcId != null ? typedRecordId('npc', c.npcId) : null,
+        ]
+          .filter(Boolean)
+          .join(', ') || '_';
         lines.push(
-          `| ${c.name} | ${c.kind} | ${c.initiative ?? '_unrolled_'} | ${c.hpCurrent}/${c.hpMax} | ${c.conditions.length ? c.conditions.join(', ') : '_none_'} |`,
+          `| ${this.mdCell(c.name)} | ${this.mdCell(c.kind)} | ${c.initiative ?? '_unrolled_'} | ${c.hpCurrent}/${c.hpMax} | ${token} | ${c.conditions.length ? c.conditions.map((cond) => this.mdCell(cond)).join(', ') : '_none_'} | ${links} |`,
         );
       }
     } else {
       lines.push('_none_');
     }
+
+    lines.push('', '## Combat log', '');
+    if (events.length) {
+      for (const ev of events) {
+        lines.push(
+          `- R${ev.round} \`${ev.type}\` ${ev.actor ?? '_'} → ${ev.target ?? '_'}: ${ev.detail || '_'}`,
+        );
+      }
+    } else {
+      lines.push('_none_');
+    }
+
+    lines.push(...this.backlinkSection('encounter', e.id, backlinks));
     return lines.join('\n') + '\n';
+  }
+
+  private factionMarkdown(
+    f: ExportData['factions'][number],
+    backlinks: Map<string, string[]>,
+  ): string {
+    const lines = [
+      ...this.identityHeader('faction', f.id, f.name),
+      `- Kind: ${f.kind || '_unknown_'}`,
+      `- Standing: ${f.standing}`,
+      `- Reputation: ${f.reputation}`,
+      '',
+      '## Description',
+      '',
+      f.body || '_none_',
+      '',
+      '## Goals',
+      '',
+      f.goals || '_none_',
+    ];
+    if (f.dmSecret) {
+      lines.push('', '## DM Secret', '', f.dmSecret);
+    }
+    lines.push(...this.backlinkSection('faction', f.id, backlinks));
+    return lines.join('\n') + '\n';
+  }
+
+  private storyArcMarkdown(a: ExportData['storyArcs'][number]): string {
+    const lines = [
+      ...this.identityHeader('story-arc', a.id, a.title),
+      `- Status: ${a.status}`,
+      '',
+      '## Summary',
+      '',
+      a.summary || '_none_',
+      '',
+      '## Beats',
+      '',
+    ];
+    if (!a.beats.length) {
+      lines.push('_none_');
+    } else {
+      for (const beat of [...a.beats].sort((x, y) => x.id - y.id)) {
+        lines.push(`### ${beat.title} (\`${typedRecordId('story-beat', beat.id)}\`)`, '');
+        lines.push(`- Status: ${beat.status}`);
+        if (beat.sessionId != null) lines.push(`- Session: ${typedRecordId('session', beat.sessionId)}`);
+        if (beat.questId != null) lines.push(`- Quest: ${typedRecordId('quest', beat.questId)}`);
+        if (beat.encounterId != null) lines.push(`- Encounter: ${typedRecordId('encounter', beat.encounterId)}`);
+        lines.push('', beat.body || '_none_', '');
+        if (beat.branches?.length) {
+          lines.push('Branches:', '');
+          for (const br of beat.branches) {
+            lines.push(`- ${br.label} → ${br.toBeatId != null ? typedRecordId('story-beat', br.toBeatId) : '_open_'}`);
+          }
+          lines.push('');
+        }
+      }
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  private timelineCalendarMarkdown(cal: ExportData['timelineCalendar']): string {
+    if (!cal) {
+      return ['# Timeline calendar', '', '_No calendar configured._', ''].join('\n');
+    }
+    return [
+      '# Timeline calendar',
+      '',
+      `- Campaign: ${typedRecordId('campaign', cal.campaignId)}`,
+      `- Current in-world date: ${cal.currentDate || '_unset_'}`,
+      '',
+      '## Calendar note',
+      '',
+      cal.note || '_none_',
+      '',
+    ].join('\n');
+  }
+
+  private timelineEventMarkdown(ev: ExportData['timelineEvents'][number]): string {
+    const lines = [
+      ...this.identityHeader('timeline-event', ev.id, ev.title),
+      `- In-world date: ${ev.inWorldDate || '_undated_'}`,
+      `- Era: ${ev.era || '_none_'}`,
+      `- Sort index: ${ev.sortIndex}`,
+      '',
+      '## Body',
+      '',
+      ev.body || '_none_',
+    ];
+    if (ev.dmSecret) {
+      lines.push('', '## DM Secret', '', ev.dmSecret);
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  private sessionZeroMarkdown(sz: ExportData['sessionZero']): string {
+    if (!sz) {
+      return ['# Session zero', '', '_No session-zero charter configured._', ''].join('\n');
+    }
+    const list = (items: string[]) => (items.length ? items.map((i) => `- ${i}`).join('\n') : '_none_');
+    return [
+      '# Session zero',
+      '',
+      `- Campaign: ${typedRecordId('campaign', sz.campaignId)}`,
+      '',
+      '## Lines',
+      '',
+      list(sz.lines),
+      '',
+      '## Veils',
+      '',
+      list(sz.veils),
+      '',
+      '## Safety tools',
+      '',
+      list(sz.safetyTools),
+      '',
+      '## House rules',
+      '',
+      sz.houseRules || '_none_',
+      '',
+      '## Tone & expectations',
+      '',
+      sz.toneAndExpectations || '_none_',
+      '',
+    ].join('\n');
+  }
+
+  private inventoryMarkdown(
+    items: ExportData['inventory'],
+    treasury: ExportData['treasury'],
+  ): string {
+    const lines = ['# Inventory & treasury', ''];
+    if (treasury) {
+      lines.push(
+        '## Treasury',
+        '',
+        `- CP: ${treasury.cp}`,
+        `- SP: ${treasury.sp}`,
+        `- EP: ${treasury.ep}`,
+        `- GP: ${treasury.gp}`,
+        `- PP: ${treasury.pp}`,
+        '',
+      );
+    } else {
+      lines.push('## Treasury', '', '_none_', '');
+    }
+    lines.push('## Items', '');
+    if (!items.length) {
+      lines.push('_none_', '');
+    } else {
+      lines.push('| ID | Name | Qty | Owner | Notes |', '| --- | --- | --- | --- | --- |');
+      for (const item of [...items].sort((a, b) => a.id - b.id)) {
+        const owner =
+          item.ownerType === 'character' && item.characterId != null
+            ? typedRecordId('character', item.characterId)
+            : 'party';
+        lines.push(
+          `| ${typedRecordId('inventory-item', item.id)} | ${this.mdCell(item.name)} | ${item.qty} | ${owner} | ${this.mdCell(item.notes) || '_'} |`,
+        );
+      }
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+
+  private noteMarkdown(n: ExportData['notes'][number]): string {
+    return [
+      ...this.identityHeader('note', n.id, `Note ${n.id}`),
+      `- Visibility: ${n.visibility}`,
+      `- Author: ${n.authorName || n.authorUserId}`,
+      `- Anchor: ${n.entityType && n.entityId != null ? typedRecordId(n.entityType, n.entityId) : '_unanchored_'}`,
+      '',
+      '## Body',
+      '',
+      n.body || '_none_',
+      '',
+    ].join('\n');
+  }
+
+  private commentMarkdown(c: ExportData['comments'][number]): string {
+    return [
+      ...this.identityHeader('comment', c.id, `Comment ${c.id}`),
+      `- Author: ${c.authorName || c.authorUserId}`,
+      `- Anchor: ${typedRecordId(c.entityType, c.entityId)}`,
+      `- Parent: ${c.parentId != null ? typedRecordId('comment', c.parentId) : '_none_'}`,
+      `- In character: ${c.inCharacter ? 'yes' : 'no'}`,
+      c.characterId != null ? `- Character: ${typedRecordId('character', c.characterId)}` : null,
+      '',
+      '## Body',
+      '',
+      c.body || '_none_',
+      '',
+    ]
+      .filter((line): line is string => line != null)
+      .join('\n');
+  }
+
+  private membersMarkdown(members: ExportData['members']): string {
+    const lines = ['# Members', ''];
+    if (!members.length) {
+      lines.push('_none_', '');
+      return lines.join('\n');
+    }
+    lines.push('| ID | User | Role | Character | Disabled |', '| --- | --- | --- | --- | --- |');
+    for (const m of [...members].sort((a, b) => a.id - b.id)) {
+      lines.push(
+        `| ${typedRecordId('member', m.id)} | ${this.mdCell(m.displayName || m.username || m.userId)} | ${this.mdCell(m.role)} | ${m.characterId != null ? typedRecordId('character', m.characterId) : '_'} | ${m.disabled ? 'yes' : 'no'} |`,
+      );
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private auditMarkdown(audit: ExportData['audit'], truncated = 0): string {
+    const lines = ['# Audit log', ''];
+    if (truncated > 0) {
+      lines.push(
+        `_${truncated} older/concurrent row(s) are omitted from this snapshot (see archive-manifest.json truncations and auditMeta in campaign.json)._`,
+        '',
+      );
+    }
+    if (!audit.length) {
+      lines.push('_none_', '');
+      return lines.join('\n');
+    }
+    for (const row of audit) {
+      lines.push(
+        `- ${row.createdAt} \`${row.action}\` ${row.entityType ?? '_'} ${row.entityId ?? '_'} by ${row.actor ?? '_'} — ${row.detail || ''}`,
+      );
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private aiConfigMarkdown(aiSeat: ExportData['aiSeat'], aiScribeConfig: ExportData['aiScribeConfig']): string {
+    const lines = [
+      '# AI configuration',
+      '',
+      '_DM-authored AI steering (issue #1078). Runtime usage counters and encrypted provider keys are NOT exported._',
+      '',
+      '## Co-DM seat',
+      '',
+    ];
+    if (aiSeat) {
+      lines.push(
+        `- Mode: ${aiSeat.mode}`,
+        `- Enabled: ${aiSeat.enabled ? 'yes' : 'no'}`,
+        `- Model: ${aiSeat.model || '_default_'}`,
+        `- Token budget: ${aiSeat.tokenBudget ?? '_unset_'}`,
+        '',
+        '### Instructions',
+        '',
+        aiSeat.instructions?.trim() || '_none_',
+        '',
+      );
+    } else {
+      lines.push('_No AI seat configured._', '');
+    }
+    lines.push('## Scribe', '');
+    if (aiScribeConfig) {
+      lines.push(
+        `- Post-session: ${aiScribeConfig.postSession ? 'yes' : 'no'}`,
+        `- Cron: ${aiScribeConfig.cron ? `\`${this.mdCell(aiScribeConfig.cron)}\`` : '_none_'}`,
+        `- Budget per run: ${aiScribeConfig.budgetPerRun ?? '_unset_'}`,
+        '',
+      );
+    } else {
+      lines.push('_No scribe configured._', '');
+    }
+    return lines.join('\n');
+  }
+
+  private proposalMarkdown(p: ExportData['proposals'][number]): string {
+    const entity =
+      p.entityId != null ? typedRecordId(p.entityType, p.entityId) : `${p.entityType}:_pending-create_`;
+    return [
+      ...this.identityHeader('proposal', p.id, `Proposal ${p.id}`),
+      `- Status: ${p.status}`,
+      `- Action: ${p.action}`,
+      `- Entity: ${entity}`,
+      `- Proposer: ${p.proposer || p.proposerUserId}`,
+      '',
+      '## Payload',
+      '',
+      '```json',
+      JSON.stringify(p.payload ?? {}, null, 2),
+      '```',
+      '',
+    ].join('\n');
+  }
+
+  private revisionMarkdown(r: ExportData['revisions'][number]): string {
+    return [
+      ...this.identityHeader('revision', r.id, `Revision ${r.id}`),
+      `- Entity: ${typedRecordId(r.entityType, r.entityId)}`,
+      `- Author: ${r.authorName || r.authorUserId || '_unknown_'}`,
+      r.replacedByUserId ? `- Replaced by: ${r.replacedByName || r.replacedByUserId}` : null,
+      r.replacedAt ? `- Replaced at: ${r.replacedAt}` : '- Tip: current',
+      '',
+      '## Snapshot',
+      '',
+      '```json',
+      JSON.stringify(r.snapshot ?? {}, null, 2),
+      '```',
+      '',
+    ]
+      .filter((line): line is string => line != null)
+      .join('\n');
   }
 }

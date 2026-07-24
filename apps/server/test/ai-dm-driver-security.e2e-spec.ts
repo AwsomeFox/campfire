@@ -9,7 +9,7 @@ import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-drive
  * Each test pins one of the issues #375–#387 against the deterministic offline harness (#318):
  *
  *  #377  a model-supplied `propose:false` can NOT write canon directly — the runtime forces propose.
- *  #378  administrative / economy direct-write tools (update_campaign, adjust_treasury, approve_proposal)
+ *  #378  administrative / economy direct-write tools (update_campaign, approve_proposal)
  *        are blocked server-side (default-deny allow-list), not just the old hand-picked denylist.
  *  #384  the seat is scoped to ONE campaign (entity-keyed writes to another campaign 403), and the
  *        server-wide token cap bounds the driver.
@@ -27,6 +27,9 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
+  });
+  beforeEach(() => {
+    h.resetMock();
   });
   afterAll(async () => {
     await h.close();
@@ -58,11 +61,11 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
   });
 
   // ── #378 ────────────────────────────────────────────────────────────────────
-  it('#378 update_campaign / adjust_treasury / approve_proposal are blocked (and never offered)', async () => {
+  it('#378 update_campaign / approve_proposal are blocked (and never offered)', async () => {
     const campaignId = await h.createCampaign('Sec Denylist');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
-    for (const name of ['update_campaign', 'adjust_treasury', 'approve_proposal']) {
+    for (const name of ['update_campaign', 'approve_proposal']) {
       // A blocked tool stops the turn after step 1 (tool_error), so script exactly ONE turn —
       // scripting a follow-up narration would leave it unconsumed and bleed into the next test.
       h.script({ text: 'Trying…', toolCalls: [{ id: `x-${name}`, name, arguments: { campaignId } }] });
@@ -76,10 +79,42 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
     const firstReq = h.mock.received.find((r) => (r.tools ?? []).length > 0)!;
     const offered = (firstReq.tools ?? []).map((t) => t.name);
     expect(offered).not.toContain('update_campaign');
-    expect(offered).not.toContain('adjust_treasury');
     expect(offered).not.toContain('approve_proposal');
     expect(offered).toContain('roll_dice'); // live play
+    expect(offered).toContain('adjust_treasury'); // economy live play (#1021)
     expect(offered).toContain('create_quest'); // proposal-capable canon
+  });
+
+  // ── #1021 ────────────────────────────────────────────────────────────────────
+  it('#1021 driver can directly execute adjust_treasury and add_inventory_item during live play', async () => {
+    const campaignId = await h.createCampaign('Loot Live Play');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script(
+      {
+        text: 'Awarding victory loot!',
+        toolCalls: [
+          { id: 't1', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: 50 } } },
+          { id: 'i1', name: 'add_inventory_item', arguments: { campaignId, name: 'Ruby Ring', ownerType: 'party', qty: 1 } },
+        ],
+      },
+      { text: 'The party gathers the spoils.' },
+    );
+    const res = await h.sendMessage(campaignId, { input: 'loot the room' });
+    expect(res.status).toBe(201);
+    expect(res.body.toolCalls).toEqual([
+      { name: 'adjust_treasury', isError: false, proposed: false },
+      { name: 'add_inventory_item', isError: false, proposed: false },
+    ]);
+
+    // Verify treasury and inventory persistence directly on campaign resources.
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body.gp).toBe(50);
+
+    const items = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(items.status).toBe(200);
+    expect(items.body.some((i: { name: string }) => i.name === 'Ruby Ring')).toBe(true);
   });
 
   // ── #384 part 1 ───────────────────────────────────────────────────────────────
@@ -216,6 +251,9 @@ describe('ai-dm driver — #375 pause/takeover levers are properly authorized (e
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
   });
+  beforeEach(() => {
+    h.resetMock();
+  });
   afterAll(async () => {
     await h.close();
   });
@@ -319,6 +357,9 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
   });
+  beforeEach(() => {
+    h.resetMock();
+  });
   afterAll(async () => {
     await h.close();
   });
@@ -338,11 +379,23 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
       }
     });
 
-    h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
+    h.script({
+      text: 'The torches gutter as the door swings wide.',
+      streamChunks: 4,
+      usage: { promptTokens: 8, completionTokens: 3, totalTokens: 11 },
+    });
     const res = await h.sendMessage(campaignId, { input: 'we enter' });
     sub.unsubscribe();
     expect(res.status).toBe(201);
     expect(paused).toBe(true);
+    // #1057: pause/takeover mid-turn is `frozen`, distinct from mode-switch `aborted`.
+    expect(res.body.stopReason).toBe('frozen');
+    // The provider completed a paid call before the freeze was observed. Suppress
+    // narration/tools, but account for that usage while the spend lock is held.
+    expect(res.body.tokensUsed).toBe(11);
+    const seat = await h.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(11);
+    expect(seat.body.turnCount).toBe(1);
 
     // The turn's finally/detect path must NOT stomp the mid-turn pause back to idle/running.
     const session = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);

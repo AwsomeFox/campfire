@@ -9,6 +9,7 @@ import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config
 import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { RulesModule } from '../rules/rules.module';
+import { EncountersModule } from '../encounters/encounters.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
@@ -47,6 +48,7 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     SessionZeroModule,
     CampaignsModule,
     RulesModule,
+    EncountersModule,
   ],
   controllers: [AiDriverController],
   providers: [

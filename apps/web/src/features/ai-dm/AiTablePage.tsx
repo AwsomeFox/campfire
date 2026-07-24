@@ -722,6 +722,7 @@ export default function AiTablePage() {
           <p key={addition.id}>
             {formatNarrationLogAddition(addition, {
               // Same localized copy as the visible transcript (not English fallback).
+              // Tool additions use their own spoken text (not system/info, which ignores `text`).
               formatSystem: (a) =>
                 systemText(
                   {

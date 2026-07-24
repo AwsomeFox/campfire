@@ -334,6 +334,13 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0068_inventory_qty_idempotency');
       expect(MIGRATION_NAMES).toContain('0069_inventory_qty_idempotency_created_at');
       expect(MIGRATION_NAMES).toContain('0070_notifications_data');
+      expect(MIGRATION_NAMES).toContain('0071_ai_dm_usage_history');
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_usage_history'").get(),
+      ).toBeTruthy();
+      expect(
+        (sqlite.pragma('index_list(ai_dm_usage_history)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_ai_dm_usage_history_campaign_created');
       expect(
         (sqlite.pragma('index_list(inventory_qty_idempotency)') as Array<{ name: string }>).map((index) => index.name),
       ).toEqual(expect.arrayContaining(['idx_inventory_qty_idempotency_item', 'idx_inventory_qty_idempotency_created']));

@@ -144,8 +144,17 @@ describe('list pagination (e2e, issue #71)', () => {
       expect(overlap).toHaveLength(0); // no row appears on both pages
     });
 
-    it('no paging params returns every visible note (backward compatible)', async () => {
+    it('no paging params returns a NoteListPage under the default limit', async () => {
+      // Default contract is a page object (not a bare array). With only 6 notes the
+      // default limit still returns every visible row on the first page.
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${noteCampaign}/notes`).set(dm);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        items: expect.any(Array),
+        total: 6,
+        hasMore: false,
+        nextCursor: null,
+      });
       expect(res.body.items).toHaveLength(6);
     });
 
