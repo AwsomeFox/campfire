@@ -195,14 +195,24 @@ export default function InboxPage() {
       .get<Note>(`${API}/notes/${deepInboxId}`)
       .then((note) => {
         if (cancelled || note.kind !== 'inbox') return;
-        const inject = (prev: InboxListState): InboxListState =>
-          prev.items.some((i) => i.id === note.id) ? prev : { ...prev, items: [note, ...prev.items] };
+        // Insert in sort order (not at the front): a deep-linked item is usually OLDER than
+        // the loaded first page, so prepending would break the documented newest-first order.
+        const inject =
+          (cmp: (a: Note, b: Note) => number) =>
+          (prev: InboxListState): InboxListState =>
+            prev.items.some((i) => i.id === note.id)
+              ? prev
+              : { ...prev, items: [...prev.items, note].sort(cmp) };
         if (note.resolved) {
+          // History is ordered by resolution recency (updatedAt desc, id desc).
           setView('history');
-          setHistoryList(inject);
+          setHistoryList(
+            inject((a, b) => Date.parse(b.updatedAt ?? '') - Date.parse(a.updatedAt ?? '') || b.id - a.id),
+          );
         } else {
+          // Open items are ordered newest-first by id.
           setView('open');
-          setOpenList(inject);
+          setOpenList(inject((a, b) => b.id - a.id));
           setExpandedId(note.id);
         }
       })

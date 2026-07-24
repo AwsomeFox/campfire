@@ -364,6 +364,12 @@ export class NotesService {
       q?: string;
       limit?: number;
       cursor?: string;
+      /**
+       * Internal-only: set false to skip the per-page COUNT(*) when a caller walks every
+       * page for the full item set (search/export) and never reads `total`. Not wired to
+       * any HTTP/MCP query param — `total` stays accurate for real paginated consumers.
+       */
+      countTotal?: boolean;
     } = {},
   ): Promise<NoteListPage> {
     const limit = clampNotesListLimit(filters.limit);
@@ -427,11 +433,15 @@ export class NotesService {
     } else {
       const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
       const pageConds = keyset ? [...conds, keyset] : conds;
-      const [[countRow], fetched] = await Promise.all([
-        this.db.select({ value: count() }).from(notes).where(and(...conds)),
+      const countQuery: Promise<{ value: number }[]> =
+        filters.countTotal === false
+          ? Promise.resolve([{ value: 0 }])
+          : this.db.select({ value: count() }).from(notes).where(and(...conds));
+      const [countRows, fetched] = await Promise.all([
+        countQuery,
         this.db.select().from(notes).where(and(...pageConds)).orderBy(desc(notes.id)).limit(limit + 1),
       ]);
-      total = countRow?.value ?? 0;
+      total = countRows[0]?.value ?? 0;
       visible = fetched;
     }
 
@@ -471,6 +481,7 @@ export class NotesService {
         ...filters,
         limit: NOTES_LIST_MAX_LIMIT,
         cursor,
+        countTotal: false,
       });
       out.push(...page.items);
       if (!page.hasMore || !page.nextCursor) break;
@@ -809,9 +820,15 @@ export class NotesService {
   async listInbox(
     campaignId: number,
     resolved = false,
-    opts: { limit?: number; cursor?: string } = {},
+    opts: { limit?: number; cursor?: string; countTotal?: boolean } = {},
   ): Promise<NoteListPage> {
     const limit = clampNotesListLimit(opts.limit);
+    // Internal full-walkers (scribe/recap) pass countTotal:false — they never read `total`,
+    // so skip the per-page COUNT(*) scan. Real paginated consumers keep an accurate total.
+    const countFor = (conds: SQL[]): Promise<{ value: number }[]> =>
+      opts.countTotal === false
+        ? Promise.resolve([{ value: 0 }])
+        : this.db.select({ value: count() }).from(notes).where(and(...conds));
     const baseConds = [
       eq(notes.campaignId, campaignId),
       eq(notes.kind, 'inbox'),
@@ -825,11 +842,11 @@ export class NotesService {
         ? sql`(${notes.updatedAt} < ${cursor.u} OR (${notes.updatedAt} = ${cursor.u} AND ${notes.id} < ${cursor.i}))`
         : undefined;
       const conds = keyset ? [...baseConds, keyset] : baseConds;
-      const [[countRow], fetched] = await Promise.all([
-        this.db.select({ value: count() }).from(notes).where(and(...baseConds)),
+      const [countRows, fetched] = await Promise.all([
+        countFor(baseConds),
         this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.updatedAt), desc(notes.id)).limit(limit + 1),
       ]);
-      const total = countRow?.value ?? 0;
+      const total = countRows[0]?.value ?? 0;
       const hasMore = fetched.length > limit;
       const rows = hasMore ? fetched.slice(0, limit) : fetched;
       const last = rows[rows.length - 1];
@@ -841,11 +858,11 @@ export class NotesService {
     const cursor = decodeNotesCursor(opts.cursor, 'id') as NotesIdCursor | undefined;
     const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
     const conds = keyset ? [...baseConds, keyset] : baseConds;
-    const [[countRow], fetched] = await Promise.all([
-      this.db.select({ value: count() }).from(notes).where(and(...baseConds)),
+    const [countRows, fetched] = await Promise.all([
+      countFor(baseConds),
       this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.id)).limit(limit + 1),
     ]);
-    const total = countRow?.value ?? 0;
+    const total = countRows[0]?.value ?? 0;
     const hasMore = fetched.length > limit;
     const rows = hasMore ? fetched.slice(0, limit) : fetched;
     const last = rows[rows.length - 1];
@@ -864,6 +881,7 @@ export class NotesService {
       const page = await this.listInbox(campaignId, resolved, {
         limit: NOTES_LIST_MAX_LIMIT,
         cursor,
+        countTotal: false,
       });
       out.push(...page.items);
       if (!page.hasMore || !page.nextCursor) break;
