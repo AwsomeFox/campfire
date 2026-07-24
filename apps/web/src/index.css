@@ -1475,7 +1475,19 @@ h1, h2, h3, h4, h5, h6 {
     background: Mark;
     forced-color-adjust: none;
   }
+  .cf-btn-danger:not(:disabled):hover,
+  .cf-btn-danger:not(:disabled):active {
+    color: MarkText;
+    border-color: Mark;
+    background: Mark;
+  }
   .cf-btn-danger.cf-btn-ghost {
+    color: Mark;
+    border-color: Mark;
+    background: Canvas;
+  }
+  .cf-btn-danger.cf-btn-ghost:not(:disabled):hover,
+  .cf-btn-danger.cf-btn-ghost:not(:disabled):active {
     color: Mark;
     border-color: Mark;
     background: Canvas;
