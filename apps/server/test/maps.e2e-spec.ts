@@ -160,7 +160,7 @@ describe('procedural map generation (e2e, issue #306)', () => {
         a.action === 'map.attach' && a.entityId === encounterId,
     );
     expect(attachRow).toBeDefined();
-    expect(attachRow.detail).toContain(`mapId=${gen.body.attachmentId}`);
+    expect(attachRow.detail).toContain(`attachmentId=${gen.body.attachmentId}`);
   });
 
   it('a non-DM member cannot generate a map (403)', async () => {

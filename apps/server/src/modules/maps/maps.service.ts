@@ -153,7 +153,7 @@ export class MapsService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId,
-      detail: `mapId=${result.attachmentId};seed=${result.seed}`,
+      detail: `attachmentId=${result.attachmentId};seed=${result.seed}`,
     });
     return result;
   }
