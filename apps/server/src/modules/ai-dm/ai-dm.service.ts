@@ -37,7 +37,7 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     lastTurnAt: row.lastTurnAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    proactiveSettings: row.proactiveSettings as any,
+    proactiveSettings: (row.proactiveSettings as any) ?? defaultSeat(row.campaignId).proactiveSettings,
   };
 }
 
@@ -298,7 +298,7 @@ export class AiDmService {
         lastTurnAt: null,
         createdAt: ts,
         updatedAt: ts,
-        proactiveSettings: input.proactiveSettings as any,
+        proactiveSettings: (input.proactiveSettings ?? base.proactiveSettings) as any,
       });
     } else {
       await this.db
