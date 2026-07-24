@@ -150,13 +150,13 @@ export class TokensService {
     }
 
     if (campaignId != null) {
-      const lifecycle = await this.campaignAccess.getLifecycle(campaignId);
-      if (lifecycle?.deletedAt != null) {
-        throw new NotFoundException(`Campaign ${campaignId} not found`);
-      }
       const base = await this.roleResolver.baseEffectiveRole(caller, campaignId);
       if (!base) {
         throw new ForbiddenException('You do not have access to this campaign');
+      }
+      const lifecycle = await this.campaignAccess.getLifecycle(campaignId);
+      if (lifecycle?.deletedAt != null) {
+        throw new NotFoundException(`Campaign ${campaignId} not found`);
       }
     }
 

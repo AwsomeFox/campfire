@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   Note,
@@ -496,15 +496,19 @@ export class ScribeService implements OnApplicationBootstrap {
   async sweep(now: Date = new Date()): Promise<ScribeRunResult[]> {
     const configs = await this.db.select().from(aiScribeConfigs);
     const results: ScribeRunResult[] = [];
+    const campaignIds = [...new Set(configs.map((cfg) => cfg.campaignId))];
+    const liveCampaignIds = new Set<number>();
+    if (campaignIds.length > 0) {
+      const lifecycleRows = await this.db
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(and(inArray(campaigns.id, campaignIds), isNull(campaigns.deletedAt)));
+      for (const row of lifecycleRows) liveCampaignIds.add(row.id);
+    }
     for (const cfg of configs) {
       // Issue #867: never background-generate for a trashed campaign — Trash freezes
       // jobs the same way it freezes REST/MCP/AI. Missing campaigns are also skipped.
-      const [campaign] = await this.db
-        .select({ deletedAt: campaigns.deletedAt })
-        .from(campaigns)
-        .where(eq(campaigns.id, cfg.campaignId))
-        .limit(1);
-      if (!campaign || campaign.deletedAt != null) continue;
+      if (!liveCampaignIds.has(cfg.campaignId)) continue;
 
       const trigger: ScribeTrigger | null = cfg.postSession && (await this.hasEndedSession(cfg.campaignId, now))
         ? 'post_session'

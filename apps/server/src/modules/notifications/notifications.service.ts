@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { EntityType, Notification, NotificationType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignMembers, campaigns, notifications } from '../../db/schema';
@@ -166,12 +166,12 @@ export class NotificationsService {
   async unreadCount(user: RequestUser): Promise<number> {
     const userId = numericUserId(user.id);
     if (userId === null) return 0;
-    const rows = await this.db
-      .select({ id: notifications.id })
+    const [row] = await this.db
+      .select({ value: count() })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
       .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), isNull(campaigns.deletedAt)));
-    return rows.length;
+    return row?.value ?? 0;
   }
 
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */
@@ -199,16 +199,20 @@ export class NotificationsService {
   async markAllRead(user: RequestUser): Promise<{ updated: number }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0 };
-    const liveIds = await this.db
-      .select({ id: notifications.id })
-      .from(notifications)
-      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
-      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), isNull(campaigns.deletedAt)));
-    if (liveIds.length === 0) return { updated: 0 };
+    const liveCampaignIds = this.db
+      .select({ id: campaigns.id })
+      .from(campaigns)
+      .where(isNull(campaigns.deletedAt));
     const updated = await this.db
       .update(notifications)
       .set({ readAt: nowIso() })
-      .where(inArray(notifications.id, liveIds.map((row) => row.id)))
+      .where(
+        and(
+          eq(notifications.userId, userId),
+          isNull(notifications.readAt),
+          inArray(notifications.campaignId, liveCampaignIds),
+        ),
+      )
       .returning({ id: notifications.id });
     return { updated: updated.length };
   }
