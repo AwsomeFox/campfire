@@ -19,7 +19,6 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Note, NoteListPage } from '@campfire/schema';
 import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';

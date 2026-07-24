@@ -854,7 +854,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
 function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
-  const { isDm, canDmWrite } = useCampaignAccess();
+  const { isDm } = useCampaignAccess();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const parentId = searchParams.get('parent');

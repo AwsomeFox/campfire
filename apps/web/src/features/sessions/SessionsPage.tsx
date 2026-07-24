@@ -19,7 +19,6 @@ import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
-import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -515,7 +514,6 @@ export default function SessionsPage() {
               key={selected.id}
               session={selected}
               campaignId={cid}
-              isDm={isDm}
               startEditing={recapAction === 'edit-recap'}
               onEditActionHandled={clearRecapAction}
               onBack={backToList}
@@ -580,7 +578,6 @@ export default function SessionsPage() {
 function SessionDetail({
   session,
   campaignId,
-  isDm,
   startEditing,
   onEditActionHandled,
   onBack,
@@ -590,7 +587,6 @@ function SessionDetail({
 }: {
   session: SessionListItem;
   campaignId: number;
-  isDm: boolean;
   /** Open the existing recap editor when arriving from a post-encounter deep link. */
   startEditing: boolean;
   /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
@@ -937,7 +933,7 @@ function SessionDetail({
         </Card>
       )}
 
-      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} isDm={isDm} />}
+      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
 
       {canDmWrite && !editing && (
         <div className="flex gap-2">
@@ -950,7 +946,7 @@ function SessionDetail({
         </div>
       )}
 
-      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} isDm={isDm} />}
+      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} />}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
@@ -1005,7 +1001,7 @@ function SessionDetail({
  * characters played (replace-set PUT). West Marches / rotating-cast tables need
  * this because the party is otherwise all-or-nothing.
  */
-function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
   const { canDmWrite } = useCampaignAccess();
   const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1166,7 +1162,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
 type ShareLifetime = '1' | '7' | '30' | 'never';
 
 /** Member-visible status plus DM-only capability controls for one recap. */
-function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
   const { canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
@@ -1318,7 +1314,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
               key={s.id}
               share={s}
               sessionId={sessionId}
-              isDm={isDm}
               onChanged={load}
               onRevoked={(shareId) => setNewLink((current) => current?.shareId === shareId ? null : current)}
             />
@@ -1332,13 +1327,11 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
 function ShareRow({
   share,
   sessionId,
-  isDm,
   onChanged,
   onRevoked,
 }: {
   share: SessionShare;
   sessionId: number;
-  isDm: boolean;
   onChanged: () => Promise<void>;
   onRevoked: (shareId: number) => void;
 }) {

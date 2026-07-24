@@ -26,7 +26,7 @@ export default function PartyPage() {
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
   const { me } = useAuth();
-  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
+  const { canDmWrite, canPlayerWrite } = useCampaignAccess();
   // The campaign record drives the D&D Beyond import affordance (issue #714): the importer
   // produces a 5e-shaped character, so it is only offered for an explicitly-D&D-5e campaign.
   // A homebrew campaign (no pack selected) resolves to 5e for combat math but is NOT treated

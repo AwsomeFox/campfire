@@ -26,7 +26,6 @@ import {
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
-import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
@@ -308,7 +307,6 @@ export default function StorylinesPage() {
             key={arc.id}
             arc={arc}
             cid={cid}
-            isDm={isDm}
             canDmWrite={canDmWrite}
             allBeats={allBeats}
             linkOptions={linkOptions}
@@ -324,7 +322,6 @@ export default function StorylinesPage() {
 function ArcCard({
   arc,
   cid,
-  isDm,
   canDmWrite,
   allBeats,
   linkOptions,
@@ -333,7 +330,6 @@ function ArcCard({
 }: {
   arc: StoryArcWithBeats;
   cid: number;
-  isDm: boolean;
   canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
@@ -505,8 +501,7 @@ function ArcCard({
               key={beat.id}
               beat={beat}
               cid={cid}
-              isDm={isDm}
-            canDmWrite={canDmWrite}
+              canDmWrite={canDmWrite}
               allBeats={allBeats}
               linkOptions={linkOptions}
               linkOptionState={linkOptionState}
@@ -560,7 +555,6 @@ function ArcCard({
 function BeatRow({
   beat,
   cid,
-  isDm,
   canDmWrite,
   allBeats,
   linkOptions,
@@ -569,7 +563,6 @@ function BeatRow({
 }: {
   beat: StoryBeatWithBranches;
   cid: number;
-  isDm: boolean;
   canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;

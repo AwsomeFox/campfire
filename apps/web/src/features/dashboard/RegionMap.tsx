@@ -7,7 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { Link } from 'react-router-dom';
-import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location, Role } from '@campfire/schema';
+import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
@@ -60,16 +60,13 @@ export function RegionMap({
   campaignId,
   campaign,
   locations,
-  role,
   onChange,
 }: {
   campaignId: number;
   campaign: Campaign;
   locations: Location[];
-  role: Role | null;
   onChange: () => void;
 }) {
-  const isDm = role === 'dm';
   const { canDmWrite } = useCampaignAccess();
   const pinned = locations.filter((l) => l.mapX != null && l.mapY != null);
   const unpinned = locations.filter((l) => l.mapX == null || l.mapY == null);

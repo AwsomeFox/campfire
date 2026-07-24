@@ -165,7 +165,7 @@ export function CommentsThread({
               <CommentCard
                 comment={root}
                 canModerate={canModerate(root)}
-                onReply={() => setReplyTo(replyTo === root.id ? null : root.id)}
+                onReply={canMemberWrite ? () => setReplyTo(replyTo === root.id ? null : root.id) : undefined}
                 onDelete={() => setConfirmingDelete(root.id)}
                 onChanged={load}
               />

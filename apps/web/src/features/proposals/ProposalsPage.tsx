@@ -552,7 +552,7 @@ function ProposalCard({
         <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
       )}
 
-      {expanded && (
+      {canResolve && expanded && (
         <TextInput
           className="!min-h-0 !py-2 text-sm"
           placeholder="Optional note…"
@@ -562,9 +562,11 @@ function ProposalCard({
       )}
 
       <div className="flex items-center gap-2 justify-end flex-wrap">
+        {canResolve && (
         <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-auto" onClick={onToggle}>
           {expanded ? 'Hide note field' : '+ note'}
         </button>
+        )}
         {canResolve && (
         <>
         {canEdit && (
