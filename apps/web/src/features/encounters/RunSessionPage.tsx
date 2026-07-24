@@ -3606,7 +3606,14 @@ function AddCombatantPanel({
             return api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
           }),
         );
-        if (!cancelled) setResults(pages.flatMap((page) => page.items));
+        // Merging two independently-sorted result sets (monsters + hazards) would leave the
+        // combined list ungrouped; re-sort by name (id tie-break) so the picker stays stable.
+        if (!cancelled) {
+          const merged = pages
+            .flatMap((page) => page.items)
+            .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+          setResults(merged);
+        }
       } catch {
         if (!cancelled) setResults([]);
       } finally {
