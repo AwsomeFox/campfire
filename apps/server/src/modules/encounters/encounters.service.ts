@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -141,6 +141,12 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     initiativeGroup: row.initiativeGroup ?? null,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
+    spCurrent: row.spCurrent ?? 0,
+    spMax: row.spMax ?? 0,
+    rpCurrent: row.rpCurrent ?? 0,
+    rpMax: row.rpMax ?? 0,
+    eac: row.eac ?? null,
+    kac: row.kac ?? null,
     hpTemp: row.hpTemp,
     hpBand: null,
     deathState: row.deathState as Combatant['deathState'],
@@ -208,7 +214,17 @@ function redactMonsterHp(c: Combatant): Combatant {
   if ((c.kind !== 'monster' && c.kind !== 'npc') || c.hpCurrent === null || c.hpMax === null) return c;
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
-  return { ...c, hpBand: hpBandFor(c.hpCurrent, c.hpMax), hpCurrent: null, hpMax: null, hpTemp: null };
+  return {
+    ...c,
+    hpBand: hpBandFor(c.hpCurrent, c.hpMax),
+    hpCurrent: null,
+    hpMax: null,
+    spCurrent: null,
+    spMax: null,
+    rpCurrent: null,
+    rpMax: null,
+    hpTemp: null,
+  };
 }
 
 /** True if a combatant's token centre lies inside any revealed fog rectangle (issue #40). */
@@ -2139,6 +2155,12 @@ export class EncountersService {
     let ruleEntryId: number | null = null;
     let characterId: number | null = null;
     let npcId: number | null = null;
+    let spCurrent = 0;
+    let spMax = 0;
+    let rpCurrent = 0;
+    let rpMax = 0;
+    let eac: number | null = null;
+    let kac: number | null = null;
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
     // it as the default name. HP/initiative still come from a linked statblock
@@ -2222,6 +2244,12 @@ export class EncountersService {
       characterSheetUpdatedAt = character.updatedAt;
       // Issue #486: seed from the sheet (same contract as create() auto-add).
       characterConditions = character.conditions;
+      spCurrent = character.spCurrent;
+      spMax = character.spMax;
+      rpCurrent = character.rpCurrent;
+      rpMax = character.rpMax;
+      eac = character.eac;
+      kac = character.kac;
       if (input.initMod === undefined) {
         const stats = normalizeStats(fromJsonText<Record<string, number>>(character.stats, {}));
         // Character level feeds PF2e trained-Perception proficiency (issue #491).
@@ -2244,6 +2272,21 @@ export class EncountersService {
       if (hpMax === undefined) {
         const hp = adapter.monsterHitPoints(data);
         if (hp !== null) hpMax = hp;
+      }
+      const mapped = adapter.mapStatblock(data) as StarfinderStatblockData;
+      if (mapped.stamina != null && typeof mapped.stamina === 'number') {
+        spMax = mapped.stamina;
+        spCurrent = mapped.stamina;
+      }
+      if (mapped.resolve != null && typeof mapped.resolve === 'number') {
+        rpMax = mapped.resolve;
+        rpCurrent = mapped.resolve;
+      }
+      if (mapped.eac != null && typeof mapped.eac === 'number') {
+        eac = mapped.eac;
+      }
+      if (mapped.kac != null && typeof mapped.kac === 'number') {
+        kac = mapped.kac;
       }
       if (input.initMod === undefined) {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
@@ -2316,6 +2359,12 @@ export class EncountersService {
             initiativeGroup,
             hpCurrent,
             hpMax,
+            spCurrent,
+            spMax,
+            rpCurrent,
+            rpMax,
+            eac,
+            kac,
             // Issue #711: only a character combatant carries the persistent
             // death/temp-HP slice in; monsters/NPCs default to alive/temp-less
             // (the Combatant schema defaults handle the unset monster case).
@@ -2428,13 +2477,8 @@ export class EncountersService {
       }
     }
 
-    // Issue #495: non-DM adds must be in the active rule system's condition
-    // vocabulary. The wire schema stays free-text (so DMs can mint homebrew /
-    // custom labels), but a player cannot inject arbitrary mechanical text into
-    // the shared tracker. Matching is case-insensitive; the stored string is
-    // still whatever the caller sent. MCP `update_combatant` shares this path.
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     if (!isDm && patch.addConditions !== undefined && patch.addConditions.length > 0) {
-      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
       const unknown = patch.addConditions.filter((c) => !isKnownCondition(adapter.conditions, c));
       if (unknown.length > 0) {
         throw new BadRequestException(
@@ -2553,6 +2597,13 @@ export class EncountersService {
         afterConditions = new Set(current);
         writeSet.conditions = toJsonText([...current]);
       }
+      if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
+      if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
+      if (patch.spSet !== undefined) writeSet.spCurrent = patch.spSet;
+      else if (patch.spDelta !== undefined) writeSet.spCurrent = Math.max(0, Math.min(fresh.spMax, fresh.spCurrent + patch.spDelta));
+      if (patch.rpSet !== undefined) writeSet.rpCurrent = patch.rpSet;
+      else if (patch.rpDelta !== undefined) writeSet.rpCurrent = Math.max(0, Math.min(fresh.rpMax, fresh.rpCurrent + patch.rpDelta));
+
       if (recomputeHp) {
         const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
         const state: CombatantHpState = {
@@ -2572,6 +2623,29 @@ export class EncountersService {
           deathSaveFailures: patch.deathSaveFailures,
           deathSaveRoll: patch.deathSaveRoll,
         });
+
+        // If Starfinder adapter or SP present, damage flows through temp HP -> SP -> HP
+        if (adapter.id === STARFINDER_ADAPTER_ID && patch.hpDelta !== undefined && patch.hpDelta < 0) {
+          const sfResult = applyStarfinderDamage(
+            {
+              hpCurrent: fresh.hpCurrent,
+              hpMax: effectiveHpMax,
+              spCurrent: fresh.spCurrent,
+              spMax: fresh.spMax,
+              rpCurrent: fresh.rpCurrent,
+              rpMax: fresh.rpMax,
+              hpTemp: fresh.hpTemp,
+              deathState: fresh.deathState as any,
+            },
+            -patch.hpDelta,
+          );
+          writeSet.spCurrent = sfResult.spCurrent;
+          writeSet.rpCurrent = sfResult.rpCurrent;
+          result.hpCurrent = sfResult.hpCurrent;
+          result.hpTemp = sfResult.hpTemp;
+          result.deathState = sfResult.deathState;
+        }
+
         if (hpMaxChanged) writeSet.hpMax = effectiveHpMax;
         writeSet.hpCurrent = result.hpCurrent;
         writeSet.hpTemp = result.hpTemp;
@@ -2584,27 +2658,19 @@ export class EncountersService {
       afterHp = updated.hpCurrent;
       afterTemp = updated.hpTemp;
       afterDeath = updated.deathState;
-      // Re-derive afterConditions from the committed row so combat-log events
-      // reflect the actual persisted state even if a future trigger rewrites the
-      // column (defense-in-depth; today the write above is the only mutator).
       if (conditionsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
       if (mirrorSheet) {
-        // Issue #711: live-mirror the full combat death/temp-HP slice, not just
-        // hpCurrent, so a downed/dead character is reflected on the sheet the
-        // moment it happens mid-fight (the same authoritative write-through
-        // contract the HP path already uses). The post-/end reconciliation below
-        // does the same write once more for the final state; both are idempotent.
-        // Issue #486: likewise mirror conditions so a tracker-applied Poisoned
-        // lands on the sheet immediately (and survives /end even if that path
-        // were skipped). Issue #466: stamp the sheet CAS token on the combatant
-        // so a later re-end knows this write-through was the last acknowledged sync.
         const mirroredAt = nowIso();
         const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
         if (recomputeHp) {
           sheetSet.hpCurrent = updated.hpCurrent;
           sheetSet.hpTemp = updated.hpTemp;
+          sheetSet.spCurrent = updated.spCurrent;
+          sheetSet.spMax = updated.spMax;
+          sheetSet.rpCurrent = updated.rpCurrent;
+          sheetSet.rpMax = updated.rpMax;
           sheetSet.deathState = updated.deathState;
           sheetSet.deathSaveSuccesses = updated.deathSaveSuccesses;
           sheetSet.deathSaveFailures = updated.deathSaveFailures;
@@ -3572,6 +3638,10 @@ export class EncountersService {
       characterId: number;
       hpCurrent: number;
       hpTemp: number;
+      spCurrent: number;
+      spMax: number;
+      rpCurrent: number;
+      rpMax: number;
       deathState: string;
       deathSaveSuccesses: number;
       deathSaveFailures: number;
@@ -3596,6 +3666,10 @@ export class EncountersService {
         characterId: row.characterId,
         hpCurrent: row.hpCurrent,
         hpTemp: row.hpTemp,
+        spCurrent: row.spCurrent ?? 0,
+        spMax: row.spMax ?? 0,
+        rpCurrent: row.rpCurrent ?? 0,
+        rpMax: row.rpMax ?? 0,
         deathState: row.deathState,
         deathSaveSuccesses: row.deathSaveSuccesses,
         deathSaveFailures: row.deathSaveFailures,
@@ -3617,6 +3691,10 @@ export class EncountersService {
         updatedAt: string;
         hpCurrent: number;
         hpTemp: number;
+        spCurrent: number;
+        spMax: number;
+        rpCurrent: number;
+        rpMax: number;
         deathState: string;
         deathSaveSuccesses: number;
         deathSaveFailures: number;
@@ -3630,6 +3708,10 @@ export class EncountersService {
           updatedAt: characters.updatedAt,
           hpCurrent: characters.hpCurrent,
           hpTemp: characters.hpTemp,
+          spCurrent: characters.spCurrent,
+          spMax: characters.spMax,
+          rpCurrent: characters.rpCurrent,
+          rpMax: characters.rpMax,
           deathState: characters.deathState,
           deathSaveSuccesses: characters.deathSaveSuccesses,
           deathSaveFailures: characters.deathSaveFailures,
@@ -3701,6 +3783,10 @@ export class EncountersService {
         const set: Partial<typeof characters.$inferInsert> = {
           hpCurrent: w.hpCurrent,
           hpTemp: w.hpTemp,
+          spCurrent: w.spCurrent,
+          spMax: w.spMax,
+          rpCurrent: w.rpCurrent,
+          rpMax: w.rpMax,
           deathState: w.deathState,
           deathSaveSuccesses: w.deathSaveSuccesses,
           deathSaveFailures: w.deathSaveFailures,
@@ -3864,6 +3950,10 @@ export class EncountersService {
             .set({
               hpCurrent: conflict.sheet.hpCurrent,
               hpTemp: conflict.sheet.hpTemp,
+              spCurrent: conflict.sheet.spCurrent,
+              spMax: conflict.sheet.spMax,
+              rpCurrent: conflict.sheet.rpCurrent,
+              rpMax: conflict.sheet.rpMax,
               deathState: conflict.sheet.deathState,
               deathSaveSuccesses: conflict.sheet.deathSaveSuccesses,
               deathSaveFailures: conflict.sheet.deathSaveFailures,

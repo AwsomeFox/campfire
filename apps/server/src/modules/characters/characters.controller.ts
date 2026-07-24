@@ -9,7 +9,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { CharactersService } from './characters.service';
-import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto } from './characters.dto';
+import { CharacterCreateDto, CharacterUpdateDto, HpPatchDto, ConditionsPatchDto, SpellSlotPatchDto, XpPatchDto, XpAwardDto, LevelUpDto, DdbCharacterImportDto, CheckRollRequestDto, CheckRequestCreateDto, RestPatchDto } from './characters.dto';
 
 @ApiTags('characters')
 @Controller('campaigns/:campaignId/characters')
@@ -197,6 +197,15 @@ export class CharactersController {
     const row = await this.characters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.characters.patchHp(id, body, user, role);
+  }
+
+  @Post(':id/rest')
+  @ApiOperation({ summary: 'Character Rest (Stamina or Night)', description: 'dm or the owning player. Restores SP/HP/RP based on rest type.' })
+  @ApiResponse({ status: 201, description: 'Rested character.' })
+  async rest(@Param('id', ParseIntPipe) id: number, @Body() body: RestPatchDto, @CurrentUser() user: RequestUser) {
+    const row = await this.characters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.characters.rest(id, body.type, user, role);
   }
 
   @Post(':id/xp')

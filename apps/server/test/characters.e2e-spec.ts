@@ -246,8 +246,8 @@ describe('characters (e2e)', () => {
       });
     expect(res.status).toBe(200);
     expect(res.body.actions).toHaveLength(2);
-    expect(res.body.actions[0]).toEqual({ name: 'Longsword', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', notes: 'versatile 1d10' });
-    expect(res.body.actions[1]).toEqual({ name: 'Second Wind', kind: '', toHit: '', damage: '', notes: '' });
+    expect(res.body.actions[0]).toEqual({ name: 'Longsword', kind: 'melee', toHit: '+5', damage: '1d8+3 slashing', targetAc: '', notes: 'versatile 1d10' });
+    expect(res.body.actions[1]).toEqual({ name: 'Second Wind', kind: '', toHit: '', damage: '', targetAc: '', notes: '' });
   });
 
   it('PATCH actions rejects a nameless action', async () => {
