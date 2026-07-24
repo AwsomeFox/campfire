@@ -99,14 +99,14 @@ test.describe('structured action resolver — multi-client', () => {
       const monsterAfter = (await afterApply.json()).combatants.find((c: { id: number }) => c.id === monsterId);
       expect(monsterAfter.hpCurrent).toBe(monsterHp - 6);
       const charAfter = await dm.get(`/api/v1/characters/${characterId}`);
-      expect(JSON.parse((await charAfter.json()).spellSlots)['1'].used).toBe(1);
+      expect((await charAfter.json()).spellSlots['1'].used).toBe(1);
 
       await page.getByTestId('undo-snackbar').getByRole('button', { name: /undo/i }).click();
       const afterUndo = await dm.get(`/api/v1/encounters/${encounterId}`);
       expect(
         (await afterUndo.json()).combatants.find((c: { id: number }) => c.id === monsterId).hpCurrent,
       ).toBe(monsterHp);
-      expect(JSON.parse((await (await dm.get(`/api/v1/characters/${characterId}`)).json()).spellSlots)['1'].used).toBe(0);
+      expect((await (await dm.get(`/api/v1/characters/${characterId}`)).json()).spellSlots['1'].used).toBe(0);
 
       // Re-apply via API, then reload — committed state survives reconnect.
       await playerCtx.post(`/api/v1/encounters/${encounterId}/actions/resolve`, {
