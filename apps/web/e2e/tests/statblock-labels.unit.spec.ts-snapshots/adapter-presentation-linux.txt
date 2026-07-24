@@ -1,4 +1,26 @@
 {
+  "archmage": {
+    "rating": {
+      "full": "Level"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Role"
+    }
+  },
   "dnd5e": {
     "rating": {
       "full": "Challenge",
@@ -41,6 +63,52 @@
     },
     "creatureType": {
       "full": "Descriptor"
+    }
+  },
+  "osr": {
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
+  },
+  "pathfinder-1e": {
+    "rating": {
+      "full": "Challenge Rating",
+      "short": "CR"
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
     }
   },
   "pf2e": {
@@ -87,29 +155,6 @@
       "full": "Traits"
     }
   },
-  "pathfinder-1e": {
-    "rating": {
-      "full": "Challenge Rating",
-      "short": "CR"
-    },
-    "defense": {
-      "full": "Armor Class",
-      "short": "AC"
-    },
-    "hitPoints": {
-      "full": "Hit Points",
-      "short": "HP"
-    },
-    "abilities": {
-      "full": "Abilities"
-    },
-    "actions": {
-      "full": "Actions"
-    },
-    "creatureType": {
-      "full": "Type"
-    }
-  },
   "starfinder-1e": {
     "rating": {
       "full": "Challenge Rating",
@@ -118,51 +163,6 @@
     "defense": {
       "full": "Kinetic Armor Class",
       "short": "KAC"
-    },
-    "hitPoints": {
-      "full": "Hit Points",
-      "short": "HP"
-    },
-    "abilities": {
-      "full": "Abilities"
-    },
-    "actions": {
-      "full": "Actions"
-    },
-    "creatureType": {
-      "full": "Type"
-    }
-  },
-  "archmage": {
-    "rating": {
-      "full": "Level"
-    },
-    "defense": {
-      "full": "Armor Class",
-      "short": "AC"
-    },
-    "hitPoints": {
-      "full": "Hit Points",
-      "short": "HP"
-    },
-    "abilities": {
-      "full": "Abilities"
-    },
-    "actions": {
-      "full": "Actions"
-    },
-    "creatureType": {
-      "full": "Role"
-    }
-  },
-  "osr": {
-    "rating": {
-      "full": "Hit Dice",
-      "short": "HD"
-    },
-    "defense": {
-      "full": "Armor Class",
-      "short": "AC"
     },
     "hitPoints": {
       "full": "Hit Points",

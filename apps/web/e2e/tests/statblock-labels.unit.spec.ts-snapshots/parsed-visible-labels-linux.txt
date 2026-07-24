@@ -1,4 +1,16 @@
 {
+  "archmage": {
+    "rating": "Level",
+    "ratingShort": null,
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Role",
+    "ratingLine": "Level 3"
+  },
   "dnd5e": {
     "rating": "Challenge",
     "ratingShort": "CR",
@@ -22,6 +34,30 @@
     "actions": "Actions",
     "creatureType": "Descriptor",
     "ratingLine": "Level 3"
+  },
+  "osr": {
+    "rating": "Hit Dice",
+    "ratingShort": "HD",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Hit Dice 2+1"
+  },
+  "pathfinder-1e": {
+    "rating": "Challenge Rating",
+    "ratingShort": "CR",
+    "defense": "Armor Class",
+    "defenseShort": "AC",
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Challenge Rating 2"
   },
   "pf2e": {
     "rating": "Level",
@@ -47,18 +83,6 @@
     "creatureType": "Traits",
     "ratingLine": "Level 3"
   },
-  "pathfinder-1e": {
-    "rating": "Challenge Rating",
-    "ratingShort": "CR",
-    "defense": "Armor Class",
-    "defenseShort": "AC",
-    "hitPoints": "Hit Points",
-    "hitPointsShort": "HP",
-    "abilities": "Abilities",
-    "actions": "Actions",
-    "creatureType": "Type",
-    "ratingLine": "Challenge Rating 2"
-  },
   "starfinder-1e": {
     "rating": "Challenge Rating",
     "ratingShort": "CR",
@@ -70,29 +94,5 @@
     "actions": "Actions",
     "creatureType": "Type",
     "ratingLine": "Challenge Rating 2"
-  },
-  "archmage": {
-    "rating": "Level",
-    "ratingShort": null,
-    "defense": "Armor Class",
-    "defenseShort": "AC",
-    "hitPoints": "Hit Points",
-    "hitPointsShort": "HP",
-    "abilities": "Abilities",
-    "actions": "Actions",
-    "creatureType": "Role",
-    "ratingLine": "Level 3"
-  },
-  "osr": {
-    "rating": "Hit Dice",
-    "ratingShort": "HD",
-    "defense": "Armor Class",
-    "defenseShort": "AC",
-    "hitPoints": "Hit Points",
-    "hitPointsShort": "HP",
-    "abilities": "Abilities",
-    "actions": "Actions",
-    "creatureType": "Type",
-    "ratingLine": "Hit Dice 2+1"
   }
 }
