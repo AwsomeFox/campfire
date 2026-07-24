@@ -23,7 +23,7 @@ export function QuestsCard({
   quests: QuestWithObjectives[];
   onChange: () => void;
 }) {
-  const { isDm, canPlayerWrite, canDmWrite } = useCampaignAccess();
+  const { canPlayerWrite, canDmWrite } = useCampaignAccess();
   const canTick = canPlayerWrite;
   const [pending, setPending] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
