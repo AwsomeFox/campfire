@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
+import type { Faction, FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
@@ -110,7 +110,7 @@ export default function FactionPage() {
     if (!faction) return;
     setTogglingHidden(true);
     try {
-      const updated = await api.patch<FactionWithMembers>(`${API}/factions/${id}`, { hidden: !faction.hidden });
+      const updated = await api.patch<Faction>(`${API}/factions/${id}`, { hidden: !faction.hidden });
       setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't change visibility.");
@@ -144,7 +144,7 @@ export default function FactionPage() {
     setFieldErrors({});
     setConflict(false);
     try {
-      const updated = await api.patch<FactionWithMembers>(`${API}/factions/${id}`, {
+      const updated = await api.patch<Faction>(`${API}/factions/${id}`, {
         name: form.name.trim(),
         kind: form.kind.trim(),
         body: form.body,
@@ -185,7 +185,16 @@ export default function FactionPage() {
     try {
       const fresh = await api.get<FactionWithMembers>(`${API}/factions/${id}`);
       setFaction(fresh);
-      setForm((f) => ({ ...f, body: fresh.body, dmSecret: fresh.dmSecret }));
+      setForm({
+        name: fresh.name,
+        kind: fresh.kind,
+        body: fresh.body,
+        goals: fresh.goals,
+        dmSecret: fresh.dmSecret,
+        hidden: fresh.hidden,
+        standing: fresh.standing,
+        reputation: fresh.reputation,
+      });
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Couldn't reload the latest faction.");
     }
@@ -316,6 +325,7 @@ export default function FactionPage() {
                   entityType="faction"
                   entityId={id}
                   currentSnapshot={{ body: faction.body }}
+                  expectedUpdatedAt={faction.updatedAt}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
