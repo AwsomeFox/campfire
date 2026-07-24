@@ -138,6 +138,7 @@ test.describe('rsvpNoteSaveRequest (issue #552)', () => {
   test('omits status so note-only saves cannot overwrite a fresher RSVP choice', () => {
     const req = rsvpNoteSaveRequest('planning to attend', 'sorry, sick');
     expect(req).toEqual({ note: 'sorry, sick' });
+    expect(req).not.toHaveProperty('status');
   });
 });
 
