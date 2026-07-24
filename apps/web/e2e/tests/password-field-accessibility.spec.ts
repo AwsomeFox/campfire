@@ -62,6 +62,7 @@ async function expectRevealPreservesValueSelectionAndAutocomplete(
   await expect(show).toHaveAttribute('aria-pressed', 'false');
   await expectTouchTarget(show);
 
+  await show.scrollIntoViewIfNeeded();
   await show.click();
   await expect(password).toHaveAttribute('type', 'text');
   await expect(password).toBeFocused();

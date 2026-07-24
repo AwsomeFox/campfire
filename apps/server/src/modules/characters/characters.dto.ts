@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import type { z } from 'zod';
+import { z } from 'zod';
 import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
@@ -53,3 +53,10 @@ export class DdbCharacterImportDto extends createZodDto(DdbCharacterImport) {}
 export class CheckRollRequestDto extends createZodDto(CheckRollRequest.strict()) {}
 // Issue #415: DM-initiated check request from one or more target characters.
 export class CheckRequestCreateDto extends createZodDto(CheckRequestCreate.strict()) {}
+
+export const RestPatch = z.object({
+  type: z.enum(['stamina', 'night', 'short', 'long']),
+});
+export class RestPatchDto extends createZodDto(RestPatch.strict()) {}
+
+

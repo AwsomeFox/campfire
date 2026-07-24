@@ -38,7 +38,27 @@ export default function PartyPage() {
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'new') {
+      setCreating(true);
+    }
+  }, [searchParams]);
   // Move-to-Trash from the roster (issue #716): a trashed card is removed from the
   // list immediately and an Undo snackbar offers a same-page restore. Delayed restore
   // remains available from the campaign Trash. Only one undo is outstanding at a time.
@@ -187,7 +207,15 @@ export default function PartyPage() {
       {/* Wait for the roster load so an empty-state create form (autoFocus) does not
           flash during loading and steal route-change focus from the page h1 (#591). */}
       {canCreate && !loading && (creating || characters.length === 0) && (
-        <NewCharacterForm campaignId={id} ddbAllowed={ddbAllowed} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
+        <NewCharacterForm
+          campaignId={id}
+          ddbAllowed={ddbAllowed}
+          onCancel={characters.length > 0 ? closeCreating : undefined}
+          onCreated={() => {
+            closeCreating();
+            void load();
+          }}
+        />
       )}
 
       {pendingUndo && (
@@ -259,10 +287,10 @@ function CharacterCard({
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+                <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
                 {!isActive && <StatusTag status={character.status} className="shrink-0" />}
               </div>
-              <p className="text-[11.5px] text-slate-500 truncate">
+              <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`} aria-label={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`}>
                 {character.className || 'Unknown class'} · Lv {character.level}
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
@@ -491,7 +519,7 @@ function AwardXpForm({
                             onChange={(event) => selectRecipient(character, event.target.checked)}
                             aria-label={`Select ${character.name} (${STATUS_LABEL[character.status]}) for XP award`}
                           />
-                          <span>{character.name}</span>
+                          <span className="cf-name-reveal inline-block max-w-full" title={character.name} aria-label={character.name}>{character.name}</span>
                         </label>
                       </td>
                       <td className="px-3 py-2">{STATUS_LABEL[character.status]}</td>
