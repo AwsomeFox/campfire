@@ -59,6 +59,8 @@ export const DATASWORN_PACK_NAME = 'Ironsworn: Starforged';
 
 /** Guard against a pathological/hostile document blowing up memory (real file is ~660 entries). */
 export const DATASWORN_MAX_ENTRIES_PER_SECTION = 5000;
+/** Recursion cap for the oracle collection tree — guards a malformed self-referential structure. */
+export const MAX_ORACLE_COLLECTION_DEPTH = 12;
 const FETCH_TIMEOUT_MS = 30_000;
 /** Max response size we'll buffer (the real file is ~1.4 MB; cap well above it, reject a runaway). */
 const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
@@ -572,7 +574,7 @@ function flattenOracleTables(
   counters: { skipped: number },
   depth: number,
 ): void {
-  if (depth > 12 || out.length >= DATASWORN_MAX_ENTRIES_PER_SECTION) return;
+  if (depth > MAX_ORACLE_COLLECTION_DEPTH || out.length >= DATASWORN_MAX_ENTRIES_PER_SECTION) return;
   const contents = asRecord(node.contents);
   if (contents) {
     for (const obj of Object.values(contents)) {

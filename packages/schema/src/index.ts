@@ -2484,7 +2484,7 @@ import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
 import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
 export * from './osr-adapter';
-import { StarforgedAdapter, STARFORGED_PACK_SLUG } from './adapters/starforged';
+import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
 export * from './adapters/starforged';
 
 /**
@@ -2513,10 +2513,12 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
   'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
-  // Ironsworn: Starforged (issue #405). Registered under the datasworn pack slug a campaign's
-  // `ruleSystem` holds so this PbtA/narrative pack resolves to the neutral Starforged adapter
-  // instead of silently inheriting 5e combat via the unknown-slug fallback. STARFORGED_PACK_SLUG
-  // mirrors the importer's DATASWORN_PACK_SLUG ('ironsworn-starforged').
+  // Ironsworn: Starforged (issue #405). Registered under BOTH its family id and the datasworn
+  // pack slug a campaign's `ruleSystem` holds (matching the sibling adapters), so this
+  // PbtA/narrative pack resolves to the neutral Starforged adapter instead of silently
+  // inheriting 5e combat via the unknown-slug fallback. STARFORGED_PACK_SLUG mirrors the
+  // importer's DATASWORN_PACK_SLUG ('ironsworn-starforged').
+  [STARFORGED_ADAPTER_ID]: StarforgedAdapter,
   [STARFORGED_PACK_SLUG]: StarforgedAdapter,
 };
 // OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
