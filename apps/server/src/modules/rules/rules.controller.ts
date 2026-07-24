@@ -1,6 +1,6 @@
 import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import { listRulePackSources, type RuleEntryType } from '@campfire/schema';
+import { listRulePackSources, previewOsrMigration, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { type RequestUser } from '../../common/user.types';
@@ -50,6 +50,26 @@ export class RulesController {
   @ApiResponse({ status: 200, description: 'Install sources and their metadata.' })
   listSources() {
     return listRulePackSources();
+  }
+
+  /**
+   * Preview how combat math would change when migrating a campaign between OSR variants
+   * (issue #765). Read-only — any authenticated user.
+   */
+  @Get('osr/migration-preview')
+  @ApiOperation({
+    summary: 'Preview OSR variant migration mechanics changes',
+    description:
+      'Any authenticated user. Compares native mechanics profiles (abilities, saves, AC, initiative) between two OSR rule-pack slugs.',
+  })
+  @ApiQuery({ name: 'from', required: true, description: 'Current rule-pack slug (e.g. basic-fantasy).' })
+  @ApiQuery({ name: 'to', required: true, description: 'Target rule-pack slug (e.g. old-school-essentials).' })
+  @ApiResponse({ status: 200, description: 'Migration preview with list of mechanics changes.' })
+  osrMigrationPreview(@Query('from') from: string, @Query('to') to: string) {
+    if (!from?.trim() || !to?.trim()) {
+      throw new BadRequestException('Both "from" and "to" query parameters are required');
+    }
+    return previewOsrMigration(from.trim(), to.trim());
   }
 
   /**

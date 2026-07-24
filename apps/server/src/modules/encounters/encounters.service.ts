@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -134,6 +134,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     name: row.name,
     initiative: row.initiative,
     initMod: row.initMod,
+    initiativeGroup: row.initiativeGroup ?? null,
     hpCurrent: row.hpCurrent,
     hpMax: row.hpMax,
     hpTemp: row.hpTemp,
@@ -1637,6 +1638,15 @@ export class EncountersService {
     let name = input.name;
     let hpMax = input.hpMax;
     let initMod = input.initMod ?? 0;
+    const initModel = initiativeModelForAdapter(adapter);
+    const initiativeGroup =
+      input.initiativeGroup !== undefined
+        ? input.initiativeGroup
+        : initModel.mode === 'group'
+          ? input.kind === 'character' || input.kind === 'npc'
+            ? 'party'
+            : 'monsters'
+          : null;
     let hpCurrent: number | undefined;
     // Issue #711: the persistent death/temp-HP slice a character carries into
     // combat. Only populated on the kind='character' branch (monsters/NPCs start
@@ -1829,6 +1839,7 @@ export class EncountersService {
             name: n,
             initiative: null,
             initMod,
+            initiativeGroup,
             hpCurrent,
             hpMax,
             // Issue #711: only a character combatant carries the persistent
@@ -2389,21 +2400,36 @@ export class EncountersService {
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
   }
 
-  /** Rolls d20+initMod for every combatant that doesn't already have an initiative. */
+  /** Rolls initiative for every combatant that doesn't already have one (issue #765: group mode rolls one d6 per side). */
   async rollInitiative(encounterId: number, user: RequestUser, role: Role): Promise<EncounterRollInitiativeResult> {
     const encounterRow = await this.getRowOrThrow(encounterId);
     this.assertMutable(encounterRow);
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    const initModel = initiativeModelForAdapter(adapter);
     const rows = await this.listCombatantRows(encounterId);
+    const unrolled = rows.filter((row) => row.initiative === null);
 
-    // Roll each un-set combatant's initiative in JS, then apply them all in ONE
-    // case-based UPDATE (#72) instead of one UPDATE per combatant. Combatants that
-    // already have an initiative are excluded from the id list, so — exactly as
-    // before — only null initiatives are filled and manually-set values are left
-    // untouched. No write at all when nothing needs rolling.
-    const rolled = rows
-      .filter((row) => row.initiative === null)
-      .map((row) => ({ id: row.id, initiative: rollInitiative(row.initMod, adapter.initiativeDie) }));
+    let rolled: Array<{ id: number; initiative: number }>;
+    if (initModel.mode === 'group') {
+      // Group initiative (issue #765): one d6 per side; all combatants on a side share the roll.
+      const groupRolls = new Map<string, number>();
+      rolled = unrolled.map((row) => {
+        const group =
+          row.initiativeGroup ??
+          (row.kind === 'character' || row.kind === 'npc' ? 'party' : 'monsters');
+        if (!groupRolls.has(group)) {
+          groupRolls.set(group, rollInitiative(0, adapter.initiativeDie));
+        }
+        const base = groupRolls.get(group)!;
+        const mod = initModel.usesDexModifier ? row.initMod : 0;
+        return { id: row.id, initiative: base + mod };
+      });
+    } else {
+      rolled = unrolled.map((row) => ({
+        id: row.id,
+        initiative: rollInitiative(row.initMod, adapter.initiativeDie),
+      }));
+    }
 
     // Fully-rolled roster (issue #702): nothing to write, nothing meaningful to audit.
     // Bail out before the audit.log / SSE emit so the audit trail and other clients are

@@ -25,14 +25,20 @@ describe('statblock presentation metadata (issue #763)', () => {
     expect(adapters.map((a) => a.id).sort()).toEqual(
       [
         'archmage',
+        'basic-fantasy',
         'dnd5e',
+        'labyrinth-lord',
+        'old-school-essentials',
         'open-legend',
         'osr',
+        'osric',
+        'ose',
         'pathfinder-1e',
         'pf2e',
         'sf2e',
         'starfinder-1e',
         'starforged',
+        'swords-wizardry',
       ].sort(),
     );
     for (const adapter of adapters) {

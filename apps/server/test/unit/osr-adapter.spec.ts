@@ -152,27 +152,27 @@ describe('OsrAdapter — condition vocabulary', () => {
 });
 
 describe('OsrAdapter — statblock mapping', () => {
-  it('maps HD to the CR slot and normalizes AC to ascending', () => {
+  it('maps HD to the CR slot and stores descending AC natively (Basic Fantasy)', () => {
     const mapped = OsrAdapter.mapStatblock({
       type: 'Undead',
       hitDice: '2',
-      armorClass: 13, // descending -> ascending 6
+      armorClass: 13, // descending — stored as-is for descending-native Basic Fantasy
       hitPoints: 9,
       movement: '20’',
       attacks: [{ name: 'Claw' }],
     });
     expect(mapped.creatureType).toBe('Undead');
     expect(mapped.challengeRating).toBe('2');
-    expect(mapped.armorClass).toBe(descendingToAscendingAc(13)); // 6
+    expect(mapped.armorClass).toBe(13); // descending-native, not converted to ascending
     expect(mapped.hitPoints).toBe(9);
     expect(mapped.speed).toBe('20’');
     expect(mapped.actions).toEqual([{ name: 'Claw' }]);
     expect(mapped.abilityScores).toBeUndefined(); // OSR monsters have no ability scores
   });
 
-  it('prefers an explicit ascending AC when the source provides one', () => {
+  it('descending-native prefers descending AC even when ascending is also provided', () => {
     const mapped = OsrAdapter.mapStatblock({ armorClass: 13, armorClassAscending: 7 });
-    expect(mapped.armorClass).toBe(7);
+    expect(mapped.armorClass).toBe(13); // Basic Fantasy is descending-native
   });
 
   it('resolves a monster max HP (rounded), or null when unavailable', () => {
@@ -184,13 +184,16 @@ describe('OsrAdapter — statblock mapping', () => {
 });
 
 describe('OsrAdapter — registry resolution', () => {
-  it('resolves the shared OSR adapter for every clone slug', () => {
-    for (const slug of OSR_RULE_SYSTEM_SLUGS) {
-      expect(ruleSystemAdapter(slug)).toBe(OsrAdapter);
-    }
+  it('resolves each OSR slug to its own native adapter (issue #765)', () => {
+    expect(ruleSystemAdapter('basic-fantasy')).toBe(OsrAdapter);
+    expect(ruleSystemAdapter('osric').id).toBe('osric');
+    expect(ruleSystemAdapter('swords-wizardry').id).toBe('swords-wizardry');
+    expect(ruleSystemAdapter('labyrinth-lord').id).toBe('labyrinth-lord');
+    expect(ruleSystemAdapter('old-school-essentials').id).toBe('old-school-essentials');
+    expect(ruleSystemAdapter('ose').id).toBe('ose');
   });
-  it('has the stable OSR family id', () => {
-    expect(OsrAdapter.id).toBe(OSR_ADAPTER_ID);
+  it('has the stable OSR family id on the generic alias', () => {
+    expect(OsrAdapter.id).toBe('basic-fantasy');
     expect(OSR_ADAPTER_ID).toBe('osr');
   });
   it('does NOT hijack 5e / unknown slugs (they still fall back to 5e)', () => {
