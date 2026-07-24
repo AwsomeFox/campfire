@@ -1,0 +1,12 @@
+{
+  "tracked": [
+    {
+      "pr": 1562,
+      "url": "https://github.com/AwsomeFox/campfire/pull/1562",
+      "branch": "fix/issue-600",
+      "status": "babysitting",
+      "updatedAt": "2026-07-27T18:55:00Z",
+      "notes": "Fixed Devin actorRole misattribution (cb551c82). Prior e2e flake on ai-transcript-privacy unrelated to #600. Waiting CI on new head."
+    }
+  ]
+}
