@@ -36,4 +36,11 @@ describe('notes-pagination helpers (issue #608)', () => {
     expect(decodeNotesCursor(undefined, 'id')).toBeUndefined();
     expect(() => decodeNotesCursor('%%%not-base64%%%', 'id')).toThrow(/cursor/i);
   });
+
+  it('rejects updated cursors whose timestamp is not Campfire ISO-8601', () => {
+    for (const u of ['2026/07/24', 'Jul 24, 2026', '2026-07-24T12:00:00+00:00', '']) {
+      const raw = encodeNotesCursor({ v: 1, m: 'updated', u, i: 1 });
+      expect(() => decodeNotesCursor(raw, 'updated')).toThrow(/cursor/i);
+    }
+  });
 });

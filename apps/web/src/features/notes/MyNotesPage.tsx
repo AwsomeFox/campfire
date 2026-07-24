@@ -310,15 +310,13 @@ export default function MyNotesPage() {
   // server results directly — a client-side re-filter here would drop fold-matched
   // entity-name hits the server legitimately returned (its naive lowercase includes()
   // can't see ß→ss / accent folds).
-  const filtered = notes;
-
   const mine = useMemo(
-    () => filtered.filter((n) => !myUserId || n.authorUserId === myUserId),
-    [filtered, myUserId],
+    () => notes.filter((n) => !myUserId || n.authorUserId === myUserId),
+    [notes, myUserId],
   );
   const sharedWithMe = useMemo(
-    () => filtered.filter((n) => myUserId && n.authorUserId !== myUserId),
-    [filtered, myUserId],
+    () => notes.filter((n) => myUserId && n.authorUserId !== myUserId),
+    [notes, myUserId],
   );
 
   if (!Number.isFinite(cid)) {
@@ -490,7 +488,7 @@ export default function MyNotesPage() {
             </section>
           )}
 
-          {filtered.length === 0 &&
+          {notes.length === 0 &&
             !loading &&
             (search.trim() ? (
               <EmptyState

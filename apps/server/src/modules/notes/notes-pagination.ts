@@ -43,9 +43,13 @@ export function decodeNotesCursor(raw: string | undefined, expectedMode: NotesCu
   if (c.m === 'id') {
     return { v: 1, m: 'id', i: c.i };
   }
-  // `u` is the updatedAt keyset value — it must be a parseable ISO-8601 timestamp, else a
-  // crafted string would keyset-compare wrongly and silently corrupt paging instead of 400ing.
-  if (typeof c.u !== 'string' || c.u.length === 0 || Number.isNaN(Date.parse(c.u))) {
+  // `u` is the updatedAt keyset value — require Campfire's ISO-8601 shape (nowIso()), else a
+  // crafted/lenient Date.parse string would keyset-compare wrongly and silently corrupt paging.
+  if (
+    typeof c.u !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(c.u) ||
+    Number.isNaN(Date.parse(c.u))
+  ) {
     throw new BadRequestException('`cursor` is invalid');
   }
   return { v: 1, m: 'updated', u: c.u, i: c.i };
