@@ -68,6 +68,8 @@ export interface ToolEntry {
   name: string;
   isError: boolean;
   proposed: boolean;
+  /** Server-derived encounter identity when the tool mutated a fight (#825). Persisted with the transcript. */
+  encounterId?: number;
   at: string;
 }
 
@@ -241,6 +243,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
           name: event.name,
           isError: event.isError,
           proposed: event.proposed,
+          ...(event.encounterId !== undefined ? { encounterId: event.encounterId } : {}),
           at: event.at,
         }),
       };

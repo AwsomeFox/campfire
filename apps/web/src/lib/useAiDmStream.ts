@@ -17,7 +17,16 @@ export type AiDmStreamEvent =
   | { type: 'turn.start'; campaignId: number; at: string }
   | { type: 'narration.delta'; campaignId: number; text: string; at: string }
   | { type: 'narration.message'; campaignId: number; text: string; at: string }
-  | { type: 'tool'; campaignId: number; name: string; isError: boolean; proposed: boolean; at: string }
+  | {
+      type: 'tool';
+      campaignId: number;
+      name: string;
+      isError: boolean;
+      proposed: boolean;
+      /** Encounter mutated by this tool, when the server could derive it safely (#825). */
+      encounterId?: number;
+      at: string;
+    }
   | {
       type: 'turn.end';
       campaignId: number;
@@ -75,16 +84,24 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
     case 'narration.message':
       if (typeof v.text !== 'string') return null;
       return { type, campaignId: v.campaignId as number, text: v.text, at: v.at as string };
-    case 'tool':
+    case 'tool': {
       if (typeof v.name !== 'string' || typeof v.isError !== 'boolean' || typeof v.proposed !== 'boolean') return null;
+      // Optional encounterId (#825): accept a positive int, ignore malformed values so an
+      // older/newer server never breaks the stream. Never accept names — identity is id-only.
+      const encounterId =
+        typeof v.encounterId === 'number' && Number.isInteger(v.encounterId) && v.encounterId > 0
+          ? v.encounterId
+          : undefined;
       return {
         type,
         campaignId: v.campaignId as number,
         name: v.name,
         isError: v.isError,
         proposed: v.proposed,
+        ...(encounterId !== undefined ? { encounterId } : {}),
         at: v.at as string,
       };
+    }
     case 'turn.end':
       if (
         typeof v.stopReason !== 'string' ||

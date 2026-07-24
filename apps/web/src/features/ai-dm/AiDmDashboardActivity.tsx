@@ -30,8 +30,13 @@ export function AiDmDashboardActivity({ campaignId, isDm }: { campaignId: number
   if (liveActivity.mode !== 'driver') return null;
 
   const showProposalNudge = isDm && liveActivity.proposalFiledCount > dismissedAt;
+  // Use the event's server-derived encounterId so dashboard chips link the fight that
+  // actually changed — never invent a link from page context alone (#825).
   const chip = liveActivity.lastToolEvent
-    ? resolveToolActivity(liveActivity.lastToolEvent, { campaignId })
+    ? resolveToolActivity(liveActivity.lastToolEvent, {
+        campaignId,
+        encounterId: liveActivity.lastToolEvent.encounterId,
+      })
     : null;
 
   return (

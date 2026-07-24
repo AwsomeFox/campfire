@@ -37,6 +37,8 @@ export interface AiDmEncounterActivity {
   at: number;
   /** Source tool event — toast/announce must key off this, not global `lastToolEvent`. */
   event: ToolStreamEvent;
+  /** Server-derived encounter the tool mutated, when present (#825). Survives chip re-resolve. */
+  encounterId?: number;
 }
 
 export interface AiDmLiveActivityState {
@@ -107,7 +109,11 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       onEvent: (event: AiDmStreamEvent) => {
         setState((prev) => reduce(prev, event));
         if (event.type === 'tool' && campaignId !== undefined) {
-          invalidateForToolEvent(queryClient, event, { campaignId });
+          // Pass the event's encounterId so invalidation targets the fight that changed (#825).
+          invalidateForToolEvent(queryClient, event, {
+            campaignId,
+            encounterId: event.encounterId,
+          });
         }
       },
       onReconnect: () => {
@@ -138,9 +144,13 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       const resource = toolResource(event.name);
       if (resource === 'encounter' || resource === 'party') {
         next.encounterActivity = {
-          chip: resolveToolActivity(event, { campaignId: event.campaignId }),
+          chip: resolveToolActivity(event, {
+            campaignId: event.campaignId,
+            encounterId: event.encounterId,
+          }),
           at,
           event,
+          encounterId: event.encounterId,
         };
       }
       return next;

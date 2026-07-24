@@ -63,7 +63,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
-import { resolveToolActivity } from '../ai-dm/toolActivity';
+import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
 import {
   advanceCombatLogAnnouncements,
@@ -533,18 +533,20 @@ export default function RunSessionPage() {
   useEffect(() => {
     const activity = liveActivity.encounterActivity;
     if (!activity) return;
-    // Pair toast/announce with the activity's source tool event — never global
-    // `lastToolEvent`, which later map/rules tools would incorrectly re-toast.
+    // Issue #825: only attribute encounter-class AI activity to THIS open fight when the
+    // server-derived encounterId matches. Cross-encounter tools (prep B while watching A)
+    // must not toast here as if they hit A. Party/campaign tools still surface here.
     const event = activity.event;
-    const eventKey = `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}`;
+    const activityEncounterId = activity.encounterId ?? event.encounterId;
+    if (toolResource(event.name) === 'encounter') {
+      if (activityEncounterId === undefined || !Number.isFinite(eid) || activityEncounterId !== eid) {
+        return;
+      }
+    }
+    const eventKey = `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}:${event.encounterId ?? ''}`;
     if (eventKey === lastToastEventRef.current) return;
     lastToastEventRef.current = eventKey;
-    // Re-resolve with THIS encounter's id so the chip can deep-link back here — tool
-    // events are id-only (#338), so the generic app-level resolution above couldn't
-    // know it.
-    const chip = Number.isFinite(eid)
-      ? resolveToolActivity(event, { campaignId: cid, encounterId: eid })
-      : activity.chip;
+    const chip = resolveToolActivity(event, { campaignId: cid, encounterId: eid });
     const key = ++toastSeq.current;
     setAiToasts((prev) => [...prev, { key, chip, at: activity.at }].slice(-3));
     announce(`The AI DM ${chip.label.toLowerCase()}.`, {
