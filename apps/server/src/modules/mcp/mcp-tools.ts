@@ -3141,18 +3141,25 @@ export class McpToolsService {
       server,
       user,
       'draft_content',
-      'EXPERIMENTAL co-DM (issue #313): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for the human ' +
-        'DM to review — nothing is written to canon directly. DM role required, the server-wide experimental flag must ' +
-        'be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, location, beat ' +
-        '(a story beat/next objective, filed as a quest), recap (filed as a session), encounter (reuses generate_encounter ' +
-        '#304), or map (reuses generate_map #306). `count` (npc/location/beat only) drafts several at once. Returns the ' +
+      'EXPERIMENTAL co-DM (issue #313 / #1056): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for ' +
+        'the human DM to review — nothing is written to canon directly. DM role required, the server-wide experimental ' +
+        'flag must be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, ' +
+        'location, beat (a story beat/next objective, filed as a quest), quest (a full quest draft), faction, recap ' +
+        '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
+        '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map | quest | faction'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | quest | faction | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
-        count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .optional()
+          .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
       },
       async ({ campaignId, target, prompt, count }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');

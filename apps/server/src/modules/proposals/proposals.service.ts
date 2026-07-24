@@ -31,6 +31,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
+import { FactionsService } from '../factions/factions.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
@@ -56,13 +57,13 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationCreate.strict(),
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
+  faction: FactionCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
   // generate_map (#306). These are create-only in v1; the update entries below reuse the
   // same schema only to keep the Record total (an update proposal is never filed for them).
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
-  faction: FactionCreate.strict(),
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   quest: QuestUpdate.strict(),
@@ -70,9 +71,9 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationUpdate.strict(),
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
+  faction: FactionUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
-  faction: FactionUpdate.strict(),
 };
 
 @Injectable()
@@ -88,6 +89,7 @@ export class ProposalsService {
     private readonly characters: CharactersService,
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
+    private readonly factions: FactionsService,
   ) {}
 
   async listForCampaign(
@@ -185,6 +187,21 @@ export class ProposalsService {
           },
           update: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
+        };
+      // Co-DM (issue #1056): factions are proposable for drafting but create-only in v1 —
+      // captureAuthorizedSnapshot returns null (no prior-row diff), so update/delete must
+      // reject loudly rather than routing through the full FactionsService.
+      case 'faction':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.factions.create(
+              campaignId,
+              payload as Parameters<FactionsService['create']>[1],
+              user,
+              role,
+            ),
+          update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+          remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
         };
     }
   }
