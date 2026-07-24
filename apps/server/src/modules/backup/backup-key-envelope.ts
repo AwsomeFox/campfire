@@ -133,9 +133,9 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
     tag = decodeEnvelopeBase64(envelope.tag, 'tag');
     ct = decodeEnvelopeBase64(envelope.ct, 'ct');
   } catch (err) {
-    throw new Error(
-      err instanceof Error ? err.message : 'Backup key envelope contains malformed base64 fields',
-    );
+    const message =
+      err instanceof Error ? err.message : 'Backup key envelope contains malformed base64 fields';
+    throw new Error(message, { cause: err instanceof Error ? err : undefined });
   }
   if (salt.length !== SALT_LEN || iv.length !== IV_LEN || tag.length !== TAG_LEN || ct.length === 0) {
     throw new Error('Backup key envelope has invalid field lengths');
