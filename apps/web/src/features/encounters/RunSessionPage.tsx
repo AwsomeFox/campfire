@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -4038,10 +4038,26 @@ function AddCombatantPanel({
     (async () => {
       setSearching(true);
       try {
-        const params = new URLSearchParams({ type: 'monster', q: debouncedQuery.trim() });
-        if (rulePack) params.set('pack', rulePack);
-        const page = await api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
-        if (!cancelled) setResults(page.items);
+        const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
+        if (rulePack) baseParams.set('pack', rulePack);
+        // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
+        // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
+        const types = tab === 'compendium' ? (['monster', 'hazard'] as const) : (['monster'] as const);
+        const pages = await Promise.all(
+          types.map((type) => {
+            const params = new URLSearchParams(baseParams);
+            params.set('type', type);
+            return api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
+          }),
+        );
+        // Merging two independently-sorted result sets (monsters + hazards) would leave the
+        // combined list ungrouped; re-sort by name (id tie-break) so the picker stays stable.
+        if (!cancelled) {
+          const merged = pages
+            .flatMap((page) => page.items)
+            .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+          setResults(merged);
+        }
       } catch {
         if (!cancelled) setResults([]);
       } finally {
@@ -4107,6 +4123,42 @@ function AddCombatantPanel({
     }
   }
 
+  async function addDroppedRuleEntry(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    if (saving) return;
+    let payload: { id?: unknown; name?: unknown; type?: unknown };
+    try {
+      payload = JSON.parse(event.dataTransfer.getData('application/x-campfire-rule-entry'));
+    } catch {
+      // Ignore unrelated/invalid drags; the drop zone accepts only Campfire rule entries.
+      return;
+    }
+    if (
+      typeof payload.id !== 'number' ||
+      typeof payload.name !== 'string' ||
+      (payload.type !== 'monster' && payload.type !== 'hazard')
+    ) return;
+    const droppedType = payload.type;
+    const droppedId = payload.id;
+    setSaving(true);
+    setError(null);
+    try {
+      // Resolve the FULL entry from the rules read path (the drag payload only carries
+      // id/name/type, but RuleEntry requires many more fields — trusting a cast would
+      // mask bugs). Confirm the resolved type still matches what was dragged before adding.
+      const entry = await api.get<RuleEntry>(`${API}/rules/entries/${droppedId}`);
+      if (entry.type !== droppedType) {
+        setError("That compendium entry doesn't match the dragged monster/hazard anymore.");
+        return;
+      }
+      await addFromCompendium(entry);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function addFromParty(character: Character) {
     setSaving(true);
     setError(null);
@@ -4160,8 +4212,20 @@ function AddCombatantPanel({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card
+      className="space-y-3"
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+      onDrop={(event) => void addDroppedRuleEntry(event)}
+    >
       <span className="card-kicker">Add combatant</span>
+      <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
+        Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
+      </p>
       <div className="seg self-start inline-flex">
         {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
@@ -4213,8 +4277,8 @@ function AddCombatantPanel({
       {tab === 'compendium' && (
         <div className="space-y-2">
           <TextInput
-            aria-label="Search monsters in the compendium"
-            placeholder="Search monsters…"
+            aria-label="Search monsters and hazards in the compendium"
+            placeholder="Search monsters and hazards…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
@@ -4259,7 +4323,7 @@ function AddCombatantPanel({
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
                   <span className="tag tag-neutral">
-                    monster
+                    {entry.type}
                   </span>
                 </button>
               ))}

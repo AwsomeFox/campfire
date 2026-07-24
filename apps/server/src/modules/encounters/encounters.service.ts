@@ -1424,9 +1424,10 @@ export class EncountersService {
   /**
    * Load the compendium monsters a generation may pick from (issue #304), scored for the
    * 5e budget math. Reads rule_entries of type 'monster' (installed packs only — that's all
-   * rule_entries ever contains), maps each statblock via the campaign's RuleSystemAdapter
-   * (#70) to a CR/HP, computes per-monster XP from the #58 CR→XP table, and applies the
-   * optional creature-type / environment / CR-range / pack filters. Never persists.
+   * rule_entries ever contains), and also type 'hazard' when `filters.includeHazards` is set,
+   * maps each statblock via the campaign's RuleSystemAdapter (#70) to a CR/HP, computes
+   * per-monster XP from the #58 CR→XP table, and applies the optional creature-type /
+   * environment / CR-range / pack filters. Never persists.
    */
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
@@ -1441,8 +1442,10 @@ export class EncountersService {
       packId = pack.id;
     }
 
-    const where = packId !== undefined ? and(eq(ruleEntries.type, 'monster'), eq(ruleEntries.packId, packId)) : eq(ruleEntries.type, 'monster');
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
+    const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
+    const where = packId !== undefined ? and(typeWhere, eq(ruleEntries.packId, packId)) : typeWhere;
+    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -1472,7 +1475,14 @@ export class EncountersService {
         if (!envs.some((e) => e.includes(envNeedle))) continue;
       }
 
-      candidates.push({ ruleEntryId: row.id, name: row.name, cr, xp: crToXp(cr), hpMax: adapter.monsterHitPoints(data) });
+      candidates.push({
+        ruleEntryId: row.id,
+        name: row.name,
+        entryType: row.type === 'hazard' ? 'hazard' : 'monster',
+        cr,
+        xp: crToXp(cr),
+        hpMax: adapter.monsterHitPoints(data),
+      });
     }
     return candidates;
   }
@@ -1508,7 +1518,7 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
       targetBand: input.difficulty,
       difficulty: result.difficulty,
       totalXp: result.difficulty.adjustedXp,

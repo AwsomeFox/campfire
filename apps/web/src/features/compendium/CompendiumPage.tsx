@@ -38,6 +38,7 @@ const TYPE_CHIPS: { key: CompendiumUrlType; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'spell', label: 'Spells' },
   { key: 'monster', label: 'Monsters' },
+  { key: 'hazard', label: 'Hazards' },
   { key: 'item', label: 'Items' },
   { key: 'condition', label: 'Conditions' },
   { key: 'class', label: 'Classes' },
@@ -474,6 +475,16 @@ export default function CompendiumPage() {
                     <Link
                       key={entry.id}
                       to={`/c/${id}/compendium/${entry.id}`}
+                      draggable={entry.type === 'monster' || entry.type === 'hazard'}
+                      onDragStart={(event) => {
+                        if (entry.type !== 'monster' && entry.type !== 'hazard') return;
+                        event.dataTransfer.effectAllowed = 'copy';
+                        event.dataTransfer.setData(
+                          'application/x-campfire-rule-entry',
+                          JSON.stringify({ id: entry.id, name: entry.name, type: entry.type }),
+                        );
+                      }}
+                      title={entry.type === 'monster' || entry.type === 'hazard' ? 'Drag into an open encounter to add' : undefined}
                       className="card elev-sm text-left"
                       style={{ gap: 10, padding: '12px 16px', display: 'flex', alignItems: 'center', flexDirection: 'row', cursor: 'pointer', border: 0, font: 'inherit', color: 'var(--color-text)', textDecoration: 'none' }}
                     >
