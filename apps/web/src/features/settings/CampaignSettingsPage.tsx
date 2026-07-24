@@ -116,20 +116,30 @@ export default function CampaignSettingsPage() {
     if (!targetId) return;
 
     let observer: MutationObserver | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const stopObserving = () => {
+      observer?.disconnect();
+      observer = undefined;
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
+      }
+    };
     const focusTarget = () => {
       const target = document.getElementById(targetId);
       if (!(target instanceof HTMLElement)) return false;
       target.focus({ preventScroll: true });
       target.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-      observer?.disconnect();
+      stopObserving();
       return true;
     };
 
     if (!focusTarget() && pageRef.current) {
       observer = new MutationObserver(focusTarget);
       observer.observe(pageRef.current, { childList: true, subtree: true });
+      timeoutId = setTimeout(stopObserving, 10_000);
     }
-    return () => observer?.disconnect();
+    return stopObserving;
   }, [campaign?.id, location.hash, location.key]);
 
   if (!Number.isFinite(id)) {

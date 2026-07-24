@@ -19,6 +19,9 @@ import { api, ApiError, API } from '../../lib/api';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
 
+const AI_DM_INSTRUCTIONS_SECTION_ID = 'ai-dm-instructions';
+const AI_DM_INSTRUCTIONS_INPUT_ID = 'ai-dm-instructions-input';
+
 export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
   {
     value: 'off',
@@ -403,14 +406,14 @@ function InstructionsSection({
   }
 
   return (
-    <Section title="Steering instructions" id="ai-dm-instructions">
+    <Section title="Steering instructions" id={AI_DM_INSTRUCTIONS_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.
       </p>
       <div className="field">
-        <label htmlFor="ai-dm-instructions" className="sr-only">Steering instructions</label>
+        <label htmlFor={AI_DM_INSTRUCTIONS_INPUT_ID} className="sr-only">Steering instructions</label>
         <textarea
-          id="ai-dm-instructions"
+          id={AI_DM_INSTRUCTIONS_INPUT_ID}
           className="input"
           style={{ minHeight: 96 }}
           value={instructions}
