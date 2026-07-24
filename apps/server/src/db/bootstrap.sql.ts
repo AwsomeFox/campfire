@@ -763,7 +763,7 @@ CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
-  ON ai_dm_usage_history (campaign_id, created_at DESC);
+  ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
 
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
 -- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a

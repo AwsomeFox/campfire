@@ -2,9 +2,10 @@ import { describe, it, expect } from '@jest/globals';
 import { AiDmUsageHistoryEntry, AiDmUsageHistoryResponse } from '@campfire/schema';
 
 /**
- * #1060: Verify the AiDmUsageHistory schema shape used by the new
- * GET /campaigns/:id/ai-dm/usage-history endpoint. The service integration
- * (persistence + query) is covered by ai-dm e2e; this validates the DTO contract.
+ * #1060: Verify the AiDmUsageHistory schema shape used by the
+ * GET /campaigns/:id/ai-dm/usage-history endpoint. Persistence + query behavior
+ * is covered in ai-dm.e2e-spec.ts ("usage-history returns newest-first…"); this
+ * file only validates the Zod DTO contract.
  */
 describe('AiDmUsageHistory schema (#1060)', () => {
   it('parses a valid entry', () => {

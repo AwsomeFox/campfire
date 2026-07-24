@@ -95,9 +95,10 @@ export class AiDmController {
     @CurrentUser() user: RequestUser,
   ) {
     await this.access.requireRole(user, id, 'dm');
+    const sinceTrimmed = typeof since === 'string' ? since.trim() : '';
     return this.aiDm.listUsageHistory(id, {
       limit,
-      ...(since && typeof since === 'string' && since.length > 0 ? { sinceIso: since } : {}),
+      ...(sinceTrimmed.length > 0 ? { sinceIso: sinceTrimmed } : {}),
     });
   }
 }
