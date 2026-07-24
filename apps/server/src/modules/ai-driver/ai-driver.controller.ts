@@ -11,7 +11,7 @@ import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
@@ -157,7 +157,7 @@ export class AiDriverController {
   @ApiResponse({ status: 200, description: 'The session state.' })
   async session(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, id);
-    return this.driver.getSession(id);
+    return toPublicAiDmSessionState(this.driver.getSession(id));
   }
 
   @Post('pause')
@@ -172,7 +172,7 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ) {
     await this.access.requireRole(user, id, 'dm');
-    return this.driver.setPaused(id, body.paused);
+    return toPublicAiDmSessionState(this.driver.setPaused(id, body.paused));
   }
 
   @Post('resume')
@@ -183,7 +183,7 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The session state after resuming.' })
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
-    return this.driver.setPaused(id, false);
+    return toPublicAiDmSessionState(this.driver.setPaused(id, false));
   }
 
   // ---- Stuck-ladder player levers (#314): available to any player at the table ----
@@ -225,8 +225,8 @@ export class AiDriverController {
   @ApiResponse({ status: 409, description: 'A vote is already open, or none is open to cast on.' })
   async vote(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmVoteDto, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'player');
-    if (body.action === 'open') return this.driver.openVote(id, user, body.kind!, role);
-    return this.driver.castVote(id, user, body.choice!, role);
+    if (body.action === 'open') return toPublicAiDmSessionState(await this.driver.openVote(id, user, body.kind!, role));
+    return toPublicAiDmSessionState(await this.driver.castVote(id, user, body.choice!, role));
   }
 
   @Post('rules-lookup')
@@ -248,7 +248,7 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The session state after the request.' })
   async requestTakeover(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.requestTakeover(id, user, role);
+    return toPublicAiDmSessionState(await this.driver.requestTakeover(id, user, role));
   }
 
   @Post('grant-takeover')
@@ -263,7 +263,7 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireRole(user, id, 'dm');
-    return this.driver.grantTakeover(id, user, body.memberId, body.note, role);
+    return toPublicAiDmSessionState(await this.driver.grantTakeover(id, user, body.memberId, body.note, role));
   }
 
   @Post('handback')
@@ -276,7 +276,7 @@ export class AiDriverController {
     // Route allows player+ so the acting-DM grant holder (often a player) can hand the seat back;
     // the service then enforces that only the grant holder or a campaign DM may actually do it (#375).
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.handback(id, user, body.note, role);
+    return toPublicAiDmSessionState(await this.driver.handback(id, user, body.note, role));
   }
 
   @Get('secret-approvals')
@@ -313,7 +313,7 @@ export class AiDriverController {
     if (body.action === 'grant') {
       return this.driver.grantSecretReadApproval(id, user, body.tool, body.entityId, body.note, role);
     }
-    return this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role);
+    return toPublicAiDmSessionState(await this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role));
   }
 
   @Sse('stream')
