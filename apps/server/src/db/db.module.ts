@@ -2316,12 +2316,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0075_check_requests', run: migrateCheckRequestsTable },
   { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
   { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
-  { name: '0078_import_jobs', run: migrateImportJobsTable },
-<<<<<<< HEAD
   { name: '0079_notification_preferences', run: migrateNotificationPreferencesTables },
-=======
-  { name: '0079_starfinder_combat_state', run: migrateStarfinderCombatState },
->>>>>>> b2b84855 (fix: model Starfinder SP/HP, Resolve Points, EAC, and KAC (#543))
+  { name: '0080_starfinder_combat_state', run: migrateStarfinderCombatState },
 ];
 
 /**
