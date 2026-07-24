@@ -225,7 +225,7 @@ export default function LocationListPage() {
                     )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
-                  <p className="text-xs text-slate-400 truncate cf-name-reveal mt-0.5" title={loc.kind || firstLine(loc.body) || undefined}>{loc.kind || firstLine(loc.body) || ' '}</p>
+                  <p className="text-xs text-slate-400 truncate cf-name-reveal mt-0.5" title={loc.kind || firstLine(loc.body) || undefined} aria-label={loc.kind || firstLine(loc.body) || undefined}>{loc.kind || firstLine(loc.body) || ' '}</p>
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
                   <span className="text-[11px] text-slate-500 shrink-0">

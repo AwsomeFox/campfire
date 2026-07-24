@@ -18,7 +18,7 @@ export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismis
   return (
     <div className="cf-inset flex items-center gap-3 px-3.5 py-2" role="status">
       <div className="min-w-0 flex-1">
-        <p className="text-[13px] font-semibold truncate cf-name-reveal" title={roll.label || roll.expr} tabIndex={0}>{roll.label || roll.expr}</p>
+        <p className="text-[13px] font-semibold truncate cf-name-reveal" title={roll.label || roll.expr} aria-label={roll.label || roll.expr}>{roll.label || roll.expr}</p>
         <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
           <span>{roll.expr}</span>
           <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />

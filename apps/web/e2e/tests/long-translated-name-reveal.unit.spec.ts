@@ -81,18 +81,18 @@ test.describe('Long translated name reveal & accessible truncation (issue #632)'
     expect(source).toMatch(/aria-label=\{`Faction: \$\{faction\.name\}`\}/);
   });
 
-  test('TrashPage provides title and reveal class on trashed items list', () => {
+  test('TrashPage provides title, aria-label, and reveal class on trashed items list', () => {
     const source = readFileSync(TRASH_PAGE, 'utf8');
     expect(source).toMatch(/className="font-heading text-\[15px\] text-white truncate cf-name-reveal"/);
     expect(source).toMatch(/title=\{item\.name \|\| 'Untitled'\}/);
-    expect(source).toMatch(/tabIndex=\{0\}/);
+    expect(source).toMatch(/aria-label=\{item\.name \|\| 'Untitled'\}/);
   });
 
-  test('RollResultBanner provides title, tabIndex, and reveal class on roll label', () => {
+  test('RollResultBanner provides title, aria-label, and reveal class on roll label', () => {
     const source = readFileSync(ROLL_RESULT_BANNER, 'utf8');
     expect(source).toMatch(/className="text-\[13px\] font-semibold truncate cf-name-reveal"/);
     expect(source).toMatch(/title=\{roll\.label \|\| roll\.expr\}/);
-    expect(source).toMatch(/tabIndex=\{0\}/);
+    expect(source).toMatch(/aria-label=\{roll\.label \|\| roll\.expr\}/);
   });
 
   test('ConfirmDialog and ConfirmDestructiveDialog render full title and body without truncation', () => {

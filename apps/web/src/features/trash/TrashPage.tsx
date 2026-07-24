@@ -134,7 +134,7 @@ export default function TrashPage() {
                   <span className="flex-1 min-w-0">
                     <span className="flex items-baseline gap-2 flex-wrap">
                       <span className="tag">{meta.label}</span>
-                      <span className="font-heading text-[15px] text-white truncate cf-name-reveal" title={item.name || 'Untitled'} tabIndex={0}>{item.name || 'Untitled'}</span>
+                      <span className="font-heading text-[15px] text-white truncate cf-name-reveal" title={item.name || 'Untitled'} aria-label={item.name || 'Untitled'}>{item.name || 'Untitled'}</span>
                     </span>
                     <span className="text-muted text-[11.5px] block mt-0.5">Deleted {formatDate(item.deletedAt)}</span>
                   </span>
