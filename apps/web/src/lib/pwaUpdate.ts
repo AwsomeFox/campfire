@@ -158,8 +158,15 @@ export function initPwaRegistration(): void {
         },
       });
     } catch (err) {
-      // Ignore module missing error in test environments
-      if (String(err).includes('virtual:pwa-register') || String(err).includes('Cannot find module')) {
+      // Ignore module missing / preview / dev error in non-SW environments
+      const errStr = String(err);
+      if (
+        errStr.includes('virtual:pwa-register') ||
+        errStr.includes('Cannot find module') ||
+        errStr.includes('Failed to fetch dynamically imported module') ||
+        errStr.includes('404') ||
+        errStr.includes('Importing a module script failed')
+      ) {
         return;
       }
       setPwaUpdateError(err);
