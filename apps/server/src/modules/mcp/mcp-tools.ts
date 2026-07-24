@@ -3105,18 +3105,17 @@ export class McpToolsService {
         'ownership + that it is actually that combatant\'s turn, serializes advancement, resolves start/end-of-turn ' +
         'effects, and guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
         'acting) and a 409 is returned if the turn already moved on. When the campaign requires DM confirmation a ' +
-        'player end-turn is staged (409); the DM confirms with confirm:true.',
+        'player end-turn is staged (409); the DM then advances it directly (a DM end-turn / next-turn is the confirmation).',
       {
         encounterId: Id.describe('Encounter id'),
         expectedCurrentCombatantId: Id.nullable().optional().describe('Double-advance guard: the combatant you believe currently has the turn'),
-        confirm: z.boolean().optional().describe('DM: confirm a player\'s staged end-turn when the campaign requires confirmation'),
       },
-      async ({ encounterId, expectedCurrentCombatantId, confirm }) => {
+      async ({ encounterId, expectedCurrentCombatantId }) => {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         return this.encounters.endTurn(
           encounterId as number,
-          { expectedCurrentCombatantId: expectedCurrentCombatantId as number | null | undefined, confirm: confirm as boolean | undefined },
+          { expectedCurrentCombatantId: expectedCurrentCombatantId as number | null | undefined },
           user,
           role,
         );

@@ -4982,12 +4982,11 @@ export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
  * Body for POST /encounters/:id/end-turn (issue #413). `expectedCurrentCombatantId` opts
  * into double-advance protection: the server only advances when the live current combatant
  * still matches (a stale/duplicate click after someone else advanced is a 409, not a second
- * skipped turn). `confirm` is set by the DM to approve a player's staged end-turn when the
- * campaign requires DM confirmation.
+ * skipped turn). When the campaign requires DM confirmation, a player's end-turn is staged
+ * (409) and the DM advances it directly (a DM end-turn / next-turn IS the confirmation).
  */
 export const EncounterEndTurn = z.object({
   expectedCurrentCombatantId: Id.nullable().optional(),
-  confirm: z.boolean().optional(),
 });
 export type EncounterEndTurn = z.infer<typeof EncounterEndTurn>;
 

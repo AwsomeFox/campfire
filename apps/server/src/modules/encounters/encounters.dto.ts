@@ -29,7 +29,7 @@ export class MapPingDto extends createZodDto(MapPing.strict()) {}
 // Issue #466: reopen may carry per-character HP resync directions when the sheet
 // advanced after the previous /end.
 export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {}
-// Issue #413: player/DM end-turn body (optimistic double-advance guard + DM confirm) and
+// Issue #413: player/DM end-turn body (optimistic double-advance guard) and
 // the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
 export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}

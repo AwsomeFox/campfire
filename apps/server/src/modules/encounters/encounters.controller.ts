@@ -382,8 +382,8 @@ export class EncountersController {
       'their OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server ' +
       'validates ownership + that it is actually that combatant’s turn, serializes advancement, and guards against ' +
       'double-advance via the optional expectedCurrentCombatantId (a stale click after someone else advanced returns ' +
-      '409). When the campaign requires DM confirmation, a player end-turn is staged (409) and the DM confirms with ' +
-      'confirm:true. Advancing resolves start/end-of-turn effects and logs structured combat-log events.',
+      '409). When the campaign requires DM confirmation, a player end-turn is staged (409) and the DM advances it ' +
+      'directly (a DM end-turn / next-turn is the confirmation). Advancing resolves start/end-of-turn effects and logs structured combat-log events.',
   })
   @ApiResponse({ status: 201, description: 'Encounter advanced to the next turn.' })
   @ApiResponse({ status: 400, description: 'Encounter is not running / no current combatant.' })

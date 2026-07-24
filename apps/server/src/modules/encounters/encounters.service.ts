@@ -2498,8 +2498,8 @@ export class EncountersService {
    *   1. the campaign's `dmControlsTurns` setting can forbid player advancement entirely;
    *   2. a non-DM must own the character linked to the CURRENT combatant (ownership);
    *   3. it must actually be that combatant's turn (current-turn validation);
-   *   4. `requireDmTurnConfirmation` stages a player end-turn (409 asking for DM confirm)
-   *      unless the DM calls with `confirm: true`.
+   *   4. `requireDmTurnConfirmation` stages a player end-turn (409 asking for DM confirm);
+   *      the DM then advances directly (a DM end-turn / next-turn IS the confirmation).
    * Advancement itself is serialized + double-advance-guarded inside advanceCurrentTurn via
    * `expectedCurrentCombatantId` — a stale/duplicate click after someone else advanced 409s
    * instead of skipping a second combatant's turn.
@@ -2543,8 +2543,8 @@ export class EncountersService {
         throw new ForbiddenException('You may only end the turn of your own active character.');
       }
       // (4) configurable DM confirmation: stage the request for the DM (players cannot
-      // self-confirm). The client shows a "waiting for DM" state; the DM calls end-turn
-      // with confirm:true (as dm) to advance.
+      // self-confirm). The client shows a "waiting for DM" state; the DM then advances the
+      // turn directly (end-turn / next-turn as dm) — that DM action IS the confirmation.
       if (requireDmConfirm) {
         await this.appendEvent(encounterId, encounterRow.round, 'note', {
           actor: current.name,
@@ -2593,6 +2593,10 @@ export class EncountersService {
 
     // Captured inside the tx for post-commit logging.
     let newRound = encounterRow.round;
+    // The round the ENDING turn was in (before advanceTurn may increment it on a wrap).
+    // Effect expiries happen at the end of that turn, so they must be logged under this
+    // round, not the incremented `newRound` (issue #413 off-by-one).
+    let endedRound = encounterRow.round;
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
     let endedName: string | null = null;
@@ -2603,6 +2607,7 @@ export class EncountersService {
       if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
         throw new BadRequestException('Encounter is not running');
       }
+      endedRound = fresh.round;
       const freshCurrentId = fresh.currentCombatantId;
       if (opts.expectedCurrentCombatantId !== undefined && freshCurrentId !== opts.expectedCurrentCombatantId) {
         // Someone advanced between the caller's read and this write — refuse rather than
@@ -2662,7 +2667,10 @@ export class EncountersService {
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
     for (const ex of expiredEffects) {
-      await this.appendEvent(encounterId, newRound, 'effect', {
+      // Log under the ENDING turn's round (endedRound), not newRound — on a wrap to the top
+      // of the order advanceTurn increments the round, but the effect expired on the turn
+      // that just ended (issue #413 off-by-one fix).
+      await this.appendEvent(encounterId, endedRound, 'effect', {
         actor: ex.combatantName,
         actorId: ex.combatantId,
         detail: `effect expired: ${ex.effectName}`,

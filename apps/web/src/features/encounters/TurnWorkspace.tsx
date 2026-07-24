@@ -90,18 +90,25 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
   };
 
   const endTurn = useMutation({
-    mutationFn: () =>
-      api.post(`${API}/encounters/${encounterId}/end-turn`, {
-        expectedCurrentCombatantId: currentCombatantId,
-      }),
+    mutationFn: () => {
+      // Use the combatant id from the SAME response the UI is rendering (not the parent
+      // prop, which can be briefly stale/null). Hard-fail rather than POST to /null or send
+      // a null guard (which would disable the server's double-advance protection).
+      const cid = turn?.current?.combatantId;
+      if (cid == null) throw new Error('No current combatant to end the turn for — refresh and try again.');
+      return api.post(`${API}/encounters/${encounterId}/end-turn`, { expectedCurrentCombatantId: cid });
+    },
     onMutate: () => setError(null),
     onError: (e) => setError(e instanceof ApiError ? e.message : String(e)),
     onSettled: settle,
   });
 
   const turnState = useMutation({
-    mutationFn: (patch: Record<string, unknown>) =>
-      api.post(`${API}/encounters/${encounterId}/combatants/${currentCombatantId}/turn-state`, patch),
+    mutationFn: (patch: Record<string, unknown>) => {
+      const cid = turn?.current?.combatantId;
+      if (cid == null) throw new Error('No current combatant to update — refresh and try again.');
+      return api.post(`${API}/encounters/${encounterId}/combatants/${cid}/turn-state`, patch);
+    },
     onMutate: () => setError(null),
     onError: (e) => setError(e instanceof ApiError ? e.message : String(e)),
     onSettled: settle,

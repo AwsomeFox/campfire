@@ -155,7 +155,7 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     await expect(service.endTurn(encounterId, {}, player1, 'player')).rejects.toThrow(/confirm/i);
     expect(currentId(orm, encounterId)).toBe(c1);
     // The DM confirms → advances.
-    const result = await service.endTurn(encounterId, { confirm: true }, dmUser, 'dm');
+    const result = await service.endTurn(encounterId, {}, dmUser, 'dm');
     expect(result.currentCombatantId).toBe(c2);
   });
 
