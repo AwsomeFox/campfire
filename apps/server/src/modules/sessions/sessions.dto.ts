@@ -5,7 +5,7 @@ import {
   SessionAttendanceSet,
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
-  RsvpSet,
+  RsvpSetBody,
   ExpectedUpdatedAt,
   SessionShareCreate,
   SessionShareUpdate,
@@ -24,7 +24,11 @@ export class SessionUpdateDto extends createZodDto(SessionUpdate.extend({ expect
 export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.strict()) {}
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.strict()) {}
-export class RsvpSetDto extends createZodDto(RsvpSet.strict()) {}
+export class RsvpSetDto extends createZodDto(
+  RsvpSetBody.strict().refine((value) => value.status !== undefined || value.note !== undefined, {
+    message: 'status or note is required',
+  }),
+) {}
 export class SessionShareCreateDto extends createZodDto(SessionShareCreate.strict()) {}
 export class SessionShareUpdateDto extends createZodDto(SessionShareUpdate) {}
 export class SessionSharePolicyUpdateDto extends createZodDto(SessionSharePolicyUpdate.strict()) {}

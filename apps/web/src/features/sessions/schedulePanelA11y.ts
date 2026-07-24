@@ -262,17 +262,17 @@ export function rsvpNoteSaveRequest(
   status: RsvpStatus | null,
   persistedNote: string,
   draft: string,
-): { status: RsvpStatus; note: string } | null {
+): { note: string } | null {
   if (!status) return null;
   const trimmed = draft.trim();
   const persistedTrimmed = persistedNote.trim();
   if (trimmed === persistedTrimmed) {
     if (trimmed === '' && persistedNote !== '' && draft === '') {
-      return { status, note: '' };
+      return { note: '' };
     }
     return null;
   }
-  return { status, note: trimmed };
+  return { note: trimmed };
 }
 
 /**

@@ -125,24 +125,23 @@ test.describe('rsvpNoteSaveRequest (issue #552)', () => {
 
   test('sends the trimmed note when it differs', () => {
     const req = rsvpNoteSaveRequest('maybe', '', 'might be 30 late');
-    expect(req).toEqual({ status: 'maybe', note: 'might be 30 late' });
+    expect(req).toEqual({ note: 'might be 30 late' });
   });
 
   test('sends empty string to explicitly clear an existing note', () => {
     const req = rsvpNoteSaveRequest('yes', 'brought snacks', '');
-    expect(req).toEqual({ status: 'yes', note: '' });
-    expect(rsvpNoteSaveRequest('yes', 'brought snacks', '   ')).toEqual({ status: 'yes', note: '' });
+    expect(req).toEqual({ note: '' });
+    expect(rsvpNoteSaveRequest('yes', 'brought snacks', '   ')).toEqual({ note: '' });
   });
 
   test('clears a whitespace-only persisted note when the draft is empty', () => {
-    expect(rsvpNoteSaveRequest('yes', '   ', '')).toEqual({ status: 'yes', note: '' });
+    expect(rsvpNoteSaveRequest('yes', '   ', '')).toEqual({ note: '' });
     expect(rsvpNoteSaveRequest('yes', '   ', '   ')).toBeNull();
   });
 
-  test('preserves the caller-picked status regardless of prior state', () => {
-    // A user changing status AND note in the same edit must send both.
+  test('omits status so note-only saves cannot overwrite a fresher RSVP choice', () => {
     const req = rsvpNoteSaveRequest('no', 'planning to attend', 'sorry, sick');
-    expect(req).toEqual({ status: 'no', note: 'sorry, sick' });
+    expect(req).toEqual({ note: 'sorry, sick' });
   });
 });
 

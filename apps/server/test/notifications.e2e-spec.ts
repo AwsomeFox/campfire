@@ -633,7 +633,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const noteOnly = await player
       .put(`/api/v1/schedule/${scheduleId}/rsvp`)
-      .send({ status: 'yes', note: 'Running 15 minutes late' });
+      .send({ note: 'Running 15 minutes late' });
     expect(noteOnly.status).toBe(200);
 
     const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);

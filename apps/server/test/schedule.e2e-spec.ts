@@ -109,6 +109,29 @@ describe('session scheduling (e2e)', () => {
     expect(badStatus.status).toBe(400);
   });
 
+  it('members can update just their RSVP note without rewriting status', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    const initial = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'bringing snacks' });
+    expect(initial.status).toBe(200);
+
+    const noteOnly = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: 'running late' });
+    expect(noteOnly.status).toBe(200);
+    expect(noteOnly.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'yes', note: 'running late' }),
+      ]),
+    );
+  });
+
   it('DM can update and cancel a scheduled session; players cannot', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)

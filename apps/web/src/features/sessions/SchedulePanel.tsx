@@ -368,7 +368,7 @@ function ScheduleItem({
   }
 
   async function saveNote(explicitDraft?: string) {
-    if (noteSaving) return;
+    if (noteSaving || rsvpSaving) return;
     const status = displayRsvp;
     if (!status) return;
     const draft = explicitDraft ?? noteDraft;
@@ -527,13 +527,13 @@ function ScheduleItem({
                 aria-describedby={`${noteHelpId} ${noteStatusId}`}
                 aria-invalid={noteTooLong || undefined}
                 maxLength={RSVP_NOTE_MAX_LEN + 100 /* let the operator paste + trim rather than truncate silently */}
-                disabled={noteSaving}
+                disabled={noteSaving || rsvpSaving}
                 className="input flex-1 min-w-0 !text-sm"
               />
               <Btn
                 ghost
                 className="!min-h-0 !py-1 text-xs"
-                disabled={!noteDirty || noteSaving || noteTooLong}
+                disabled={!noteDirty || noteSaving || rsvpSaving || noteTooLong}
                 busy={noteSaving}
                 onClick={() => void saveNote()}
               >
@@ -543,7 +543,7 @@ function ScheduleItem({
                 <Btn
                   ghost
                   className="!min-h-0 !py-1 text-xs"
-                  disabled={noteSaving}
+                  disabled={noteSaving || rsvpSaving}
                   onClick={() => void clearNote()}
                 >
                   {RSVP_NOTE_CLEAR_LABEL}

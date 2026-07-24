@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
@@ -363,18 +363,25 @@ export class SchedulingService {
 
     const persistedNote =
       input.note !== undefined ? input.note.trim() : (existing?.note ?? '');
+    const nextStatus = input.status ?? existing?.status;
+    if (!nextStatus) {
+      throw new BadRequestException('status is required when creating an RSVP');
+    }
 
-    const statusChanged = !existing || existing.status !== input.status;
+    const statusChanged = !existing || (input.status !== undefined && existing.status !== input.status);
     const noteChanged =
       input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
 
     if (existing) {
       const update: {
-        status: typeof input.status;
+        status?: typeof nextStatus;
         userName: string;
         updatedAt: string;
         note?: string;
-      } = { status: input.status, userName: user.name, updatedAt: ts };
+      } = { userName: user.name, updatedAt: ts };
+      if (input.status !== undefined) {
+        update.status = input.status;
+      }
       if (input.note !== undefined) {
         update.note = input.note.trim();
       }
@@ -387,7 +394,7 @@ export class SchedulingService {
         scheduledSessionId: scheduleId,
         userId: user.id,
         userName: user.name,
-        status: input.status,
+        status: nextStatus,
         note: persistedNote,
         createdAt: ts,
         updatedAt: ts,
@@ -401,7 +408,7 @@ export class SchedulingService {
       entityType: 'session',
       entityId: scheduleId,
       campaignId: schedule.campaignId,
-      detail: input.status,
+      detail: nextStatus,
     });
     this.emitScheduleUpdated(schedule.campaignId, scheduleId);
     // Let the DM(s) know availability changed (issue #263) — they own scheduling, so
@@ -414,8 +421,8 @@ export class SchedulingService {
         noteChanged && !statusChanged
           ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
           : noteChanged && statusChanged
-            ? `${user.name || 'A player'} RSVP'd ${input.status} and updated their note for ${this.scheduleLabel(schedule)}`
-            : `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`;
+            ? `${user.name || 'A player'} RSVP'd ${nextStatus} and updated their note for ${this.scheduleLabel(schedule)}`
+            : `${user.name || 'A player'} RSVP'd ${nextStatus} for ${this.scheduleLabel(schedule)}`;
       await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
         type: 'session_rsvp',
         title,
