@@ -219,7 +219,6 @@ describe('AiMapService attach (#410 — orphan-safe persistence)', () => {
     const { service } = makeService(anthropicConfig);
     const campaignId = nextCampaign();
     const job = await service.createJob(campaignId, { prompt: 'a keep', mode: 'battle-map', count: 1 } as never, USER, 'dm');
-    const previewId = job.previews[0].id;
     const cancelled = await service.cancelJob(job.id, campaignId, USER, 'dm');
     // A finished job cancel is a no-op (already succeeded); assert idempotency semantics.
     expect(['succeeded', 'cancelled']).toContain(cancelled.status);
