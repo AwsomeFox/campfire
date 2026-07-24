@@ -14,7 +14,7 @@ import type { RequestUser } from '../../common/user.types';
 import { AttachmentsService, sniffImageMime } from '../attachments/attachments.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { generateMap } from './map-generator';
-import { OPEN_MAP_SOURCES } from './map-sources';
+import { OPEN_MAP_SOURCES, getMapSource } from './map-sources';
 
 /** Content type + on-disk format for every generated map (see AttachmentsService.filePath). */
 const MAP_MIME = 'image/svg+xml';
@@ -157,17 +157,34 @@ export class MapsService {
   }
 
   /**
-   * Import an open-licensed external map (issue #303) — e.g. a One Page Dungeon Contest
-   * entry (CC-BY-SA 3.0) the DM downloaded, or a Watabou/donjon export. Saves it as a
-   * hidden (#97/#259) 'map' attachment so it never auto-leaks to players, with the required
-   * attribution stamped onto the stored filename so the credit travels with the artifact.
+   * Import an external map (issue #303, #411) — either a redistributable open-licensed
+   * COLLECTION entry (a One Page Dungeon Contest map, CC-BY-SA 3.0), or the OUTPUT a DM
+   * generated on a curated external generator (Watabou, donjon) and exported themselves.
+   * Saves it as a hidden (#97/#259) 'map' attachment so it never auto-leaks to players, with
+   * attribution stamped onto the stored filename and the source recorded in the audit trail
+   * so provenance travels with the artifact.
    *
-   * License-clean by construction:
-   *  - the claimed licence is validated against `isOpenLicense` (the same gate that rejects
-   *    NC/ND rule packs, #19), so a proprietary/NC/ND map is refused with a 400 — we don't
-   *    weaken the gate;
-   *  - the bytes are sniffed (magic-byte) and must be a real png/jpeg/webp image, exactly
-   *    like a normal upload, so a mislabelled or non-image file can't be stored as a map.
+   * Two legally distinct cases, gated differently on purpose:
+   *
+   *  - GENERATOR OUTPUT (issue #411): when `sourceId` resolves to a curated
+   *    `generator-external` source, the file is the DM's OWN client-side creation under that
+   *    generator's already-vetted permissive grant (Watabou's "free for commercial use",
+   *    donjon's OGL). It is not a redistribution of someone else's licensed pack, so the
+   *    redistributable-collection keyword gate does NOT apply — applying it would wrongly
+   *    reject e.g. Watabou output, whose licence string names no CC/OGL keyword. We trust the
+   *    curated source's licence (never the client-supplied string) precisely because the
+   *    curation in map-sources.ts is what vetted it; an unknown/spoofed `sourceId` falls
+   *    through to the strict gate below.
+   *
+   *  - COLLECTION / UNKNOWN SOURCE (issue #303): the claimed licence must NAME an open
+   *    licence (`isOpenLicense`, the same #19 gate) AND must NOT carry an NC/ND restriction
+   *    (`licenseForbidsRedistribution`) — the second layer is not redundant because
+   *    `isOpenLicense` is a permissive substring match, so "CC-BY-NC-ND" sneaks past it on
+   *    the "cc-by" substring, yet NC/ND is exactly the 'free map' pack licence Campfire may
+   *    not re-serve. We reject those rather than weakening the shared gate.
+   *
+   * In both cases the bytes are sniffed (magic-byte) and must be a real png/jpeg/webp image,
+   * exactly like a normal upload, so a mislabelled or non-image file can't be stored as a map.
    */
   async importAttributedMap(
     campaignId: number,
@@ -176,16 +193,14 @@ export class MapsService {
     user: RequestUser,
     role: Role,
   ): Promise<ImportedMapResult> {
-    // Two layers, because importing re-serves the bytes to the whole table:
-    //  1. must NAME an open licence (the #19 gate), and
-    //  2. must NOT carry an NC/ND restriction. Layer 2 is essential here and not redundant:
-    //     `isOpenLicense` is a permissive substring match, so "CC-BY-NC-ND" sneaks past it on
-    //     the "cc-by" substring — yet NC/ND is exactly the 'free map' pack licence Campfire
-    //     may not redistribute (issue #303). We reject those explicitly rather than weakening
-    //     the shared gate.
-    if (!isOpenLicense(attribution.license) || licenseForbidsRedistribution(attribution.license)) {
+    const source = attribution.sourceId ? getMapSource(attribution.sourceId) : undefined;
+    const isGeneratorOutput = source?.kind === 'generator-external';
+
+    // Generator output is trusted via its curated licence; everything else runs the gate.
+    const license = isGeneratorOutput ? source!.license : attribution.license;
+    if (!isGeneratorOutput && (!isOpenLicense(license) || licenseForbidsRedistribution(license))) {
       throw new BadRequestException(
-        `Refusing to import a map under the licence "${attribution.license}". ` +
+        `Refusing to import a map under the licence "${license}". ` +
           'Only openly-redistributable content (e.g. CC-BY-SA, CC-BY, CC0, OGL) can be imported — ' +
           "non-commercial (NC) or no-derivatives (ND) 'free map' packs can't be re-served.",
       );
@@ -198,13 +213,20 @@ export class MapsService {
       );
     }
 
-    // Stamp the attribution onto the filename so the CC-BY-SA credit is carried by the
-    // artifact itself (surfaces in the attachment list + Content-Disposition). Kept within
-    // the 255-char column via createGenerated's own slice.
+    // Stamp the attribution onto the filename so the credit is carried by the artifact
+    // itself (surfaces in the attachment list + Content-Disposition). Kept within the
+    // 255-char column via createGenerated's own slice.
     const ext = mime === 'image/png' ? 'png' : mime === 'image/jpeg' ? 'jpg' : 'webp';
     const filename = sanitizeFilename(
-      `${attribution.title} — ${attribution.author} (${attribution.license})`,
+      `${attribution.title} — ${attribution.author} (${license})`,
     ).slice(0, 240) + `.${ext}`;
+
+    // Provenance in the audit trail (issue #411): name the source this map came from, mirroring
+    // the `map:generator-builtin:seed=` detail the first-party generator records — so an
+    // imported map is always attributable to its origin (curated source id) from the log alone.
+    const auditDetail = attribution.sourceId
+      ? `map:import:source=${attribution.sourceId}`
+      : undefined;
 
     const attachment = await this.attachments.createGenerated(
       campaignId,
@@ -212,6 +234,7 @@ export class MapsService {
       { filename, mime, bytes: file.buffer },
       user,
       role,
+      auditDetail,
     );
 
     return {
@@ -219,7 +242,7 @@ export class MapsService {
       attribution: {
         title: attribution.title,
         author: attribution.author,
-        license: attribution.license,
+        license,
         sourceUrl: attribution.sourceUrl,
       },
     };

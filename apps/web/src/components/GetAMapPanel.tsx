@@ -19,6 +19,13 @@ import type { GenerateMapParams, MapSource } from '@campfire/schema';
 import { api, API, ApiError } from '../lib/api';
 import { importMapWithAttribution } from './ImageUpload';
 import { GenerateMapPanel } from './GenerateMapPanel';
+import { ExternalGeneratorCard } from './ExternalGeneratorCard';
+import {
+  clearAcquisition,
+  loadAcquisition,
+  saveAcquisition,
+  type AcquisitionState,
+} from './externalGeneratorAcquisition';
 import { Field } from './Field';
 import {
   MAP_AUTHOR_HELP,
@@ -59,7 +66,12 @@ export function GetAMapPanel({
   onError?: (message: string) => void;
 }) {
   const [sources, setSources] = useState<MapSource[] | null>(null);
-  const [open, setOpen] = useState(false);
+  // A persisted, in-progress external-generator round trip (issue #411): the DM opened a
+  // generator and hasn't imported yet. Restored on mount so a reload / navigation lands them
+  // back on the same card with its return checklist, not a blank menu.
+  const [acquisition, setAcquisition] = useState<AcquisitionState | null>(() => loadAcquisition(campaignId));
+  // Auto-expand the "Get a map" menu when there's an unfinished round trip to return to.
+  const [open, setOpen] = useState(() => loadAcquisition(campaignId) != null);
   const [generatorOpen, setGeneratorOpen] = useState(false);
   const [importSource, setImportSource] = useState<MapSource | null>(null);
 
@@ -77,6 +89,10 @@ export function GetAMapPanel({
       .get<MapSource[]>(`${API}/campaigns/${campaignId}/maps/sources`)
       .then((s) => alive && setSources(s))
       .catch(() => alive && setSources([]));
+    // Re-read the persisted round trip for this campaign (the id can change without a remount).
+    const restored = loadAcquisition(campaignId);
+    setAcquisition(restored);
+    if (restored) setOpen(true);
     return () => {
       alive = false;
     };
@@ -102,6 +118,8 @@ export function GetAMapPanel({
         {hasSources ? (
           <button
             type="button"
+            data-testid="get-a-map-toggle"
+            aria-expanded={open}
             onClick={() => setOpen((v) => !v)}
             style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, cursor: 'pointer', background: 'none', border: 0, padding: 0 }}
           >
@@ -151,25 +169,31 @@ export function GetAMapPanel({
       {open && hasSources && (
         <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
-            Generate a map on one of these sites, export it as an image, then import it below. Output is free to use;
-            nothing is bundled or re-served.
+            Generate a map on one of these sites, export it as an image, then import it right here.
+            Output is free to use; Campfire never fetches or re-serves anything on your behalf.
           </p>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {generators.map((s) => (
-              <a
-                key={s.id}
-                href={s.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="cf-chip"
-                style={{ cursor: 'pointer', textDecoration: 'none' }}
-                title={`${s.description} — ${s.license}`}
-              >
-                {s.name} ↗
-              </a>
-            ))}
-          </div>
+          {/* External generators as a guided round trip (issue #411): open → export → return →
+              import → calibrate → attach, all in the one card — no separate dropzone to hunt for. */}
+          {generators.map((s) => (
+            <ExternalGeneratorCard
+              key={s.id}
+              campaignId={campaignId}
+              source={s}
+              acquisitionActive={acquisition?.sourceId === s.id}
+              onOpenGenerator={() => setAcquisition(saveAcquisition(campaignId, s.id))}
+              onCancelAcquisition={() => {
+                clearAcquisition(campaignId);
+                setAcquisition(null);
+              }}
+              onImported={(id) => {
+                clearAcquisition(campaignId);
+                setAcquisition(null);
+                onImported(id);
+              }}
+              onError={onError}
+            />
+          ))}
 
           {importable.map((s) => (
             <div key={s.id} style={{ borderTop: '1px solid var(--cf-border, rgba(255,255,255,0.08))', paddingTop: 8 }}>
