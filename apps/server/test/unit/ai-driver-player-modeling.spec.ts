@@ -1,7 +1,5 @@
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
-import { AiDriverService, setDriverStreamIdleTimeoutMsForTests } from '../../src/modules/ai-driver/ai-driver.service';
-import { ConflictException } from '@nestjs/common';
-import type { RequestUser } from '../../src/common/user.types';
+import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import type { AiDmSeat } from '@campfire/schema';
 
 describe('ai-driver-player-modeling', () => {
