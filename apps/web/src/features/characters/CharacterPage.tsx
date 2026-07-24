@@ -839,14 +839,14 @@ function XpCard({
         <span className="font-heading text-[34px] leading-none">
           {character.xp.toLocaleString()}
           <span className="text-base text-slate-500">
-            {nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
+            {supported && nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
           </span>
         </span>
-        <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
-          {supported && (
+        {supported && (
+          <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
             <div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} />
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <p className="text-xs text-slate-500">
         {atCap

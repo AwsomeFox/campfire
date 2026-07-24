@@ -245,11 +245,12 @@ describe('RuleSystemAdapter — maxLevel per system (issue #535)', () => {
  * live on each adapter so PF2e/OSR campaigns don't inherit 5e PHB guidance.
  */
 describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
-  it('5e-family adapters opt into XP thresholds', () => {
-    expect(Dnd5eAdapter.supportsXpProgression).toBe(true);
-    expect(Pathfinder1eAdapter.supportsXpProgression).toBe(true);
-    expect(Pf2eAdapter.supportsXpProgression).toBe(true);
-    expect(StarfinderAdapter.supportsXpProgression).toBe(true);
+  it('5e-family adapters opt into XP thresholds with both methods defined', () => {
+    for (const adapter of [Dnd5eAdapter, Pathfinder1eAdapter, Pf2eAdapter, StarfinderAdapter]) {
+      expect(adapter.supportsXpProgression).toBe(true);
+      expect(typeof adapter.xpForLevel).toBe('function');
+      expect(typeof adapter.levelForXp).toBe('function');
+    }
   });
 
   it('milestone-first systems do not model XP thresholds', () => {
@@ -275,7 +276,7 @@ describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
     expect(Dnd5eAdapter.xpForLevel!(5)).toBe(6_500);
   });
 
-  it('13th Age cap (10) is respected by xpForLevel when thresholds were absent', () => {
+  it('13th Age does not model XP thresholds (milestone-first)', () => {
     expect(Archmage13aAdapter.maxLevel).toBe(10);
     expect(Archmage13aAdapter.supportsXpProgression).not.toBe(true);
   });

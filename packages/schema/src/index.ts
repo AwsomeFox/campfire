@@ -509,6 +509,9 @@ export function xpProgressionFromThresholds(
   thresholds: readonly number[],
   maxLevel: number,
 ): Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'> {
+  if (thresholds.length === 0) {
+    throw new Error('xpProgressionFromThresholds: thresholds must not be empty');
+  }
   const cap = maxLevel === Infinity ? thresholds.length : Math.min(maxLevel, thresholds.length);
   return {
     supportsXpProgression: true,
@@ -2355,26 +2358,28 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
 };
 
 /** Whether this adapter owns XP threshold math (issue #441). */
-export function xpProgressionSupported(adapter: Pick<RuleSystemAdapter, 'supportsXpProgression'>): boolean {
-  return adapter.supportsXpProgression === true;
+export function xpProgressionSupported(
+  adapter: Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'>,
+): boolean {
+  return !!(adapter.supportsXpProgression && adapter.xpForLevel && adapter.levelForXp);
 }
 
 /** Total XP required to reach `level` for a campaign's rule-system adapter. */
 export function xpForLevelForAdapter(adapter: RuleSystemAdapter, level: number): number {
-  if (adapter.supportsXpProgression && adapter.xpForLevel) return adapter.xpForLevel(level);
+  if (xpProgressionSupported(adapter)) return adapter.xpForLevel!(level);
   return Dnd5eAdapter.xpForLevel!(level);
 }
 
 /** Highest level the given total XP qualifies for under a campaign's rule-system adapter. */
 export function levelForXpForAdapter(adapter: RuleSystemAdapter, xp: number): number {
-  if (adapter.supportsXpProgression && adapter.levelForXp) return adapter.levelForXp(xp);
+  if (xpProgressionSupported(adapter)) return adapter.levelForXp!(xp);
   return Dnd5eAdapter.levelForXp!(xp);
 }
 
 /** Compute advisory XP progress for a character sheet (issue #441). */
 export function xpProgressForCharacter(adapter: RuleSystemAdapter, level: number, xp: number): XpProgress {
   const atCap = level >= adapter.maxLevel;
-  if (!xpProgressionSupported(adapter) || !adapter.xpForLevel) {
+  if (!xpProgressionSupported(adapter)) {
     return { supported: false, atCap, currentThreshold: 0, nextThreshold: null, ready: false, pct: 0 };
   }
   const currentThreshold = adapter.xpForLevel(level);

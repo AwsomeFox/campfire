@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
 import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/schema';
-import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter } from '@campfire/schema';
+import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -276,7 +276,7 @@ function CharacterCard({
     }
   }
 
-  const xpQualifiedLevel = adapter.supportsXpProgression ? levelForXpForAdapter(adapter, character.xp) : character.level;
+  const xpQualifiedLevel = xpProgressionSupported(adapter) ? levelForXpForAdapter(adapter, character.xp) : character.level;
 
   // The card stays a single click target to the sheet, but the quick-HP steppers
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
@@ -301,7 +301,7 @@ function CharacterCard({
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
             </div>
-            {adapter.supportsXpProgression && xpQualifiedLevel > character.level && (
+            {xpProgressionSupported(adapter) && xpQualifiedLevel > character.level && (
               <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${xpQualifiedLevel}`}>
                 ⬆ Level up
               </span>
