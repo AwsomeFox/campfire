@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import {
   archiveDisplayStem,
   archiveRecordFilename,
+  ARCHIVE_STEM_MAX_BYTES,
   buildMarkdownArchiveManifest,
   MACHINE_EXPORT_MODULES,
   MARKDOWN_ARCHIVE_FORMAT_VERSION,
@@ -42,8 +43,12 @@ function buildService(entities: {
   notes?: any[];
   comments?: any[];
   attachments?: any[];
+  auditEntries?: any[];
+  auditTruncated?: number;
 }): ExportService {
   const noop = async () => [];
+  const auditEntries = entities.auditEntries ?? [];
+  const auditTruncated = entities.auditTruncated ?? 0;
   const campaign = campaignRow();
   const emptyDbQuery = {
     from: () => ({ where: () => ({ limit: async () => [] }) }),
@@ -62,12 +67,12 @@ function buildService(entities: {
     {
       listForCampaign: noop as any,
       listForCampaignExport: async () => ({
-        entries: [],
+        entries: auditEntries,
         meta: {
-          total: 0,
-          exported: 0,
-          truncated: 0,
-          cutoff: { snapshotMaxId: 0, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
+          total: auditEntries.length + auditTruncated,
+          exported: auditEntries.length,
+          truncated: auditTruncated,
+          cutoff: { snapshotMaxId: 1000, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
         },
       }),
       finalizeCampaignExportMeta: async (_campaignId: number, meta: unknown) => meta,
@@ -104,13 +109,28 @@ describe('archiveDisplayStem / archiveRecordFilename (issue #863)', () => {
     expect(archiveDisplayStem('bob')).toBe('bob');
   });
 
-  it('sanitizes path separators and falls back for punctuation-only names', () => {
+  it('sanitizes path separators; keeps punctuation-only stems, falls back only when sanitized result is empty', () => {
     expect(archiveDisplayStem('a/b\\c:d')).toBe('a-b-c-d');
+    // Punctuation-only stems that survive sanitization are KEPT (ids still disambiguate).
     expect(archiveDisplayStem('!!!')).toBe('!!!');
-    // `?` is Windows-forbidden → stripped to empty → untitled.
+    // `?` is Windows-forbidden → stripped to empty → fallback to untitled.
     expect(archiveDisplayStem('???')).toBe('untitled');
     expect(archiveDisplayStem('')).toBe('untitled');
     expect(archiveDisplayStem('   ')).toBe('untitled');
+  });
+
+  it('truncates long multibyte stems to a UTF-8 byte budget so filenames stay extractable', () => {
+    const longEmoji = '🐉'.repeat(200); // 200 code points, 800 UTF-8 bytes
+    const stem = archiveDisplayStem(longEmoji);
+    // Must stay within the byte budget that reserves room for the `__{type}-{id}.md` suffix.
+    expect(Buffer.byteLength(stem, 'utf8')).toBeLessThanOrEqual(ARCHIVE_STEM_MAX_BYTES);
+    // Never splits a multi-byte code point (every char is a whole dragon).
+    expect([...stem].every((cp) => cp === '🐉')).toBe(true);
+    // The full record filename (stem + suffix) stays under the 255-byte component limit.
+    expect(Buffer.byteLength(archiveRecordFilename('npc', 2147483647, longEmoji), 'utf8')).toBeLessThanOrEqual(255);
+
+    const longCjk = '東'.repeat(200); // 3 bytes each
+    expect(Buffer.byteLength(archiveDisplayStem(longCjk), 'utf8')).toBeLessThanOrEqual(ARCHIVE_STEM_MAX_BYTES);
   });
 
   it('embeds stable typed ids so duplicate stems never collide', () => {
@@ -307,7 +327,9 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
     expect(typeof manifest.schemaVersion).toBe('number');
     expect(manifest.checksums.campaignJson).toMatch(/^[a-f0-9]{64}$/);
     expect(manifest.exclusions.some((e: { module: string }) => e.module === 'participantSupportNote')).toBe(true);
-    expect(manifest.truncations.some((t: { module: string }) => t.module === 'audit')).toBe(true);
+    // This fixture's audit snapshot dropped no rows (auditMeta.truncated === 0), so the
+    // manifest must NOT claim an audit truncation (the note is conditional, not unconditional).
+    expect(manifest.truncations.some((t: { module: string }) => t.module === 'audit')).toBe(false);
 
     for (const key of MACHINE_EXPORT_MODULES) {
       expect(manifest.modules[key]).toBeDefined();
@@ -315,11 +337,54 @@ describe('buildMarkdownZip — collisions + Unicode + determinism (issue #863)',
       expect(['markdown-file', 'markdown-folder', 'embedded', 'excluded']).toContain(rep.kind);
     }
 
+    // Coverage independent of the MACHINE_EXPORT_MODULES constant: every key actually
+    // returned by buildExport must have a manifest representation, so a newly-exported
+    // field can't silently escape the archive (issue #863).
+    const exported = await service.buildExport(1, USER);
+    for (const key of Object.keys(exported)) {
+      expect(manifest.modules[key]).toBeDefined();
+    }
+
     // Record checksums match file contents.
     const bob = manifest.records.find((r: { path: string }) => r.path === 'npcs/Bob__npc-1.md');
     expect(bob).toBeDefined();
     const body = await zip.file('npcs/Bob__npc-1.md')!.async('string');
     expect(bob.checksum).toBe(sha256Hex(body));
+  });
+
+  it('records an audit truncation only when auditMeta.truncated > 0', async () => {
+    const service = buildService({
+      npcs: [{ id: 1, name: 'Bob' }],
+      auditEntries: [{ createdAt: 't', action: 'create', entityType: 'npc', entityId: 1, actor: 'dm', detail: '' }],
+      auditTruncated: 3,
+    });
+    const { buffer } = await service.buildMarkdownZip(1, USER);
+    const zip = await JSZip.loadAsync(buffer);
+    const manifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+
+    const auditTruncation = manifest.truncations.find((t: { module: string }) => t.module === 'audit');
+    expect(auditTruncation).toBeDefined();
+    expect(auditTruncation.note).toContain('3 audit row(s)');
+    // audit.md surfaces the truncation for a human reader too.
+    const auditMd = await zip.file('audit.md')!.async('string');
+    expect(auditMd).toContain('3 older/concurrent row(s) are omitted');
+  });
+
+  it('escapes pipe/newline in free-text table cells so the manifest table stays intact', async () => {
+    const service = buildService({
+      npcs: [{ id: 1, name: 'Bob' }],
+      attachments: [
+        { id: 5, kind: 'image', filename: 'evil|name\nsecond', file: 'uploads/5.png', fileRoute: '/api/v1/attachments/5/file', present: false, mime: 'image/png' },
+      ],
+    });
+    const { buffer } = await service.buildMarkdownZip(1, USER);
+    const zip = await JSZip.loadAsync(buffer);
+    const attachmentsMd = await zip.file('attachments.md')!.async('string');
+    const row = attachmentsMd.split('\n').find((l) => l.startsWith('| 5 |'))!;
+    expect(row).toBeDefined();
+    // The literal pipe is escaped and the newline collapsed, so the row keeps 5 columns.
+    expect(row).toContain('evil\\|name second');
+    expect(row.split(' | ').length).toBe(5);
   });
 
   it('includes typed ids, relationships, actions, and map/grid/fog/token snapshots', async () => {

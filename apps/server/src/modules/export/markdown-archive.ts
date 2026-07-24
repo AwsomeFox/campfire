@@ -15,14 +15,33 @@ export const MARKDOWN_ARCHIVE_FORMAT_VERSION = 1;
 /** Secrecy profile for the DM-facing markdown archive (dmSecret fields included). */
 export const MARKDOWN_ARCHIVE_SECRECY_PROFILE = 'dm-full';
 
-/** Max Unicode code points in a display stem before truncation. */
+/** Max Unicode code points in a display stem before truncation (readability cap). */
 export const ARCHIVE_STEM_MAX = 80;
 
-function truncateStemByCodePoints(stem: string, max: number): string {
+/**
+ * UTF-8 byte budget for the display stem. Most filesystems (ext4, APFS, NTFS) cap a
+ * single path COMPONENT at 255 bytes, and archiveRecordFilename appends a
+ * `__{type}-{id}.md` suffix. A code-point cap alone is unsafe: 80 emoji encode to 320
+ * UTF-8 bytes, blowing past 255 before the suffix. Reserve room for the suffix so even
+ * an all-multibyte stem plus its typed id stays extractable. 180 bytes leaves 75 bytes
+ * for the suffix (ample for `__timeline-event-2147483647.md`).
+ */
+export const ARCHIVE_STEM_MAX_BYTES = 180;
+
+const utf8ByteLength = (s: string): number => Buffer.byteLength(s, 'utf8');
+
+/**
+ * Truncate to whole Unicode code points, honoring BOTH a code-point cap (readability)
+ * and a UTF-8 byte budget (filesystem safety). Never splits a multi-byte code point.
+ */
+function truncateStem(stem: string, maxCodePoints: number, maxBytes: number): string {
   const parts: string[] = [];
+  let bytes = 0;
   for (const cp of stem) {
+    const cpBytes = utf8ByteLength(cp);
+    if (parts.length >= maxCodePoints || bytes + cpBytes > maxBytes) break;
     parts.push(cp);
-    if (parts.length >= max) break;
+    bytes += cpBytes;
   }
   return parts.join('');
 }
@@ -56,8 +75,8 @@ export function archiveDisplayStem(name: string): string {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   const stem = cleaned || 'untitled';
-  if ([...stem].length <= ARCHIVE_STEM_MAX) return stem;
-  return truncateStemByCodePoints(stem, ARCHIVE_STEM_MAX).replace(/[\s.-]+$/g, '') || 'untitled';
+  if ([...stem].length <= ARCHIVE_STEM_MAX && utf8ByteLength(stem) <= ARCHIVE_STEM_MAX_BYTES) return stem;
+  return truncateStem(stem, ARCHIVE_STEM_MAX, ARCHIVE_STEM_MAX_BYTES).replace(/[\s.-]+$/g, '') || 'untitled';
 }
 
 /**
@@ -120,7 +139,12 @@ export type MarkdownArchiveManifest = {
   checksums: {
     /** sha256 of the machine-readable campaign.json payload. */
     campaignJson: string;
-    /** sha256 of each human-readable content file (path → hex). */
+    /**
+     * sha256 (path → hex) of every archive entry EXCEPT campaign.json (covered by
+     * `campaignJson`) and archive-manifest.json (cannot checksum itself). This spans
+     * the human-readable markdown files, the embedded `uploads/` binaries, and
+     * `warnings.txt` when present.
+     */
     files: Record<string, string>;
   };
   modules: Record<string, ArchiveModuleRepresentation>;
@@ -141,6 +165,10 @@ export const MACHINE_EXPORT_MODULES = [
   'comments',
   'members',
   'audit',
+  'auditMeta',
+  'auditNote',
+  'aiSeat',
+  'aiScribeConfig',
   'proposals',
   'encounters',
   'factions',

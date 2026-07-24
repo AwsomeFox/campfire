@@ -490,14 +490,26 @@ export class ExportService {
 
     writeFile('members.md', this.membersMarkdown(data.members));
 
-    const truncations: ArchiveTruncation[] = [
-      {
-        module: 'audit',
-        exported: data.audit.length,
-        note: 'Latest 500 audit entries (AuditService.listForCampaign cap). Older rows are omitted from both campaign.json and audit.md.',
-      },
-    ];
-    writeFile('audit.md', this.auditMarkdown(data.audit));
+    // Only record a truncation when the audit snapshot actually dropped rows. The export
+    // path (AuditService.listForCampaignExport) keyset-pages the full retained trail, so
+    // `auditMeta.truncated` — not a fixed 500-row cap — is the real omission count
+    // (retention pruning during the walk and/or rows appended after the snapshot ceiling).
+    const auditTruncated = data.auditMeta.truncated;
+    const truncations: ArchiveTruncation[] =
+      auditTruncated > 0
+        ? [
+            {
+              module: 'audit',
+              exported: data.audit.length,
+              note:
+                `${auditTruncated} audit row(s) are missing from this snapshot relative to the ` +
+                `capture ceiling (id <= ${data.auditMeta.cutoff.snapshotMaxId}): retention pruning ` +
+                `during export and/or rows appended after the cutoff. See auditMeta in campaign.json ` +
+                `and page GET /api/v1/campaigns/:id/audit for the live log.`,
+            },
+          ]
+        : [];
+    writeFile('audit.md', this.auditMarkdown(data.audit, auditTruncated));
 
     const proposalAlloc: Array<{ stem: string; filename: string }> = [];
     for (const p of [...data.proposals].sort((a, b) => a.id - b.id)) {
@@ -531,6 +543,10 @@ export class ExportService {
       this.attachmentsManifestMarkdown(data.campaign, data.characters, data.encounters, data.attachments, skipped),
     );
 
+    // AI DM seat + scribe config (issue #1078) are first-class exported data, so give
+    // them a human-readable file rather than leaving them only in campaign.json.
+    writeFile('ai.md', this.aiConfigMarkdown(data.aiSeat, data.aiScribeConfig));
+
     const modules: Record<string, ArchiveModuleRepresentation> = {
       campaign: { kind: 'markdown-file', path: 'campaign.md' },
       quests: { kind: 'markdown-folder', path: 'quests/' },
@@ -542,6 +558,18 @@ export class ExportService {
       comments: { kind: 'markdown-folder', path: 'comments/' },
       members: { kind: 'markdown-file', path: 'members.md' },
       audit: { kind: 'markdown-file', path: 'audit.md' },
+      auditMeta: {
+        kind: 'embedded',
+        path: 'audit.md',
+        note: 'Audit snapshot metadata (cutoff/truncation counts) lives in campaign.json; audit.md summarizes any truncation.',
+      },
+      auditNote: {
+        kind: 'embedded',
+        path: 'audit.md',
+        note: 'Human-readable audit portability note; machine copy in campaign.json.',
+      },
+      aiSeat: { kind: 'markdown-file', path: 'ai.md' },
+      aiScribeConfig: { kind: 'markdown-file', path: 'ai.md' },
       proposals: { kind: 'markdown-folder', path: 'proposals/' },
       encounters: { kind: 'markdown-folder', path: 'encounters/' },
       factions: { kind: 'markdown-folder', path: 'factions/' },
@@ -583,9 +611,19 @@ export class ExportService {
       inventory: data.inventory.length,
       revisions: data.revisions.length,
       attachments: data.attachments.length,
-      attachmentsPresent: data.attachments.filter((a) => a.present).length,
+      // Derive present from the ACTUAL byte reads (data.attachments.length - skipped),
+      // not the earlier existsSync-based `a.present` flag, so the two counts can never
+      // disagree if a file disappears between the existence check and the read.
+      attachmentsPresent: data.attachments.length - skipped.length,
       attachmentsSkipped: skipped.length,
     };
+
+    // warnings.txt is content, so write it BEFORE building the manifest via writeFile() —
+    // that checksums it into manifest.checksums.files. The manifest itself is written last
+    // and is not (cannot be) checksummed against itself.
+    if (warnings.length) {
+      writeFile('warnings.txt', warnings.join('\n') + '\n');
+    }
 
     const manifest = buildMarkdownArchiveManifest({
       campaignId,
@@ -601,16 +639,29 @@ export class ExportService {
         },
       ],
       truncations,
-      records: records.sort((a, b) => String(a.path).localeCompare(String(b.path))),
+      // Locale-independent code-unit sort so record order is identical across machines
+      // and locales (localeCompare is locale-sensitive and would make the manifest
+      // non-deterministic).
+      records: records.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
     });
-    // Manifest is written last and is not checksummed against itself.
     zip.file('archive-manifest.json', JSON.stringify(manifest, null, 2));
 
-    if (warnings.length) {
-      zip.file('warnings.txt', warnings.join('\n') + '\n');
-    }
-
     return { buffer: await zip.generateAsync({ type: 'nodebuffer' }), warnings };
+  }
+
+  /**
+   * Escape a free-text value for a GitHub-flavored-markdown TABLE cell. Entity names,
+   * notes, and conditions are user-authored, so an embedded `|` (column delimiter) or
+   * newline (row delimiter) would otherwise corrupt the table and desync every following
+   * cell — breaking the "verifiable manifest" guarantee (issue #863). Pipes are
+   * backslash-escaped and CR/LF collapsed to a single space; the result is trimmed.
+   */
+  private mdCell(value: unknown): string {
+    return String(value ?? '')
+      .replace(/\r\n?|\n/g, ' ')
+      .replace(/\|/g, '\\|')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   private buildBacklinkIndex(data: ExportData): Map<string, string[]> {
@@ -705,13 +756,13 @@ export class ExportService {
       const refs: string[] = [];
       if (campaign.mapAttachmentId === a.id) refs.push('campaign map');
       for (const c of characters) {
-        if (c.portraitUrl && c.portraitUrl.endsWith(a.fileRoute)) refs.push(`portrait: ${c.name} (character:${c.id})`);
+        if (c.portraitUrl && c.portraitUrl.endsWith(a.fileRoute)) refs.push(`portrait: ${this.mdCell(c.name)} (character:${c.id})`);
       }
       for (const e of encounters) {
-        if (e.mapAttachmentId === a.id) refs.push(`encounter map: ${e.name} (encounter:${e.id})`);
+        if (e.mapAttachmentId === a.id) refs.push(`encounter map: ${this.mdCell(e.name)} (encounter:${e.id})`);
       }
-      const fileCell = a.present ? `\`${a.file}\`` : '_missing — skipped_';
-      lines.push(`| ${a.id} | ${a.kind} | ${a.filename} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
+      const fileCell = a.present ? `\`${this.mdCell(a.file)}\`` : '_missing — skipped_';
+      lines.push(`| ${a.id} | ${this.mdCell(a.kind)} | ${this.mdCell(a.filename)} | ${fileCell} | ${refs.length ? refs.join(', ') : '_unreferenced_'} |`);
     }
     if (skipped.length) {
       lines.push('', '## Skipped (file missing on disk)', '');
@@ -855,7 +906,7 @@ export class ExportService {
       lines.push('', '## Actions / Resources', '');
       lines.push('| Name | Kind | To hit | Damage | Notes |', '| --- | --- | --- | --- | --- |');
       for (const a of c.actions) {
-        lines.push(`| ${a.name} | ${a.kind || '_'} | ${a.toHit || '_'} | ${a.damage || '_'} | ${a.notes || '_'} |`);
+        lines.push(`| ${this.mdCell(a.name)} | ${this.mdCell(a.kind) || '_'} | ${this.mdCell(a.toHit) || '_'} | ${this.mdCell(a.damage) || '_'} | ${this.mdCell(a.notes) || '_'} |`);
       }
     }
     const slotKeys = c.spellSlots ? Object.keys(c.spellSlots).sort() : [];
@@ -928,7 +979,7 @@ export class ExportService {
           .filter(Boolean)
           .join(', ') || '_';
         lines.push(
-          `| ${c.name} | ${c.kind} | ${c.initiative ?? '_unrolled_'} | ${c.hpCurrent}/${c.hpMax} | ${token} | ${c.conditions.length ? c.conditions.join(', ') : '_none_'} | ${links} |`,
+          `| ${this.mdCell(c.name)} | ${this.mdCell(c.kind)} | ${c.initiative ?? '_unrolled_'} | ${c.hpCurrent}/${c.hpMax} | ${token} | ${c.conditions.length ? c.conditions.map((cond) => this.mdCell(cond)).join(', ') : '_none_'} | ${links} |`,
         );
       }
     } else {
@@ -1106,7 +1157,7 @@ export class ExportService {
             ? typedRecordId('character', item.characterId)
             : 'party';
         lines.push(
-          `| ${typedRecordId('inventory-item', item.id)} | ${item.name} | ${item.qty} | ${owner} | ${item.notes || '_'} |`,
+          `| ${typedRecordId('inventory-item', item.id)} | ${this.mdCell(item.name)} | ${item.qty} | ${owner} | ${this.mdCell(item.notes) || '_'} |`,
         );
       }
       lines.push('');
@@ -1155,20 +1206,21 @@ export class ExportService {
     lines.push('| ID | User | Role | Character | Disabled |', '| --- | --- | --- | --- | --- |');
     for (const m of [...members].sort((a, b) => a.id - b.id)) {
       lines.push(
-        `| ${typedRecordId('member', m.id)} | ${m.displayName || m.username || m.userId} | ${m.role} | ${m.characterId != null ? typedRecordId('character', m.characterId) : '_'} | ${m.disabled ? 'yes' : 'no'} |`,
+        `| ${typedRecordId('member', m.id)} | ${this.mdCell(m.displayName || m.username || m.userId)} | ${this.mdCell(m.role)} | ${m.characterId != null ? typedRecordId('character', m.characterId) : '_'} | ${m.disabled ? 'yes' : 'no'} |`,
       );
     }
     lines.push('');
     return lines.join('\n');
   }
 
-  private auditMarkdown(audit: ExportData['audit']): string {
-    const lines = [
-      '# Audit log',
-      '',
-      '_Truncated to the latest 500 entries (see archive-manifest.json truncations)._',
-      '',
-    ];
+  private auditMarkdown(audit: ExportData['audit'], truncated = 0): string {
+    const lines = ['# Audit log', ''];
+    if (truncated > 0) {
+      lines.push(
+        `_${truncated} older/concurrent row(s) are omitted from this snapshot (see archive-manifest.json truncations and auditMeta in campaign.json)._`,
+        '',
+      );
+    }
     if (!audit.length) {
       lines.push('_none_', '');
       return lines.join('\n');
@@ -1179,6 +1231,44 @@ export class ExportService {
       );
     }
     lines.push('');
+    return lines.join('\n');
+  }
+
+  private aiConfigMarkdown(aiSeat: ExportData['aiSeat'], aiScribeConfig: ExportData['aiScribeConfig']): string {
+    const lines = [
+      '# AI configuration',
+      '',
+      '_DM-authored AI steering (issue #1078). Runtime usage counters and encrypted provider keys are NOT exported._',
+      '',
+      '## Co-DM seat',
+      '',
+    ];
+    if (aiSeat) {
+      lines.push(
+        `- Mode: ${aiSeat.mode}`,
+        `- Enabled: ${aiSeat.enabled ? 'yes' : 'no'}`,
+        `- Model: ${aiSeat.model || '_default_'}`,
+        `- Token budget: ${aiSeat.tokenBudget ?? '_unset_'}`,
+        '',
+        '### Instructions',
+        '',
+        aiSeat.instructions?.trim() || '_none_',
+        '',
+      );
+    } else {
+      lines.push('_No AI seat configured._', '');
+    }
+    lines.push('## Scribe', '');
+    if (aiScribeConfig) {
+      lines.push(
+        `- Post-session: ${aiScribeConfig.postSession ? 'yes' : 'no'}`,
+        `- Cron: ${aiScribeConfig.cron ? `\`${this.mdCell(aiScribeConfig.cron)}\`` : '_none_'}`,
+        `- Budget per run: ${aiScribeConfig.budgetPerRun ?? '_unset_'}`,
+        '',
+      );
+    } else {
+      lines.push('_No scribe configured._', '');
+    }
     return lines.join('\n');
   }
 
