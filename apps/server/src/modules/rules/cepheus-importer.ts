@@ -216,7 +216,12 @@ export function normalizeMarkdown(md: string): string {
     .trim();
 }
 
-/** The first prose paragraph (skipping the leading H1/H2 heading and blank lines), for the summary. */
+/**
+ * A one-line summary from the start of a chapter: the first prose paragraph, skipping the
+ * leading heading(s) and blank lines. If a list, table, or blockquote appears before any prose
+ * paragraph, that first markup line is used instead (stripped of syntax) rather than returning
+ * an empty summary.
+ */
 export function firstParagraph(md: string): string {
   const lines = md.split('\n');
   const buf: string[] = [];
