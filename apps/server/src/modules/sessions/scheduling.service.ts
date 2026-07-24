@@ -361,14 +361,17 @@ export class SchedulingService {
       .where(and(eq(sessionRsvps.scheduledSessionId, scheduleId), eq(sessionRsvps.userId, user.id)))
       .limit(1);
 
+    const persistedNote =
+      input.note !== undefined ? input.note.trim() : (existing?.note ?? '');
+
     const statusChanged = !existing || existing.status !== input.status;
     const noteChanged =
-      input.note !== undefined && (input.note ?? '').trim() !== (existing?.note ?? '').trim();
+      input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
 
     if (existing) {
       await this.db
         .update(sessionRsvps)
-        .set({ status: input.status, note: input.note ?? existing.note, userName: user.name, updatedAt: ts })
+        .set({ status: input.status, note: persistedNote, userName: user.name, updatedAt: ts })
         .where(eq(sessionRsvps.id, existing.id));
     } else {
       await this.db.insert(sessionRsvps).values({
@@ -376,7 +379,7 @@ export class SchedulingService {
         userId: user.id,
         userName: user.name,
         status: input.status,
-        note: input.note ?? '',
+        note: persistedNote,
         createdAt: ts,
         updatedAt: ts,
       });
