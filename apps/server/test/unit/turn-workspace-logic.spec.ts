@@ -26,6 +26,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     name: `C${id}`,
     initiative,
     initMod: 0,
+    initiativeGroup: null,
     hpCurrent: 10,
     hpMax: 10,
     hpTemp: 0,
