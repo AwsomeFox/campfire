@@ -41,7 +41,7 @@ const THEMES: { value: MapTheme; label: string }[] = [
 
 /** Data URL for the previewed SVG markup — rendered by a plain <img> (never attached). */
 function svgDataUrl(svg: string): string {
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 /** Human alt text for the preview so a screen reader describes the candidate map. */
@@ -81,6 +81,12 @@ export function GenerateMapPanel({
   const [copied, setCopied] = useState(false);
   // Ignore an in-flight preview whose params are already stale (rapid reroll / edits).
   const previewSeq = useRef(0);
+  // Exact params (including the server-resolved seed) that produced the currently-shown
+  // preview. "Use this map" replays THESE — never live form state — so editing a control
+  // after a preview without re-previewing can't silently attach a different map than shown.
+  const previewedParamsRef = useRef<
+    (Required<Pick<GenerateMapParams, 'kind' | 'size'>> & GenerateMapParams) | null
+  >(null);
 
   const busy = previewing || using;
 
@@ -99,16 +105,22 @@ export function GenerateMapPanel({
   const runPreview = useCallback(
     async (explicitSeed?: string) => {
       const seq = ++previewSeq.current;
+      const requestParams = buildParams(explicitSeed);
       setPreviewing(true);
       setError(null);
       try {
         const result = await api.post<GeneratedMapPreview>(
           `${API}/campaigns/${campaignId}/maps/generate/preview`,
-          buildParams(explicitSeed),
+          requestParams,
         );
         if (seq !== previewSeq.current) return; // superseded by a newer preview
         setPreview(result);
         setSeed(result.seed); // surface the resolved seed (copyable + reproducible)
+        // Pin the exact params + resolved seed behind this shown preview so "Use" is faithful.
+        previewedParamsRef.current = {
+          ...requestParams,
+          seed: result.seed,
+        } as Required<Pick<GenerateMapParams, 'kind' | 'size'>> & GenerateMapParams;
       } catch (err) {
         if (seq !== previewSeq.current) return;
         const message = err instanceof ApiError ? err.message : "Couldn't generate a preview.";
@@ -134,12 +146,14 @@ export function GenerateMapPanel({
   }
 
   async function attachSelectedMap() {
-    if (!preview) return;
+    const pinned = previewedParamsRef.current;
+    if (!preview || !pinned) return;
     setUsing(true);
     setError(null);
     try {
-      // Replay the EXACT previewed seed + params so the attached map is byte-identical.
-      await onUse(buildParams(preview.seed) as Required<Pick<GenerateMapParams, 'kind' | 'size'>> & GenerateMapParams);
+      // Replay the EXACT params + seed that produced the shown preview (not live form state),
+      // so the attached map is byte-identical to what the DM saw.
+      await onUse(pinned);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "Couldn't attach the map.";
       setError(message);
