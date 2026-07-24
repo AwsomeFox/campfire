@@ -202,5 +202,42 @@ describe('AI key posture manifest fields (#496)', () => {
     expect(view.aiKeySource).toBeNull();
     expect(view.aiKeyIncluded).toBe(false);
     expect(view.aiCredentialCount).toBeNull();
+    expect(view.reconciliation).toBeNull();
+    expect(view.attachmentChecksums).toEqual([]);
+  });
+
+  it('inspect view surfaces reconciliation and attachment checksums (issue #444)', () => {
+    const manifest = parseBackupManifest({
+      ...baseV1,
+      attachments: [
+        {
+          id: 1,
+          campaignId: 3,
+          path: '3/1.png',
+          size: 100,
+          mime: 'image/png',
+          hidden: false,
+          sha256: 'a'.repeat(64),
+        },
+      ],
+      reconciliation: {
+        generation: 'gen-test',
+        totalAttachments: 1,
+        missing: 0,
+        changed: 0,
+        orphans: [],
+        orphanCount: 0,
+        clean: true,
+      },
+    });
+    const view = manifestToInspectView(manifest, ['3/1.png'], 1);
+    expect(view.reconciliation).toMatchObject({
+      generation: 'gen-test',
+      clean: true,
+      totalAttachments: 1,
+    });
+    expect(view.attachmentChecksums).toEqual([
+      { path: '3/1.png', size: 100, sha256: 'a'.repeat(64) },
+    ]);
   });
 });
