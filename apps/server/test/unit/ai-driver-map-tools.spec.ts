@@ -174,6 +174,20 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
       expect(args).toEqual({ campaignId: 1, kind: 'cave', style: 'ruins' });
     }
   });
+
+  it('models generate -> update attachment-id handoff via session bookkeeping', () => {
+    const s = session();
+    expect(guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'dungeon' }, s).ok).toBe(true);
+    noteDriverGenerateMapCall(s);
+    recordDriverGeneratedMap(s, 88);
+    const link = guardDriverLivePlayArgs(
+      'update_encounter',
+      { encounterId: 3, mapAttachmentId: 88, fog: { enabled: true, revealed: [] } },
+      s,
+    );
+    expect(link.ok).toBe(true);
+    if (link.ok) expect(link.args.mapAttachmentId).toBe(88);
+  });
 });
 
 describe('toPublicAiDmSessionState', () => {
