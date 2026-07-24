@@ -459,7 +459,7 @@ export class CharactersService {
     characterId: number,
     hpCurrent: number,
     hpMax?: number,
-    opts?: { campaignId?: number },
+    opts?: { campaignId?: number; spCurrent?: number; spMax?: number; rpCurrent?: number; rpMax?: number; deathState?: string },
   ): Promise<void> {
     const rows = await this.db
       .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
@@ -480,13 +480,19 @@ export class CharactersService {
     for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
+      const updatePayload: Partial<typeof combatants.$inferInsert> = {
+        hpCurrent: nextCurrent,
+        hpMax: nextMax,
+        ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+      };
+      if (opts?.spCurrent !== undefined) updatePayload.spCurrent = opts.spCurrent;
+      if (opts?.spMax !== undefined) updatePayload.spMax = opts.spMax;
+      if (opts?.rpCurrent !== undefined) updatePayload.rpCurrent = opts.rpCurrent;
+      if (opts?.rpMax !== undefined) updatePayload.rpMax = opts.rpMax;
+      if (opts?.deathState !== undefined) updatePayload.deathState = opts.deathState;
       await this.db
         .update(combatants)
-        .set({
-          hpCurrent: nextCurrent,
-          hpMax: nextMax,
-          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
-        })
+        .set(updatePayload)
         .where(eq(combatants.id, combatant.id));
       touchedEncounterIds.add(encounterId);
       campaignId ??= encCampaignId;
@@ -935,7 +941,14 @@ export class CharactersService {
       }
     });
 
-    await this.syncActiveCombatants(id, row.hpCurrent, undefined, { campaignId: row.campaignId });
+    await this.syncActiveCombatants(id, row.hpCurrent, undefined, {
+      campaignId: row.campaignId,
+      spCurrent: row.spCurrent,
+      spMax: row.spMax,
+      rpCurrent: row.rpCurrent,
+      rpMax: row.rpMax,
+      deathState: row.deathState,
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

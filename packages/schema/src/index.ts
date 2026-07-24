@@ -6075,6 +6075,7 @@ export const CombatantUpdate = z.object({
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
   deathSaveFailures: z.number().int().min(0).max(3).optional(),
+  deathState: DeathState.optional(),
   // A death-save d20 roll result (issue #619). Mutually exclusive in spirit with the
   // manual counter sets above: instead of a DM clicking pips, a rolled death save drives
   // the outcome per the 5e crit/fumble rules — nat 1 = two failures, nat 20 = revive at

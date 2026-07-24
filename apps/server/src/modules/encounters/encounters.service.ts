@@ -2527,7 +2527,14 @@ export class EncountersService {
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
     const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
 
-    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched) {
+    const spFieldsTouched =
+      patch.spSet !== undefined ||
+      patch.spDelta !== undefined ||
+      patch.rpSet !== undefined ||
+      patch.rpDelta !== undefined;
+    const deathStateTouched = patch.deathState !== undefined;
+
+    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched && !spFieldsTouched && !deathStateTouched) {
       return combatantToDomain(existing);
     }
 
@@ -2557,7 +2564,7 @@ export class EncountersService {
       existing.kind === 'character' &&
       existing.characterId !== null &&
       encounterRow.status !== 'ended' &&
-      (recomputeHp || conditionsTouched);
+      (recomputeHp || conditionsTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -2603,6 +2610,7 @@ export class EncountersService {
       else if (patch.spDelta !== undefined) writeSet.spCurrent = Math.max(0, Math.min(fresh.spMax, fresh.spCurrent + patch.spDelta));
       if (patch.rpSet !== undefined) writeSet.rpCurrent = patch.rpSet;
       else if (patch.rpDelta !== undefined) writeSet.rpCurrent = Math.max(0, Math.min(fresh.rpMax, fresh.rpCurrent + patch.rpDelta));
+      if (patch.deathState !== undefined) writeSet.deathState = patch.deathState;
 
       if (recomputeHp) {
         const effectiveHpMax = hpMaxChanged ? Math.max(1, patch.hpMax!) : fresh.hpMax;
@@ -2664,7 +2672,7 @@ export class EncountersService {
       if (mirrorSheet) {
         const mirroredAt = nowIso();
         const sheetSet: Partial<typeof characters.$inferInsert> = { updatedAt: mirroredAt };
-        if (recomputeHp) {
+        if (recomputeHp || spFieldsTouched || deathStateTouched) {
           sheetSet.hpCurrent = updated.hpCurrent;
           sheetSet.hpTemp = updated.hpTemp;
           sheetSet.spCurrent = updated.spCurrent;
