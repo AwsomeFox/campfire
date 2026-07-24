@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { isOpenLicense, type RuleEntryType } from '@campfire/schema';
+import { isOpenLicense, licenseForbidsRedistribution, type RuleEntryType } from '@campfire/schema';
 import type { ImportedEntry, Open5eImportLogger } from './open5e-importer';
 
 /**
@@ -187,16 +187,20 @@ function normalizeCcByLicense(url: string): string {
  * a link to the license, plus the page when known. Built from the object's own `_source`,
  * falling back to the document's top-level provenance.
  */
-function attributionOf(src: DataswornSource | null, doc: DataswornDocument, licenseUrl: string): string {
+function attributionOf(
+  src: DataswornSource | null,
+  doc: DataswornDocument,
+  licenseUrl: string,
+  licenseLabel: string,
+): string {
   const title = asString(src?.title) || asString(doc.title) || DATASWORN_PACK_NAME;
   const authors = authorsOf(src, doc);
   const page = typeof src?.page === 'number' ? `, p. ${src.page}` : '';
   const by = authors ? ` by ${authors}` : '';
-  // Reflect the ACTUAL CC-BY version + link so a non-4.0 source isn't credited as 4.0.
-  const ver = ccByVersion(licenseUrl);
-  const licLabel = ver ? `CC BY ${ver}` : 'CC BY 4.0';
+  // Credit under the ACTUAL license (caller passes the resolved label), never a hard-coded
+  // "CC BY 4.0" — a non-4.0 CC-BY or a different open license must not be misattributed.
   const licLink = licenseUrl || DATASWORN_LICENSE_URL;
-  return `${title}${by}${page}, licensed under ${licLabel} (${licLink}).`;
+  return `${title}${by}${page}, licensed under ${licenseLabel} (${licLink}).`;
 }
 
 function sourceUrlOf(src: DataswornSource | null, doc: DataswornDocument): string {
@@ -233,9 +237,15 @@ function provenanceOf(
   const ccByVer = ccByVersion(licenseUrl);
   const license = normalizeCcByLicense(licenseUrl);
   if (ccByVer == null && !isOpenLicense(license)) return null;
+  // Defense-in-depth: isOpenLicense is a permissive substring match, so "CC-BY-NC-4.0" would
+  // pass on the "cc-by" substring. Explicitly reject NC/ND content (which can't be legally
+  // redistributed) — checked on both the resolved string and the raw URL.
+  if (licenseForbidsRedistribution(license) || licenseForbidsRedistribution(licenseUrl)) return null;
+  // Attribution label: the exact CC-BY version, or the resolved open-license string otherwise.
+  const licenseLabel = ccByVer ? `CC BY ${ccByVer}` : license;
   return {
     license,
-    attribution: attributionOf(src, doc, licenseUrl),
+    attribution: attributionOf(src, doc, licenseUrl, licenseLabel),
     author: authorsOf(src, doc),
     sourceUrl: sourceUrlOf(src, doc),
   };
@@ -717,7 +727,12 @@ export async function fetchDataswornDocument(
   // Honor the license requirement up front: the document must be open-licensed.
   const docLicenseUrl = asString(doc.license);
   const docLicense = normalizeCcByLicense(docLicenseUrl);
-  if (!docLicenseUrl || (ccByVersion(docLicenseUrl) == null && !isOpenLicense(docLicense))) {
+  if (
+    !docLicenseUrl ||
+    (ccByVersion(docLicenseUrl) == null && !isOpenLicense(docLicense)) ||
+    licenseForbidsRedistribution(docLicense) ||
+    licenseForbidsRedistribution(docLicenseUrl)
+  ) {
     throw new BadRequestException(
       `Datasworn document at ${url} ${
         docLicenseUrl ? `declares a non-open license ("${docLicenseUrl}")` : 'declares no license'
