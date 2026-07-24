@@ -44,6 +44,7 @@ import { Btn } from './ui';
 import { DraftWithAiButton } from '../features/ai-dm/DraftWithAiButton';
 import { useAuth } from '../app/auth';
 import { useAiDmSeat } from '../lib/query';
+import { useDisclosure } from './useDisclosure';
 
 export function GetAMapPanel({
   campaignId,
@@ -70,9 +71,15 @@ export function GetAMapPanel({
   // generator and hasn't imported yet. Restored on mount so a reload / navigation lands them
   // back on the same card with its return checklist, not a blank menu.
   const [acquisition, setAcquisition] = useState<AcquisitionState | null>(() => loadAcquisition(campaignId));
-  // Auto-expand the "Get a map" menu when there's an unfinished round trip to return to.
-  const [open, setOpen] = useState(() => loadAcquisition(campaignId) != null);
-  const [generatorOpen, setGeneratorOpen] = useState(false);
+  const { open, setOpen, buttonProps, regionProps } = useDisclosure({
+    regionLabel: 'Open, license-clean map sources',
+    initialOpen: loadAcquisition(campaignId) != null,
+  });
+  const generatorDisclosure = useDisclosure({
+    regionLabel: 'Map generator',
+    focusManagement: false,
+  });
+  const generatorOpen = generatorDisclosure.open;
   const [importSource, setImportSource] = useState<MapSource | null>(null);
 
   // Same self-gate as DraftWithAiButton (DM + AI-DM seat enabled, co_dm/driver mode) —
@@ -119,8 +126,7 @@ export function GetAMapPanel({
           <button
             type="button"
             data-testid="get-a-map-toggle"
-            aria-expanded={open}
-            onClick={() => setOpen((v) => !v)}
+            {...buttonProps}
             style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, cursor: 'pointer', background: 'none', border: 0, padding: 0 }}
           >
             <span className="card-kicker">Get a map</span>
@@ -128,7 +134,7 @@ export function GetAMapPanel({
               open, license-clean sources
             </span>
             <span style={{ flex: 1 }} />
-            <span className="text-muted" style={{ fontSize: 12 }}>{open ? '▾' : '▸'}</span>
+            <span className="text-muted" style={{ fontSize: 12 }} aria-hidden="true">{open ? '▾' : '▸'}</span>
           </button>
         ) : (
           <>
@@ -141,8 +147,7 @@ export function GetAMapPanel({
             type="button"
             data-testid="generate-map-toggle"
             className="cf-chip"
-            aria-expanded={generatorOpen}
-            onClick={() => setGeneratorOpen((v) => !v)}
+            {...generatorDisclosure.buttonProps}
             style={{ cursor: 'pointer' }}
             title={builtinGenerator?.description}
           >
@@ -155,19 +160,21 @@ export function GetAMapPanel({
       {/* First-party procedural generator wizard (issue #409): preview → reroll → use,
           without attaching or revealing until the DM commits. */}
       {canGenerate && generatorOpen && (
-        <GenerateMapPanel
-          campaignId={campaignId}
-          onError={onError}
-          onCancel={() => setGeneratorOpen(false)}
-          onUse={async (params) => {
-            await onGenerate!(params);
-            setGeneratorOpen(false);
-          }}
-        />
+        <div {...generatorDisclosure.regionProps}>
+          <GenerateMapPanel
+            campaignId={campaignId}
+            onError={onError}
+            onCancel={() => generatorDisclosure.setOpen(false)}
+            onUse={async (params) => {
+              await onGenerate!(params);
+              generatorDisclosure.setOpen(false);
+            }}
+          />
+        </div>
       )}
 
       {open && hasSources && (
-        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div {...regionProps} style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
             Generate a map on one of these sites, export it as an image, then import it right here.
             Output is free to use; Campfire never fetches or re-serves anything on your behalf.

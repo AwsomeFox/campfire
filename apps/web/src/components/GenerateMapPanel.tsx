@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GenerateMapParams, GeneratedMapPreview, MapKind, MapSize, MapTheme } from '@campfire/schema';
 import { api, API, ApiError } from '../lib/api';
 import { Btn } from './ui';
+import { useDisclosure } from './useDisclosure';
 
 const KINDS: { value: MapKind; label: string }[] = [
   { value: 'dungeon', label: 'Dungeon' },
@@ -70,7 +71,10 @@ export function GenerateMapPanel({
   const [size, setSize] = useState<MapSize>('medium');
   const [complexity, setComplexity] = useState(0.5);
   const [theme, setTheme] = useState<MapTheme | ''>('');
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const { open: showAdvanced, buttonProps: advancedButtonProps, regionProps: advancedRegionProps } = useDisclosure({
+    focusManagement: false,
+    regionLabel: 'Advanced map generator options',
+  });
   // The seed field: blank means "let the server pick one" — after a preview it's filled
   // with the resolved seed so the map is reproducible and the value is copyable.
   const [seed, setSeed] = useState('');
@@ -296,14 +300,13 @@ export function GenerateMapPanel({
         <button
           type="button"
           className="btn btn-ghost"
-          aria-expanded={showAdvanced}
-          onClick={() => setShowAdvanced((v) => !v)}
+          {...advancedButtonProps}
           style={{ fontSize: 11, padding: '2px 6px' }}
         >
-          {showAdvanced ? '▾' : '▸'} Advanced
+          <span aria-hidden="true">{showAdvanced ? '▾' : '▸'}</span> Advanced
         </button>
         {showAdvanced && (
-          <div style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+          <div {...advancedRegionProps} style={{ marginTop: 6, display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
             <label className="flex flex-col gap-1 text-muted" style={{ fontSize: 11, flex: 1, minWidth: 180 }}>
               Seed (reproducible)
               <input

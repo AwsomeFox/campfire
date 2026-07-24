@@ -14,7 +14,7 @@
  * total is handed up via `onApplyDamage` so the encounter can apply it to a target.
  * Without a `campaignId` the card is read-only, so it stays reusable elsewhere.
  */
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { type CSSProperties, type ReactNode } from 'react';
 import type { Character } from '@campfire/schema';
 import { ruleSystemAdapter } from '@campfire/schema';
 import {
@@ -32,6 +32,7 @@ import {
 } from '../lib/characterStats';
 import { useRoller } from '../lib/useRoller';
 import { RollResultBanner } from './RollResultBanner';
+import { useDisclosure } from './useDisclosure';
 
 const NOOP = () => {};
 
@@ -92,7 +93,11 @@ export function CharacterStatCard({
   /** Called with a rolled damage total so the encounter can apply it to a target combatant. */
   onApplyDamage?: (amount: number, label: string) => void;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const { open, buttonProps, regionProps } = useDisclosure({
+    initialOpen: defaultOpen,
+    focusManagement: false,
+    regionLabel: `${character.name} character sheet`,
+  });
   const adapter = ruleSystemAdapter(ruleSystem);
   const pb = profBonus(character.level);
   const roller = useRoller(campaignId ?? 0, onError ?? NOOP);
@@ -141,15 +146,15 @@ export function CharacterStatCard({
       <button
         type="button"
         className="btn btn-ghost"
-        aria-expanded={open}
+        {...buttonProps}
         aria-label={`${open ? 'Collapse' : 'Expand'} ${character.name}'s character sheet`}
-        onClick={() => setOpen((v) => !v)}
         style={{ fontSize: 10.5, minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
       >
-        {open ? '▾' : '▸'} Character sheet
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Character sheet
       </button>
       {open && (
         <div
+          {...regionProps}
           style={{
             marginTop: 6,
             padding: '10px 12px',

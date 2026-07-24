@@ -249,6 +249,12 @@ export default async function globalSetup(config: FullConfig) {
     hidden: false,
   });
   const statblockEncounterId: number = statblockEncounter.id;
+  // Two compendium-linked monsters so disclosure controls (issue #884) can be
+  // asserted side-by-side: each statblock toggle must control only its own region.
+  await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
+    kind: 'monster',
+    ruleEntryId: statblockEntryId,
+  });
   await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
     kind: 'monster',
     ruleEntryId: statblockEntryId,
