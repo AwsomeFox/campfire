@@ -1,4 +1,4 @@
-import { createHash, scryptSync } from 'node:crypto';
+import crypto, { createHash, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,6 +30,7 @@ import {
   BACKUP_FORMAT_VERSION,
   BACKUP_FORMAT_VERSION_WITH_KEY_ENVELOPE,
   BACKUP_KIND,
+  BACKUP_ORPHAN_LIST_CAP,
   BACKUP_VERSION,
   CURRENT_SCHEMA_REVISION,
   DB_ENTRY_V1,
@@ -37,8 +38,10 @@ import {
   parseBackupManifest,
   serverAppVersion,
   type AiKeySource,
+  type BackupAttachmentRecord,
   type BackupInspectResult,
   type BackupManifest,
+  type BackupReconciliation,
 } from './backup-manifest';
 import {
   KEY_ENVELOPE_ENTRY,
@@ -130,6 +133,57 @@ function listFilesRecursive(root: string): string[] {
 
 function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
+}
+
+/** Max attempts to read an attachment file whose size is changing (#828). */
+const MAX_ATTACHMENT_RETRIES = 3;
+
+/**
+ * Read a file with retry-on-size-change (#828). If the file's size differs between two
+ * reads (indicating a concurrent overwrite), retry up to {@link MAX_ATTACHMENT_RETRIES}
+ * times. Returns the final captured bytes and whether the size changed at any point.
+ * Returns null if the file is truly absent (ENOENT after retries).
+ */
+function readWithRetry(absPath: string): { bytes: Buffer; changed: boolean } | null {
+  let priorSize = -1;
+  let changed = false;
+  for (let attempt = 0; attempt < MAX_ATTACHMENT_RETRIES; attempt++) {
+    try {
+      const stat = fs.statSync(absPath);
+      const bytes = fs.readFileSync(absPath);
+      // Detect an in-flight overwrite: if the size we read differs from the previous
+      // stat, or if the current stat differs from the just-read bytes' length, the file
+      // was rewritten mid-read. Retry once more to catch a stable read.
+      if (priorSize >= 0 && stat.size !== priorSize) {
+        changed = true;
+      }
+      if (bytes.length !== stat.size) {
+        // The file grew or shrank between stat and read — retry with a fresh stat.
+        priorSize = stat.size;
+        changed = true;
+        continue;
+      }
+      return { bytes, changed };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === 'ENOENT') return null;
+      // Any other error (permissions etc.) is fatal for THIS file — treat as missing
+      // and let the caller record it in reconciliation. Log at the caller.
+      return null;
+    }
+  }
+  // Retries exhausted with the size still moving — capture whatever we can get now.
+  try {
+    const bytes = fs.readFileSync(absPath);
+    return { bytes, changed: true };
+  } catch {
+    return null;
+  }
+}
+
+/** sha256 hex digest for a byte buffer. */
+function sha256Hex(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
@@ -394,20 +448,35 @@ export class BackupService implements OnApplicationBootstrap {
   }
 
   /**
-   * Build a downloadable backup archive: a WAL-safe hot snapshot of the SQLite
-   * DB (via `VACUUM INTO`, which checkpoints the WAL into a single clean file
-   * without blocking writers or requiring the app to be quiesced) plus every
-   * file under DATA_DIR/uploads, wrapped with a manifest.
+   * Build a downloadable backup archive with attachment reconciliation (#828)
+   * and optional AI keyfile envelope (#496).
    *
-   * #496: When the running server relies on an auto-generated
-   * `DATA_DIR/ai-config.key` and the caller supplies a `keyPassphrase`, the
-   * keyfile is wrapped in an AES-256-GCM envelope (scrypt(passphrase, salt))
-   * and included as `ai-config.key.env.json` inside the archive so a restore
-   * to a fresh host can rehydrate stored provider credentials. The manifest
-   * always records the key source (`env` vs `keyfile`) and whether an
-   * envelope was included, so operators can see up-front whether their
-   * archive is credential-portable. Plaintext key material never enters the
-   * archive.
+   * Flow:
+   *   1. Snapshot the DB via `VACUUM INTO` (WAL-safe hot snapshot; does not block writers)
+   *      — this fixes the "generation" for the whole backup. The snapshot is the
+   *      authoritative source of truth about which attachment rows exist.
+   *   2. Open the snapshot read-only and enumerate every committed attachment row.
+   *   3. For each row, resolve its on-disk path via {@link AttachmentsService.filePath}
+   *      (same MIME→ext maps as live serving) and read with retry-on-size-change.
+   *   4. Compute sha256 of the captured bytes and record the attachment in the manifest.
+   *      A captured byte length that differs from the snapshot row's `size` counts as
+   *      `changed` (restoring would leave the DB inconsistent with the file).
+   *   5. Scan the live uploads/ tree once more and record any files that are NOT
+   *      referenced by any committed attachment row as `orphans`.
+   *   6. Fail loudly if any file went missing (ENOENT) or changed under capture;
+   *      partial / inconsistent archives should not silently claim success.
+   *   7. #496: When the running server relies on an auto-generated
+   *      `DATA_DIR/ai-config.key` and the caller supplies a `keyPassphrase`, the
+   *      keyfile is wrapped in an AES-256-GCM envelope (scrypt(passphrase, salt))
+   *      and included as `ai-config.key.env.json` inside the archive so a restore
+   *      to a fresh host can rehydrate stored provider credentials. The manifest
+   *      always records the key source (`env` vs `keyfile`) and whether an
+   *      envelope was included. Plaintext key material never enters the archive.
+   *
+   * Uploads referenced by the DB snapshot land at their canonical path
+   * `<campaignId>/<id>.<ext>` under `uploads/` in the archive. Orphan files (in the
+   * live tree but not referenced) are NOT copied — they were the "concurrent write"
+   * case the DB snapshot doesn't know about, and including them would defeat the point.
    */
   async buildBackup(options?: BuildBackupOptions): Promise<Buffer> {
     const dataDir = resolveDataDir();
@@ -415,18 +484,95 @@ export class BackupService implements OnApplicationBootstrap {
     const snapshotPath = path.join(tmpDir, 'campfire.db');
     try {
       // VACUUM INTO requires the target file NOT to exist (tmpDir is empty). Escape the
-      // path for the SQL string literal.
+      // path for the SQL string literal. This is our generation boundary — every read
+      // below is against this snapshot, not the live DB.
       this.holder.raw.exec(`VACUUM INTO '${snapshotPath.replace(/'/g, "''")}'`);
       const dbBytes = fs.readFileSync(snapshotPath);
 
       const zip = new JSZip();
       zip.file(DB_ENTRY, dbBytes);
 
-      const uploads = uploadsRoot(dataDir);
-      const uploadFiles = listFilesRecursive(uploads);
-      for (const rel of uploadFiles) {
-        zip.file(`${UPLOADS_PREFIX}${rel}`, fs.readFileSync(path.join(uploads, rel)));
+      // Read committed attachment rows from the SNAPSHOT. Rows in state 'reserved' are
+      // uploads that hadn't yet finished publishing at snapshot time — their bytes may
+      // or may not exist on disk; excluding them keeps the archive semantically clean
+      // (a restored server sees the same attachment set the snapshot's DB saw).
+      const snapshotDb = new Database(snapshotPath, { readonly: true, fileMustExist: true });
+      let snapshotRows: Array<{
+        id: number;
+        campaignId: number;
+        mime: string;
+        size: number;
+        hidden: number;
+      }>;
+      try {
+        snapshotRows = snapshotDb
+          .prepare(
+            `SELECT id, campaign_id AS campaignId, mime, size, hidden
+             FROM attachments
+             WHERE state = 'committed'`,
+          )
+          .all() as Array<{ id: number; campaignId: number; mime: string; size: number; hidden: number }>;
+      } finally {
+        snapshotDb.close();
       }
+
+      const uploads = uploadsRoot(dataDir);
+      const attachmentRecords: BackupAttachmentRecord[] = [];
+      const capturedPaths = new Set<string>();
+      let missing = 0;
+      let changed = 0;
+
+      for (const row of snapshotRows) {
+        // Resolve through AttachmentsService so backup MIME→ext matches live storage
+        // (ALLOWED_MIME_TO_EXT + GENERATED_MIME_TO_EXT, else `.bin`) — never invent
+        // extensions the app would not have written.
+        const abs = this.attachments.filePath(row);
+        const rel = path.relative(uploads, abs).split(path.sep).join('/');
+        const captured = readWithRetry(abs);
+        if (captured === null) {
+          // The file is truly gone (ENOENT after retries). Do NOT add the file to the
+          // zip — a restore that references a missing file would fail on read; the
+          // reconciliation section signals the problem loudly.
+          missing++;
+          continue;
+        }
+        // Concurrent overwrite OR captured bytes disagree with the snapshot row size
+        // → restored DB would be internally inconsistent with the archived file.
+        if (captured.changed || captured.bytes.length !== row.size) changed++;
+        zip.file(`${UPLOADS_PREFIX}${rel}`, captured.bytes);
+        capturedPaths.add(rel);
+        attachmentRecords.push({
+          id: row.id,
+          campaignId: row.campaignId,
+          path: rel,
+          size: captured.bytes.length,
+          mime: row.mime,
+          hidden: row.hidden === 1,
+          sha256: sha256Hex(captured.bytes),
+        });
+      }
+
+      // Orphans: files on disk that no committed attachment row references. These include
+      // uncommitted staging leftovers and any concurrent uploads that landed after the
+      // snapshot. Reported in the manifest but NOT copied — the DB doesn't know about them.
+      const liveFiles = listFilesRecursive(uploads);
+      const orphanPaths: string[] = [];
+      for (const rel of liveFiles) {
+        // Normalize to forward slashes for stable manifest paths (zip + cross-OS).
+        const normalized = rel.split(path.sep).join('/');
+        if (!capturedPaths.has(normalized)) orphanPaths.push(normalized);
+      }
+      orphanPaths.sort();
+
+      const reconciliation: BackupReconciliation = {
+        generation: crypto.randomUUID(),
+        totalAttachments: snapshotRows.length,
+        missing,
+        changed,
+        orphans: orphanPaths.slice(0, BACKUP_ORPHAN_LIST_CAP),
+        orphanCount: orphanPaths.length,
+        clean: missing === 0 && changed === 0,
+      };
 
       // #496: probe the key source + credential count for the manifest, and
       // (opt-in) include an encrypted envelope of the keyfile.
@@ -487,12 +633,25 @@ export class BackupService implements OnApplicationBootstrap {
         createdAt: nowIso(),
         db: DB_ENTRY,
         dbBytes: dbBytes.length,
-        uploadCount: uploadFiles.length,
+        uploadCount: attachmentRecords.length,
         aiKeySource,
         aiKeyIncluded,
         ...(aiCredentialCount !== null ? { aiCredentialCount } : {}),
+        attachments: attachmentRecords,
+        reconciliation,
       };
       zip.file(MANIFEST_ENTRY, JSON.stringify(manifest, null, 2));
+
+      // Fail loudly if any file was missing or changed under capture — partial /
+      // inconsistent archives should never silently claim success (#828 AC). Orphans
+      // are informational and don't block the archive: they're either reserved uploads
+      // (recoverable on restore) or concurrent writes after the generation boundary.
+      if (missing > 0 || changed > 0) {
+        throw new Error(
+          `Backup failed reconciliation: ${missing} missing, ${changed} changed attachment file(s). ` +
+            `Backup generation ${reconciliation.generation} — see manifest.reconciliation for details.`,
+        );
+      }
 
       return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     } finally {
