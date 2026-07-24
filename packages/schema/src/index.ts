@@ -4503,14 +4503,13 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
     "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
 } as const;
 
-// Add near the AI DM section:
 export const AiDmProactiveSettings = z.object({
   enabled: z.boolean().default(false),
   triggers: z.object({
     encounterEnded: z.boolean().default(true),
     hpCritical: z.boolean().default(true),
     objectiveCompleted: z.boolean().default(true),
-  }).default({}),
+  }).default({ encounterEnded: true, hpCritical: true, objectiveCompleted: true }),
   cooldownSeconds: z.number().int().min(30).max(3600).default(300),
   maxProactiveTokensPerHour: z.number().int().min(0).max(50_000).default(5_000),
 });

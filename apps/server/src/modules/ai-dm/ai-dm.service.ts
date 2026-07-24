@@ -8,7 +8,8 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import type { AiDmMode, AiDmProactiveSettings, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
+import { AiDmProactiveSettings } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -37,7 +38,7 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     lastTurnAt: row.lastTurnAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    proactiveSettings: (row.proactiveSettings as any) ?? defaultSeat(row.campaignId).proactiveSettings,
+    proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
   };
 }
 

@@ -964,10 +964,9 @@ export class AiDriverService {
   systemActor(): RequestUser {
     return {
       id: 'system:proactive',
-      username: 'system',
-      displayName: 'Proactive DM',
-      devRole: null,
-    } as unknown as RequestUser;
+      name: 'Proactive DM',
+      serverRole: 'user',
+    };
   }
 
   /**

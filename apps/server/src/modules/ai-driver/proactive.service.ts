@@ -4,7 +4,7 @@
  * critical, objective completed). Budget-metered and rate-limited.
  */
 
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { CampaignEventsService } from '../events/campaign-events.service';
@@ -140,7 +140,10 @@ export class ProactiveService implements OnModuleDestroy {
    * Manually trigger a proactive turn (POST /ai-dm/trigger).
    */
   async manualTrigger(campaignId: number, triggerType: string, customPrompt?: string): Promise<void> {
-    const prompt = customPrompt ?? PROACTIVE_PROMPTS[triggerType] ?? `Proactive DM trigger: ${triggerType}`;
+    if (!customPrompt && !(triggerType in PROACTIVE_PROMPTS)) {
+      throw new BadRequestException(`Unknown proactive trigger type: ${triggerType}`);
+    }
+    const prompt = customPrompt ?? PROACTIVE_PROMPTS[triggerType];
     await this.executeProactiveTurn(campaignId, triggerType, prompt);
   }
 
@@ -176,16 +179,16 @@ export class ProactiveService implements OnModuleDestroy {
 
     // Check driver session isn't busy
     const session = this.driver.getSession(campaignId);
-    if (session?.status === 'running') {
+    if (session?.status === 'running' || session?.status === 'paused') {
       this.logger.debug(`Campaign ${campaignId}: proactive trigger '${triggerType}' skipped (turn in progress)`);
       return;
     }
 
-    state.lastTriggerAt = now;
     const prompt = PROACTIVE_PROMPTS[triggerType];
     if (!prompt) return;
 
     await this.executeProactiveTurn(campaignId, triggerType, prompt);
+    state.lastTriggerAt = now;
   }
 
   private classifyEvent(event: CampaignEvent, settings: AiDmProactiveSettings): string | null {
@@ -202,7 +205,7 @@ export class ProactiveService implements OnModuleDestroy {
               return 'hpCritical';
           }
       } else {
-        return 'hpCritical'; // Fallback if shape is different or we rely on down-stream
+        return null;
       }
     }
     if (((event.type as string) === 'quest.objective_completed' || (event.type as string) === 'quest.completed') &&
@@ -235,7 +238,7 @@ export class ProactiveService implements OnModuleDestroy {
         this.logger.debug(`Campaign ${campaignId}: proactive turn skipped (conflict)`);
         return;
       }
-      throw err;
+      this.logger.warn(`Campaign ${campaignId}: proactive turn failed (${triggerType}): ${err?.message ?? err}`);
     }
   }
 }

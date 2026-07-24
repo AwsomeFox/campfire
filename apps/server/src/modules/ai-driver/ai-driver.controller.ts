@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Sse, type MessageEvent } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Sse, type MessageEvent } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { createZodDto } from 'nestjs-zod';
@@ -198,6 +198,7 @@ export class AiDriverController {
   }
 
   @Post('trigger')
+  @HttpCode(202)
   @ApiOperation({ summary: 'Manually trigger a proactive DM turn' })
   @ApiResponse({ status: 202, description: 'Proactive turn initiated.' })
   @Throttle({ ai: { limit: 5, ttl: 60000 } })
