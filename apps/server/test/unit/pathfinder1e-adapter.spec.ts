@@ -81,7 +81,10 @@ describe('Pathfinder1eAdapter — initiative (native bonus preferred, else DEX; 
     expect(pf1eInitiativeBreakdown(null)).toEqual({ source: 'unavailable', bonus: null });
     expect(pf1eInitiativeBreakdown(undefined)).toEqual({ source: 'unavailable', bonus: null });
     expect(pf1eNativeInitiative({})).toBeNull();
-    // Shared seam still coerces unavailable → 0 for rollInitiative callers.
+    // Production callers (encounter add) use initiativeModifierOrNull so unavailable is not
+    // silently stored as +0; the numeric seam still defaults for rollInitiative.
+    expect(Pathfinder1eAdapter.initiativeModifierOrNull!({ STR: 16 })).toBeNull();
+    expect(Pathfinder1eAdapter.initiativeModifierOrNull!(null)).toBeNull();
     expect(Pathfinder1eAdapter.initiativeModifier({ STR: 16 })).toBe(0);
     expect(Pathfinder1eAdapter.initiativeModifier(null)).toBe(0);
   });

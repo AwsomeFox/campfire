@@ -1683,6 +1683,18 @@ export interface RuleSystemAdapter {
     level?: number,
   ): number;
   /**
+   * OPTIONAL — resolve an initiative modifier, or `null` when it cannot be derived
+   * (issue #764). Systems that implement this (PF1e) let encounter/generator callers
+   * surface "unavailable" instead of inventing a silent +0; the numeric
+   * {@link initiativeModifier} seam remains for rollers that need a default. Other
+   * adapters leave this undefined and keep returning 0 from `initiativeModifier`.
+   */
+  initiativeModifierOrNull?(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+    level?: number,
+  ): number | null;
+  /**
    * Compare two combatants with equal initiative totals for running-order sort (issue #611).
    * Return negative if `a` should act before `b`. Called only after initiative totals match
    * (or both are null). 5e: higher DEX/`initMod` first, then `sortOrder` ascending as a

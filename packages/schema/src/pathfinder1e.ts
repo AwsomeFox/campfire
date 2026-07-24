@@ -74,8 +74,9 @@ export const PF1E_CONDITIONS = [
 export type Pf1eCondition = (typeof PF1E_CONDITIONS)[number];
 
 /**
- * Coerce a value to a finite number, or null. Accepts integer-like numerics (including
- * numeric strings the SRD sometimes emits); rejects NaN / Infinity / empty string.
+ * Coerce a value to a finite number, or null. Accepts any finite number (including
+ * floats) and numeric strings `Number(...)` can parse (the SRD sometimes emits
+ * these); rejects NaN / Infinity / empty / non-numeric strings.
  * Used for ability scores and the flat initiative bonus the importer stores on a
  * monster's `dataJson`.
  */
@@ -222,21 +223,28 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   // Pathfinder 1e caps at character level 20 (Core Rulebook), matching the 5e ceiling.
   maxLevel: 20,
   // Prefer the explicit native Init folded into abilityScores by mapStatblock (issue #764);
-  // derive from DEX only when that bonus is absent. The shared seam returns a number, so
-  // a fully unavailable score still coerces to 0 here — call pf1eInitiativeBreakdown when
-  // the caller needs to distinguish "unavailable" from a genuine +0.
-  // `representation` applies only to the DEX fallback (native Init is already a bonus).
+  // derive from DEX only when that bonus is absent. `representation` applies only to the
+  // DEX fallback (native Init is already a bonus).
+  //
+  // Callers that must surface "unavailable" (encounter addCombatant, generators) use
+  // `initiativeModifierOrNull` / `pf1eInitiativeBreakdown`. The numeric seam still returns
+  // 0 for rollInitiative callers that need a default when a combatant already exists.
+  initiativeModifierOrNull(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number | null {
+    const breakdown = pf1eInitiativeBreakdown(abilities);
+    if (breakdown.source === 'unavailable') return null;
+    if (breakdown.source === 'native') return breakdown.bonus;
+    // Inline of resolveAbilityModifier — this file cannot runtime-import from ./index
+    // without creating a cycle (index registers Pathfinder1eAdapter).
+    return representation === 'score' ? breakdown.bonus : Math.trunc(breakdown.dexScore);
+  },
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
   ): number {
-    const native = pf1eNativeInitiative(abilities);
-    if (native !== null) return native;
-    const dex = pf1eDexScore(abilities);
-    if (dex === null) return 0;
-    // Inline of resolveAbilityModifier — this file cannot runtime-import from ./index
-    // without creating a cycle (index registers Pathfinder1eAdapter).
-    return representation === 'score' ? pf1eAbilityModifier(dex) : Math.trunc(dex);
+    return this.initiativeModifierOrNull!(abilities, representation) ?? 0;
   },
   // PF1e initiative is DEX-derived like 5e; on a tied total, higher DEX (initMod) first,
   // then sortOrder (issue #611).

@@ -1627,7 +1627,22 @@ export class EncountersService {
         // Pass abilityRepresentation so PF2e creature modifiers (and Open Legend native
         // attributes) are not score-converted a second time (issue #767).
         const mapped = adapter.mapStatblock(data);
-        initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
+        // Issue #764: when the adapter can distinguish "unavailable" from a genuine +0
+        // (PF1e), refuse to invent a silent zero — the DM must supply initMod explicitly.
+        if (adapter.initiativeModifierOrNull) {
+          const resolved = adapter.initiativeModifierOrNull(
+            mapped.abilityScores,
+            mapped.abilityRepresentation,
+          );
+          if (resolved === null) {
+            throw new BadRequestException(
+              'Unable to resolve initiative for this combatant — provide "initMod" explicitly (statblock has no native Init or DEX)',
+            );
+          }
+          initMod = resolved;
+        } else {
+          initMod = adapter.initiativeModifier(mapped.abilityScores, mapped.abilityRepresentation);
+        }
       }
     }
 
