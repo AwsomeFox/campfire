@@ -2391,10 +2391,14 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
         : typeof perception === 'number'
           ? { perception }
           : undefined;
+    // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits). An
+    // empty traits array joins to "" — treat that (and a blank string) as absent so the
+    // creatureType/type fallback still applies instead of surfacing an empty label.
+    const traitsRaw = Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits;
+    const traits = typeof traitsRaw === 'string' && traitsRaw.trim() === '' ? undefined : traitsRaw;
     return {
       size: d.size,
-      // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
-      creatureType: (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits) ?? d.creatureType ?? d.type,
+      creatureType: traits ?? d.creatureType ?? d.type,
       // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
       challengeRating: d.level ?? d.challengeRating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
