@@ -622,6 +622,25 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(ofType(await listFor(player), 'session_rsvp')).toHaveLength(0);
   });
 
+  it("a player's RSVP note-only update notifies the DM with note-specific copy", async () => {
+    const future = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+    const sched = await dm.post(`/api/v1/campaigns/${campaignId}/schedule`).send({ scheduledAt: future, title: 'RSVP note night' });
+    expect(sched.status).toBe(201);
+
+    const initial = await player.put(`/api/v1/schedule/${sched.body.id}/rsvp`).send({ status: 'yes' });
+    expect(initial.status).toBe(200);
+
+    const noteOnly = await player
+      .put(`/api/v1/schedule/${sched.body.id}/rsvp`)
+      .send({ status: 'yes', note: 'Running 15 minutes late' });
+    expect(noteOnly.status).toBe(200);
+
+    const dmRsvps = ofType(await listFor(dm), 'session_rsvp');
+    expect(dmRsvps).toHaveLength(2);
+    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
+    expect(dmRsvps[0].title).not.toMatch(/RSVP'd yes/i);
+  });
+
   it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
     const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon' });
     expect(quest.status).toBe(201);

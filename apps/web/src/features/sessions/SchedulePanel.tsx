@@ -348,7 +348,7 @@ function ScheduleItem({
   const noteTooLong = noteDraftLength > RSVP_NOTE_MAX_LEN;
 
   async function setRsvp(status: RsvpStatus) {
-    if (rsvpSaving) return;
+    if (rsvpSaving || noteSaving) return;
     const prior = rsvpState.persisted;
     if (status === prior && rsvpState.pending == null) return;
     dispatchRsvp({ type: 'select', status });
@@ -480,7 +480,7 @@ function ScheduleItem({
             aria-labelledby={rsvpLegendId}
             value={displayRsvp}
             onChange={(status) => void setRsvp(status)}
-            disabled={busy || rsvpSaving}
+            disabled={busy || rsvpSaving || noteSaving}
           />
           <span
             id={rsvpStatusId}

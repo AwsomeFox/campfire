@@ -361,6 +361,10 @@ export class SchedulingService {
       .where(and(eq(sessionRsvps.scheduledSessionId, scheduleId), eq(sessionRsvps.userId, user.id)))
       .limit(1);
 
+    const statusChanged = !existing || existing.status !== input.status;
+    const noteChanged =
+      input.note !== undefined && (input.note ?? '').trim() !== (existing?.note ?? '').trim();
+
     if (existing) {
       await this.db
         .update(sessionRsvps)
@@ -394,9 +398,13 @@ export class SchedulingService {
     const roles = await this.notifications.memberRoles(schedule.campaignId);
     for (const [memberId, memberRole] of roles) {
       if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+      const title =
+        noteChanged && !statusChanged
+          ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
+          : `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`;
       await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
         type: 'session_rsvp',
-        title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
+        title,
         entityId: scheduleId,
         actorName: user.name,
       });
