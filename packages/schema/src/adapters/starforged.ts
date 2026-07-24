@@ -1,14 +1,13 @@
 /**
- * Ironsworn: Starforged rule-system adapter — issue #405 (Copilot review follow-up).
+ * Ironsworn: Starforged rule-system adapter (issue #405).
  *
- * PR #1257 imported Starforged (the canonical rsek/datasworn CC-BY-4.0 dataset) as a
- * selectable rule pack under the slug `ironsworn-starforged`, but registered NO adapter for
- * it. `ruleSystemAdapter()` falls back to `Dnd5eAdapter` for any unregistered slug, so a
- * campaign that picked Starforged would silently inherit D&D 5e combat mechanics — a d20
- * initiative roll, Armor Class, a 20-level cap, the 5e ability-modifier curve, and the 5e
- * condition chips. Starforged is a PbtA / narrative game with none of those concepts, so
- * that fallback is wrong. This adapter is the minimal, honest NEUTRAL implementation that
- * keeps the pack off the 5e path.
+ * Starforged is imported (from the canonical rsek/datasworn CC-BY-4.0 dataset) as a selectable
+ * rule pack under the slug `ironsworn-starforged`. Without a registered adapter,
+ * `ruleSystemAdapter()` falls back to `Dnd5eAdapter` for any unregistered slug, so a campaign
+ * that picked Starforged would silently inherit D&D 5e combat mechanics — a d20 initiative
+ * roll, Armor Class, a 20-level cap, the 5e ability-modifier curve, and the 5e condition chips.
+ * Starforged is a PbtA / narrative game with none of those concepts, so that fallback is wrong.
+ * This adapter is the minimal, honest NEUTRAL implementation that keeps the pack off the 5e path.
  *
  * Design (Starforged is PbtA / narrative — NOT d20):
  *  - Presentation: NEUTRAL (Rating / Defense / …), never 5e's "Challenge" / "Armor Class".
