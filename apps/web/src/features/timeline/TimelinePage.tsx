@@ -537,10 +537,13 @@ export default function TimelinePage() {
                         setEditDraft(draftFrom(e));
                         setEditFieldErrors({});
                         setEditingId(e.id);
-                        // #754: surface the "Visible to players" bar for an
-                        // already player-visible event when the DM opens Edit, so
-                        // the bar isn't limited to events created this session.
-                        setVisibilityEventId(e.hidden ? null : e.id);
+                        // #754: track the edited event for the "Visible to players"
+                        // bar so it isn't limited to events created this session.
+                        // Set unconditionally (even when hidden): the bar's `visible`
+                        // guard renders nothing while the event stays hidden, and
+                        // keeping it mounted means revealing the event mid-edit shows
+                        // the bar without needing a fresh create/edit cycle.
+                        setVisibilityEventId(e.id);
                         setActionError(null);
                       }}
                     >
