@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -245,7 +245,11 @@ export class RulesService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    const interrupted = this.db.select().from(importJobs).where(eq(importJobs.status, 'running')).all();
+    const interrupted = this.db
+      .select()
+      .from(importJobs)
+      .where(inArray(importJobs.status, ['running', 'queued']))
+      .all();
     for (const job of interrupted) {
       const ts = nowIso();
       const errors = JSON.parse(job.errors || '[]') as string[];
@@ -301,9 +305,10 @@ export class RulesService implements OnModuleInit {
     const ts = nowIso();
     const id = randomUUID();
     const progress: ImportJobProgress = { committed: 0, skipped: 0, failed: 0, sections: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })) };
-    const payload = JSON.stringify({ source, ...input });
+    const persistedInput = { source, ...input };
+    const payload = JSON.stringify(persistedInput);
     const sourceHash = createHash('sha256').update(payload).digest('hex').slice(0, 16);
-    this.db.insert(importJobs).values({ id, source, sourceHash, input: JSON.stringify(input), status: 'queued', progress: JSON.stringify(progress), cursor: null, actorId: user.id, startedAt: null, updatedAt: ts, completedAt: null, outcome: null, errors: '[]', createdAt: ts }).run();
+    this.db.insert(importJobs).values({ id, source, sourceHash, input: payload, status: 'queued', progress: JSON.stringify(progress), cursor: null, actorId: user.id, startedAt: null, updatedAt: ts, completedAt: null, outcome: null, errors: '[]', createdAt: ts }).run();
     return this.getJobOrThrow(id);
   }
 
@@ -318,11 +323,17 @@ export class RulesService implements OnModuleInit {
     this.db.update(importJobs).set({ progress: JSON.stringify(progress), cursor, updatedAt: nowIso() }).where(eq(importJobs.id, jobId)).run();
   }
 
-  private markJobCompleted(jobId: string, outcome: 'created' | 'updated', added: number, skipped: number, pack?: RulePack): void {
+  private markJobCompleted(jobId: string, outcome: 'created' | 'updated', added: number, skipped: number, pack?: RulePack, isIncremental = false): void {
     const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
-    if (!row) return;
+    if (!row || row.status === 'cancelled') {
+      this.runningJobs.delete(jobId);
+      return;
+    }
     const progress = RulesService.parseProgress(row.progress);
-    progress.committed = added; progress.skipped = skipped;
+    if (isIncremental) {
+      progress.committed = added;
+      progress.skipped = skipped;
+    }
     if (pack) (progress as unknown as Record<string, unknown>).packSlug = pack.slug;
     progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'done'; });
     const ts = nowIso();
@@ -332,7 +343,10 @@ export class RulesService implements OnModuleInit {
 
   private markJobFailed(jobId: string, error: string): void {
     const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
-    if (!row) return;
+    if (!row || row.status === 'cancelled') {
+      this.runningJobs.delete(jobId);
+      return;
+    }
     const errors = JSON.parse(row.errors || '[]') as string[]; errors.push(error);
     const progress = RulesService.parseProgress(row.progress);
     progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'failed'; });
@@ -348,8 +362,8 @@ export class RulesService implements OnModuleInit {
     const ts = nowIso();
     const running = this.runningJobs.get(jobId);
     if (running) running.cancelled = true;
+    else this.runningJobs.set(jobId, { cancelled: true });
     this.db.update(importJobs).set({ status: 'cancelled', updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
-    this.runningJobs.delete(jobId);
     return this.getJobOrThrow(jobId);
   }
 
@@ -357,22 +371,45 @@ export class RulesService implements OnModuleInit {
     const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
     if (!row) throw new NotFoundException(`Install job ${jobId} not found`);
     if (row.status !== 'failed' && row.status !== 'cancelled') throw new BadRequestException(`Job ${jobId} cannot be retried (status: ${row.status})`);
+    if (row.source === 'upload') throw new BadRequestException(`Upload jobs cannot be retried`);
     const input = JSON.parse(row.input) as RulePackInstall;
     return this.enqueueInstall(input, user);
   }
 
+  private isJobCancelled(jobId: string): boolean {
+    if (this.runningJobs.get(jobId)?.cancelled) return true;
+    const [row] = this.db.select({ status: importJobs.status }).from(importJobs).where(eq(importJobs.id, jobId)).all();
+    return row?.status === 'cancelled';
+  }
+
   private async runJob(jobId: string, work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>): Promise<void> {
+    if (this.isJobCancelled(jobId)) {
+      this.runningJobs.delete(jobId);
+      return;
+    }
     const ts = nowIso();
     this.db.update(importJobs).set({ status: 'running', startedAt: ts, updatedAt: ts }).where(eq(importJobs.id, jobId)).run();
-    this.runningJobs.set(jobId, { cancelled: false });
+    if (this.isJobCancelled(jobId)) {
+      this.runningJobs.delete(jobId);
+      return;
+    }
+    if (!this.runningJobs.has(jobId)) {
+      this.runningJobs.set(jobId, { cancelled: false });
+    }
     try {
       const result = await work();
-      if (this.runningJobs.get(jobId)?.cancelled) return;
+      if (this.isJobCancelled(jobId)) {
+        this.runningJobs.delete(jobId);
+        return;
+      }
       const isIncremental = 'added' in result;
       const { added, skippedExisting, ...pack } = result as RulePack & { added?: number; skippedExisting?: number };
-      this.markJobCompleted(jobId, isIncremental ? 'updated' : 'created', added ?? 0, skippedExisting ?? 0, pack);
+      this.markJobCompleted(jobId, isIncremental ? 'updated' : 'created', added ?? 0, skippedExisting ?? 0, pack, isIncremental);
     } catch (err) {
-      if (this.runningJobs.get(jobId)?.cancelled) return;
+      if (this.isJobCancelled(jobId)) {
+        this.runningJobs.delete(jobId);
+        return;
+      }
       this.markJobFailed(jobId, err instanceof Error ? err.message : String(err));
     }
   }

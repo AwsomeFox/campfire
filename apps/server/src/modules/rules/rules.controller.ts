@@ -125,7 +125,7 @@ export class RulesController {
   }
 
   @Get('packs/install-jobs')
-  @ApiOperation({ summary: 'List install-job history', description: 'Any authenticated user. Returns all persisted import jobs, newest first.' })
+  @ApiOperation({ summary: 'List install-job history', description: 'Any authenticated user. Returns the newest persisted import jobs (default limit 50).' })
   @ApiResponse({ status: 200, description: 'Import job history.' })
   listJobs() {
     return this.rules.listJobs();
