@@ -1,4 +1,5 @@
 import { describe, it, expect, jest } from '@jest/globals';
+import type { NarrationLanguage } from '@campfire/schema';
 import { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import {
   formatCalendarForPrompt,
@@ -89,7 +90,11 @@ describe('world-state prompt formatters (#1048)', () => {
 describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
   const CAMPAIGN = 42;
 
-  function makeService(toolResults: Record<string, { text: string; isError?: boolean }>) {
+  function makeService(
+    toolResults: Record<string, { text: string; isError?: boolean }>,
+    campaignLanguage: NarrationLanguage = 'en',
+    override?: NarrationLanguage,
+  ) {
     const call = jest.fn(async (name: string, _args: Record<string, unknown>) => {
       const hit = toolResults[name];
       if (!hit) return { text: '', isError: true };
@@ -107,6 +112,9 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
     const characters = {
       getOrThrow: jest.fn(),
     };
+    const campaigns = {
+      getOrThrow: jest.fn(async () => ({ id: CAMPAIGN, narrationLanguage: campaignLanguage })),
+    };
     const aiDm = { registerDriverSessionTeardown: jest.fn() };
     const svc = new AiDriverService(
       aiDm as unknown as Ctor[0],
@@ -116,21 +124,25 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
       undefined as unknown as Ctor[4],
       supportPreferences as unknown as Ctor[5],
       undefined as unknown as Ctor[6],
-      undefined as unknown as Ctor[7],
+      campaigns as unknown as Ctor[7],
       undefined as unknown as Ctor[8],
-      undefined as unknown as Ctor[9], // encounters (#1048 ctor arity)
-      members as unknown as Ctor[10], // members (#1045)
-      characters as unknown as Ctor[11], // characters (#1045)
+      undefined as unknown as Ctor[9],
+      members as unknown as Ctor[10],
+      characters as unknown as Ctor[11],
     );
-    return { svc, call, mcpTools, supportPreferences };
+    return { svc, call, mcpTools, supportPreferences, campaigns };
   }
 
-  async function assemble(svc: AiDriverService): Promise<string> {
+  async function assemble(svc: AiDriverService, override?: NarrationLanguage): Promise<string> {
     return (
       svc as unknown as {
-        assembleSystemPrompt(campaignId: number, seat: { instructions: string | null }): Promise<string>;
+        assembleSystemPrompt(
+          campaignId: number,
+          seat: { instructions: string | null },
+          narrationLanguageOverride?: NarrationLanguage,
+        ): Promise<string>;
       }
-    ).assembleSystemPrompt(CAMPAIGN, { instructions: null });
+    ).assembleSystemPrompt(CAMPAIGN, { instructions: null }, override);
   }
 
   it('injects calendar, encounters, party, and location sections from tool outputs', async () => {
@@ -206,5 +218,40 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
     expect(prompt).not.toContain('## Party status');
     expect(prompt).not.toContain('## Current location / environment');
     expect(prompt).toContain('## Campaign context');
+  });
+
+  it('injects the campaign narration language contract (#635)', async () => {
+    const { svc } = makeService(
+      {
+        get_campaign_summary: { text: JSON.stringify({ campaign: { dangerLevel: 'low' }, currentLocation: null }) },
+        get_session_zero: { text: '{"lines":[]}' },
+        get_calendar: { text: '[]', isError: true },
+        list_encounters: { text: '[]' },
+        get_party: { text: '[]' },
+      },
+      'fr',
+    );
+
+    const prompt = await assemble(svc);
+    expect(prompt).toContain('French (fr)');
+    expect(prompt).toContain('narrationLanguage=fr');
+  });
+
+  it('honors a per-run narration language override (#635)', async () => {
+    const { svc } = makeService(
+      {
+        get_campaign_summary: { text: JSON.stringify({ campaign: { dangerLevel: 'low' }, currentLocation: null }) },
+        get_session_zero: { text: '{"lines":[]}' },
+        get_calendar: { text: '[]', isError: true },
+        list_encounters: { text: '[]' },
+        get_party: { text: '[]' },
+      },
+      'en',
+      'ja',
+    );
+
+    const prompt = await assemble(svc, 'ja');
+    expect(prompt).toContain('Japanese (ja)');
+    expect(prompt).toContain('per-run override');
   });
 });

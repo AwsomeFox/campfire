@@ -82,6 +82,7 @@ import {
   AiMapRefineRequest,
   AttachGeneratedMapRequest,
   CoDmDraftTarget,
+  NarrationLanguage,
   CampaignDmRepair,
   ParticipantSupportPreferenceUpsert,
   RevisionEntityType,
@@ -897,10 +898,13 @@ export class McpToolsService {
         '(or a session) may trigger it. Idempotent: a re-run over unchanged material, or while a scribe recap proposal is ' +
         'still pending, is a no-op that returns the existing proposal. Pass dryRun:true to generate a preview without filing ' +
         'anything. Returns the recorded job + any filed proposal ids.',
-      { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal') },
-      async ({ campaignId, dryRun }) => {
+      { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal'), narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)') },
+      async ({ campaignId, dryRun, narrationLanguage }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.scribe.run(campaignId as number, 'on_demand', user, { dryRun: (dryRun as boolean | undefined) ?? false });
+        return this.scribe.run(campaignId as number, 'on_demand', user, {
+          dryRun: (dryRun as boolean | undefined) ?? false,
+          ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
+        });
       },
     );
 
@@ -3627,8 +3631,9 @@ export class McpToolsService {
           .max(10)
           .optional()
           .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
+        narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
       },
-      async ({ campaignId, target, prompt, count }) => {
+      async ({ campaignId, target, prompt, count, narrationLanguage }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.coDm.draft(
           campaignId as number,
@@ -3636,6 +3641,7 @@ export class McpToolsService {
             target: target as z.infer<typeof CoDmDraftTarget>,
             prompt: prompt as string,
             ...(count !== undefined ? { count: count as number } : {}),
+            ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
           },
           user,
           role,

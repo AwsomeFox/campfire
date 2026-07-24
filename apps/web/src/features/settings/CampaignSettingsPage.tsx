@@ -216,7 +216,15 @@ export default function CampaignSettingsPage() {
             isAdmin={isAdmin}
             onSaved={(c) => setCampaign(c)}
           />
-          <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
+          <AiDmCard
+            key={`aidm-${campaign.id}`}
+            campaignId={id}
+            campaign={campaign}
+            onCampaignSaved={(c) => {
+              setCampaign(c);
+              void refreshCampaigns();
+            }}
+          />
           <ExportCard key={`export-${campaign.id}`} campaignId={id} />
           <CloneCard
             key={`clone-${campaign.id}`}

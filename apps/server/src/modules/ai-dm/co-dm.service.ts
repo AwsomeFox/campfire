@@ -16,10 +16,12 @@ import {
   EncounterGenerate,
   GenerateMapParams,
   normalizeMapTheme,
+  buildNarrationLanguageContract,
+  resolveNarrationLanguage,
 } from '@campfire/schema';
-import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
+import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, NarrationLanguage, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats } from '../../db/schema';
+import { aiDmSeats, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -129,7 +131,12 @@ export class CoDmService {
     // CoDmService always used the injected AI_DM_PROVIDER (NoopAiDmProvider by default),
     // so a configured provider's drafts were served by the no-op scaffold — which fails
     // JSON parsing (422). When no provider is configured, fall back to the legacy seam.
-    const instructions = this.buildInstructions(seat.instructions, input.target, count);
+    const instructions = this.buildInstructions(
+      seat.instructions,
+      input.target,
+      count,
+      await this.resolveLanguageContract(campaignId, input.narrationLanguage),
+    );
     const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
 
     let narration: string;
@@ -239,7 +246,12 @@ export class CoDmService {
   }
 
   /** Persona + a target-specific instruction to reply with strict JSON the server can parse. */
-  private buildInstructions(persona: string, target: CoDmDraftTarget, count: number): string {
+  private buildInstructions(
+    persona: string,
+    target: CoDmDraftTarget,
+    count: number,
+    languageContract: string,
+  ): string {
     const base = persona ? `${persona}\n\n` : '';
     const shape = DRAFT_JSON_SHAPE[target];
     const arrayNote =
@@ -247,9 +259,23 @@ export class CoDmService {
         ? `Return a JSON ARRAY of exactly ${count} such objects.`
         : 'Return a single JSON object.';
     return (
-      `${base}You are drafting D&D content for the DM to review. Reply with ONLY JSON — no prose, ` +
+      `${base}${languageContract}\n\n` +
+      `You are drafting D&D content for the DM to review. Reply with ONLY JSON — no prose, ` +
       `no markdown fences. ${arrayNote} Each object matches: ${shape}`
     );
+  }
+
+  private async resolveLanguageContract(
+    campaignId: number,
+    override?: NarrationLanguage,
+  ): Promise<string> {
+    const [row] = await this.db
+      .select({ narrationLanguage: campaigns.narrationLanguage })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    const { language, provenance } = resolveNarrationLanguage(row?.narrationLanguage, override);
+    return buildNarrationLanguageContract(language, provenance);
   }
 
   /**

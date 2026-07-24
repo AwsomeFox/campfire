@@ -14,7 +14,8 @@
  * unless a budget + provider are set. We surface those server messages verbatim.
  */
 import { useEffect, useState } from 'react';
-import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/schema';
+import type { AiDmMode, AiDmSeat, AiProviderEffectiveView, Campaign, NarrationLanguage } from '@campfire/schema';
+import { NARRATION_LANGUAGE_OPTIONS } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
@@ -42,7 +43,15 @@ export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
 const MODE_LABEL: Record<AiDmMode, string> = { off: 'Off', co_dm: 'Co-DM', driver: 'Driver' };
 const MODE_TAG: Record<AiDmMode, string> = { off: 'tag-neutral', co_dm: 'tag-accent-2', driver: 'tag-accent' };
 
-export default function AiDmCard({ campaignId }: { campaignId: number }) {
+export default function AiDmCard({
+  campaignId,
+  campaign,
+  onCampaignSaved,
+}: {
+  campaignId: number;
+  campaign: Campaign;
+  onCampaignSaved: (c: Campaign) => void;
+}) {
   const [seat, setSeat] = useState<AiDmSeat | null>(null);
   const [effective, setEffective] = useState<AiProviderEffectiveView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -118,6 +127,11 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
       </p>
 
       <ModeSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
+      <NarrationLanguageSection
+        campaignId={campaignId}
+        campaign={campaign}
+        onSaved={onCampaignSaved}
+      />
       <EffectiveProviderSection campaignId={campaignId} effective={effective} onChanged={() => void loadEffective()} />
       <BudgetSection campaignId={campaignId} seat={seat} usagePct={usagePct} onChanged={(s) => setSeat(s)} />
       <InstructionsSection campaignId={campaignId} seat={seat} onChanged={(s) => setSeat(s)} />
@@ -140,6 +154,74 @@ function Section({ title, id, children }: { title: string; id?: string; children
       <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-neutral-200)' }}>{title}</span>
       {children}
     </div>
+  );
+}
+
+function NarrationLanguageSection({
+  campaignId,
+  campaign,
+  onSaved,
+}: {
+  campaignId: number;
+  campaign: Campaign;
+  onSaved: (c: Campaign) => void;
+}) {
+  const [narrationLanguage, setNarrationLanguage] = useState<NarrationLanguage>(campaign.narrationLanguage);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const dirty = narrationLanguage !== campaign.narrationLanguage;
+
+  useEffect(() => {
+    setNarrationLanguage(campaign.narrationLanguage);
+  }, [campaign.id, campaign.narrationLanguage]);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { narrationLanguage });
+      onSaved(updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't save narration language.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Section title="Narration language" id="ai-dm-narration-language">
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Governs AI-generated narration from the Driver, co-DM drafts, and Scribe recaps. This is separate from your
+        personal UI language in Preferences.
+      </p>
+      <div className="field" style={{ maxWidth: 320 }}>
+        <label htmlFor="ai-dm-narration-language">Campaign narration language</label>
+        <select
+          id="ai-dm-narration-language"
+          className="input"
+          value={narrationLanguage}
+          disabled={saving}
+          onChange={(e) => setNarrationLanguage(e.target.value as NarrationLanguage)}
+        >
+          {NARRATION_LANGUAGE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
+      <div className="flex gap-2 items-center">
+        <button className="btn btn-primary" style={{ fontSize: 12.5 }} disabled={saving || !dirty} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save language'}
+        </button>
+        {saved && <span className="text-muted" style={{ fontSize: 12 }}>Saved.</span>}
+      </div>
+    </Section>
   );
 }
 
