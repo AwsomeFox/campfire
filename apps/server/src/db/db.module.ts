@@ -434,10 +434,12 @@ function migrateCampaignsTableForLatestSessionNumber(sqlite: Database.Database):
   if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
 
   const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
-  if (columns.some((c) => c.name === 'latest_session_number')) return;
-
-  sqlite.exec('ALTER TABLE campaigns ADD COLUMN latest_session_number INTEGER NOT NULL DEFAULT 0');
-  // Backfill from live sessions only (soft-deleted recaps must not set campaign position).
+  if (!columns.some((c) => c.name === 'latest_session_number')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN latest_session_number INTEGER NOT NULL DEFAULT 0');
+  }
+  // Always run the idempotent backfill so a partially-applied migration (ALTER
+  // succeeded, backfill crashed) is healed on the next boot rather than recorded
+  // as complete with stale zeros.
   sqlite.exec(`
     UPDATE campaigns
     SET latest_session_number = MAX(
