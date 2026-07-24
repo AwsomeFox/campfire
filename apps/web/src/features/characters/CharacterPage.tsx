@@ -21,7 +21,7 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
