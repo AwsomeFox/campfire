@@ -35,6 +35,11 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     await h.enableExperimental();
   });
 
+  beforeEach(() => {
+    // tool_error / budget_exhausted stops leave unconsumed scripted turns — isolate each case.
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -314,6 +319,10 @@ describe('ai-dm driver runtime — gating + access (e2e)', () => {
     campaignId = await h.createCampaign('Driver Gating');
   });
 
+  beforeEach(() => {
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -373,6 +382,9 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'driver-teardown-model' });
     await h.enableExperimental();
+  });
+  beforeEach(() => {
+    h.resetMock();
   });
   afterAll(async () => {
     await h.close();
@@ -527,6 +539,10 @@ describe('ai-dm driver — provider streaming failure unlocks composers (#1046)'
     await h.enableExperimental();
   });
 
+  beforeEach(() => {
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -594,6 +610,10 @@ describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
     await h.enableExperimental();
     // Shrink the watchdog so the e2e does not wait the production 30s.
     setDriverStreamIdleTimeoutMsForTests(50);
+  });
+
+  beforeEach(() => {
+    h.resetMock();
   });
 
   afterAll(async () => {

@@ -28,6 +28,9 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
   });
+  beforeEach(() => {
+    h.resetMock();
+  });
   afterAll(async () => {
     await h.close();
   });
@@ -248,6 +251,9 @@ describe('ai-dm driver — #375 pause/takeover levers are properly authorized (e
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
   });
+  beforeEach(() => {
+    h.resetMock();
+  });
   afterAll(async () => {
     await h.close();
   });
@@ -350,6 +356,9 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'sec-model' });
     await h.enableExperimental();
+  });
+  beforeEach(() => {
+    h.resetMock();
   });
   afterAll(async () => {
     await h.close();
