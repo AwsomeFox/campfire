@@ -40,7 +40,7 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     const revisions = new RevisionsService(orm);
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
-    const charactersService = new CharactersService(orm, audit, revisions, events);
+    const charactersService = new CharactersService(orm, audit, revisions, events, rolls);
     return { orm, encountersService, charactersService, audit };
   }
 
