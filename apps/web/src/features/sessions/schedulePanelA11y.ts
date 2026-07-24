@@ -259,11 +259,9 @@ export function rsvpNoteTooLongMessage(current: number, max: number = RSVP_NOTE_
  * Returns null when the trimmed value equals the persisted value (no-op).
  */
 export function rsvpNoteSaveRequest(
-  status: RsvpStatus | null,
   persistedNote: string,
   draft: string,
 ): { note: string } | null {
-  if (!status) return null;
   const trimmed = draft.trim();
   const persistedTrimmed = persistedNote.trim();
   if (trimmed === persistedTrimmed) {

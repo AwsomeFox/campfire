@@ -377,7 +377,7 @@ function ScheduleItem({
       announce(rsvpNoteTooLongMessage(draft.trim().length), { assertive: true });
       return;
     }
-    const request = rsvpNoteSaveRequest(status, persistedNote, draft);
+    const request = rsvpNoteSaveRequest(persistedNote, draft);
     if (!request) return; // no-op — draft matches persisted
     setNoteSaving(true);
     setNoteError(null);

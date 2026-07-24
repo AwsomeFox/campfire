@@ -6,6 +6,8 @@ import {
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
   RsvpSetBody,
+  hasRsvpSetMutation,
+  RSVP_SET_REQUIRED_MESSAGE,
   ExpectedUpdatedAt,
   SessionShareCreate,
   SessionShareUpdate,
@@ -25,8 +27,8 @@ export class SessionAttendanceSetDto extends createZodDto(SessionAttendanceSet.s
 export class ScheduledSessionCreateDto extends createZodDto(ScheduledSessionCreate.strict()) {}
 export class ScheduledSessionUpdateDto extends createZodDto(ScheduledSessionUpdate.strict()) {}
 export class RsvpSetDto extends createZodDto(
-  RsvpSetBody.strict().refine((value) => value.status !== undefined || value.note !== undefined, {
-    message: 'status or note is required',
+  RsvpSetBody.strict().refine(hasRsvpSetMutation, {
+    message: RSVP_SET_REQUIRED_MESSAGE,
   }),
 ) {}
 export class SessionShareCreateDto extends createZodDto(SessionShareCreate.strict()) {}

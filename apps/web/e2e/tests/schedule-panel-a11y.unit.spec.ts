@@ -111,36 +111,32 @@ test.describe('RSVP note editor copy (issue #552)', () => {
 });
 
 test.describe('rsvpNoteSaveRequest (issue #552)', () => {
-  test('returns null when no RSVP has been picked yet', () => {
-    expect(rsvpNoteSaveRequest(null, '', 'some new note')).toBeNull();
-  });
-
   test('returns null when the trimmed draft matches the persisted note (no-op)', () => {
     // Exact match
-    expect(rsvpNoteSaveRequest('yes', 'running late', 'running late')).toBeNull();
+    expect(rsvpNoteSaveRequest('running late', 'running late')).toBeNull();
     // Whitespace-only difference — trimming turns them into the same string,
     // so a save would be a no-op.
-    expect(rsvpNoteSaveRequest('yes', 'running late', '  running late  ')).toBeNull();
+    expect(rsvpNoteSaveRequest('running late', '  running late  ')).toBeNull();
   });
 
   test('sends the trimmed note when it differs', () => {
-    const req = rsvpNoteSaveRequest('maybe', '', 'might be 30 late');
+    const req = rsvpNoteSaveRequest('', 'might be 30 late');
     expect(req).toEqual({ note: 'might be 30 late' });
   });
 
   test('sends empty string to explicitly clear an existing note', () => {
-    const req = rsvpNoteSaveRequest('yes', 'brought snacks', '');
+    const req = rsvpNoteSaveRequest('brought snacks', '');
     expect(req).toEqual({ note: '' });
-    expect(rsvpNoteSaveRequest('yes', 'brought snacks', '   ')).toEqual({ note: '' });
+    expect(rsvpNoteSaveRequest('brought snacks', '   ')).toEqual({ note: '' });
   });
 
   test('clears a whitespace-only persisted note when the draft is empty', () => {
-    expect(rsvpNoteSaveRequest('yes', '   ', '')).toEqual({ note: '' });
-    expect(rsvpNoteSaveRequest('yes', '   ', '   ')).toBeNull();
+    expect(rsvpNoteSaveRequest('   ', '')).toEqual({ note: '' });
+    expect(rsvpNoteSaveRequest('   ', '   ')).toBeNull();
   });
 
   test('omits status so note-only saves cannot overwrite a fresher RSVP choice', () => {
-    const req = rsvpNoteSaveRequest('no', 'planning to attend', 'sorry, sick');
+    const req = rsvpNoteSaveRequest('planning to attend', 'sorry, sick');
     expect(req).toEqual({ note: 'sorry, sick' });
   });
 });
