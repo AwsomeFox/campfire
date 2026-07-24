@@ -21,7 +21,7 @@ import type { SessionZero } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea } from '../../components/ui';
+import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
