@@ -140,6 +140,7 @@ export class RulesController {
   }
 
   @Post('packs/install-jobs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
   @ServerRoles('admin')
   @ApiOperation({ summary: 'Cancel a running or queued install job', description: 'Server admin only.' })
   @ApiResponse({ status: 200, description: 'Job cancelled.' })
