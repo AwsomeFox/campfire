@@ -242,7 +242,7 @@ export class OpenAiProvider implements AiProvider {
         completionTokens: json.usage?.output_tokens ?? 0,
         totalTokens: (json.usage?.input_tokens ?? 0) + (json.usage?.output_tokens ?? 0),
       },
-      finishReason: mapResponsesStatus(json.status),
+      finishReason: toolCalls.length > 0 ? 'tool_calls' : mapResponsesStatus(json.status),
       model: json.model ?? requestedModel,
     };
   }

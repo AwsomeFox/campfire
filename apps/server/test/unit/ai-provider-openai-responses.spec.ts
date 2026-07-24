@@ -93,7 +93,7 @@ describe('OpenAiProvider — Responses API — non-streaming parsing', () => {
     const { fetchImpl } = fakeFetch(jsonResponse(body));
     const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
     const result = await p.generate(req);
-    expect(result.finishReason).toBe('stop');
+    expect(result.finishReason).toBe('tool_calls');
     expect(result.toolCalls).toEqual([{ id: 'call_abc', name: 'roll_dice', arguments: { sides: 20, count: 2 } }]);
   });
 });
