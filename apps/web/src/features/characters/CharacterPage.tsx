@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
-import { xpForLevel, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
+import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
 import { api, API, ApiError } from '../../lib/api';
 import {
@@ -372,7 +372,7 @@ export default function CharacterPage() {
             )}
           </Card>
 
-          <XpCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+          <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
 
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
 
@@ -703,18 +703,20 @@ function SheetEditForm({
 }
 
 /**
- * Experience card — XP total, progress toward the next 5e threshold, a
- * quick-award input, and the guided level-up flow (issue #14). The threshold
- * is advisory only: "Level up" always works so milestone campaigns aren't
- * blocked, but the card calls out when the XP actually qualifies.
+ * Experience card — XP total, optional progress toward the next threshold (when the
+ * campaign's rule-system adapter models XP), a quick-award input, and the guided
+ * level-up flow (issue #14). The threshold is advisory only: "Level up" always works
+ * so milestone campaigns aren't blocked, but the card calls out when the XP qualifies.
  */
 function XpCard({
   character,
+  adapter,
   canEdit,
   onChange,
   onError,
 }: {
   character: Character;
+  adapter: RuleSystemAdapter;
   canEdit: boolean;
   onChange: () => void;
   onError: (msg: string | null) => void;
@@ -744,14 +746,12 @@ function XpCard({
     return () => clearTimeout(t);
   }, [celebratedLevel]);
 
-  const atCap = character.level >= 20;
-  const currentThreshold = xpForLevel(character.level);
-  const nextThreshold = atCap ? null : xpForLevel(character.level + 1);
-  const ready = nextThreshold != null && character.xp >= nextThreshold;
-  const pct =
-    nextThreshold == null
-      ? 100
-      : Math.max(0, Math.min(100, ((character.xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
+  const progress = xpProgressForCharacter(adapter, character.level, character.xp);
+  const { supported, atCap, nextThreshold, ready, pct } = progress;
+  const capLabel =
+    adapter.maxLevel === Infinity
+      ? 'No level cap'
+      : `Level ${adapter.maxLevel} — the summit. XP still accrues for bragging rights.`;
 
   async function addXp() {
     if (busy) return;
@@ -811,7 +811,7 @@ function XpCard({
     <Card className="space-y-3" data-testid="character-xp">
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <p className="card-kicker mb-0">Experience</p>
-        {ready && (
+        {supported && ready && (
           <span className="tag tag-accent cf-anim-ready">
             Ready to level up
           </span>
@@ -839,19 +839,23 @@ function XpCard({
         <span className="font-heading text-[34px] leading-none">
           {character.xp.toLocaleString()}
           <span className="text-base text-slate-500">
-            {nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
+            {supported && nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
           </span>
         </span>
-        <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
-          <div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} />
-        </div>
+        {supported && (
+          <div className="flex-1 min-w-[120px] h-[7px] rounded bg-[var(--color-neutral-800)] overflow-hidden">
+            <div className="h-full bg-[var(--color-accent)]" style={{ width: `${pct}%` }} />
+          </div>
+        )}
       </div>
       <p className="text-xs text-slate-500">
         {atCap
-          ? 'Level 20 — the summit. XP still accrues for bragging rights.'
-          : ready
-            ? `Enough XP for level ${character.level + 1}!`
-            : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
+          ? capLabel
+          : !supported
+            ? 'XP tracked — level up when your DM says so.'
+            : ready
+              ? `Enough XP for level ${character.level + 1}!`
+              : `${(nextThreshold! - character.xp).toLocaleString()} XP to level ${character.level + 1}.`}
       </p>
       {canEdit && (
         <div className="flex gap-2 flex-wrap items-end">

@@ -177,6 +177,44 @@ export const CampaignClone = z.object({
   mode: CampaignCloneMode.default('full'),
 });
 
+/** Versioned manifest returned by GET /campaigns/:id/clone/preview (issue #435). */
+export const CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION = 1;
+
+export const ClonePreviewExclusion = z.object({
+  module: z.string(),
+  reason: z.string(),
+});
+export type ClonePreviewExclusion = z.infer<typeof ClonePreviewExclusion>;
+
+export const ClonePreviewWarning = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+export type ClonePreviewWarning = z.infer<typeof ClonePreviewWarning>;
+
+export const ClonePreviewModuleInclusion = z.object({
+  included: z.boolean(),
+  count: z.number().int().nonnegative(),
+  note: z.string().optional(),
+});
+export type ClonePreviewModuleInclusion = z.infer<typeof ClonePreviewModuleInclusion>;
+
+export const CampaignClonePreview = z.object({
+  app: z.literal('campfire'),
+  kind: z.literal('campaign-clone-preview'),
+  formatVersion: z.number().int(),
+  appVersion: z.string(),
+  schemaVersion: z.number().int(),
+  campaignId: Id,
+  mode: CampaignCloneMode,
+  createdAt: IsoDate,
+  counts: z.record(z.string(), z.number().int().nonnegative()),
+  inclusions: z.record(z.string(), ClonePreviewModuleInclusion),
+  exclusions: z.array(ClonePreviewExclusion),
+  warnings: z.array(ClonePreviewWarning),
+});
+export type CampaignClonePreview = z.infer<typeof CampaignClonePreview>;
+
 // Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
 // export (the shape ExportService.buildExport produces): make the one-way export
 // round-trippable by re-creating the campaign from it. Validated permissively —
@@ -212,6 +250,9 @@ export const CampaignImport = z
     // Issue #813: immutable prose versions (author + replacer provenance) round-trip
     // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
     revisions: z.array(ImportedEntity).optional(),
+    // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
+    scheduledSessions: z.array(ImportedEntity).optional(),
+    sessionAttendance: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -493,18 +534,64 @@ export const XP_THRESHOLDS = [
   195_000, 225_000, 265_000, 305_000, 355_000,
 ] as const;
 
-/** Total XP required to reach `level` (clamped to [1, 20]). */
+/** Total XP required to reach `level` (clamped to [1, 20]). Uses the 5e PHB table. */
 export function xpForLevel(level: number): number {
-  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1];
+  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1]!;
 }
 
-/** Highest level the given total XP qualifies for (1–20). */
+/** Highest level the given total XP qualifies for (1–20). Uses the 5e PHB table. */
 export function levelForXp(xp: number): number {
   let level = 1;
   for (let i = 0; i < XP_THRESHOLDS.length; i++) {
-    if (xp >= XP_THRESHOLDS[i]) level = i + 1;
+    if (xp >= XP_THRESHOLDS[i]!) level = i + 1;
   }
   return level;
+}
+
+/** Advisory XP progress toward the next level — for character-sheet UI (issue #441). */
+export interface XpProgress {
+  /** False when the adapter does not model XP thresholds (OSR, Open Legend, …). */
+  readonly supported: boolean;
+  readonly atCap: boolean;
+  readonly currentThreshold: number;
+  readonly nextThreshold: number | null;
+  readonly ready: boolean;
+  readonly pct: number;
+}
+
+/** Build `xpForLevel` / `levelForXp` from a cumulative threshold table (issue #441).
+ * `thresholds` must be non-empty and strictly increasing; length should match `maxLevel`
+ * when the system has a finite level cap. */
+export function xpProgressionFromThresholds(
+  thresholds: readonly number[],
+  maxLevel: number,
+): Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'> {
+  if (thresholds.length === 0) {
+    throw new Error('xpProgressionFromThresholds: thresholds must not be empty');
+  }
+  if (thresholds.some((v, i) => i > 0 && v <= thresholds[i - 1]!)) {
+    throw new Error('xpProgressionFromThresholds: thresholds must be strictly increasing');
+  }
+  if (Number.isFinite(maxLevel) && thresholds.length < maxLevel) {
+    throw new Error(
+      `xpProgressionFromThresholds: thresholds.length (${thresholds.length}) must be >= maxLevel (${maxLevel})`,
+    );
+  }
+  const cap = maxLevel === Infinity ? thresholds.length : Math.min(maxLevel, thresholds.length);
+  return {
+    supportsXpProgression: true,
+    xpForLevel(level: number): number {
+      const clamped = Math.max(1, Math.min(cap, Math.floor(level)));
+      return thresholds[clamped - 1] ?? thresholds[thresholds.length - 1]!;
+    },
+    levelForXp(xp: number): number {
+      let level = 1;
+      for (let i = 0; i < cap; i++) {
+        if (xp >= thresholds[i]!) level = i + 1;
+      }
+      return level;
+    },
+  };
 }
 
 // ---------- quest ----------
@@ -2186,6 +2273,20 @@ export interface RuleSystemAdapter {
    */
   readonly supportsDdbImport?: boolean;
   /**
+   * Whether this adapter owns XP threshold math for advisory progress UI (issue #441). D&D-family
+   * systems opt in; milestone-first systems (13th Age, Open Legend, OSR, Starforged) omit it so
+   * the sheet does not show misleading 5e guidance.
+   */
+  readonly supportsXpProgression?: boolean;
+  /**
+   * Cumulative XP required to be `level`. Required when `supportsXpProgression` is true.
+   */
+  xpForLevel?(level: number): number;
+  /**
+   * Highest level the given total XP qualifies for. Required when `supportsXpProgression` is true.
+   */
+  levelForXp?(xp: number): number;
+  /**
    * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
    * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
    * explicit unsupported result instead of a misleading 5e "Trivial" band.
@@ -2307,6 +2408,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // PHB cumulative XP thresholds — the advisory progress bar on the character sheet (issue #441).
+  ...xpProgressionFromThresholds(XP_THRESHOLDS, 20),
   // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
   supportsEncounterDifficulty: true,
   estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
@@ -2318,6 +2421,45 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return dnd5eCheckCatalog(this, character);
   },
 };
+
+/** Whether this adapter owns XP threshold math (issue #441). */
+export function xpProgressionSupported(
+  adapter: Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'>,
+): adapter is RuleSystemAdapter & {
+  supportsXpProgression: true;
+  xpForLevel: (level: number) => number;
+  levelForXp: (xp: number) => number;
+} {
+  return !!(adapter.supportsXpProgression && adapter.xpForLevel && adapter.levelForXp);
+}
+
+/** Total XP required to reach `level` for a campaign's rule-system adapter. */
+export function xpForLevelForAdapter(adapter: RuleSystemAdapter, level: number): number {
+  if (xpProgressionSupported(adapter)) return adapter.xpForLevel(level);
+  return Dnd5eAdapter.xpForLevel!(level);
+}
+
+/** Highest level the given total XP qualifies for under a campaign's rule-system adapter. */
+export function levelForXpForAdapter(adapter: RuleSystemAdapter, xp: number): number {
+  if (xpProgressionSupported(adapter)) return adapter.levelForXp(xp);
+  return Dnd5eAdapter.levelForXp!(xp);
+}
+
+/** Compute advisory XP progress for a character sheet (issue #441). */
+export function xpProgressForCharacter(adapter: RuleSystemAdapter, level: number, xp: number): XpProgress {
+  const atCap = level >= adapter.maxLevel;
+  if (!xpProgressionSupported(adapter)) {
+    return { supported: false, atCap, currentThreshold: 0, nextThreshold: null, ready: false, pct: 0 };
+  }
+  const currentThreshold = adapter.xpForLevel(level);
+  const nextThreshold = atCap ? null : adapter.xpForLevel(level + 1);
+  const ready = nextThreshold != null && xp >= nextThreshold;
+  const pct =
+    nextThreshold == null || nextThreshold === currentThreshold
+      ? 100
+      : Math.max(0, Math.min(100, ((xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
+  return { supported: true, atCap, currentThreshold, nextThreshold, ready, pct };
+}
 
 // ---------- Open Legend adapter (issue #299) ----------
 // Open Legend (openlegendrpg.com) is a fully-open OGL system with a dice model quite unlike
@@ -3227,6 +3369,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   initiativeDie: 20,
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
+  // PF2e awards 1,000 XP per level; cumulative total at level n is (n-1)×1,000 (issue #441).
+  ...xpProgressionFromThresholds(
+    Array.from({ length: 20 }, (_, i) => i * 1_000),
+    20,
+  ),
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
   // DEX modifier (the 5e assumption). A numeric `perception` is already the full
   // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
@@ -4530,6 +4677,7 @@ export const AiDmSeat = z.object({
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
+  actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   ...timestamps,
 });
 export type AiDmSeat = z.infer<typeof AiDmSeat>;
@@ -4543,6 +4691,7 @@ export const AiDmSeatUpdate = z.object({
   instructions: z.string().max(20_000).optional(),
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
   proactiveSettings: AiDmProactiveSettings.optional(),
+  actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;
 
@@ -6785,6 +6934,7 @@ export type CheckRequestResolution = z.infer<typeof CheckRequestResolution>;
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
 export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
+export type CampaignClone = z.infer<typeof CampaignClone>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
 export type CanonicalNpcDisposition = z.infer<typeof CanonicalNpcDisposition>;
 export type LocationStatus = z.infer<typeof LocationStatus>;

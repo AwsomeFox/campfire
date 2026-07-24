@@ -107,7 +107,7 @@ describe('ProactiveService', () => {
   });
 
   it('skips if session is busy', async () => {
-    driver.getSession.mockReturnValue({ status: 'running' } as any);
+    driver.getSession.mockReturnValue({ status: 'running', state: 'running' } as any);
 
     service.startWatching(1, {
       enabled: true,
@@ -121,6 +121,42 @@ describe('ProactiveService', () => {
     await new Promise(setImmediate);
 
     expect(driver.runTurn).not.toHaveBeenCalled();
+  });
+
+  it('skips if session is frozen in human_control', async () => {
+    driver.getSession.mockReturnValue({ status: 'idle', state: 'human_control' } as any);
+
+    service.startWatching(1, {
+      enabled: true,
+      triggers: { encounterEnded: true, hpCritical: false, objectiveCompleted: false },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    });
+
+    eventStream.next({ type: 'encounter.ended' } as any);
+
+    await new Promise(setImmediate);
+
+    expect(driver.runTurn).not.toHaveBeenCalled();
+  });
+
+  it('does not trigger hpCritical when HP data is missing', async () => {
+    service.startWatching(1, {
+      enabled: true,
+      triggers: { encounterEnded: false, hpCritical: true, objectiveCompleted: false },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    });
+
+    eventStream.next({ type: 'character.updated', data: { characterId: 1 } } as any);
+
+    await new Promise(setImmediate);
+
+    expect(driver.runTurn).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown manual trigger types without a custom prompt', async () => {
+    await expect(service.manualTrigger(1, 'notARealTrigger')).rejects.toThrow('Unknown proactive trigger type');
   });
 
   it('respects hourly token budget', async () => {

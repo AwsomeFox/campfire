@@ -3,7 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from './notifications.service';
-import { NotificationPreferencesUpdateDto } from './notifications.dto';
+import { BulkNotificationDto, NotificationPreferencesUpdateDto } from './notifications.dto';
 
 /**
  * User-scoped (never campaign-scoped): every route operates on the CALLER's own
@@ -16,18 +16,33 @@ export class NotificationsController {
   constructor(private readonly notifications: NotificationsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List my notifications', description: 'Own notifications only, newest first.' })
+  @ApiOperation({ summary: 'List my notifications', description: 'Own notifications only, newest first, with cursor pagination and filters.' })
   @ApiQuery({ name: 'unread', required: false, type: Boolean, description: 'If true, only unread notifications.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max rows (default 50, cap 200).' })
-  @ApiResponse({ status: 200, description: 'Notifications for the caller.' })
+  @ApiQuery({ name: 'cursor', required: false, type: Number, description: 'Cursor notification ID for pagination.' })
+  @ApiQuery({ name: 'campaignId', required: false, type: Number, description: 'Filter by campaign ID.' })
+  @ApiQuery({ name: 'type', required: false, type: String, description: 'Filter by notification type.' })
+  @ApiQuery({ name: 'startDate', required: false, type: String, description: 'Filter created on or after date.' })
+  @ApiQuery({ name: 'endDate', required: false, type: String, description: 'Filter created on or before date.' })
+  @ApiResponse({ status: 200, description: 'Paginated notifications for the caller.' })
   async list(
     @CurrentUser() user: RequestUser,
     @Query('unread') unread?: string,
     @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+    @Query('campaignId') campaignId?: string,
+    @Query('type') type?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
   ) {
     return this.notifications.listForUser(user, {
       unreadOnly: unread === 'true',
-      limit: limit !== undefined ? Number(limit) : undefined,
+      limit: limit && !isNaN(Number(limit)) ? Number(limit) : undefined,
+      cursor: cursor && !isNaN(Number(cursor)) ? Number(cursor) : undefined,
+      campaignId: campaignId && !isNaN(Number(campaignId)) ? Number(campaignId) : undefined,
+      type: type || undefined,
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
     });
   }
 
@@ -64,6 +79,20 @@ export class NotificationsController {
     return this.notifications.setPreferences(user, campaignId, body);
   }
 
+  @Post('mark-read')
+  @ApiOperation({ summary: 'Mark selected, campaign, or all notifications read' })
+  @ApiResponse({ status: 201, description: '{ updated, updatedIds }' })
+  async markReadBulk(@CurrentUser() user: RequestUser, @Body() body: BulkNotificationDto) {
+    return this.notifications.markReadBulk(user, body);
+  }
+
+  @Post('mark-unread')
+  @ApiOperation({ summary: 'Mark selected, campaign, or all notifications unread' })
+  @ApiResponse({ status: 201, description: '{ updated, updatedIds }' })
+  async markUnreadBulk(@CurrentUser() user: RequestUser, @Body() body: BulkNotificationDto) {
+    return this.notifications.markUnreadBulk(user, body);
+  }
+
   @Post(':id/read')
   @ApiOperation({ summary: 'Mark a notification read', description: 'Recipient only — 404 for anyone else. Idempotent.' })
   @ApiResponse({ status: 201, description: 'The notification, with readAt set.' })
@@ -71,10 +100,18 @@ export class NotificationsController {
     return this.notifications.markRead(id, user);
   }
 
+  @Post(':id/unread')
+  @ApiOperation({ summary: 'Mark a notification unread', description: 'Recipient only — 404 for anyone else. Idempotent.' })
+  @ApiResponse({ status: 201, description: 'The notification, with readAt set to null.' })
+  async markUnread(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    return this.notifications.markUnread(id, user);
+  }
+
   @Post('read-all')
   @ApiOperation({ summary: 'Mark all my notifications read' })
-  @ApiResponse({ status: 201, description: '{ updated } — number of rows marked read.' })
+  @ApiResponse({ status: 201, description: '{ updated, updatedIds } — number of rows marked read.' })
   async markAllRead(@CurrentUser() user: RequestUser) {
     return this.notifications.markAllRead(user);
   }
 }
+

@@ -19,6 +19,16 @@ import { useEffect, useRef, type RefObject } from 'react';
 const FOCUSABLE_SELECTOR =
   'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
+/** Sequential tab targets only — skip disabled/hidden and tabindex=-1 controls. */
+function collectFocusable(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) =>
+      !el.hasAttribute('disabled')
+      && el.getAttribute('aria-hidden') !== 'true'
+      && el.tabIndex >= 0,
+  );
+}
+
 export function useDialog<T extends HTMLElement = HTMLDivElement>({
   onClose,
   disabled = false,
@@ -84,7 +94,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
     }
 
     if (autoFocus) {
-      const first = root?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+      const first = root ? collectFocusable(root)[0] : undefined;
       (initialFocusRef?.current ?? first ?? root)?.focus();
     }
     return () => {
@@ -116,9 +126,7 @@ export function useDialog<T extends HTMLElement = HTMLDivElement>({
       if (e.key === 'Tab' && trapFocus) {
         const root = ref.current;
         if (!root) return;
-        const focusable = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-          (el) => !el.hasAttribute('disabled') && el.getAttribute('aria-hidden') !== 'true',
-        );
+        const focusable = collectFocusable(root);
         if (focusable.length === 0) {
           e.preventDefault();
           if (!root.hasAttribute('tabindex')) root.setAttribute('tabindex', '-1');

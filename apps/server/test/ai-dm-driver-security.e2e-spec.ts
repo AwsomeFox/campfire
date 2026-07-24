@@ -1,5 +1,4 @@
 import request from 'supertest';
-import { ConflictException } from '@nestjs/common';
 import { createAiEvalHarness, dm, player, type AiEvalHarness } from './ai-eval-harness';
 import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
 import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-driver/ai-driver-stream.service';
@@ -15,7 +14,7 @@ import { AiDmStreamService, type AiDmStreamEvent } from '../src/modules/ai-drive
  *        server-wide token cap bounds the driver.
  *  #375  a player can neither un-freeze a DM pause nor revoke a takeover held by someone else.
  *  #376  Co-DM mode (the propose-only mode) does NOT arm the autonomous driver loop.
- *  #381  a pause landing mid-turn is preserved (not reverted); concurrent turns are serialized.
+ *  #381  a pause landing mid-turn is preserved (not reverted); concurrent turns are serialized via the action queue (#1045).
  *  #382  a table vote can FAIL (no majority) instead of deadlocking every future vote.
  *  #383  autonomous driver proposals are attributed to the AI (`ai-dm:` prefix), not the seat's raw id.
  *  #387  DM-only secrets never enter the model context that feeds narration to every player + viewer.
@@ -461,13 +460,13 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     expect(refused.status).toBe(503);
   });
 
-  it('a concurrent turn is rejected while one is already in progress (409)', async () => {
+  it('concurrent turns are queued and serialized instead of rejected (409) (#1045)', async () => {
     const campaignId = await h.createCampaign('Sec Concurrent');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
     // Drive the service directly with two OVERLAPPING turns (calling the controller twice over HTTP
     // races supertest's per-request connection lifecycle). The first reserves the turn slot
-    // synchronously; the second must be rejected as already-in-progress (#381).
+    // synchronously; the second is queued and runs after the first completes (#1045).
     const driver = h.ctx.app.get(AiDriverService);
     const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
     h.script({ text: 'The first turn narrates slowly, token by token.', streamChunks: 6 });
@@ -477,8 +476,9 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     ]);
     const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
     const fulfilled = results.filter((r) => r.status === 'fulfilled');
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBeInstanceOf(ConflictException);
+    expect(rejected).toHaveLength(0);
+    expect(fulfilled).toHaveLength(2);
+    const seat = await h.getSeat(campaignId);
+    expect(seat.body.turnCount).toBe(2);
   });
 });

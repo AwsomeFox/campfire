@@ -1113,6 +1113,8 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   lastTurnAt: text('last_turn_at'),
   /** Proactive DM settings per campaign (#1044). */
   proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
+  /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
+  actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

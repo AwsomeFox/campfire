@@ -19,6 +19,7 @@ import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
 const AiDmMessageRequest = z
   .object({
     input: z.string().min(1).max(20_000).describe('What the player says / does — the situation the AI DM responds to.'),
+    characterId: z.number().int().positive().optional().describe('The character speaking. When provided, the server resolves speaker identity and enriches the prompt.'),
     scene: z.string().max(500).optional().describe('Optional scene/encounter label to set on the session.'),
     maxSteps: z.number().int().min(1).max(12).optional().describe('Cap on tool-loop iterations this turn.'),
     maxTokens: z.number().int().min(1).max(4096).optional().describe('Cap on each provider call’s output tokens (clamped to remaining budget).'),
@@ -157,6 +158,7 @@ export class AiDriverController {
       scene: body.scene,
       maxSteps: body.maxSteps,
       maxTokens: body.maxTokens,
+      characterId: body.characterId,
     });
   }
 

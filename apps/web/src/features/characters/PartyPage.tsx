@@ -7,8 +7,8 @@
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import type { Character, CampaignMember } from '@campfire/schema';
-import { levelForXp, ddbImportSupported } from '@campfire/schema';
+import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/schema';
+import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -33,6 +33,7 @@ export default function PartyPage() {
   // as explicitly 5e here, matching the server's compatibility gate.
   const campaign = useCampaign(id);
   const ddbAllowed = ddbImportSupported(campaign?.ruleSystem);
+  const adapter = ruleSystemAdapter(campaign?.ruleSystem);
 
   const [characters, setCharacters] = useState<Character[]>([]);
   const [members, setMembers] = useState<CampaignMember[]>([]);
@@ -188,6 +189,7 @@ export default function PartyPage() {
               key={c.id}
               campaignId={id}
               character={c}
+              adapter={adapter}
               index={i}
               ownerLabel={ownerLabel(c.ownerUserId)}
               // Quick HP is offered on a card the viewer can edit: the DM (any card)
@@ -232,6 +234,7 @@ export default function PartyPage() {
 function CharacterCard({
   campaignId,
   character,
+  adapter,
   index,
   ownerLabel,
   canEditHp,
@@ -242,6 +245,7 @@ function CharacterCard({
 }: {
   campaignId: number;
   character: Character;
+  adapter: RuleSystemAdapter;
   index: number;
   ownerLabel: string | null;
   canEditHp: boolean;
@@ -272,6 +276,8 @@ function CharacterCard({
     }
   }
 
+  const xpQualifiedLevel = xpProgressionSupported(adapter) ? levelForXpForAdapter(adapter, character.xp) : character.level;
+
   // The card stays a single click target to the sheet, but the quick-HP steppers
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
   // <button> inside an <a> is invalid and would hijack the navigation click (#68).
@@ -295,8 +301,8 @@ function CharacterCard({
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
             </div>
-            {levelForXp(character.xp) > character.level && (
-              <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${levelForXp(character.xp)}`}>
+            {xpProgressionSupported(adapter) && xpQualifiedLevel > character.level && (
+              <span className="tag tag-accent shrink-0" style={{ fontSize: 9.5 }} title={`${character.xp.toLocaleString()} XP — enough for level ${xpQualifiedLevel}`}>
                 ⬆ Level up
               </span>
             )}

@@ -488,3 +488,86 @@ test('coordinates polling and read state between tabs', async ({ browser }) => {
 
   await context.close();
 });
+
+test.describe('Issue #550: Notification Center, pagination, confirmation, and undo', () => {
+  test.use({ storageState: stateFor('player'), serviceWorkers: 'block' });
+
+  test('Notification Center renders 35 items with cursor pagination, filters, confirmation dialog, and undo', async ({ page }) => {
+    const { campaignId } = seed();
+    const items35 = Array.from({ length: 35 }, (_, index) => ({
+      id: 1000 + index,
+      userId: 3,
+      campaignId,
+      type: 'quest_updated' as const,
+      title: `Quest notification ${index + 1}`,
+      body: `Details for quest notification ${index + 1}`,
+      entityType: 'quest' as const,
+      entityId: 1,
+      commentId: null,
+      data: null,
+      actorName: 'Dungeon Master',
+      readAt: null,
+      createdAt: new Date(Date.now() - index * 60000).toISOString(),
+    }));
+
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 35 } }));
+    await page.route('**/api/v1/notifications?*', (route) => {
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get('cursor');
+      if (!cursor) {
+        return route.fulfill({
+          json: {
+            items: items35.slice(0, 30),
+            nextCursor: items35[29].id,
+            total: 35,
+            hasMore: true,
+          },
+        });
+      }
+      return route.fulfill({
+        json: {
+          items: items35.slice(30),
+          nextCursor: null,
+          total: 35,
+          hasMore: false,
+        },
+      });
+    });
+
+    await page.goto(`/c/${campaignId}/notifications`);
+    await expect(page.getByRole('heading', { name: 'Notification Center' })).toBeVisible();
+    await expect(page.getByText('Showing 30 notifications of 35')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Load more notifications' })).toBeVisible();
+
+    // Test confirmation dialog when clicking "Mark all (35) read" with undisplayed rows
+    await page.route('**/api/v1/notifications/mark-read', (route) => route.fulfill({
+      json: { updated: 35, updatedIds: items35.map((n) => n.id) },
+    }));
+
+    await page.getByRole('button', { name: 'Mark all (35) read' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText(/including rows not currently displayed/)).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Mark all 35 read' }).click();
+    await expect(dialog).toHaveCount(0);
+
+    // Undo snackbar should be displayed
+    const undoSnackbar = page.getByTestId('undo-snackbar');
+    await expect(undoSnackbar).toBeVisible();
+    await expect(undoSnackbar.getByText(/Marked 35 notifications as read/).first()).toBeVisible();
+
+    // Test Undo
+    await page.route('**/api/v1/notifications/mark-unread', (route) => route.fulfill({
+      json: { updated: 35, updatedIds: items35.map((n) => n.id) },
+    }));
+    await undoSnackbar.getByRole('button', { name: 'Undo' }).click();
+    await expect(undoSnackbar).toHaveCount(0);
+
+    // Test cursor pagination (Load more)
+    await page.getByRole('button', { name: 'Load more notifications' }).click();
+    await expect(page.getByText('Showing 35 notifications')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Load more notifications' })).toHaveCount(0);
+  });
+});
+

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, NotFoundException, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, count, desc, eq, exists, inArray, isNull, sql } from 'drizzle-orm';
+import { and, count, desc, eq, exists, gte, inArray, isNotNull, isNull, lt, lte, sql } from 'drizzle-orm';
 import {
   NOTIFICATION_CATEGORIES,
   QuietHours,
@@ -48,6 +48,23 @@ export interface NotificationEvent {
    */
   data?: Record<string, unknown> | null;
   actorName?: string;
+}
+
+export interface ListNotificationsOptions {
+  unreadOnly?: boolean;
+  limit?: number;
+  cursor?: number;
+  campaignId?: number;
+  type?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+export interface PaginatedNotifications {
+  items: Notification[];
+  nextCursor: number | null;
+  total: number;
+  hasMore: boolean;
 }
 
 /** Parse the nullable JSON `data` column into a plain object (or null). */
@@ -573,20 +590,63 @@ export class NotificationsService implements OnApplicationBootstrap {
 
   // ---------- recipient-facing reads ----------
 
-  async listForUser(user: RequestUser, opts: { unreadOnly?: boolean; limit?: number } = {}): Promise<Notification[]> {
+  async listForUser(
+    user: RequestUser,
+    opts: ListNotificationsOptions = {},
+  ): Promise<PaginatedNotifications> {
     const userId = numericUserId(user.id);
-    if (userId === null) return [];
+    if (userId === null) {
+      return { items: [], nextCursor: null, total: 0, hasMore: false };
+    }
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-    const conditions = [eq(notifications.userId, userId), isNull(campaigns.deletedAt)];
+
+    const conditions = [
+      eq(notifications.userId, userId),
+      isNull(campaigns.deletedAt),
+    ];
     if (opts.unreadOnly) conditions.push(isNull(notifications.readAt));
+    if (opts.campaignId) conditions.push(eq(notifications.campaignId, opts.campaignId));
+    if (opts.type) conditions.push(eq(notifications.type, opts.type));
+
+    if (opts.startDate) {
+      const startIso = opts.startDate.includes('T') ? opts.startDate : `${opts.startDate}T00:00:00.000Z`;
+      conditions.push(gte(notifications.createdAt, startIso));
+    }
+    if (opts.endDate) {
+      const endIso = opts.endDate.includes('T') ? opts.endDate : `${opts.endDate}T23:59:59.999Z`;
+      conditions.push(lte(notifications.createdAt, endIso));
+    }
+
+    const [countRow] = await this.db
+      .select({ value: count() })
+      .from(notifications)
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(...conditions));
+    const total = countRow?.value ?? 0;
+
+    if (opts.cursor && Number.isInteger(opts.cursor) && opts.cursor > 0) {
+      conditions.push(lt(notifications.id, opts.cursor));
+    }
+
     const rows = await this.db
       .select({ notification: notifications })
       .from(notifications)
       .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
       .where(and(...conditions))
       .orderBy(desc(notifications.id))
-      .limit(limit);
-    return rows.map((row) => toDomain(row.notification));
+      .limit(limit + 1);
+
+    const hasMore = rows.length > limit;
+    const pagedRows = hasMore ? rows.slice(0, limit) : rows;
+    const items = pagedRows.map((row) => toDomain(row.notification));
+    const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].id : null;
+
+    return {
+      items,
+      nextCursor,
+      total,
+      hasMore,
+    };
   }
 
   async unreadCount(user: RequestUser): Promise<number> {
@@ -622,25 +682,106 @@ export class NotificationsService implements OnApplicationBootstrap {
     return toDomain(updated);
   }
 
-  async markAllRead(user: RequestUser): Promise<{ updated: number }> {
+  async markUnread(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    if (userId === null) return { updated: 0 };
+    const [joined] = await this.db
+      .select({ notification: notifications })
+      .from(notifications)
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(eq(notifications.id, id), isNull(campaigns.deletedAt)))
+      .limit(1);
+    const row = joined?.notification;
+    if (!row || userId === null || row.userId !== userId) {
+      throw new NotFoundException(`Notification ${id} not found`);
+    }
+    if (!row.readAt) return toDomain(row);
+    const [updated] = await this.db
+      .update(notifications)
+      .set({ readAt: null })
+      .where(eq(notifications.id, id))
+      .returning();
+    return toDomain(updated);
+  }
+
+  async markReadBulk(
+    user: RequestUser,
+    opts: { ids?: number[]; campaignId?: number; all?: boolean } = {},
+  ): Promise<{ updated: number; updatedIds: number[] }> {
+    const userId = numericUserId(user.id);
+    if (userId === null) return { updated: 0, updatedIds: [] };
+
+    if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
+      return { updated: 0, updatedIds: [] };
+    }
+
+    const conditions = [
+      eq(notifications.userId, userId),
+      isNull(notifications.readAt),
+      exists(
+        this.db
+          .select({ one: sql`1` })
+          .from(campaigns)
+          .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
+      ),
+    ];
+
+    if (opts.ids && opts.ids.length > 0) {
+      conditions.push(inArray(notifications.id, opts.ids));
+    }
+    if (opts.campaignId) {
+      conditions.push(eq(notifications.campaignId, opts.campaignId));
+    }
+
     const updated = await this.db
       .update(notifications)
       .set({ readAt: nowIso() })
-      .where(
-        and(
-          eq(notifications.userId, userId),
-          isNull(notifications.readAt),
-          exists(
-            this.db
-              .select({ one: sql`1` })
-              .from(campaigns)
-              .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
-          ),
-        ),
-      )
+      .where(and(...conditions))
       .returning({ id: notifications.id });
-    return { updated: updated.length };
+
+    const updatedIds = updated.map((r) => r.id);
+    return { updated: updatedIds.length, updatedIds };
+  }
+
+  async markUnreadBulk(
+    user: RequestUser,
+    opts: { ids?: number[]; campaignId?: number; all?: boolean } = {},
+  ): Promise<{ updated: number; updatedIds: number[] }> {
+    const userId = numericUserId(user.id);
+    if (userId === null) return { updated: 0, updatedIds: [] };
+
+    if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
+      return { updated: 0, updatedIds: [] };
+    }
+
+    const conditions = [
+      eq(notifications.userId, userId),
+      isNotNull(notifications.readAt),
+      exists(
+        this.db
+          .select({ one: sql`1` })
+          .from(campaigns)
+          .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
+      ),
+    ];
+
+    if (opts.ids && opts.ids.length > 0) {
+      conditions.push(inArray(notifications.id, opts.ids));
+    }
+    if (opts.campaignId) {
+      conditions.push(eq(notifications.campaignId, opts.campaignId));
+    }
+
+    const updated = await this.db
+      .update(notifications)
+      .set({ readAt: null })
+      .where(and(...conditions))
+      .returning({ id: notifications.id });
+
+    const updatedIds = updated.map((r) => r.id);
+    return { updated: updatedIds.length, updatedIds };
+  }
+
+  async markAllRead(user: RequestUser): Promise<{ updated: number; updatedIds: number[] }> {
+    return this.markReadBulk(user, { all: true });
   }
 }

@@ -34,6 +34,8 @@ describe('AiDriverService — secret-read approvals are bounded (#1059)', () => 
       undefined as unknown as Ctor[7], // campaigns
       undefined as unknown as Ctor[8], // rules
       undefined as unknown as Ctor[9], // encounters
+      undefined as unknown as Ctor[10], // members (#1045)
+      undefined as unknown as Ctor[11], // characters (#1045)
     );
     return { svc, audit, stream };
   }

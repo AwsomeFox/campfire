@@ -36,6 +36,7 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     tokensUsed: row.tokensUsed,
     turnCount: row.turnCount,
     lastTurnAt: row.lastTurnAt,
+    actionQueueDepth: row.actionQueueDepth ?? 8,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
@@ -61,6 +62,7 @@ function defaultSeat(campaignId: number): AiDmSeat {
       cooldownSeconds: 300,
       maxProactiveTokensPerHour: 5000,
     },
+    actionQueueDepth: 8,
     createdAt: ts,
     updatedAt: ts,
   };
@@ -294,6 +296,7 @@ export class AiDmService {
         model: input.model ?? base.model,
         instructions: input.instructions ?? base.instructions,
         tokenBudget: input.tokenBudget ?? base.tokenBudget,
+        actionQueueDepth: input.actionQueueDepth ?? base.actionQueueDepth,
         tokensUsed: 0,
         turnCount: 0,
         lastTurnAt: null,
@@ -311,6 +314,7 @@ export class AiDmService {
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
           ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
+          ...(input.actionQueueDepth !== undefined ? { actionQueueDepth: input.actionQueueDepth } : {}),
           updatedAt: ts,
         })
         .where(eq(aiDmSeats.campaignId, campaignId));

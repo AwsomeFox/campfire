@@ -9,6 +9,7 @@ import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
 import { LocationsService } from '../locations/locations.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { SchedulingService } from '../sessions/scheduling.service';
 import { CharactersService } from '../characters/characters.service';
 import { NotesService } from '../notes/notes.service';
 import { CommentsService } from '../comments/comments.service';
@@ -79,6 +80,7 @@ export class ExportService {
     private readonly npcs: NpcsService,
     private readonly locations: LocationsService,
     private readonly sessions: SessionsService,
+    private readonly scheduling: SchedulingService,
     private readonly characters: CharactersService,
     private readonly notes: NotesService,
     private readonly comments: CommentsService,
@@ -140,6 +142,8 @@ export class ExportService {
       inventoryList,
       treasury,
       revisionList,
+      scheduledSessionList,
+      sessionAttendanceList,
     ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -166,6 +170,9 @@ export class ExportService {
       this.inventory.getTreasury(campaignId),
       // Issue #813: immutable prose versions (author + replacer provenance), including tips.
       this.revisions.listForCampaign(campaignId),
+      // Issue #436: planned game nights (with RSVPs) and per-session attendance.
+      this.scheduling.listForCampaign(campaignId),
+      this.sessions.listAttendanceForCampaign(campaignId),
     ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
@@ -255,6 +262,9 @@ export class ExportService {
       treasury,
       // Issue #813: version authorship + replacer metadata round-trips with remapped ids.
       revisions: revisionList,
+      // Issue #436: schedules + RSVPs and session attendance round-trip on import.
+      scheduledSessions: scheduledSessionList,
+      sessionAttendance: sessionAttendanceList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
       aiSeat: aiSeatRow
         ? {
@@ -573,6 +583,16 @@ export class ExportService {
       inventory: { kind: 'embedded', path: 'inventory.md', note: 'Items listed in inventory.md' },
       treasury: { kind: 'embedded', path: 'inventory.md', note: 'Coin totals listed in inventory.md' },
       revisions: { kind: 'markdown-folder', path: 'revisions/' },
+      scheduledSessions: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Planned game nights with nested RSVPs; machine copy in campaign.json.',
+      },
+      sessionAttendance: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Per-session character attendance; machine copy in campaign.json.',
+      },
       attachments: { kind: 'markdown-file', path: 'attachments.md' },
       attachmentsNote: {
         kind: 'embedded',
@@ -603,6 +623,8 @@ export class ExportService {
       timelineEvents: data.timelineEvents.length,
       inventory: data.inventory.length,
       revisions: data.revisions.length,
+      scheduledSessions: data.scheduledSessions.length,
+      sessionAttendance: data.sessionAttendance.length,
       attachments: data.attachments.length,
       // Derive present from the ACTUAL byte reads (data.attachments.length - skipped),
       // not the earlier existsSync-based `a.present` flag, so the two counts can never

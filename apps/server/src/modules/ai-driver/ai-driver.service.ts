@@ -9,6 +9,8 @@ import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { MembersService } from '../membership/members.service';
+import { CharactersService } from '../characters/characters.service';
 import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
@@ -244,6 +246,17 @@ export interface RunTurnOptions {
   maxSteps?: number;
   maxTokens?: number;
   proactive?: boolean;
+  characterId?: number;
+}
+
+interface ActionQueueEntry {
+  input: string;
+  characterId?: number;
+  user: RequestUser;
+  opts: RunTurnOptions;
+  resolve: (result: any) => void;
+  reject: (error: any) => void;
+  queuedAt: number;
 }
 
 /**
@@ -806,6 +819,7 @@ export class AiDriverService {
   private readonly sessions = new Map<number, AiDmSessionState>();
   /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
   private readonly lastInputs = new Map<number, string>();
+  private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
   private voteSeq = 0;
 
   constructor(
@@ -819,6 +833,8 @@ export class AiDriverService {
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
     private readonly encounters: EncountersService,
+    private readonly members: MembersService,
+    private readonly characters: CharactersService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -998,7 +1014,18 @@ export class AiDriverService {
     // one un-keyed SSE channel and merge into a single bubble. This check + the synchronous slot
     // reservation below run with NO await between them, so a second request can never slip past.
     if (session.status === 'running') {
-      throw new ConflictException('A driver turn is already in progress for this campaign. Wait for it to finish.');
+      // Queue the action instead of rejecting with 409
+      const queue = this.actionQueues.get(campaignId) ?? [];
+      const maxDepth = await this.getActionQueueDepth(campaignId);
+      if (queue.length >= maxDepth) {
+        throw new ConflictException(
+          `Action queue is full (${maxDepth} pending). Wait for the current turn to finish.`,
+        );
+      }
+      return new Promise((resolve, reject) => {
+        queue.push({ input, characterId: opts.characterId, user: triggeredBy, opts, resolve, reject, queuedAt: Date.now() });
+        this.actionQueues.set(campaignId, queue);
+      });
     }
     // Reserve the turn slot NOW, synchronously, before any further await — so a concurrent caller
     // that already cleared assertRunnable sees `running` at the guard above and is rejected.
@@ -1049,10 +1076,36 @@ export class AiDriverService {
       }));
 
     const system = await this.assembleSystemPrompt(campaignId, seat);
+    
+    let speakerPrefix = '';
+    if (opts.characterId) {
+      try {
+        const membersList = await this.members.listForCampaign(campaignId);
+        const member = membersList.find(m => m.characterId === opts.characterId);
+        let character = null;
+        if (member && opts.characterId) {
+          try {
+            character = await this.characters.getOrThrow(opts.characterId, 'player');
+          } catch {
+            character = null;
+          }
+        }
+        if (character && member) {
+          speakerPrefix = `[${character.name}, played by ${member.displayName ?? member.username}]`;
+        }
+      } catch {
+        // Fallback: no server-side prefix, client-side prefix in input is used
+      }
+    }
+
+    const wrappedInput = speakerPrefix
+      ? `${speakerPrefix} ${input}`
+      : input;
+
     // Untrusted-input hardening (#317): fence + neutralize the player message so it reads as
-    // data, preventing prompt injection. (Skipped for trusted system-generated proactive prompts).
-    const wrappedInput = opts.proactive ? input : wrapUntrustedPlayerInput(input);
-    const messages: AiMessage[] = [{ role: 'user', content: wrappedInput }];
+    // in-world DATA, not instructions. The system prompt's UNTRUSTED_INPUT_PREAMBLE explains the fence.
+    // Skipped for trusted system-generated proactive prompts.
+    const messages: AiMessage[] = [{ role: 'user', content: opts.proactive ? wrappedInput : wrapUntrustedPlayerInput(wrappedInput) }];
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
@@ -1329,6 +1382,8 @@ export class AiDriverService {
 
     this.stream.emit({ type: 'turn.end', campaignId, stopReason, steps, tokensUsed: totalTokens, budgetRemaining });
 
+    this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
+
     return {
       narration: finalNarration,
       stopReason,
@@ -1339,6 +1394,43 @@ export class AiDriverService {
       budgetRemaining,
       seat: latestSeat,
     };
+  }
+
+  private async getActionQueueDepth(campaignId: number): Promise<number> {
+    try {
+      const seat = await this.aiDm.getSeat(campaignId);
+      return seat?.actionQueueDepth ?? 8;
+    } catch {
+      return 8;  // Default
+    }
+  }
+
+  private async drainQueue(campaignId: number): Promise<void> {
+    const queue = this.actionQueues.get(campaignId);
+    if (!queue || queue.length === 0) return;
+
+    // Expire stale entries (older than 60 seconds)
+    const now = Date.now();
+    while (queue.length > 0 && now - queue[0].queuedAt > 60_000) {
+      const expired = queue.shift()!;
+      expired.reject(new ConflictException('Queued action expired (60s timeout).'));
+    }
+
+    if (queue.length === 0) {
+      this.actionQueues.delete(campaignId);
+      return;
+    }
+
+    const next = queue.shift()!;
+    if (queue.length === 0) this.actionQueues.delete(campaignId);
+
+    // Execute the next queued turn
+    try {
+      const result = await this.runTurn(campaignId, next.user, next.input, next.opts);
+      next.resolve(result);
+    } catch (err) {
+      next.reject(err);
+    }
   }
 
   /**
@@ -2332,6 +2424,28 @@ export class AiDriverService {
 
     const party = formatListForPrompt(partyRaw);
     if (party) parts.push(`## Party status\n${party}`);
+
+    const members = await this.members.listForCampaign(campaignId);
+    const playerLines: string[] = [];
+    for (const member of members) {
+      if (member.role === 'dm') {
+        playerLines.push(`- **DM**: ${member.displayName ?? member.username}`);
+        continue;
+      }
+      if (member.characterId) {
+        try {
+          const character = await this.characters.getOrThrow(member.characterId, 'player');
+          playerLines.push(`- **${character.name}** (played by ${member.displayName ?? member.username}) — Level ${character.level ?? '?'} ${character.className ?? ''}, HP ${character.hpCurrent ?? '?'}/${character.hpMax ?? '?'}`);
+          continue;
+        } catch {
+          // Character not found, fall through
+        }
+      }
+      playerLines.push(`- **${member.displayName ?? member.username}** (no character assigned)`);
+    }
+    if (playerLines.length > 0) {
+      parts.push(`## Players at the table\n${playerLines.join('\n')}`);
+    }
 
     const locationEnv = formatLocationEnvironmentFromSummary(summary);
     if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);

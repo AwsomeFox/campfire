@@ -23,7 +23,7 @@ describe('notification preferences (issue #789, e2e)', () => {
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return res.body as Notification[];
+    return Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
   }
   const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
 
@@ -202,7 +202,7 @@ describe('session reminders + RSVP nudges (issue #789, e2e)', () => {
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<N[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return res.body as N[];
+    return Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
   }
   const ofType = (rows: N[], type: string) => rows.filter((n) => n.type === type);
 

@@ -4,11 +4,11 @@
  * critical, objective completed). Budget-metered and rate-limited.
  */
 
-import { BadRequestException, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { Subscription } from 'rxjs';
 import { filter } from 'rxjs/operators';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService } from './ai-driver.service';
+import { AiDriverService, isMidTurnFrozenState } from './ai-driver.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
 import type { AiDmProactiveSettings, CampaignEvent } from '@campfire/schema';
 
@@ -64,7 +64,13 @@ export class ProactiveService implements OnModuleDestroy {
     private readonly driver: AiDriverService,
     private readonly aiDm: AiDmService,
   ) {
-    this.aiDm?.registerProactiveSettingsCallback?.((campaignId, settings, seatEnabled) => {
+    if (typeof this.aiDm.registerProactiveSettingsCallback !== 'function') {
+      this.logger.error(
+        'AiDmService.registerProactiveSettingsCallback is unavailable; proactive watching will not start',
+      );
+      return;
+    }
+    this.aiDm.registerProactiveSettingsCallback((campaignId, settings, seatEnabled) => {
       if (settings) {
         if (settings.enabled && seatEnabled !== false) {
           this.startWatching(campaignId, settings);
@@ -140,7 +146,7 @@ export class ProactiveService implements OnModuleDestroy {
    * Manually trigger a proactive turn (POST /ai-dm/trigger).
    */
   async manualTrigger(campaignId: number, triggerType: string, customPrompt?: string): Promise<void> {
-    if (!customPrompt && !(triggerType in PROACTIVE_PROMPTS)) {
+    if (!customPrompt && !(triggerType in TRIGGER_EVENT_MAP)) {
       throw new BadRequestException(`Unknown proactive trigger type: ${triggerType}`);
     }
     const prompt = customPrompt ?? PROACTIVE_PROMPTS[triggerType];
@@ -177,10 +183,10 @@ export class ProactiveService implements OnModuleDestroy {
       return;
     }
 
-    // Check driver session isn't busy
+    // Check driver session isn't busy or frozen (paused / human_control)
     const session = this.driver.getSession(campaignId);
-    if (session?.status === 'running' || session?.status === 'paused') {
-      this.logger.debug(`Campaign ${campaignId}: proactive trigger '${triggerType}' skipped (turn in progress)`);
+    if (session.status === 'running' || isMidTurnFrozenState(session.state)) {
+      this.logger.debug(`Campaign ${campaignId}: proactive trigger '${triggerType}' skipped (turn in progress or frozen)`);
       return;
     }
 
@@ -232,13 +238,14 @@ export class ProactiveService implements OnModuleDestroy {
       }
 
       this.logger.log(`Campaign ${campaignId}: proactive turn completed (${result?.tokensUsed ?? 0} tokens)`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       // ConflictException (409) means a turn is already running — that's fine, skip
-      if (err.status === 409) {
+      if (err instanceof ConflictException) {
         this.logger.debug(`Campaign ${campaignId}: proactive turn skipped (conflict)`);
         return;
       }
-      this.logger.warn(`Campaign ${campaignId}: proactive turn failed (${triggerType}): ${err?.message ?? err}`);
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Campaign ${campaignId}: proactive turn failed (${triggerType}): ${message}`);
     }
   }
 }
