@@ -140,7 +140,7 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
     }
   } catch (err) {
     if (err instanceof Error && err.message === GENERIC_DECRYPT_FAILURE) throw err;
-    throw new Error(GENERIC_DECRYPT_FAILURE);
+    throw new Error(GENERIC_DECRYPT_FAILURE, { cause: err });
   }
 
   const derived = scryptSync(passphrase, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
