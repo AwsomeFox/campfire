@@ -7,8 +7,11 @@ import {
   xpThresholdsForLevel,
 } from '@campfire/schema';
 import type {
+  ActionEconomySlot,
+  ActiveEffect,
   Combatant,
   CombatantKind,
+  CombatantTurnState,
   DeathState,
   DifficultyBand,
   EncounterDifficulty,
@@ -16,6 +19,7 @@ import type {
   EncounterShape,
   EncounterStatus,
   HpBand,
+  TurnPrompt,
 } from '@campfire/schema';
 
 /** Re-export difficulty primitives so existing unit-test imports keep working. */
@@ -535,4 +539,238 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
     }
   }
   return { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail };
+}
+
+// ---------------------------------------------------------------------------
+// Current-turn workspace pure logic (issue #413).
+//
+// These functions are the deterministic heart of the turn workspace: reversing the
+// turn pointer for undo, resetting a combatant's per-turn action economy when its turn
+// starts, ticking timed effects down when its turn ends, and deriving the start/end-of-turn
+// prompts a player and DM should resolve. No `this`, no DB, no side effects — unit-tested in
+// encounters-logic.spec.ts and reused inside the service's serialized advancement transaction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Reverse of {@link advanceTurn} (issue #413, undo advance). Steps the pointer BACKWARD over
+ * `sorted` from `currentCombatantId` to the previous combatant, unwrapping to the last
+ * combatant and decrementing `round` when stepping back past the top. `round` never drops
+ * below 1 (a running encounter is always at least round 1), so undo at the very first turn is
+ * a no-op on round. A missing/unset pointer restarts at the top of the current round.
+ */
+export function retreatTurn(
+  sorted: Combatant[],
+  currentCombatantId: number | null,
+  round: number,
+): NextTurnState {
+  const count = sorted.length;
+  if (count === 0) {
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: null };
+  }
+  const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
+  // Unset/last-removed pointer: restart at the top of the current round (mirrors advanceTurn).
+  if (currentIdx < 0) {
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: sorted[0].id };
+  }
+  let prevIdx = currentIdx - 1;
+  let prevRound = round;
+  if (prevIdx < 0) {
+    prevIdx = count - 1;
+    prevRound = Math.max(1, round - 1);
+  }
+  return { turnIndex: prevIdx, round: prevRound, currentCombatantId: sorted[prevIdx].id };
+}
+
+/**
+ * Reset a combatant's per-turn action economy at the START of its own turn (issue #413).
+ * Slots that reset at 'turn' AND those that reset at 'round' both refresh here (a 5e reaction
+ * resets "at the start of your turn"), so `used` is cleared for every slot and movement is
+ * zeroed. Concentration PERSISTS across turns (it only breaks on failed saves / incapacitation,
+ * handled elsewhere). `delaying`/`readied` clear because the combatant is now taking its turn.
+ * Returns a new turn-state; the input is not mutated.
+ */
+export function resetTurnStateForStart(turnState: CombatantTurnState): CombatantTurnState {
+  return {
+    used: {},
+    movementUsedFt: 0,
+    concentration: turnState.concentration,
+    delaying: false,
+    readied: null,
+  };
+}
+
+/** One expired/ticked effect surfaced from {@link tickEffectsAtTurnEnd} for combat-log lines. */
+export interface EffectTickResult {
+  kept: ActiveEffect[];
+  expired: ActiveEffect[];
+}
+
+/**
+ * Tick a combatant's timed effects down at the END of its turn (issue #413). Effects with a
+ * finite `roundsRemaining` decrement by one; those reaching 0 are moved to `expired` (dropped
+ * from the roster) so the service can log an 'effect' expiry line. Indefinite effects
+ * (roundsRemaining === null) are kept untouched. Returns new arrays; the input is not mutated.
+ */
+export function tickEffectsAtTurnEnd(effects: ActiveEffect[]): EffectTickResult {
+  const kept: ActiveEffect[] = [];
+  const expired: ActiveEffect[] = [];
+  for (const e of effects) {
+    if (e.roundsRemaining === null) {
+      kept.push(e);
+      continue;
+    }
+    const remaining = e.roundsRemaining - 1;
+    if (remaining <= 0) {
+      expired.push(e);
+    } else {
+      kept.push({ ...e, roundsRemaining: remaining });
+    }
+  }
+  return { kept, expired };
+}
+
+/** Minimal combatant slice the prompt derivation reads (avoids importing the full domain type). */
+export interface TurnPromptCombatant {
+  id: number;
+  name: string;
+  kind: CombatantKind;
+  deathState: DeathState;
+  activeEffects: ActiveEffect[];
+  turnState: CombatantTurnState;
+}
+
+/**
+ * Derive the START-of-turn prompts for a combatant (issue #413): a death save for a dying PC,
+ * an ongoing-damage tick, a regeneration heal, and any start-of-turn repeat save. Pure and
+ * name-safe (message never embeds another combatant's hidden identity). Ongoing HP ticks are
+ * surfaced as prompts (not auto-applied) so the DM/owner stays in control of the roll/amount.
+ */
+export function deriveStartTurnPrompts(c: TurnPromptCombatant): TurnPrompt[] {
+  const prompts: TurnPrompt[] = [];
+  if (c.kind === 'character' && (c.deathState === 'dying' || c.deathState === 'stable')) {
+    prompts.push({
+      id: `death-save:${c.id}`,
+      kind: 'death-save',
+      timing: 'start',
+      combatantId: c.id,
+      combatantName: c.name,
+      message:
+        c.deathState === 'stable'
+          ? 'Stable at 0 HP — no death save needed unless it takes damage.'
+          : 'Down at 0 HP — roll a death saving throw.',
+      effectId: null,
+    });
+  }
+  for (const e of c.activeEffects) {
+    if (e.timing !== 'start-of-turn') continue;
+    if (e.kind === 'ongoing-damage') {
+      prompts.push({
+        id: `ongoing:${c.id}:${e.id}`,
+        kind: 'ongoing-damage',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: e.amount != null ? `Take ${e.amount} ongoing damage from ${e.name}.` : `Resolve ongoing damage from ${e.name}.`,
+        effectId: e.id,
+      });
+    } else if (e.kind === 'regeneration') {
+      prompts.push({
+        id: `regen:${c.id}:${e.id}`,
+        kind: 'regeneration',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: e.amount != null ? `Regain ${e.amount} HP from ${e.name}.` : `Resolve regeneration from ${e.name}.`,
+        effectId: e.id,
+      });
+    }
+    if (e.saveAbility) {
+      prompts.push({
+        id: `repeat-save:start:${c.id}:${e.id}`,
+        kind: 'repeat-save',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name}.`,
+        effectId: e.id,
+      });
+    }
+  }
+  return prompts;
+}
+
+/**
+ * Derive the END-of-turn prompts for a combatant (issue #413): effects that expire this turn,
+ * end-of-turn repeat saves and HP ticks, and unresolved actions (an action-economy slot with
+ * remaining uses). `slots` is the campaign adapter's action-economy model so "unresolved
+ * action" reflects the real system (5e Action, PF2e's three actions, …), never a 5e constant.
+ */
+export function deriveEndTurnPrompts(c: TurnPromptCombatant, slots: readonly ActionEconomySlot[]): TurnPrompt[] {
+  const prompts: TurnPrompt[] = [];
+  for (const e of c.activeEffects) {
+    if (e.roundsRemaining !== null && e.roundsRemaining <= 1) {
+      prompts.push({
+        id: `expiring:${c.id}:${e.id}`,
+        kind: 'expiring-effect',
+        timing: 'end',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `${e.name} expires at the end of this turn.`,
+        effectId: e.id,
+      });
+    }
+    if (e.timing === 'end-of-turn') {
+      if (e.kind === 'ongoing-damage') {
+        prompts.push({
+          id: `ongoing:end:${c.id}:${e.id}`,
+          kind: 'ongoing-damage',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: e.amount != null ? `Take ${e.amount} ongoing damage from ${e.name}.` : `Resolve ongoing damage from ${e.name}.`,
+          effectId: e.id,
+        });
+      } else if (e.kind === 'regeneration') {
+        prompts.push({
+          id: `regen:end:${c.id}:${e.id}`,
+          kind: 'regeneration',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: e.amount != null ? `Regain ${e.amount} HP from ${e.name}.` : `Resolve regeneration from ${e.name}.`,
+          effectId: e.id,
+        });
+      }
+      if (e.saveAbility) {
+        prompts.push({
+          id: `repeat-save:end:${c.id}:${e.id}`,
+          kind: 'repeat-save',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name} (save ends).`,
+          effectId: e.id,
+        });
+      }
+    }
+  }
+  // Unresolved PRIMARY action: only the first action-kind slot (5e "Action", PF2e "Actions")
+  // raises an end-of-turn prompt when it still has uses left. Leaving a bonus action or a
+  // reaction unspent is normal play, so those never nag.
+  const primaryAction = slots.find((s) => s.kind === 'action');
+  if (primaryAction) {
+    const used = c.turnState.used[primaryAction.key] ?? 0;
+    if (used < primaryAction.max) {
+      prompts.push({
+        id: `unresolved:${c.id}:${primaryAction.key}`,
+        kind: 'unresolved-action',
+        timing: 'end',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `${primaryAction.label} not yet used (${primaryAction.max - used} of ${primaryAction.max} remaining).`,
+        effectId: null,
+      });
+    }
+  }
+  return prompts;
 }

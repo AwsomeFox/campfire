@@ -57,6 +57,8 @@ function campaign(
     currentLocationId: null,
     dangerLevel: 'low',
     dmControlsProgression: false,
+    dmControlsTurns: false,
+    requireDmTurnConfirmation: false,
     publicRecapSharingEnabled: true,
     publicInvitesEnabled: true,
     sessionCount: 0,

@@ -18,6 +18,7 @@ import {
   CharacterCreate,
   CharacterUpdate,
   CombatantCreate,
+  CombatantTurnStatePatch,
   CombatantUpdate,
   DifficultyBand,
   EncounterShape,
@@ -1014,6 +1015,22 @@ export class McpToolsService {
         // a non-DM PAT must not read raw names/detail on a hidden encounter or hidden NPCs.
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.listEvents(encounterId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'get_turn',
+      'Get the current-turn workspace (issue #413): the active combatant, round, next actor, and — for the DM or the ' +
+        'current combatant\'s owner — the adapter-defined action-economy slots (with usage + plain-language help), ' +
+        'movement / reaction / concentration / active effects, suggested actions from the sheet or statblock, and the ' +
+        'start/end-of-turn prompts to resolve before advancing. Read-only. The detailed workspace is withheld from ' +
+        'other viewers (a monster\'s abilities/effects never leak to players).',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.getTurnWorkspace(encounterId as number, user, role);
       },
     );
 
@@ -3076,6 +3093,66 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         return this.encounters.nextTurn(encounterId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'end_turn',
+      'End the CURRENT combatant\'s turn (issue #413). The DM may always end it; a player may end the turn of their ' +
+        'OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server validates ' +
+        'ownership + that it is actually that combatant\'s turn, serializes advancement, resolves start/end-of-turn ' +
+        'effects, and guards against double-advance: pass expectedCurrentCombatantId (the combatant you believe is ' +
+        'acting) and a 409 is returned if the turn already moved on. When the campaign requires DM confirmation a ' +
+        'player end-turn is staged (409); the DM then advances it directly (a DM end-turn / next-turn is the confirmation).',
+      {
+        encounterId: Id.describe('Encounter id'),
+        expectedCurrentCombatantId: Id.nullable().optional().describe('Double-advance guard: the combatant you believe currently has the turn'),
+      },
+      async ({ encounterId, expectedCurrentCombatantId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.encounters.endTurn(
+          encounterId as number,
+          { expectedCurrentCombatantId: expectedCurrentCombatantId as number | null | undefined },
+          user,
+          role,
+        );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'undo_turn',
+      'DM only: undo the last turn advance (issue #413) — step the turn pointer BACKWARD, decrementing the round when ' +
+        'unwrapping past the top. Effect ticks applied while advancing are not reversed; re-apply any effect ' +
+        'corrections manually.',
+      { encounterId: Id.describe('Encounter id') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.undoTurn(encounterId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_turn_state',
+      'Declare / resolve the current turn\'s action economy and effects on a combatant (issue #413): useSlot / ' +
+        'releaseSlot / setSlotUsed against an adapter action-economy slot key (get_turn lists them), moveFt (spend ' +
+        'movement) or resetMovement, concentration (set/clear what the combatant concentrates on), addEffect / ' +
+        'removeEffectId for a structured active effect (duration + save timing), delaying / readied for the turn-order ' +
+        'tools, and resetTurn to clear the per-turn slice. The DM may edit any combatant; a player only a combatant ' +
+        'linked to a character they own.',
+      { encounterId: Id.describe('Encounter id'), combatantId: Id.describe('Combatant id — from get_encounter'), ...CombatantTurnStatePatch.shape },
+      async ({ encounterId, combatantId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        const validated = CombatantTurnStatePatch.parse(fields);
+        return this.encounters.updateCombatantTurnState(encounterId as number, combatantId as number, validated, user, role);
       },
     );
 

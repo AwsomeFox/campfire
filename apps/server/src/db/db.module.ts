@@ -1809,6 +1809,48 @@ function migrateCombatantsTableForSheetSyncedUpdatedAt(sqlite: Database.Database
 }
 
 /**
+ * Issue #413: `combatants.turn_state` (JSON CombatantTurnState — per-turn action-economy
+ * usage, movement, concentration, delay/ready) and `combatants.active_effects` (JSON
+ * ActiveEffect[] with duration + save timing) power the current-turn workspace. Plain
+ * nullable ADD COLUMNs — no table rebuild. null degrades to the defaults (EMPTY_TURN_STATE
+ * / []) in the read path. Fresh DBs never hit this path (BOOTSTRAP_SQL declares both).
+ */
+function migrateCombatantsTableForTurnState(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'turn_state')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN turn_state TEXT');
+  }
+  if (!columns.some((c) => c.name === 'active_effects')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN active_effects TEXT');
+  }
+}
+
+/**
+ * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
+ * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
+ * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
+ * NOT NULL DEFAULT 0 ADD COLUMNs — no table rebuild. Fresh DBs never hit this path
+ * (BOOTSTRAP_SQL declares both).
+ */
+function migrateCampaignsTableForTurnControls(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'dm_controls_turns')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN dm_controls_turns INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((c) => c.name === 'require_dm_turn_confirmation')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
@@ -2077,6 +2119,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0069_inventory_qty_idempotency_created_at', run: migrateInventoryQtyIdempotencyCreatedAtIndex },
   { name: '0070_notifications_data', run: migrateNotificationsTableForData },
   { name: '0071_ai_dm_usage_history', run: migrateAiDmUsageHistoryTable },
+  { name: '0072_combatants_turn_state', run: migrateCombatantsTableForTurnState },
+  { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
 ];
 
 /**

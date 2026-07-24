@@ -37,7 +37,8 @@ test.describe('combat tracker — DM view', () => {
 
     // Fight is running (seeded via /start) — status + round render.
     await expect(page.getByText('Running', { exact: false }).first()).toBeVisible();
-    await expect(page.getByText(/Round\s*1/)).toBeVisible();
+    // The current-turn workspace (issue #413) also shows "Round N", so scope to the first.
+    await expect(page.getByText(/Round\s*1/).first()).toBeVisible();
 
     // Both monsters present with exact HP "current / max" (issue #81 HP math).
     await expect(page.getByText(boss.name).first()).toBeVisible();

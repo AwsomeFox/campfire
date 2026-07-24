@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { AoeTemplate, CombatantCreate, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { AoeTemplate as AoeTemplateType, Combatant, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -24,10 +24,15 @@ import {
   advanceTurn,
   applyCombatantHp,
   crToXp,
+  deriveEndTurnPrompts,
+  deriveStartTurnPrompts,
   generateEncounterGroup,
   hpBandFor,
   redactEncounterEventsForViewer,
+  resetTurnStateForStart,
+  retreatTurn,
   sortCombatants,
+  tickEffectsAtTurnEnd,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
@@ -136,7 +141,32 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
     tokenHiddenByFog: false,
+    // Issue #413: current-turn workspace state. Corrupt/legacy JSON degrades to the
+    // defaults (EMPTY_TURN_STATE / []) rather than failing the whole combatant read.
+    turnState: parseTurnState(row.turnState),
+    activeEffects: parseActiveEffects(row.activeEffects),
   };
+}
+
+/**
+ * Parse the stored turn-state JSON back into a CombatantTurnState (issue #413). Null / corrupt
+ * / legacy text degrades to EMPTY_TURN_STATE (no usage, no concentration) — turn state is a
+ * live-combat aid, never a reason to fail an encounter read.
+ */
+function parseTurnState(text: string | null): CombatantTurnState {
+  // Route null/corrupt text through the schema so the returned object always has its OWN
+  // fresh `used` map (the schema uses factory defaults) — never a spread of the shared
+  // EMPTY_TURN_STATE, whose nested `used` object would otherwise be aliased and mutated.
+  if (text == null) return CombatantTurnState.parse({});
+  const parsed = CombatantTurnState.safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : CombatantTurnState.parse({});
+}
+
+/** Parse the stored active-effects JSON back into an ActiveEffect[] (issue #413); degrade to []. */
+function parseActiveEffects(text: string | null): ActiveEffectType[] {
+  if (text == null) return [];
+  const parsed = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(text, null));
+  return parsed.success ? parsed.data : [];
 }
 
 function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent {
@@ -2460,52 +2490,510 @@ export class EncountersService {
     if (encounterRow.status !== 'running') {
       throw new BadRequestException('Encounter is not running');
     }
+    // DM/AI "Next turn" — no expected-id guard (preserves the classic control); the
+    // serialized advance below still resolves start/end-of-turn effects (issue #413).
+    return this.advanceCurrentTurn(encounterRow, user, role, { auditAction: 'encounter.next_turn' });
+  }
 
-    // Walk the SERVER-sorted order from the current combatant's identity, not a raw
-    // positional index (issue #49). Find where the current actor sits now, step to the
-    // next one, and wrap (round+1) past the end. Because the pointer is an id, a mid-
-    // fight add/remove that reshuffled positions can't desync who's "current".
-    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
-    const sorted = this.sortCombatantsWithAdapter(
-      (await this.listCombatantRows(encounterId)).map(combatantToDomain),
-      'running',
-      adapter,
-    );
-    const { turnIndex, round, currentCombatantId } = advanceTurn(
-      sorted,
-      encounterRow.currentCombatantId,
-      encounterRow.round,
-    );
+  /**
+   * End the current combatant's turn (issue #413). The player path: a character owner ends
+   * their OWN active combatant's turn. Authorization is layered:
+   *   1. the campaign's `dmControlsTurns` setting can forbid player advancement entirely;
+   *   2. a non-DM must own the character linked to the CURRENT combatant (ownership);
+   *   3. it must actually be that combatant's turn (current-turn validation);
+   *   4. `requireDmTurnConfirmation` stages a player end-turn (409 asking for DM confirm);
+   *      the DM then advances directly (a DM end-turn / next-turn IS the confirmation).
+   * Advancement itself is serialized + double-advance-guarded inside advanceCurrentTurn via
+   * `expectedCurrentCombatantId` — a stale/duplicate click after someone else advanced 409s
+   * instead of skipping a second combatant's turn.
+   */
+  async endTurn(
+    encounterId: number,
+    input: EncounterEndTurnInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'running') {
+      throw new BadRequestException('Encounter is not running');
+    }
+    const currentId = encounterRow.currentCombatantId;
+    if (currentId === null) {
+      throw new BadRequestException('No combatant currently has the turn');
+    }
+    const isDm = role === 'dm';
+    const [campaign] = await this.db
+      .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
+      .from(campaigns)
+      .where(eq(campaigns.id, encounterRow.campaignId))
+      .limit(1);
+    const dmControlsTurns = Boolean(campaign?.dmControlsTurns);
+    const requireDmConfirm = Boolean(campaign?.requireDmTurnConfirmation);
 
-    await this.db
-      .update(encounters)
-      .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
-      .where(eq(encounters.id, encounterId));
+    if (!isDm) {
+      // (1) DM-only advancement setting: a player cannot end a turn at all.
+      if (dmControlsTurns) {
+        throw new ForbiddenException('This campaign is set to DM-only turn advancement — ask the DM to advance.');
+      }
+      // (2) + (3) ownership + current-turn validation: the player must own the character
+      // linked to the CURRENT combatant.
+      const current = await this.getCombatantRowOrThrow(encounterId, currentId);
+      if (current.kind !== 'character' || current.characterId === null) {
+        throw new ForbiddenException('Only the DM may end a monster or NPC turn.');
+      }
+      const [character] = await this.db.select().from(characters).where(eq(characters.id, current.characterId)).limit(1);
+      if (!character || character.ownerUserId !== user.id) {
+        throw new ForbiddenException('You may only end the turn of your own active character.');
+      }
+      // (4) configurable DM confirmation: stage the request for the DM (players cannot
+      // self-confirm). The client shows a "waiting for DM" state; the DM then advances the
+      // turn directly (end-turn / next-turn as dm) — that DM action IS the confirmation.
+      if (requireDmConfirm) {
+        await this.appendEvent(encounterId, encounterRow.round, 'note', {
+          actor: current.name,
+          actorId: current.id,
+          detail: 'requested to end their turn (awaiting DM confirmation)',
+        });
+        this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+        throw new ConflictException({
+          code: 'TURN_END_NEEDS_DM_CONFIRM',
+          message: 'This campaign requires the DM to confirm end-of-turn. Your request has been sent to the DM.',
+          combatantId: current.id,
+        });
+      }
+    }
 
-    // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail
-    // stays name-free so #869 redaction cannot be bypassed by prose.
-    const current = sorted.find((c) => c.id === currentCombatantId);
-    await this.appendEvent(encounterId, round, 'turn', {
-      actor: current?.name ?? null,
-      target: current?.name ?? null,
-      actorId: current?.id ?? null,
-      targetId: current?.id ?? null,
-      detail: '',
+    // Double-advance guard: only advance when the live current combatant still matches the
+    // one the caller is ending. A player always ends the CURRENT combatant; an explicit
+    // `expectedCurrentCombatantId` (a stale client) is honored when provided.
+    const expected = input.expectedCurrentCombatantId ?? currentId;
+    return this.advanceCurrentTurn(encounterRow, user, role, {
+      auditAction: 'encounter.end_turn',
+      expectedCurrentCombatantId: expected,
+      endedByPlayer: !isDm,
     });
+  }
+
+  /**
+   * Serialized turn advance shared by DM "Next turn" and player "End turn" (issues #49 + #413).
+   * Runs the whole read-compute-write inside ONE synchronous better-sqlite3 transaction so
+   * concurrent advances cannot interleave (double-advance prevention): the FRESH current
+   * pointer is read inside the tx, an optional `expectedCurrentCombatantId` that no longer
+   * matches surfaces a 409 (someone already advanced), and the winner's committed pointer is
+   * what the loser observes. Within the tx it also resolves per-turn effects: the ENDING
+   * combatant's timed effects tick down (expiring ones are dropped) and the STARTING
+   * combatant's per-turn action economy resets. Structured combat-log events (turn marker +
+   * effect expiries) are appended after commit.
+   */
+  private async advanceCurrentTurn(
+    encounterRow: typeof encounters.$inferSelect,
+    user: RequestUser,
+    role: Role,
+    opts: { auditAction: string; expectedCurrentCombatantId?: number; endedByPlayer?: boolean },
+  ): Promise<EncounterWithCombatants> {
+    const encounterId = encounterRow.id;
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+
+    // Captured inside the tx for post-commit logging.
+    let newRound = encounterRow.round;
+    // The round the ENDING turn was in (before advanceTurn may increment it on a wrap).
+    // Effect expiries happen at the end of that turn, so they must be logged under this
+    // round, not the incremented `newRound` (issue #413 off-by-one).
+    let endedRound = encounterRow.round;
+    let newCurrentId: number | null = null;
+    let newCurrentName: string | null = null;
+    let endedName: string | null = null;
+    const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
+
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+      if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
+        throw new BadRequestException('Encounter is not running');
+      }
+      endedRound = fresh.round;
+      const freshCurrentId = fresh.currentCombatantId;
+      if (opts.expectedCurrentCombatantId !== undefined && freshCurrentId !== opts.expectedCurrentCombatantId) {
+        // Someone advanced between the caller's read and this write — refuse rather than
+        // skip a second combatant's turn (double-advance prevention, issue #413).
+        throw new ConflictException({
+          code: 'TURN_ALREADY_ADVANCED',
+          message: 'The turn already advanced — refresh the encounter before ending the turn again.',
+          currentCombatantId: freshCurrentId,
+        });
+      }
+
+      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
+      const { turnIndex, round, currentCombatantId } = advanceTurn(sorted, freshCurrentId, fresh.round);
+      newRound = round;
+      newCurrentId = currentCombatantId;
+
+      // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
+      // timed effects down, drop the expired. Only meaningful on a genuine advance.
+      const ending = freshCurrentId === null ? undefined : sorted.find((c) => c.id === freshCurrentId);
+      if (ending) {
+        endedName = ending.name;
+        const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
+        if (expired.length > 0) {
+          for (const e of expired) expiredEffects.push({ combatantId: ending.id, combatantName: ending.name, effectName: e.name });
+          tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
+        } else if (kept.some((e, i) => e.roundsRemaining !== ending.activeEffects[i]?.roundsRemaining)) {
+          // Durations changed (decremented) even though nothing expired — persist the tick.
+          tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
+        }
+      }
+
+      // Reset the STARTING combatant's per-turn action economy (fresh action/bonus/reaction/
+      // movement for its new turn). Concentration persists across turns.
+      const starting = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
+      if (starting) {
+        newCurrentName = starting.name;
+        const reset = resetTurnStateForStart(starting.turnState);
+        tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, starting.id)).run();
+      }
+
+      tx.update(encounters)
+        .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
+        .where(eq(encounters.id, encounterId))
+        .run();
+    });
+
+    // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
+    // name-free so #869 redaction cannot be bypassed by prose.
+    await this.appendEvent(encounterId, newRound, 'turn', {
+      actor: newCurrentName,
+      target: newCurrentName,
+      actorId: newCurrentId,
+      targetId: newCurrentId,
+      detail: opts.endedByPlayer && endedName ? 'ended their turn' : '',
+    });
+    // Structured effect-expiry events (issue #413): one per expired effect on the combatant
+    // whose turn just ended. Detail stays name-free (the effect name is generic content).
+    for (const ex of expiredEffects) {
+      // Log under the ENDING turn's round (endedRound), not newRound — on a wrap to the top
+      // of the order advanceTurn increments the round, but the effect expired on the turn
+      // that just ended (issue #413 off-by-one fix).
+      await this.appendEvent(encounterId, endedRound, 'effect', {
+        actor: ex.combatantName,
+        actorId: ex.combatantId,
+        detail: `effect expired: ${ex.effectName}`,
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
-      action: 'encounter.next_turn',
+      action: opts.auditAction,
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
-      detail: `round ${round}, turn ${turnIndex}`,
+      detail: `round ${newRound}`,
     });
 
     this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
 
     return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  /**
+   * DM undo of the last turn advance (issue #413). Steps the pointer BACKWARD over the sorted
+   * order (see {@link retreatTurn}), decrementing the round when unwrapping past the top.
+   * Serialized like advanceCurrentTurn so it can't race a concurrent advance. Effect ticks
+   * applied on the way forward are NOT reversed — undo restores the turn pointer, and the DM
+   * re-applies any effect corrections manually (surfaced in the log). DM-only (enforced by the
+   * controller's `dm` role gate).
+   */
+  async undoTurn(encounterId: number, user: RequestUser, role: Role): Promise<EncounterWithCombatants> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    if (encounterRow.status !== 'running') {
+      throw new BadRequestException('Encounter is not running');
+    }
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    let newRound = encounterRow.round;
+    let newCurrentId: number | null = null;
+    let newCurrentName: string | null = null;
+
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
+      if (!fresh || (fresh.status as EncounterStatus) !== 'running') {
+        throw new BadRequestException('Encounter is not running');
+      }
+      const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+      const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
+      const { turnIndex, round, currentCombatantId } = retreatTurn(sorted, fresh.currentCombatantId, fresh.round);
+      newRound = round;
+      newCurrentId = currentCombatantId;
+      const back = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
+      newCurrentName = back?.name ?? null;
+      tx.update(encounters)
+        .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
+        .where(eq(encounters.id, encounterId))
+        .run();
+    });
+
+    await this.appendEvent(encounterId, newRound, 'override', {
+      actor: newCurrentName,
+      actorId: newCurrentId,
+      targetId: newCurrentId,
+      detail: 'turn advance undone',
+    });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.undo_turn',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: encounterRow.campaignId,
+      detail: `round ${newRound}`,
+    });
+    this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    return this.getWithCombatantsOrThrow(encounterId, role);
+  }
+
+  /**
+   * Build the current-turn workspace read model (issue #413) — "what can I do now?" for the
+   * active combatant. Derived server-side from the encounter + combatant + campaign-adapter
+   * state on every read (no stored blob). Secrecy: the DETAILED workspace (action economy,
+   * suggested actions, effects, prompts) is only populated for the DM or the user who owns
+   * the current combatant's character; other viewers get identity + round only, so a monster's
+   * turn never leaks its abilities/effects to players (mirrors the issue #43/#869 gates).
+   */
+  async getTurnWorkspace(encounterId: number, user: RequestUser, role: Role): Promise<TurnWorkspace> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (role !== 'dm' && !isVisibleTo({ hidden: row.hidden }, role)) {
+      throw new NotFoundException(`Encounter ${encounterId} not found`);
+    }
+    const status = row.status as EncounterStatus;
+    const [campaign] = await this.db
+      .select({ dmControlsTurns: campaigns.dmControlsTurns, requireDmTurnConfirmation: campaigns.requireDmTurnConfirmation })
+      .from(campaigns)
+      .where(eq(campaigns.id, row.campaignId))
+      .limit(1);
+    const dmControlsTurns = Boolean(campaign?.dmControlsTurns);
+    const requireDmTurnConfirmation = Boolean(campaign?.requireDmTurnConfirmation);
+
+    const base: TurnWorkspace = {
+      encounterId,
+      status,
+      round: row.round,
+      current: null,
+      next: null,
+      isYourTurn: false,
+      canEndTurn: false,
+      dmControlsTurns,
+      requireDmTurnConfirmation,
+      actionEconomy: [],
+      movement: null,
+      reactionAvailable: false,
+      concentration: null,
+      activeEffects: [],
+      suggestedActions: [],
+      startPrompts: [],
+      endPrompts: [],
+    };
+    if (status !== 'running' || row.currentCombatantId === null) {
+      return base;
+    }
+
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    const rows = await this.listCombatantRows(encounterId);
+    const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
+    const currentIdx = sorted.findIndex((c) => c.id === row.currentCombatantId);
+    if (currentIdx < 0) return base;
+    const current = sorted[currentIdx];
+    const nextCombatant = sorted[(currentIdx + 1) % sorted.length];
+
+    const isDm = role === 'dm';
+    const currentActor = await this.toTurnActor(current);
+    const nextActor = await this.toTurnActor(nextCombatant);
+    const isYourTurn = currentActor.ownerUserId !== null && currentActor.ownerUserId === user.id;
+    const canEndTurn = isDm || (isYourTurn && !dmControlsTurns);
+
+    // Secrecy gate: only the DM or the current combatant's owner sees the detailed workspace.
+    const canSeeDetail = isDm || isYourTurn;
+    if (!canSeeDetail) {
+      return { ...base, current: currentActor, next: nextActor, isYourTurn, canEndTurn };
+    }
+
+    const model = actionEconomyForAdapter(adapter);
+    const used = current.turnState.used;
+    const actionEconomy = model.slots.map((slot) => ({
+      key: slot.key,
+      label: slot.label,
+      help: slot.help,
+      kind: slot.kind,
+      max: slot.max,
+      used: slot.kind === 'movement' ? current.turnState.movementUsedFt : used[slot.key] ?? 0,
+      resetsAt: slot.resetsAt,
+    }));
+    const movementSlot = model.slots.find((s) => s.kind === 'movement');
+    const reactionSlot = model.slots.find((s) => s.kind === 'reaction');
+    const suggestedActions = await this.suggestedActionsForCombatant(current);
+
+    return {
+      ...base,
+      current: currentActor,
+      next: nextActor,
+      isYourTurn,
+      canEndTurn,
+      actionEconomy,
+      movement: movementSlot ? { maxFt: movementSlot.max, usedFt: current.turnState.movementUsedFt } : null,
+      reactionAvailable: reactionSlot ? (used[reactionSlot.key] ?? 0) < reactionSlot.max : false,
+      concentration: current.turnState.concentration,
+      activeEffects: current.activeEffects,
+      suggestedActions,
+      startPrompts: deriveStartTurnPrompts(current),
+      endPrompts: deriveEndTurnPrompts(current, model.slots),
+    };
+  }
+
+  /** Resolve a combatant into a TurnActor, looking up the linked character's owner (issue #413). */
+  private async toTurnActor(c: Combatant): Promise<TurnActor> {
+    let ownerUserId: string | null = null;
+    if (c.kind === 'character' && c.characterId !== null) {
+      const [character] = await this.db
+        .select({ ownerUserId: characters.ownerUserId })
+        .from(characters)
+        .where(eq(characters.id, c.characterId))
+        .limit(1);
+      ownerUserId = character?.ownerUserId ?? null;
+    }
+    return { combatantId: c.id, name: c.name, kind: c.kind, characterId: c.characterId, ownerUserId };
+  }
+
+  /**
+   * Gather suggested actions for the current combatant from its sheet / statblock (issue #413).
+   * Characters draw from their `actions` list; monsters/NPCs from the linked compendium
+   * statblock's actions/reactions/legendary actions (mapped via the campaign adapter so the
+   * field names aren't hardcoded to one schema). Best-effort + defensive — a missing or
+   * malformed source yields an empty list rather than throwing.
+   */
+  private async suggestedActionsForCombatant(c: Combatant): Promise<TurnSuggestedAction[]> {
+    const out: TurnSuggestedAction[] = [];
+    if (c.kind === 'character' && c.characterId !== null) {
+      const [character] = await this.db.select({ actions: characters.actions }).from(characters).where(eq(characters.id, c.characterId)).limit(1);
+      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown }>>(character?.actions ?? null, []);
+      for (const a of actions) {
+        if (typeof a?.name !== 'string' || a.name.length === 0) continue;
+        const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
+        out.push({ name: a.name.slice(0, 160), source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action', summary: bits.join(' · ').slice(0, 600) });
+      }
+      return out.slice(0, 100);
+    }
+    if (c.ruleEntryId !== null) {
+      const adapter = await this.adapterForCampaign((await this.getRowOrThrow(c.encounterId)).campaignId);
+      const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, c.ruleEntryId)).limit(1);
+      const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
+      const mapped = adapter.mapStatblock(data);
+      const push = (source: string, raw: unknown) => {
+        if (!Array.isArray(raw)) return;
+        for (const item of raw as Array<Record<string, unknown>>) {
+          const name = typeof item?.name === 'string' ? item.name : '';
+          if (!name) continue;
+          const desc = typeof item?.desc === 'string' ? item.desc : typeof item?.description === 'string' ? (item.description as string) : '';
+          out.push({ name: name.slice(0, 160), source, summary: desc.slice(0, 600) });
+        }
+      };
+      push('action', mapped.actions);
+      push('reaction', mapped.reactions);
+      push('legendary', mapped.legendaryActions);
+      push('special', mapped.specialAbilities);
+      return out.slice(0, 100);
+    }
+    return out;
+  }
+
+  /**
+   * Declare / resolve action economy, movement, concentration, effects, and the delay/ready
+   * turn-order tools on a combatant (issue #413). Authorization mirrors updateCombatant: the
+   * DM may edit any combatant; a non-DM only a combatant linked to a character they own. The
+   * whole read-modify-write runs in one synchronous transaction off the FRESH row so
+   * concurrent declarations compose instead of clobbering (same pattern as the condition/HP
+   * paths). Structured combat-log notes are appended for meaningful changes.
+   */
+  async updateCombatantTurnState(
+    encounterId: number,
+    combatantId: number,
+    patch: CombatantTurnStatePatchInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<Combatant> {
+    const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
+    const existing = await this.getCombatantRowOrThrow(encounterId, combatantId);
+    const isDm = role === 'dm';
+    if (!isDm) {
+      if (existing.kind !== 'character' || existing.characterId === null) {
+        throw new ForbiddenException('Only the DM may modify this combatant’s turn state.');
+      }
+      const [character] = await this.db.select().from(characters).where(eq(characters.id, existing.characterId)).limit(1);
+      if (!character || character.ownerUserId !== user.id) {
+        throw new ForbiddenException('You may only modify the turn state of your own character.');
+      }
+    }
+
+    const logs: Array<{ detail: string }> = [];
+    let row!: typeof combatants.$inferSelect;
+    this.db.transaction((tx) => {
+      const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
+      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
+      const effects = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(fresh.activeEffects, null));
+      const activeEffects: ActiveEffectType[] = effects.success ? effects.data : [];
+
+      if (patch.resetTurn) {
+        turnState.used = {};
+        turnState.movementUsedFt = 0;
+      }
+      if (patch.useSlot) turnState.used[patch.useSlot] = (turnState.used[patch.useSlot] ?? 0) + 1;
+      if (patch.releaseSlot) turnState.used[patch.releaseSlot] = Math.max(0, (turnState.used[patch.releaseSlot] ?? 0) - 1);
+      if (patch.setSlotUsed) turnState.used[patch.setSlotUsed.key] = patch.setSlotUsed.used;
+      if (patch.resetMovement) turnState.movementUsedFt = 0;
+      if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
+      if (patch.concentration !== undefined) {
+        if (patch.concentration !== turnState.concentration) {
+          logs.push({ detail: patch.concentration ? `began concentrating on ${patch.concentration}` : 'concentration ended' });
+        }
+        turnState.concentration = patch.concentration;
+      }
+      if (patch.delaying !== undefined) {
+        if (patch.delaying !== turnState.delaying) logs.push({ detail: patch.delaying ? 'is delaying their turn' : 'is no longer delaying' });
+        turnState.delaying = patch.delaying;
+      }
+      if (patch.readied !== undefined) {
+        if (patch.readied !== turnState.readied) logs.push({ detail: patch.readied ? `readied an action: ${patch.readied}` : 'released their readied action' });
+        turnState.readied = patch.readied;
+      }
+
+      let nextEffects = activeEffects;
+      if (patch.removeEffectId) {
+        nextEffects = nextEffects.filter((e) => e.id !== patch.removeEffectId);
+        if (nextEffects.length !== activeEffects.length) logs.push({ detail: `effect removed: ${patch.removeEffectId}` });
+      }
+      if (patch.addEffect) {
+        nextEffects = [...nextEffects.filter((e) => e.id !== patch.addEffect!.id), patch.addEffect].slice(0, 50);
+        logs.push({ detail: `effect applied: ${patch.addEffect.name}` });
+      }
+
+      const [updated] = tx
+        .update(combatants)
+        .set({ turnState: toJsonText(turnState), activeEffects: toJsonText(nextEffects) })
+        .where(eq(combatants.id, combatantId))
+        .returning()
+        .all();
+      row = updated;
+    });
+
+    for (const l of logs) {
+      await this.appendEvent(encounterId, encounterRow.round, 'note', {
+        actor: existing.name,
+        actorId: existing.id,
+        detail: l.detail,
+      });
+    }
+    if (logs.length > 0) {
+      this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
+    }
+    return combatantToDomain(row);
   }
 
   /**

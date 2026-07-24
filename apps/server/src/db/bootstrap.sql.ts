@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
   current_location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   danger_level TEXT NOT NULL DEFAULT 'low',
   dm_controls_progression INTEGER NOT NULL DEFAULT 0,
+  -- Issue #413: turn-advancement controls. dm_controls_turns=1 keeps advancement DM-only
+  -- (players cannot end their own turn); require_dm_turn_confirmation=1 stages a player's
+  -- end-turn for DM approval instead of advancing immediately.
+  dm_controls_turns INTEGER NOT NULL DEFAULT 0,
+  require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0,
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
   public_invites_enabled INTEGER NOT NULL DEFAULT 1,
   session_count INTEGER NOT NULL DEFAULT 0,
@@ -840,7 +845,12 @@ CREATE TABLE IF NOT EXISTS combatants (
   token_y REAL,
   token_size TEXT NOT NULL DEFAULT 'medium',
   -- Issue #466: CAS token for sheet↔combatant HP sync (character.updatedAt at last sync).
-  sheet_synced_updated_at TEXT
+  sheet_synced_updated_at TEXT,
+  -- Issue #413: current-turn workspace state (per-turn action economy usage, movement,
+  -- concentration, delay/ready) as a JSON CombatantTurnState blob, and structured active
+  -- effects with duration/save timing as a JSON ActiveEffect[] blob. Null = defaults.
+  turn_state TEXT,
+  active_effects TEXT
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain

@@ -48,6 +48,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
+import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
@@ -1398,6 +1399,17 @@ export default function RunSessionPage() {
           onPing={sendPing}
           pings={pings}
           onError={surfaceActionError}
+        />
+      )}
+
+      {/* Current-turn workspace (issue #413): "what can I do now?" + player End-turn. Only
+          while running; the component self-hides when there's no current combatant. */}
+      {encounter.status === 'running' && (
+        <TurnWorkspace
+          encounterId={eid}
+          round={encounter.round}
+          currentCombatantId={currentCombatantId ?? null}
+          isDm={isDm}
         />
       )}
 
