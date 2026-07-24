@@ -160,7 +160,7 @@ export interface StarfinderRuleSystemAdapter extends RuleSystemAdapter {
 export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
   rating: { full: 'Challenge Rating', short: 'CR' },
   defense: { full: 'Kinetic Armor Class', short: 'KAC' },
-  hitPoints: { full: 'Hit Points', short: 'HP' },
+  hitPoints: { full: 'Stamina + Hit Points', short: 'SP + HP' },
   abilities: { full: 'Abilities' },
   actions: { full: 'Actions' },
   creatureType: { full: 'Type' },
