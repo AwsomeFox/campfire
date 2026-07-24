@@ -310,6 +310,7 @@ export class CoDmService {
           return QuestCreate.parse({
             title: raw.title ?? raw.name ?? 'Untitled quest',
             body: raw.body ?? raw.description ?? '',
+            ...(typeof raw.reward === 'string' ? { reward: raw.reward } : {}),
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
             ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
           }) as Record<string, unknown>;
@@ -317,6 +318,8 @@ export class CoDmService {
           return FactionCreate.parse({
             name: raw.name ?? 'Untitled faction',
             ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+            ...(typeof raw.kind === 'string' ? { kind: raw.kind } : {}),
+            ...(typeof raw.goals === 'string' ? { goals: raw.goals } : {}),
             ...(typeof raw.standing === 'string' ? { standing: raw.standing } : {}),
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
@@ -334,21 +337,6 @@ export class CoDmService {
           return GenerateMapParams.parse({
             ...raw,
             seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
-          }) as Record<string, unknown>;
-        case 'quest':
-          return QuestCreate.parse({
-            title: raw.title ?? raw.name ?? 'Untitled quest',
-            body: raw.body ?? raw.description ?? '',
-            reward: typeof raw.reward === 'string' ? raw.reward : '',
-            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
-          }) as Record<string, unknown>;
-        case 'faction':
-          return FactionCreate.parse({
-            name: raw.name ?? 'Unnamed faction',
-            kind: typeof raw.kind === 'string' ? raw.kind : '',
-            body: typeof raw.body === 'string' ? raw.body : '',
-            goals: typeof raw.goals === 'string' ? raw.goals : '',
-            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
       }
     } catch (err) {
