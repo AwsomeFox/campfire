@@ -91,12 +91,14 @@ test.describe('statblock labels (issue #763)', () => {
 
   test('compendium / encounter parity: StatBlock renders adapter-native labels', () => {
     const openLegendHtml = renderToStaticMarkup(
-      <StatBlock data={SAMPLE} ruleSystem="open-legend" />,
+      React.createElement(StatBlock, { data: SAMPLE, ruleSystem: 'open-legend' }),
     );
     expect(openLegendHtml).toContain('Guard');
     expect(openLegendHtml).not.toMatch(/>\s*Armor Class\s*</);
 
-    const osrHtml = renderToStaticMarkup(<StatBlock data={SAMPLE} ruleSystem="osr" />);
+    const osrHtml = renderToStaticMarkup(
+      React.createElement(StatBlock, { data: SAMPLE, ruleSystem: 'osr' }),
+    );
     expect(osrHtml).toContain('Hit Dice');
   });
 
