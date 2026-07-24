@@ -200,6 +200,19 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     requiresUrl: SOURCES_REQUIRING_URL.has('osr'),
     osrVariants: OSR_VARIANTS,
   },
+  {
+    source: 'cepheus',
+    label: 'Cepheus Engine SRD',
+    license: 'orffen/cepheus-srd · OGL 1.0a',
+    blurb: 'Cepheus Engine — a Classic-Era 2D6 science-fiction SRD, imported as section-level rules text from its mdBook Markdown.',
+    mechanics: 'Task resolution is 2D6 + characteristic DM + skill vs. a target of 8+ · reference text only (no combat adapter — falls back to 5e turn order).',
+    // Cepheus imports the whole SRD; its mdBook "books" are not a per-statblock section
+    // filter (the server rejects a foreign `sections` value), so the picker offers no
+    // section checkboxes — mirroring RulesService.SECTIONS_BY_SOURCE['cepheus'].
+    sections: [],
+    packSlug: 'cepheus-srd',
+    requiresUrl: SOURCES_REQUIRING_URL.has('cepheus'),
+  },
 ];
 
 /** Metadata for an install source, or undefined for a non-picker source ('other'). */

@@ -1411,6 +1411,7 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
  *   - 'open-legend' — Open Legend community codex (issue #299)
  *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
+ *   - 'cepheus'     — Cepheus Engine SRD (2D6 sci-fi; mdBook Markdown, issue #406)
  *   - 'other'       — generic/placeholder (routes to the Open5e path for back-compat)
  * The existing Open5e/PF2e request shape is unchanged: callers still pass `source: 'open5e'`
  * (or 'pf2e'). Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.
@@ -1424,6 +1425,7 @@ export const RulePackInstallSource = z.enum([
   'archmage',
   'open-legend',
   'osr',
+  'cepheus',
   'other',
 ]);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
@@ -1593,6 +1595,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     license: 'CC-BY-SA-4.0 (Basic Fantasy) / OGL v1.0a (OSRIC, S&W, Labyrinth Lord, OSE)',
     note: 'Basic Fantasy is CC-BY-SA but published only as PDF/ODT — not machine-readable — and the OGL retroclones have no JSON API. Upload a converted pack, or pass `url`.',
     candidateSourceUrl: 'https://basicfantasy.org/downloads.html',
+  },
+  cepheus: {
+    source: 'cepheus',
+    label: 'Cepheus Engine SRD',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'Open Game License v1.0a',
+    note: 'Live import of the section-level SRD text (2D6 sci-fi) from the first-party mdBook Markdown at orffen/cepheus-srd (raw GitHub). Open Game Content only; the "Cepheus Engine"/"Samardan Press" trademarks are not claimed.',
+    candidateSourceUrl: 'https://github.com/orffen/cepheus-srd',
   },
   other: {
     source: 'other',
@@ -2699,7 +2710,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'cepheus', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
