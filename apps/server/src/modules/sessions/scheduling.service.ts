@@ -365,10 +365,10 @@ export class SchedulingService {
       input.note !== undefined ? input.note.trim() : (existing?.note ?? '');
     const nextStatus = input.status ?? existing?.status;
     if (!nextStatus) {
-      throw new BadRequestException('status is required when creating an RSVP');
+      throw new BadRequestException('status is required for the first RSVP submission');
     }
 
-    const statusChanged = !existing || (input.status !== undefined && existing.status !== input.status);
+    const statusChanged = input.status !== undefined && existing?.status !== input.status;
     const noteChanged =
       input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
 
