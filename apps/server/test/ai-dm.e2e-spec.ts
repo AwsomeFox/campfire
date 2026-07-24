@@ -255,6 +255,57 @@ describe('ai-dm (e2e)', () => {
     expect(seatRes.body.turnCount).toBe(2);
   });
 
+  it('usage-history returns newest-first items + summary after metered turns (#1060)', async () => {
+    await request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/reset`).set(dm).send({});
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(dm)
+      .send({ enabled: true, tokenBudget: 100_000 });
+
+    const first = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'History turn one.', kind: 'narrate' });
+    expect(first.status).toBe(201);
+    const second = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'History turn two.', kind: 'narrate' });
+    expect(second.status).toBe(201);
+
+    const history = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history`)
+      .set(dm);
+    expect(history.status).toBe(200);
+    expect(history.body.count).toBeGreaterThanOrEqual(2);
+    expect(history.body.items).toHaveLength(history.body.count);
+    expect(history.body.totalTokens).toBe(
+      history.body.items.reduce((sum: number, row: { tokensUsed: number }) => sum + row.tokensUsed, 0),
+    );
+    // Newest-first: first item is at/after the second item's createdAt.
+    expect(history.body.items[0].createdAt >= history.body.items[1].createdAt).toBe(true);
+    expect(history.body.items[0].action).toBe('ai-dm.turn');
+    expect(history.body.items[0].tokensUsed).toBeGreaterThan(0);
+
+    // Whitespace-only since is ignored (treated as unset).
+    const blankSince = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history?since=%20%20%20`)
+      .set(dm);
+    expect(blankSince.status).toBe(200);
+    expect(blankSince.body.count).toBe(history.body.count);
+
+    const badSince = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history?since=not-a-date`)
+      .set(dm);
+    expect(badSince.status).toBe(400);
+
+    // Players cannot read DM-only metering history.
+    const playerDenied = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history`)
+      .set(player);
+    expect(playerDenied.status).toBe(403);
+  });
+
   it('turn is 403 when the seat is disabled even with the flag on', async () => {
     await request(server).put(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm).send({ enabled: false });
     const res = await request(server)

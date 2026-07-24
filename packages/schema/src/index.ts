@@ -3561,6 +3561,27 @@ export const AiDmTurnResult = z.object({
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
+// Per-turn usage history (issue #1060). One row per metered token spend
+// (driver step, co-DM draft, scribe run). Powers the DM's usage sparkline and
+// audit view. Returned by GET /campaigns/:id/ai-dm/usage-history newest-first.
+export const AiDmUsageHistoryEntry = z.object({
+  id: Id,
+  campaignId: Id,
+  tokensUsed: z.number().int().nonnegative(),
+  action: z.string(),   // e.g. 'ai-dm.driver.turn', 'ai-dm.scribe'
+  model: z.string(),
+  actor: z.string(),
+  createdAt: IsoDate,
+});
+export type AiDmUsageHistoryEntry = z.infer<typeof AiDmUsageHistoryEntry>;
+
+export const AiDmUsageHistoryResponse = z.object({
+  items: z.array(AiDmUsageHistoryEntry),
+  totalTokens: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative(),
+});
+export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and
