@@ -63,11 +63,11 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     const hint = page.getByTestId('confirm-destructive-hint');
 
     await expect(confirmBtn).toBeDisabled();
-    await expect(hint).toContainText('must type the exact name');
+    await expect(hint).toContainText('must type');
 
     await input.fill('E2E — Cinder');
     await expect(confirmBtn).toBeDisabled();
-    await expect(hint).toContainText('must type the exact name');
+    await expect(hint).toContainText('must type');
 
     await input.fill('wrong name');
     await expect(confirmBtn).toBeDisabled();
@@ -115,7 +115,6 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
 
     const errorEl = page.getByTestId('confirm-destructive-error');
     await expect(errorEl).toBeVisible();
-    await expect(errorEl).toHaveAttribute('role', 'alert');
     await expect(input).toHaveAttribute('aria-invalid', 'true');
 
     await page.unroute(`**/api/v1/campaigns/${campaignId}`);

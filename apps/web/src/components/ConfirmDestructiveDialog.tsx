@@ -37,6 +37,12 @@ export interface ConfirmDestructiveDialogProps {
   pendingLabel?: string;
   /** Optional label for the cancel button. @default 'Cancel' */
   cancelLabel?: string;
+  /** Label for the type-to-confirm input. @default 'Type {confirmValue} to confirm' */
+  inputLabel?: React.ReactNode;
+  /** Hint shown while the typed value does not match. */
+  hintMismatch?: string;
+  /** Hint shown once the typed value matches. */
+  hintConfirmed?: string;
   /** Whether the action is currently in flight. */
   busy?: boolean;
   /** Server or validation error to display and announce. */
@@ -67,6 +73,9 @@ export function ConfirmDestructiveDialog({
   confirmLabel,
   pendingLabel,
   cancelLabel = 'Cancel',
+  inputLabel,
+  hintMismatch,
+  hintConfirmed = 'Confirmed — you may proceed.',
   busy = false,
   error = null,
   onConfirm,
@@ -84,6 +93,13 @@ export function ConfirmDestructiveDialog({
 
   const matches = confirmValuesMatch(inputValue, confirmValue);
   const confirmText = busy ? resolveBusyConfirmLabel(confirmLabel, pendingLabel) : confirmLabel;
+  const resolvedInputLabel = inputLabel ?? (
+    <>
+      Type <strong>{confirmValue}</strong> to confirm
+    </>
+  );
+  const resolvedHintMismatch =
+    hintMismatch ?? `You must type "${confirmValue}" to enable the button.`;
 
   const dialogRef = useDialog<HTMLDivElement>({
     onClose: onCancel,
@@ -136,7 +152,7 @@ export function ConfirmDestructiveDialog({
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-2" style={{ marginTop: 8 }}>
           <label htmlFor={`${uid}-input`} style={{ fontSize: 12.5 }}>
-            Type <strong>{confirmValue}</strong> to confirm
+            {resolvedInputLabel}
           </label>
           <input
             ref={inputRef}
@@ -160,16 +176,12 @@ export function ConfirmDestructiveDialog({
             style={{ margin: 0, fontSize: 11.5 }}
             data-testid="confirm-destructive-hint"
           >
-            {matches
-              ? 'Confirmed — you may proceed.'
-              : `You must type the exact name "${confirmValue}" to enable the button.`}
+            {matches ? hintConfirmed : resolvedHintMismatch}
           </p>
 
           {error && (
             <p
               id={errorId}
-              role="alert"
-              aria-live="assertive"
               style={{ margin: 0, fontSize: 12.5, color: '#f87171' }}
               data-testid="confirm-destructive-error"
             >

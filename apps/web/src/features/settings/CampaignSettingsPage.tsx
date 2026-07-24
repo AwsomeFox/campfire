@@ -1272,6 +1272,7 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
             ) : null
           }
           confirmValue={campaign.name}
+          hintMismatch={`You must type "${campaign.name}" to enable the button.`}
           confirmLabel="Move to Trash"
           pendingLabel="Moving…"
           busy={deleting}

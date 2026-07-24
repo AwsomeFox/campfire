@@ -551,6 +551,15 @@ function DeleteAccountCard({ username }: { username: string }) {
             </p>
           }
           confirmValue={username}
+          inputLabel={
+            <Trans
+              i18nKey="preferences.deleteTypeLabel"
+              values={{ username }}
+              components={[<strong key="u" />]}
+            />
+          }
+          hintMismatch={t('preferences.deleteTypeHintMismatch', { username })}
+          hintConfirmed={t('preferences.deleteTypeHintConfirmed')}
           confirmLabel={t('preferences.deleteMyAccount')}
           pendingLabel={t('preferences.deleting')}
           cancelLabel={t('preferences.cancel')}
