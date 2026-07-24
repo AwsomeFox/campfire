@@ -184,11 +184,11 @@ export class ProactiveService implements OnModuleDestroy {
       return;
     }
 
+    state.lastTriggerAt = now;
     const prompt = PROACTIVE_PROMPTS[triggerType];
     if (!prompt) return;
 
     await this.executeProactiveTurn(campaignId, triggerType, prompt);
-    state.lastTriggerAt = now;
   }
 
   private classifyEvent(event: CampaignEvent, settings: AiDmProactiveSettings): string | null {
