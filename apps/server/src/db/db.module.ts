@@ -1884,6 +1884,22 @@ function migrateCombatantsTableForTurnState(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #765: `combatants.initiative_group` stores the side label for OSR group-initiative
+ * variants (e.g. "party", "monsters"). Combatants on the same side share one d6 roll.
+ * Nullable plain ADD COLUMN — no table rebuild.
+ */
+function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'initiative_group')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN initiative_group TEXT');
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2198,6 +2214,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
   { name: '0075_check_requests', run: migrateCheckRequestsTable },
   { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
+  { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
 ];
 
 /**

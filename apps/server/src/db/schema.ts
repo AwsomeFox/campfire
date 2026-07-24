@@ -1078,6 +1078,9 @@ export const combatants = sqliteTable('combatants', {
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
   initMod: integer('init_mod').notNull().default(0),
+  // OSR group-initiative side label (issue #765). Combatants on the same side share one
+  // d6 roll in group-mode systems. Nullable; added by migration on older DBs.
+  initiativeGroup: text('initiative_group'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
   // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;

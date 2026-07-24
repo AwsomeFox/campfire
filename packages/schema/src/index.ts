@@ -1913,8 +1913,31 @@ export function actionEconomyForAdapter(adapter: Pick<RuleSystemAdapter, 'action
   return adapter.actionEconomy ?? NEUTRAL_ACTION_ECONOMY;
 }
 
+// ---------- adapter-defined initiative model (issue #765) ----------
+// OSR retroclones vary between individual d6+DEX and group d6-per-side initiative.
+// This optional capability on RuleSystemAdapter lets encounter rollers and the UI
+// show the exact variant's initiative mode without hardcoding Basic Fantasy defaults.
+
+/** How initiative is rolled for a rule system (issue #765). */
+export type InitiativeMode = 'individual' | 'group';
+
+/** Per-system initiative configuration (issue #765). */
+export interface InitiativeModel {
+  readonly mode: InitiativeMode;
+  /** Whether DEX modifier is added to the initiative roll (individual mode only). */
+  readonly usesDexModifier: boolean;
+}
+
+/** Default individual d20+DEX model (5e/PF1e). Adapters that omit `initiativeModel` are treated as individual. */
+export const DEFAULT_INITIATIVE_MODEL: InitiativeModel = { mode: 'individual', usesDexModifier: true };
+
+/** Resolve the initiative model for an adapter (issue #765). */
+export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'initiativeModel'>): InitiativeModel {
+  return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
+}
+
 export interface RuleSystemAdapter {
-  /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
+  /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
@@ -1929,6 +1952,12 @@ export interface RuleSystemAdapter {
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
+  /**
+   * OPTIONAL — how initiative is rolled for this system (issue #765). OSR variants use
+   * individual d6+DEX or group d6-per-side; 5e/PF1e omit this and default to individual d20+DEX.
+   * Encounter rollers and the UI read this via {@link initiativeModelForAdapter}.
+   */
+  readonly initiativeModel?: InitiativeModel;
   /**
    * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
    * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
@@ -3163,7 +3192,7 @@ import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
 export * from './starfinder-adapter';
 import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
-import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
+import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS } from './osr-adapter';
 export * from './osr-adapter';
 import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
 export * from './adapters/starforged';
@@ -3202,8 +3231,10 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [STARFORGED_ADAPTER_ID]: StarforgedAdapter,
   [STARFORGED_PACK_SLUG]: StarforgedAdapter,
 };
-// OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
-for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
+// OSR pack (issue #300, #765): each retroclone slug resolves to its own native adapter.
+for (const slug of OSR_RULE_SYSTEM_SLUGS) {
+  ADAPTERS[slug] = OSR_VARIANT_ADAPTERS[slug] ?? OsrAdapter;
+}
 
 /**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
@@ -5584,6 +5615,19 @@ export const EMPTY_TURN_STATE: CombatantTurnState = {
   readied: null,
 };
 
+/** OSR group-initiative side label. Trims; empty/whitespace normalizes to null. */
+export const InitiativeGroup = z.preprocess(
+  (val) => {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      return trimmed.length === 0 ? null : trimmed;
+    }
+    return val;
+  },
+  z.string().min(1).max(40).nullable(),
+);
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -5595,6 +5639,10 @@ export const Combatant = z.object({
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
+  // Initiative side/group for OSR group-initiative variants (issue #765). Combatants sharing
+  // the same group name (e.g. "party", "monsters") roll one d6 for the whole side. null =
+  // individual initiative (default for 5e and individual-mode OSR).
+  initiativeGroup: InitiativeGroup.default(null),
   // Nullable so a monster's exact HP can be redacted to `null` for non-DM viewers
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
@@ -5649,6 +5697,10 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // OSR group-initiative side label (issue #765). When the campaign adapter uses group
+  // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
+  // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.
+  initiativeGroup: InitiativeGroup.optional(),
   // Add N identical combatants in one call (issue #114). When >1 the names are
   // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
   // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.

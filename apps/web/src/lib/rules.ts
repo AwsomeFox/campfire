@@ -25,6 +25,7 @@ import {
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
   OSR_RULE_SYSTEM_SLUGS,
+  osrMechanicsProfile,
   ruleSystemAdapter,
 } from '@campfire/schema';
 
@@ -277,6 +278,9 @@ export function ruleSystemForPackSlug(slug: string | null | undefined): RuleSyst
 
 /** One-line mechanics summary for a pack slug, or undefined if the system isn't recognised. */
 export function mechanicsForPackSlug(slug: string | null | undefined): string | undefined {
+  if (slug && (OSR_RULE_SYSTEM_SLUGS as readonly string[]).includes(slug)) {
+    return osrMechanicsProfile(slug).mechanicsSummary;
+  }
   return ruleSystemForPackSlug(slug)?.mechanics;
 }
 

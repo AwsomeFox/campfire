@@ -869,6 +869,7 @@ CREATE TABLE IF NOT EXISTS combatants (
   name TEXT NOT NULL,
   initiative INTEGER,
   init_mod INTEGER NOT NULL DEFAULT 0,
+  initiative_group TEXT,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
   hp_temp INTEGER NOT NULL DEFAULT 0,

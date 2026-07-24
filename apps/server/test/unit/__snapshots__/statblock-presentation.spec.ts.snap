@@ -24,6 +24,29 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
       "full": "Level",
     },
   },
+  "basic-fantasy": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
+    },
+  },
   "dnd5e": {
     "abilities": {
       "full": "Abilities",
@@ -47,6 +70,52 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
       "short": "CR",
     },
   },
+  "labyrinth-lord": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
+    },
+  },
+  "old-school-essentials": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
+    },
+  },
   "open-legend": {
     "abilities": {
       "full": "Attributes",
@@ -68,7 +137,53 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
       "full": "Level",
     },
   },
+  "ose": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
+    },
+  },
   "osr": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
+    },
+  },
+  "osric": {
     "abilities": {
       "full": "Abilities",
     },
@@ -200,6 +315,29 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
     },
     "rating": {
       "full": "Rating",
+    },
+  },
+  "swords-wizardry": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Armor Class",
+      "short": "AC",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Hit Dice",
+      "short": "HD",
     },
   },
 }
