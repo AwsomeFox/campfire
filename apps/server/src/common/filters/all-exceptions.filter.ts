@@ -86,13 +86,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
       );
     }
 
-    // Apply the status to the HTTP response. HttpException already carries the
-    // intended status; the envelope's `status` mirrors it. For raw Error / 500,
-    // HttpStatus.INTERNAL_SERVER_ERROR is the floor.
-    const status =
-      exception instanceof HttpException
-        ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+    // Prefer the normalized envelope status (covers express.json entity.too.large
+    // and other middleware-thrown errors with a status property). HttpException
+    // status is already mirrored in the envelope.
+    const status = envelope.status;
 
     // RFC 9457 advertising: tell integrators this is application/problem+json.
     // (Swagger documents application/json on the wire shape; many Problem Details

@@ -83,6 +83,14 @@ describe('api-error.envelope — normalizeError', () => {
     expect(normalizeError(err).message).toBe('plain string detail');
   });
 
+  it('maps express entity.too.large to 413 payload_too_large', () => {
+    const err = Object.assign(new Error('request entity too large'), { type: 'entity.too.large' });
+    expect(normalizeError(err)).toMatchObject({
+      status: 413,
+      code: 'payload_too_large',
+    });
+  });
+
   it('extracts structured errors[] from nestjs-zod message:string[] shape', () => {
     // This is exactly what nestjs-zod's ZodValidationPipe throws.
     const err = new BadRequestException({
@@ -142,9 +150,9 @@ describe('api-error.envelope — buildRestEnvelope', () => {
     });
   });
 
-  it('sanitizes the message for any 5xx', () => {
+  it('sanitizes the message for uncaught 5xx (non-HttpException)', () => {
     const env = buildRestEnvelope({
-      err: new InternalServerErrorException('pg connection failed: postgres://user:pass@host'),
+      err: new Error('pg connection failed: postgres://user:pass@host'),
       requestId: 'r',
     });
     expect(env.status).toBe(500);
@@ -152,6 +160,37 @@ describe('api-error.envelope — buildRestEnvelope', () => {
     expect(env.message).not.toContain('postgres');
     expect(env.message).not.toContain('pass');
     expect(env.message).toBe('Something went wrong. Please try again later.');
+  });
+
+  it('preserves intentional HttpException 5xx messages (e.g. 503)', () => {
+    const env = buildRestEnvelope({
+      err: new HttpException('Campaign data directory is unreadable', 503),
+      requestId: 'r',
+    });
+    expect(env.status).toBe(503);
+    expect(env.message).toContain('unreadable');
+  });
+
+  it('passes through domain extension fields from HttpException bodies', () => {
+    const env = buildRestEnvelope({
+      err: new ConflictException({
+        code: 'COMBATANT_IDENTITY_CONFLICT',
+        message: 'Already present',
+        combatantId: 42,
+      }),
+      requestId: 'r',
+    });
+    expect(env.code).toBe('COMBATANT_IDENTITY_CONFLICT');
+    expect(env.combatantId).toBe(42);
+  });
+
+  it('strips query strings from instance', () => {
+    const env = buildRestEnvelope({
+      err: new ForbiddenException('nope'),
+      requestId: 'r',
+      instance: '/api/v1/campaigns/1/search?q=secret',
+    });
+    expect(env.instance).toBe('/api/v1/campaigns/1/search');
   });
 
   it('preserves structured errors[] on a 400 validation failure', () => {

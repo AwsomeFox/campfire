@@ -1,5 +1,5 @@
-import type { HttpException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
+import type { HttpException } from '@nestjs/common';
 import type { ZodError } from 'zod';
 
 /**
@@ -33,9 +33,9 @@ export type ApiErrorCode =
 
 /**
  * Map an HTTP status to the canonical machine-readable slug. Statuses outside
- * the documented table collapse to the nearest category (`error` for 5xx,
- * `bad_request` for unknown 4xx), keeping the slug vocabulary bounded so an
- * integrator's switch-statement never needs to grow forever.
+ * the documented table collapse to the nearest category (`internal_error` for
+ * unknown 5xx and `error` for unknown 4xx), keeping the slug vocabulary bounded
+ * so an integrator's switch-statement never needs to grow forever.
  */
 export function codeForStatus(status: number): ApiErrorCode {
   switch (status) {
@@ -255,13 +255,16 @@ export function normalizeError(err: unknown): NormalizedError {
       // errors with `field:"(root)"` when the message isn't `path: message`,
       // which is the common shape for top-level body parse failures.
       if (Array.isArray(obj.message)) {
-        errors = (obj.message as string[]).map((m) => {
-          const idx = m.indexOf(':');
-          return idx > 0
-            ? { field: m.slice(0, idx).trim(), message: m.slice(idx + 1).trim() }
-            : { field: '(root)', message: m };
+        errors = (obj.message as unknown[]).map((m) => {
+          if (typeof m === 'string') {
+            const idx = m.indexOf(':');
+            return idx > 0
+              ? { field: m.slice(0, idx).trim(), message: m.slice(idx + 1).trim() }
+              : { field: '(root)', message: m };
+          }
+          return fieldErrorFromIssue(m);
         });
-        message = (obj.message as string[]).join('; ');
+        message = errors.map((e) => `${e.field}: ${e.message}`).join('; ');
       } else if (typeof obj.message === 'string') {
         message = obj.message;
       } else {
@@ -275,6 +278,16 @@ export function normalizeError(err: unknown): NormalizedError {
   }
 
   if (err instanceof Error) {
+    // express.json / body-parser throws entity.too.large before Nest sees the body.
+    const errStatus =
+      (err as Error & { status?: number }).status ??
+      (err as Error & { statusCode?: number }).statusCode;
+    if (
+      errStatus === 413 ||
+      ('type' in err && (err as Error & { type?: string }).type === 'entity.too.large')
+    ) {
+      return { status: 413, code: 'payload_too_large', message: 'request entity too large' };
+    }
     // Never leak internal stack traces for 500s — the filter replaces `message`
     // for 5xx with a generic string. The original message is preserved here for
     // non-production logs (the filter chooses what to surface).
@@ -300,17 +313,34 @@ export function normalizeError(err: unknown): NormalizedError {
  * `requestId` if none was already attached to the request (the filter accepts
  * an inbound `X-Request-Id` header so a caller's id propagates end-to-end).
  */
+/** HttpException response keys absorbed into the canonical envelope (not passthrough). */
+const ENVELOPE_RESERVED_KEYS = new Set(['message', 'error', 'errors', 'code', 'statusCode', 'status']);
+
+function isHttpException(err: unknown): err is HttpException {
+  return typeof err === 'object' && err !== null && typeof (err as { getStatus?: unknown }).getStatus === 'function';
+}
+
+/** Strip query strings so error `instance` does not echo caller-supplied search terms. */
+function sanitizeInstance(instance: string): string {
+  const q = instance.indexOf('?');
+  return q >= 0 ? instance.slice(0, q) : instance;
+}
+
 export function buildRestEnvelope(opts: {
   err: unknown;
   requestId?: string;
   instance?: string;
-}): ApiErrorEnvelope {
+}): ApiErrorEnvelope & Record<string, unknown> {
   const norm = normalizeError(opts.err);
-  // 5xx errors get a sanitized message — never trust the internal Error.message
-  // to be free of stack/path/secret fragments (e.g. a thrown DB error string).
+  const intentional = isHttpException(opts.err);
+  // Sanitize only uncaught/internal 5xx — intentional HttpExceptions (e.g. 503
+  // Service Unavailable with a domain message) keep their wired message.
   const isServerError = norm.status >= 500;
-  const message = isServerError ? 'Something went wrong. Please try again later.' : norm.message;
-  const envelope: ApiErrorEnvelope = {
+  const message =
+    isServerError && !intentional
+      ? 'Something went wrong. Please try again later.'
+      : norm.message;
+  const envelope: ApiErrorEnvelope & Record<string, unknown> = {
     type: 'about:blank',
     title: titleForStatus(norm.status),
     status: norm.status,
@@ -318,8 +348,22 @@ export function buildRestEnvelope(opts: {
     message,
     requestId: opts.requestId,
   };
-  if (opts.instance !== undefined) envelope.instance = opts.instance;
+  if (opts.instance !== undefined) envelope.instance = sanitizeInstance(opts.instance);
   if (norm.errors && norm.errors.length > 0) envelope.errors = norm.errors;
+
+  // Domain services attach machine-readable extension fields (combatantId, current,
+  // encounterName, …) alongside code/message — preserve them on the wire.
+  if (intentional) {
+    const httpErr = opts.err as HttpException;
+    const res = httpErr.getResponse();
+    if (typeof res === 'object' && res !== null) {
+      for (const [key, value] of Object.entries(res as Record<string, unknown>)) {
+        if (!ENVELOPE_RESERVED_KEYS.has(key) && value !== undefined) {
+          envelope[key] = value;
+        }
+      }
+    }
+  }
   return envelope;
 }
 
@@ -331,8 +375,12 @@ export function buildRestEnvelope(opts: {
  */
 export function buildMcpEnvelope(err: unknown): { error: ApiErrorEnvelope } {
   const norm = normalizeError(err);
+  const intentional = isHttpException(err);
   const isServerError = norm.status >= 500;
-  const message = isServerError ? 'Something went wrong. Please try again later.' : norm.message;
+  const message =
+    isServerError && !intentional
+      ? 'Something went wrong. Please try again later.'
+      : norm.message;
   const error: ApiErrorEnvelope = {
     status: norm.status,
     code: norm.code,
