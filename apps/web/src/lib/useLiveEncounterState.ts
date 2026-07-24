@@ -10,6 +10,7 @@ import { useCampaignEvents } from './useCampaignEvents';
 
 export function useLiveEncounterState(campaignId: number | undefined): Encounter | null {
   const [projection, setProjection] = useState<{ campaignId: number; data: Encounter | null } | null>(null);
+  const requestSequence = useRef(0);
   const activeCampaignId = useRef(campaignId);
   activeCampaignId.current = campaignId;
 
@@ -18,15 +19,14 @@ export function useLiveEncounterState(campaignId: number | undefined): Encounter
 
   const refresh = useCallback(async () => {
     if (campaignId === undefined || !Number.isFinite(campaignId)) return;
+    const requestId = ++requestSequence.current;
     try {
       const running = await api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters?status=running`);
-      if (activeCampaignId.current === campaignId) {
-        setProjection({ campaignId, data: running[0] ?? null });
-      }
+      if (requestId !== requestSequence.current || activeCampaignId.current !== campaignId) return;
+      setProjection({ campaignId, data: running[0] ?? null });
     } catch {
-      if (activeCampaignId.current === campaignId) {
-        setProjection({ campaignId, data: null });
-      }
+      if (requestId !== requestSequence.current || activeCampaignId.current !== campaignId) return;
+      setProjection({ campaignId, data: null });
     }
   }, [campaignId]);
 
