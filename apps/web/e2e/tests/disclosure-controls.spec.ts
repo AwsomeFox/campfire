@@ -55,8 +55,9 @@ test.describe('disclosure controls (issue #884)', () => {
       await expect(region).toHaveAccessibleName(/versions/);
 
       // Focus moved intentionally into the region (onto a focusable child or
-      // the region itself when it has none).
-      const focusLandedInside = await page.evaluate(
+      // the region itself when it has none). useDisclosure defers focus via
+      // requestAnimationFrame, so wait rather than asserting immediately.
+      await page.waitForFunction(
         (rid) => {
           const el = document.activeElement;
           const regionEl = document.getElementById(rid);
@@ -64,7 +65,6 @@ test.describe('disclosure controls (issue #884)', () => {
         },
         regionId!,
       );
-      expect(focusLandedInside).toBe(true);
 
       // Closing returns focus to the trigger and drops the region from the tree.
       // Focus is now inside the region, so we close by activating the trigger

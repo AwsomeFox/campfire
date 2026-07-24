@@ -139,8 +139,7 @@ export function useDisclosure({
   const regionProps: DisclosureRegionProps = {
     id: regionId,
     ref: regionRef,
-    role: 'region',
-    ...(regionLabel ? { 'aria-label': regionLabel } : {}),
+    ...(regionLabel ? { role: 'region' as const, 'aria-label': regionLabel } : {}),
   };
 
   return {

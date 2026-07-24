@@ -3428,10 +3428,9 @@ function CombatantRow({
 function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; ruleSystem: string | null }) {
   const { open, setOpen, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
-    // No regionLabel: the rendered StatBlock already exposes a labelled
-    // "Creature statblock" region (see StatBlock.tsx). Tagging this wrapper
-    // as a region too would create a redundant nested landmark; an unlabelled
-    // region is treated as a generic container by AT, which is what we want.
+    // No regionLabel: StatBlock inside already exposes a labelled "Creature
+    // statblock" region (see StatBlock.tsx). The wrapper stays a plain div so
+    // we don't nest redundant landmarks.
   });
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [loading, setLoading] = useState(false);
