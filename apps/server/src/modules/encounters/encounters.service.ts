@@ -1319,9 +1319,10 @@ export class EncountersService {
   /**
    * Load the compendium monsters a generation may pick from (issue #304), scored for the
    * 5e budget math. Reads rule_entries of type 'monster' (installed packs only — that's all
-   * rule_entries ever contains), maps each statblock via the campaign's RuleSystemAdapter
-   * (#70) to a CR/HP, computes per-monster XP from the #58 CR→XP table, and applies the
-   * optional creature-type / environment / CR-range / pack filters. Never persists.
+   * rule_entries ever contains), and also type 'hazard' when `filters.includeHazards` is set,
+   * maps each statblock via the campaign's RuleSystemAdapter (#70) to a CR/HP, computes
+   * per-monster XP from the #58 CR→XP table, and applies the optional creature-type /
+   * environment / CR-range / pack filters. Never persists.
    */
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,

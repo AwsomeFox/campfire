@@ -18,7 +18,7 @@ import type { RuleEntry, RuleEntryType } from '@campfire/schema';
 const TYPE_DEFAULT: Record<RuleEntryType, string> = {
   spell: 'spell-book',
   monster: 'death-skull',
-  hazard: 'spiked',
+  hazard: 'skull-crossed-bones',
   item: 'chest',
   condition: 'aura',
   class: 'wizard-staff',
