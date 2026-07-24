@@ -35,16 +35,52 @@ describe('ai-dm (e2e)', () => {
     expect(res.body.experimentalAiDm).toBe(on);
   }
 
-  it('#1058 serializes concurrent budget gates and releases the queue after failures', async () => {
+  it('#1058 serializes concurrent budget gates with FIFO release after failures', async () => {
     const aiDm = ctx.app.get(AiDmService);
+
+    // Queue four owners before releasing the first. A failing middle owner must
+    // still hand the mutex to every follower in arrival order.
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = aiDm.withSpendLock(campaignId, async () => {
+      order.push('first');
+      firstStarted();
+      await firstGate;
+      return 'first';
+    });
+    await firstReady;
+    const second = aiDm.withSpendLock(campaignId, async () => {
+      order.push('second');
+      throw new Error('simulated provider failure');
+    });
+    const third = aiDm.withSpendLock(campaignId, async () => {
+      order.push('third');
+      return 'third';
+    });
+    const fourth = aiDm.withSpendLock(campaignId, async () => {
+      order.push('fourth');
+      return 'fourth';
+    });
+
+    releaseFirst();
+    const settled = await Promise.allSettled([first, second, third, fourth]);
+    expect(order).toEqual(['first', 'second', 'third', 'fourth']);
+    expect(settled.map((result) => result.status)).toEqual(['fulfilled', 'rejected', 'fulfilled', 'fulfilled']);
+
+    // Reproduce the reported TOCTOU shape: both spenders arrive together, but
+    // only the owner may pass the budget gate and make the provider call.
     let remaining = 1;
     let providerCalls = 0;
-
     const spend = () => aiDm.withSpendLock(campaignId, async () => {
       if (remaining <= 0) return false;
       providerCalls += 1;
-      // Yield while holding the mutex: without a real queue both callers can
-      // pass the gate before either accounts for its provider spend.
       await Promise.resolve();
       remaining -= 1;
       return true;
@@ -52,14 +88,6 @@ describe('ai-dm (e2e)', () => {
 
     await expect(Promise.all([spend(), spend()])).resolves.toEqual([true, false]);
     expect(providerCalls).toBe(1);
-
-    // A throwing config/provider/metering operation must not strand the campaign.
-    await expect(
-      aiDm.withSpendLock(campaignId, async () => {
-        throw new Error('simulated provider failure');
-      }),
-    ).rejects.toThrow('simulated provider failure');
-    await expect(aiDm.withSpendLock(campaignId, async () => 'released')).resolves.toBe('released');
   });
 
   it('GET seat returns an un-configured default (members, no experimental gate)', async () => {

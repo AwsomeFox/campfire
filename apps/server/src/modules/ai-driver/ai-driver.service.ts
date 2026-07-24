@@ -784,13 +784,22 @@ export class AiDriverService {
           const currentSeat = await this.aiDm.getSeat(campaignId);
           const currentRemaining = currentSeat.tokenBudget - currentSeat.tokensUsed;
           if (currentRemaining <= 0) {
-            return { kind: 'budget_exhausted' as const, seat: currentSeat };
+            return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
           if (session.detached || isFrozen(session)) {
             return { kind: 'aborted' as const, seat: currentSeat, budgetRemaining: currentRemaining, text: '' };
           }
+          // assertRunnable's server-cap check happened before this turn entered
+          // the queue. Repeat it under ownership so a preceding Scribe spend
+          // cannot make that admission stale while the Driver waits.
+          try {
+            await this.aiDm.assertWithinServerTokenCap();
+          } catch {
+            return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
+          }
 
           const maxTokens = Math.min(perStepCap, currentRemaining);
+          steps = stepNumber;
           const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
             system,
             messages,
@@ -829,9 +838,9 @@ export class AiDriverService {
           return { kind: 'metered' as const, text, result, metered };
         });
 
-        if (spend.kind === 'budget_exhausted') {
+        if (spend.kind === 'budget_exhausted' || spend.kind === 'server_cap') {
           latestSeat = spend.seat;
-          budgetRemaining = 0;
+          budgetRemaining = spend.budgetRemaining;
           stopReason = 'budget_exhausted';
           break;
         }
@@ -843,7 +852,6 @@ export class AiDriverService {
           break;
         }
 
-        steps = stepNumber;
         const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;

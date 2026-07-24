@@ -75,9 +75,11 @@ export class AiDmService {
   private driverSessionTeardown: ((campaignId: number) => void) | null = null;
 
   /**
-   * Per-campaign budget-spend queues (#1058). Each value is the tail promise
-   * for that campaign. Appending synchronously before awaiting the prior tail
-   * gives FIFO mutex semantics even when multiple waiters arrive together.
+   * Per-campaign, in-process budget-spend queues (#1058). Each value is the tail
+   * promise for that campaign. Appending synchronously before awaiting the prior
+   * tail gives FIFO mutex semantics even when multiple waiters arrive together.
+   * Campfire's SQLite server is a single-process deployment; this advisory mutex
+   * deliberately coordinates spenders inside that process.
    */
   private readonly spendLockTails = new Map<number, Promise<void>>();
 

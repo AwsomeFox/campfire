@@ -14,6 +14,9 @@
 
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { ScribeService } from '../src/modules/scribe/scribe.service';
 
 const API = '/api/v1';
 
@@ -249,6 +252,82 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.body.job.status).toBe('no_material');
     expect(run.body.proposalIds).toHaveLength(0);
+  });
+});
+
+describe('AI driver + scribe — shared spend lock (#1058)', () => {
+  let harness: AiEvalHarness;
+
+  beforeAll(async () => {
+    harness = await createAiEvalHarness({ model: 'shared-budget-model' });
+    await harness.enableExperimental();
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it('admits only one provider operation when both queued spenders see the final token', async () => {
+    const campaignId = await harness.createCampaign('Driver Scribe Budget Race');
+    await harness.configureSeat(campaignId, { mode: 'driver', tokenBudget: 1 });
+    await seedResolvedInbox(harness, campaignId, 'The party escaped with the final ember.');
+
+    const aiDm = harness.ctx.app.get(AiDmService);
+    const driver = harness.ctx.app.get(AiDriverService);
+    const scribe = harness.ctx.app.get(ScribeService);
+    const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
+
+    // Hold the shared mutex until both real consumers have passed their cheap
+    // pre-checks and joined its queue with the same one-token snapshot.
+    let releaseHolder!: () => void;
+    let holderStarted!: () => void;
+    const holderReady = new Promise<void>((resolve) => {
+      holderStarted = resolve;
+    });
+    const holderGate = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    const holder = aiDm.withSpendLock(campaignId, async () => {
+      holderStarted();
+      await holderGate;
+    });
+    await holderReady;
+
+    const lockSpy = jest.spyOn(aiDm, 'withSpendLock');
+    harness.script({
+      text: 'The final ember gutters out.',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    const driverRun = driver.runTurn(campaignId, user, 'Guard the ember.');
+    const scribeRun = scribe.run(campaignId, 'on_demand', user);
+
+    let bothQueued = false;
+    try {
+      const deadline = Date.now() + 2_000;
+      while (lockSpy.mock.calls.length < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      bothQueued = lockSpy.mock.calls.length >= 2;
+    } finally {
+      releaseHolder();
+    }
+
+    const [driverResult, scribeResult] = await Promise.all([driverRun, scribeRun]);
+    await holder;
+    lockSpy.mockRestore();
+
+    expect(bothQueued).toBe(true);
+    const admitted = Number(driverResult.steps === 1) + Number(scribeResult.job.status === 'succeeded');
+    expect(admitted).toBe(1);
+    if (driverResult.steps === 1) {
+      expect(scribeResult.job.status).toBe('over_budget');
+    } else {
+      expect(driverResult.stopReason).toBe('budget_exhausted');
+      expect(scribeResult.job.status).toBe('succeeded');
+    }
+
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(1);
+    expect(seat.body.turnCount).toBe(1);
   });
 });
 
