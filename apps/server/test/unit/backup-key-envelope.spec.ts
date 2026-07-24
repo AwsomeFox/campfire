@@ -124,6 +124,8 @@ describe('backup key envelope (#496)', () => {
     const keyBytes = Buffer.from('a'.repeat(64), 'utf8');
     const envelope = encryptKeyfile(keyBytes, goodPassphrase);
     const badSalt = { ...envelope, salt: Buffer.from('short').toString('base64') };
-    expect(() => decryptKeyfile(badSalt, goodPassphrase)).toThrow(/invalid field lengths/);
+    expect(() => decryptKeyfile(badSalt, goodPassphrase)).toThrow(
+      /passphrase is wrong or the archive is corrupt/,
+    );
   });
 });

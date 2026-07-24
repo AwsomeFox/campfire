@@ -123,12 +123,24 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
     throw new Error('Backup key passphrase is required to decrypt the AI keyfile');
   }
 
-  const salt = decodeEnvelopeBase64(envelope.salt, 'salt');
-  const iv = decodeEnvelopeBase64(envelope.iv, 'iv');
-  const tag = decodeEnvelopeBase64(envelope.tag, 'tag');
-  const ct = decodeEnvelopeBase64(envelope.ct, 'ct');
-  if (salt.length !== SALT_LEN || iv.length !== IV_LEN || tag.length !== TAG_LEN || ct.length === 0) {
-    throw new Error('Backup key envelope has invalid field lengths');
+  const GENERIC_DECRYPT_FAILURE =
+    'Backup key envelope failed to decrypt — passphrase is wrong or the archive is corrupt';
+
+  let salt: Buffer;
+  let iv: Buffer;
+  let tag: Buffer;
+  let ct: Buffer;
+  try {
+    salt = decodeEnvelopeBase64(envelope.salt, 'salt');
+    iv = decodeEnvelopeBase64(envelope.iv, 'iv');
+    tag = decodeEnvelopeBase64(envelope.tag, 'tag');
+    ct = decodeEnvelopeBase64(envelope.ct, 'ct');
+    if (salt.length !== SALT_LEN || iv.length !== IV_LEN || tag.length !== TAG_LEN || ct.length === 0) {
+      throw new Error(GENERIC_DECRYPT_FAILURE);
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === GENERIC_DECRYPT_FAILURE) throw err;
+    throw new Error(GENERIC_DECRYPT_FAILURE);
   }
 
   const derived = scryptSync(passphrase, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
@@ -139,7 +151,7 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
   } catch {
     // AES-GCM raises on either wrong key or tampered ciphertext. Do not distinguish
     // the two to the caller — that distinction would be an oracle.
-    throw new Error('Backup key envelope failed to decrypt — passphrase is wrong or the archive is corrupt');
+    throw new Error(GENERIC_DECRYPT_FAILURE);
   }
 }
 

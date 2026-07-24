@@ -27,9 +27,15 @@ server-admin session or API token):
   snapshot** of the database (taken with SQLite `VACUUM INTO`, so it never blocks
   writers and never ships a torn WAL) plus every uploaded file, with a
   `manifest.json`. Safe to run against a live server.
+- **`POST /api/v1/backup/download`** — same archive as the GET endpoint, but accepts
+  an optional `keyPassphrase` in the JSON body (≥12 characters) so the auto-generated
+  `ai-config.key` can be wrapped in an encrypted envelope for credential-portable
+  restores. Passphrases must not be sent in query strings.
 - **`POST /api/v1/backup/restore`** — multipart upload with the archive as field
-  `file` and a field `confirm` set to `RESTORE`. **Destructive**: it validates the
-  archive, then replaces the live database and uploads and re-opens the DB in place.
+  `file` and a field `confirm` set to `RESTORE`. When the archive includes an AI
+  keyfile envelope, also pass `keyPassphrase` with the passphrase used when the
+  backup was created. **Destructive**: it validates the archive, then replaces the
+  live database and uploads and re-opens the DB in place.
   A malformed or foreign archive is rejected (`400`) with the running server left
   untouched, and the whole thing is gated behind server-admin plus the explicit
   `confirm` token so it can't fire by accident.
