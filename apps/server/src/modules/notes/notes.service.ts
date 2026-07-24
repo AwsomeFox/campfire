@@ -1,5 +1,13 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
 import type { Note, Role, PageParams } from '@campfire/schema';
@@ -22,6 +30,7 @@ import {
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -92,6 +101,8 @@ export function canSee(
 
 @Injectable()
 export class NotesService {
+  private readonly logger = new Logger(NotesService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -211,6 +222,35 @@ export class NotesService {
   }
 
   /**
+   * A member posted to the DM scribe inbox (issue #832) — every current dm-role member
+   * except the author should get a bell item. entityId is the inbox note row for a
+   * deep-link; the UI routes inbox_submitted to /inbox?inbox=:id. Best-effort.
+   */
+  private async notifyDmsOfInboxSubmission(row: typeof notes.$inferSelect, user: RequestUser): Promise<void> {
+    if (row.kind !== 'inbox') return;
+    try {
+      const roles = await this.notifications.memberRoles(row.campaignId);
+      for (const [memberId, memberRole] of roles) {
+        if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+        await this.notifications.notifyUser(memberId, row.campaignId, user, {
+          type: 'inbox_submitted',
+          title: `${user.name || 'A member'} sent a note to your inbox`,
+          body: excerpt(row.body),
+          entityType: null,
+          entityId: row.id,
+          actorName: user.name,
+        });
+      }
+    } catch (err) {
+      // notifyUser swallows per-row insert errors; this catch covers memberRoles /
+      // iteration failures only (issue #832).
+      this.logger.warn(
+        `inbox_submitted DM role lookup failed for note ${row.id}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  /**
    * Validate + normalize the (visibility, recipientUserId) pair for a create/update.
    * Returns the recipient id to persist: the validated target for a `whisper`, or null
    * for every other visibility (a stray recipient on a non-whisper note is dropped, not
@@ -310,11 +350,12 @@ export class NotesService {
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
-    // Free-text search over note bodies (issue #65) — case-insensitive substring match,
-    // pushed into SQL so it composes correctly with limit/offset paging (#71) rather than
-    // filtering only the current page. Scoped to NOTES only (campaign-wide search is #64).
-    const search = filters.q?.trim().toLowerCase();
-    if (search) conds.push(sql`lower(${notes.body}) like ${'%' + search + '%'}`);
+    // Free-text search over note bodies (issue #65 / #624). Needle is folded with the
+    // shared helper (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and
+    // cannot see ß→ss / İ / accent case folds, so when `q` is set we fold-match in JS
+    // then apply limit/offset — paging stays correct (#71) without relying on SQL lower().
+    // Campaign-wide search (#64) loads notes without `q` and matches in memory the same way.
+    const search = filters.q?.trim() ? foldForSearch(filters.q.trim()) : '';
 
     const page: PageParams = { limit: filters.limit, offset: filters.offset };
     let query = this.db
@@ -323,8 +364,17 @@ export class NotesService {
       .where(and(...conds))
       .orderBy(asc(notes.id)) // deterministic order for stable paging (insertion order)
       .$dynamic();
-    query = applyPage(query, page);
-    const visible = await query;
+
+    let visible: Array<typeof notes.$inferSelect>;
+    if (search) {
+      const all = await query;
+      const matched = all.filter((r) => foldedIncludes(r.body, search));
+      const offset = page.offset ?? 0;
+      visible = page.limit !== undefined ? matched.slice(offset, offset + page.limit) : matched.slice(offset);
+    } else {
+      query = applyPage(query, page);
+      visible = await query;
+    }
 
     const names = await this.resolveEntityNames(campaignId, visible);
     const recipientNames = await this.resolveRecipientNames(visible);
@@ -644,6 +694,9 @@ export class NotesService {
       entityId: row.id,
       campaignId,
     });
+    // Out-of-band: inbox create must not wait on DM fan-out latency (issue #832).
+    // Errors are swallowed inside notifyDmsOfInboxSubmission.
+    void this.notifyDmsOfInboxSubmission(row, user);
     return toDomain(row);
   }
 

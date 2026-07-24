@@ -29,6 +29,7 @@
  *    their statblock instead, surfaced from dataJson).
  */
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from '../index';
+import { initModDescThenSortOrderAsc } from '../initiative-tiebreak';
 
 /** Family id of the 13th Age (Archmage Engine) adapter. Matches the importer's pack slug family. */
 export const ARCHMAGE_ADAPTER_ID = 'archmage';
@@ -140,6 +141,9 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
     // Inline of resolveAbilityModifier — no runtime import from ../index (cycle).
     return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
+  // 13th Age initiative is Dex-based (plus level, applied elsewhere); on a tied total,
+  // higher Dex (initMod) first, then sortOrder — 5e-like default (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: ARCHMAGE_CONDITIONS,
   escalationDieMax: ESCALATION_DIE_MAX,
   escalationDieForRound(round: number): number {

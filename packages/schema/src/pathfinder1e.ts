@@ -1,4 +1,5 @@
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
+import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 /**
  * Pathfinder 1e rule-system adapter (issue #296, part of the #275 open-ruleset program).
@@ -183,6 +184,9 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
     // without creating a cycle (index registers Pathfinder1eAdapter).
     return representation === 'score' ? pf1eAbilityModifier(dex) : Math.trunc(dex);
   },
+  // PF1e initiative is DEX-derived like 5e; on a tied total, higher DEX (initMod) first,
+  // then sortOrder (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: PF1E_CONDITIONS,
   // PF1e statblocks share the 5e-family field vocabulary (size/type/CR/AC/HP/speed/ability
   // scores). AC is ascending, so the stored `armorClass` is used as-is. We accept both the

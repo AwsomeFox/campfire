@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   Note,
@@ -202,9 +202,21 @@ export class ScribeService implements OnApplicationBootstrap {
     const resolvedInbox = await this.notes.listInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encounters = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
+    // Pull the combat-log event trail for encounters that were actually run (issue #1068).
+    // Preparing encounters have no meaningful log; skip the DB work. The scribe runs as the
+    // DM/system actor, so no viewer role is passed — the full (unredacted) DM view is correct.
+    const foughtEncounterIds = new Set(
+      encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
+    );
+    const events = await Promise.all(
+      encounterList.map((e) =>
+        foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
+      ),
+    );
+    const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
     const source: RecapDraftSource = {
       resolvedInbox: resolvedInbox.map((n: Note) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-      encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants })),
+      encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
     };
     const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
     if (fought.length === 0 && source.resolvedInbox.length === 0) return null;
@@ -344,17 +356,22 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, 'failed', { detail: 'provider returned empty recap', sourceHash, tokensUsed, provider: providerName });
     }
 
-    // 6. Meter the cost against the seat budget atomically (mirrors AiDmService.takeTurn's
-    //    #272 in-SQL clamp so two concurrent runs can't under-count the cap).
-    this.db.transaction((tx) => {
-      tx.update(aiDmSeats)
-        .set({
-          tokensUsed: sql`MIN(${aiDmSeats.tokenBudget}, ${aiDmSeats.tokensUsed} + ${tokensUsed})`,
-          updatedAt: nowIso(),
-        })
-        .where(eq(aiDmSeats.campaignId, campaignId))
-        .run();
-    });
+    // 6. Meter the cost against the seat budget atomically (AiDmService.meterTurn's
+    //    #272 in-SQL clamp + turnCount/lastTurnAt for #1055). On failure, still record a job.
+    try {
+      await this.aiDm.meterTurn(campaignId, tokensUsed, {
+        actor: auditActor(user),
+        action: 'scribe.meter',
+        detail: `${trigger} metering (+${tokensUsed} tokens)`,
+      });
+    } catch (err) {
+      return this.record(campaignId, trigger, user, 'failed', {
+        detail: `metering error: ${err instanceof Error ? err.message : String(err)}`,
+        sourceHash,
+        tokensUsed,
+        provider: providerName,
+      });
+    }
 
     // 7. Dry run: preview only — metered (a real call was made) but nothing filed.
     if (dryRun) {
@@ -436,13 +453,24 @@ export class ScribeService implements OnApplicationBootstrap {
     return results;
   }
 
-  /** True when the campaign has at least one scheduled session whose end time is in the past. */
+  /** True when the campaign has at least one scheduled session whose end time is in the past AND after the last post_session scribe run (#1066). */
   private async hasEndedSession(campaignId: number, now: Date): Promise<boolean> {
+    // Find the last successful (or attempted) post_session run as a watermark.
+    const [lastRun] = await this.db
+      .select({ createdAt: aiScribeJobs.createdAt })
+      .from(aiScribeJobs)
+      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')))
+      .orderBy(desc(aiScribeJobs.createdAt))
+      .limit(1);
+    const watermark = lastRun ? Date.parse(lastRun.createdAt) : 0;
+
     const rows = await this.db.select().from(scheduledSessions).where(eq(scheduledSessions.campaignId, campaignId));
     return rows.some((r) => {
       const start = Date.parse(r.scheduledAt);
       if (!Number.isFinite(start)) return false;
-      return start + (r.durationMinutes ?? 0) * 60_000 <= now.getTime();
+      const endTime = start + (r.durationMinutes ?? 0) * 60_000;
+      // Session must have ended AND ended after the last post_session run.
+      return endTime <= now.getTime() && endTime > watermark;
     });
   }
 

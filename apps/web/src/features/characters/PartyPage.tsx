@@ -181,7 +181,9 @@ export default function PartyPage() {
         </div>
       )}
 
-      {canCreate && (creating || characters.length === 0) && (
+      {/* Wait for the roster load so an empty-state create form (autoFocus) does not
+          flash during loading and steal route-change focus from the page h1 (#591). */}
+      {canCreate && !loading && (creating || characters.length === 0) && (
         <NewCharacterForm campaignId={id} ddbAllowed={ddbAllowed} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
       )}
 

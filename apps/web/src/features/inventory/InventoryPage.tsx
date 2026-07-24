@@ -11,6 +11,7 @@ import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
+import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
@@ -632,6 +633,12 @@ function ItemSection({
   );
 }
 
+function newIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function ItemRow({
   item,
   editable,
@@ -644,20 +651,38 @@ function ItemRow({
   writableOwners: Character[];
   onChanged: () => void;
 }) {
+  const announce = useAnnounce();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickingIcon, setPickingIcon] = useState(false);
+  // Issue #782: render from the last committed server item so +/- announce and
+  // display the applied quantity rather than a stale optimistic absolute.
+  const [committed, setCommitted] = useState(item);
+  useEffect(() => {
+    setCommitted(item);
+  }, [item]);
 
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
     setError(null);
     try {
-      await api.patch(`${API}/inventory/${item.id}`, body);
+      const updated = await api.patch<InventoryItem>(`${API}/inventory/${committed.id}`, body);
+      setCommitted(updated);
       onChanged();
+      return updated;
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't update the item.");
+      return null;
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** Atomic +/- with a fresh per-click idempotency key (issue #782). */
+  async function adjustQty(delta: number) {
+    const updated = await patch({ qtyDelta: delta, idempotencyKey: newIdempotencyKey() });
+    if (updated) {
+      announce(`${updated.name} quantity is now ${updated.qty}.`);
     }
   }
 
@@ -665,7 +690,7 @@ function ItemRow({
     setBusy(true);
     setError(null);
     try {
-      await api.delete(`${API}/inventory/${item.id}`);
+      await api.delete(`${API}/inventory/${committed.id}`);
       onChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete the item.");
@@ -676,44 +701,44 @@ function ItemRow({
 
   function onMove(value: string) {
     if (value === 'party') {
-      if (item.ownerType !== 'party') void patch({ ownerType: 'party' });
+      if (committed.ownerType !== 'party') void patch({ ownerType: 'party' });
       return;
     }
     const characterId = Number(value);
-    if (Number.isFinite(characterId) && characterId !== item.characterId) {
+    if (Number.isFinite(characterId) && characterId !== committed.characterId) {
       void patch({ ownerType: 'character', characterId });
     }
   }
 
-  const currentOwnerValue = item.ownerType === 'party' ? 'party' : String(item.characterId ?? '');
+  const currentOwnerValue = committed.ownerType === 'party' ? 'party' : String(committed.characterId ?? '');
 
-  const iconSlug = itemIconSlug(item);
-  const hasOverride = !!(item.iconSlug && item.iconSlug.trim());
+  const iconSlug = itemIconSlug(committed);
+  const hasOverride = !!(committed.iconSlug && committed.iconSlug.trim());
 
   return (
-    <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2" {...entityTargetProps('item', item.id)}>
+    <li className="py-2 flex flex-wrap items-start gap-x-3 gap-y-2" {...entityTargetProps('item', committed.id)}>
       {editable ? (
         <button
           type="button"
           onClick={() => setPickingIcon(true)}
           disabled={busy}
           title={hasOverride ? `Icon: ${getIcon(iconSlug)?.name ?? 'custom'} — click to change` : 'Auto icon — click to override'}
-          aria-label={`Change icon for ${item.name}`}
+          aria-label={`Change icon for ${committed.name}`}
           className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)]"
         >
-          <GameIcon slug={iconSlug} size={22} title={item.name} />
+          <GameIcon slug={iconSlug} size={22} title={committed.name} />
         </button>
       ) : (
         <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
-          <GameIcon slug={iconSlug} size={22} title={item.name} />
+          <GameIcon slug={iconSlug} size={22} title={committed.name} />
         </span>
       )}
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-white truncate">
-          {item.name}
-          {item.qty !== 1 && <span className="text-slate-500 font-normal"> ×{item.qty}</span>}
+          {committed.name}
+          {committed.qty !== 1 && <span className="text-slate-500 font-normal"> ×{committed.qty}</span>}
         </p>
-        {item.notes && <Markdown className="!text-[12px] !text-slate-500">{item.notes}</Markdown>}
+        {committed.notes && <Markdown className="!text-[12px] !text-slate-500">{committed.notes}</Markdown>}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
       </div>
       {editable && (
@@ -721,9 +746,9 @@ function ItemRow({
           <Btn
             ghost
             className="!min-h-0 !py-0.5 !px-2 text-xs"
-            disabled={busy || item.qty <= 0}
-            onClick={() => void patch({ qty: Math.max(0, item.qty - 1) })}
-            aria-label={`Decrease ${item.name} quantity`}
+            disabled={busy || committed.qty <= 0}
+            onClick={() => void adjustQty(-1)}
+            aria-label={`Decrease ${committed.name} quantity`}
           >
             −
           </Btn>
@@ -731,8 +756,8 @@ function ItemRow({
             ghost
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy}
-            onClick={() => void patch({ qty: item.qty + 1 })}
-            aria-label={`Increase ${item.name} quantity`}
+            onClick={() => void adjustQty(1)}
+            aria-label={`Increase ${committed.name} quantity`}
           >
             +
           </Btn>
@@ -742,7 +767,7 @@ function ItemRow({
             value={currentOwnerValue}
             disabled={busy}
             onChange={(e) => onMove(e.target.value)}
-            aria-label={`Move ${item.name}`}
+            aria-label={`Move ${committed.name}`}
           >
             <option value="party">Party stash</option>
             {writableOwners.map((c) => (
@@ -750,8 +775,8 @@ function ItemRow({
                 {c.name}
               </option>
             ))}
-            {item.ownerType === 'character' && item.characterId != null && !writableOwners.some((c) => c.id === item.characterId) && (
-              <option value={String(item.characterId)}>(current owner)</option>
+            {committed.ownerType === 'character' && committed.characterId != null && !writableOwners.some((c) => c.id === committed.characterId) && (
+              <option value={String(committed.characterId)}>(current owner)</option>
             )}
           </select>
           <Btn
@@ -760,7 +785,7 @@ function ItemRow({
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy}
             onClick={() => void remove()}
-            aria-label={`Delete ${item.name}`}
+            aria-label={`Delete ${committed.name}`}
           >
             ✕
           </Btn>
@@ -768,11 +793,11 @@ function ItemRow({
       )}
       {pickingIcon && (
         <IconPicker
-          value={item.iconSlug ?? ''}
+          value={committed.iconSlug ?? ''}
           onSelect={(slug) => {
             setPickingIcon(false);
             // '' clears the override, reverting the row to its name-derived default.
-            if ((item.iconSlug ?? '') !== slug) void patch({ iconSlug: slug });
+            if ((committed.iconSlug ?? '') !== slug) void patch({ iconSlug: slug });
           }}
           onClose={() => setPickingIcon(false)}
         />

@@ -343,8 +343,7 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
 
   const { presentation } = block;
   const metaBits = [block.size, block.creatureType].filter(Boolean).join(' ');
-  const cr = block.challengeRating;
-  const ratingText = cr ? `${presentation.rating.full} ${cr}` : '';
+  const ratingText = statblockVisibleLabels(block).ratingLine ?? '';
 
   return (
     <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>

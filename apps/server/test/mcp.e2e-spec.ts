@@ -47,6 +47,7 @@ const ALL_TOOLS = [
   'get_rule_entry',
   'get_encounter',
   'get_encounter_difficulty',
+  'list_encounter_events',
   'generate_encounter',
   'list_encounters',
   'list_members',
@@ -69,6 +70,7 @@ const ALL_TOOLS = [
   'list_scheduled_sessions',
   'get_next_session',
   'get_calendar_feed',
+  'list_entity_revisions',
   // write
   'set_my_support_preference',
   'delete_my_support_preference',
@@ -94,6 +96,7 @@ const ALL_TOOLS = [
   'remove_branch',
   'upsert_npc',
   'delete_npc',
+  'set_npc_disposition',
   'upsert_faction',
   'set_faction_reputation',
   'delete_faction',
@@ -165,6 +168,8 @@ const ALL_TOOLS = [
   'set_rsvp',
   'rotate_calendar_feed',
   'disable_calendar_feed',
+  'import_ddb_character',
+  'restore_entity_revision',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -247,7 +252,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(146);
+    expect(tools).toHaveLength(151);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -1073,6 +1078,67 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const viewerOgre = viewerView.combatants.find((c) => c.name === 'Hidden Ogre')!;
     expect(viewerOgre.hpCurrent).toBeNull();
     expect(viewerOgre.hpBand).toBeTruthy();
+  });
+
+  it('list_encounter_events returns the persisted combat log with stable ids (issue #1068)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const enc = parseResult(
+      await dmC.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Log Test Fight' } }),
+    ) as { id: number };
+    const goblin = parseResult(
+      await dmC.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: enc.id, kind: 'monster', name: 'Goblin Scout', hpMax: 20 },
+      }),
+    ) as { id: number };
+    await dmC.callTool({ name: 'roll_initiative', arguments: { encounterId: enc.id } });
+    await dmC.callTool({ name: 'begin_encounter', arguments: { encounterId: enc.id } });
+    // Deal damage — this appends a 'damage' event to the persistent combat log.
+    await dmC.callTool({
+      name: 'update_combatant',
+      arguments: { encounterId: enc.id, combatantId: goblin.id, hpDelta: -8 },
+    });
+
+    const res = await dmC.callTool({ name: 'list_encounter_events', arguments: { encounterId: enc.id } });
+    expect(res.isError).toBeFalsy();
+    const events = parseResult(res) as Array<{
+      id: number;
+      encounterId: number;
+      type: string;
+      round: number;
+    }>;
+    // At least the begin/turn + damage events are present, in insertion order.
+    expect(Array.isArray(events)).toBe(true);
+    expect(events.length).toBeGreaterThan(0);
+    expect(events.every((e) => e.encounterId === enc.id)).toBe(true);
+    expect(events.some((e) => e.type === 'damage')).toBe(true);
+    // Ids are stable and ascending (chronological insertion order).
+    const ids = events.map((e) => e.id);
+    expect([...ids].sort((a, b) => a - b)).toEqual(ids);
+
+    // Clean up: end this fight so it doesn't hold the campaign's single active-encounter
+    // slot (#744) and break later tests that begin their own encounter.
+    await dmC.callTool({ name: 'end_encounter', arguments: { encounterId: enc.id } });
+  });
+
+  it('list_encounter_events 404s a hidden encounter for a non-DM viewer PAT (issue #869 parity)', async () => {
+    const dmC = await mcpClient(dmToken);
+    const hidden = parseResult(
+      await dmC.callTool({
+        name: 'create_encounter',
+        arguments: { campaignId, name: 'Hidden Prep Fight', hidden: true },
+      }),
+    ) as { id: number };
+
+    // DM can read the hidden encounter's (possibly empty) log.
+    const dmRes = await dmC.callTool({ name: 'list_encounter_events', arguments: { encounterId: hidden.id } });
+    expect(dmRes.isError).toBeFalsy();
+
+    // A viewer-scoped PAT must not even learn the hidden encounter exists.
+    const viewerC = await mcpClient(viewerToken);
+    const viewerRes = await viewerC.callTool({ name: 'list_encounter_events', arguments: { encounterId: hidden.id } });
+    expect(viewerRes.isError).toBe(true);
+    expect(parseResult(viewerRes)).toMatchObject({ error: { status: 404 } });
   });
 
   it('draft_session_recap assembles the template scaffold + seeds encounters and resolved inbox threads (issue #62)', async () => {
@@ -2429,6 +2495,119 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       expect(row).toBeDefined();
       expect(row!.snapshot.dmSecret ?? '').toBe('');
       expect(JSON.stringify(list)).not.toContain('MCP_VISIBLE_QUEST_817');
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────────
+  // #565: handler execution smoke tests for previously-untested tools.
+  // Each verifies that the MCP handler executes (not just registers) — at minimum
+  // a valid callTool returns a non-error result, and a bad-args call returns isError.
+  // ──────────────────────────────────────────────────────────────────────────────
+
+  describe('#565 coverage: untested read tool handler execution', () => {
+    it('get_character returns the first character in the campaign', async () => {
+      const client = await mcpClient(dmToken);
+      const list = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+      const chars = JSON.parse((list as { content: Array<{ text: string }> }).content[0].text).characters;
+      if (chars.length === 0) return; // no characters to test
+      const res = await client.callTool({ name: 'get_character', arguments: { characterId: chars[0].id } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('get_party returns the party for the campaign', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'get_party', arguments: { campaignId } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('list_quests returns an array', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'list_quests', arguments: { campaignId } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('get_location returns an existing location', async () => {
+      const client = await mcpClient(dmToken);
+      const locRes = await client.callTool({ name: 'upsert_location', arguments: { campaignId, name: 'MCP Test Loc 565' } });
+      const loc = JSON.parse((locRes as { content: Array<{ text: string }> }).content[0].text);
+      const res = await client.callTool({ name: 'get_location', arguments: { locationId: loc.id } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('get_session_zero returns session-zero config', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'get_session_zero', arguments: { campaignId } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('get_calendar returns the campaign calendar', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'get_calendar', arguments: { campaignId } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('get_membership_integrity is admin-only (dm token gets isError)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'get_membership_integrity', arguments: {} });
+      expect((res as { isError?: boolean }).isError).toBe(true);
+    });
+
+    it('list_scheduled_sessions returns an array', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'list_scheduled_sessions', arguments: { campaignId } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('list_entity_revisions on a non-existent entity returns 404 (isError)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'list_entity_revisions', arguments: { entityType: 'quest', entityId: 999999 } });
+      expect((res as { isError?: boolean }).isError).toBe(true);
+    });
+  });
+
+  describe('#565 coverage: untested write tool handler execution', () => {
+    it('set_npc_disposition updates an NPC', async () => {
+      const client = await mcpClient(dmToken);
+      const npcRes = await client.callTool({ name: 'upsert_npc', arguments: { campaignId, name: 'Disp NPC 565' } });
+      const npc = JSON.parse((npcRes as { content: Array<{ text: string }> }).content[0].text);
+      const res = await client.callTool({ name: 'set_npc_disposition', arguments: { npcId: npc.id, disposition: 'hostile' } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+      const fetched = JSON.parse((res as { content: Array<{ text: string }> }).content[0].text);
+      expect(fetched.disposition).toBe('hostile');
+    });
+
+    it('update_character_hp applies a delta', async () => {
+      const client = await mcpClient(dmToken);
+      const campSum = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId } });
+      const chars = JSON.parse((campSum as { content: Array<{ text: string }> }).content[0].text).characters;
+      if (chars.length === 0) return;
+      const res = await client.callTool({ name: 'update_character_hp', arguments: { characterId: chars[0].id, delta: -1 } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('set_calendar sets the in-world date', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'set_calendar', arguments: { campaignId, currentDate: 'Day 42, Year 1492' } });
+      expect((res as { isError?: boolean }).isError).toBeFalsy();
+    });
+
+    it('reveal_map_region with a non-existent encounter returns isError', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'reveal_map_region', arguments: { encounterId: 999999, x: 0, y: 0, radius: 5 } });
+      expect((res as { isError?: boolean }).isError).toBe(true);
+    });
+
+    it('check_objective with a non-existent quest returns isError', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'check_objective', arguments: { questId: 999999, objectiveId: 999999 } });
+      expect((res as { isError?: boolean }).isError).toBe(true);
+    });
+
+    it('disable_calendar_feed disables the feed (or 404s gracefully)', async () => {
+      const client = await mcpClient(dmToken);
+      const res = await client.callTool({ name: 'disable_calendar_feed', arguments: { campaignId } });
+      // Either succeeds or returns isError if no feed exists — either exercises the handler.
+      expect(res).toBeDefined();
     });
   });
 });

@@ -62,6 +62,38 @@ describe('RuleSystemAdapter — 5e initiative derivation', () => {
   });
 });
 
+describe('RuleSystemAdapter — 5e initiativeTiebreak (issue #611)', () => {
+  it('orders higher initMod (DEX) before lower on a tie', () => {
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 1, sortOrder: 0 },
+        { initMod: 3, sortOrder: 1 },
+      ),
+    ).toBeGreaterThan(0);
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 4, sortOrder: 5 },
+        { initMod: 2, sortOrder: 0 },
+      ),
+    ).toBeLessThan(0);
+  });
+
+  it('falls back to sortOrder ascending when initMod is equal (stable / no roll-off UI)', () => {
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 2, sortOrder: 0 },
+        { initMod: 2, sortOrder: 3 },
+      ),
+    ).toBeLessThan(0);
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 2, sortOrder: 3 },
+        { initMod: 2, sortOrder: 0 },
+      ),
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe('RuleSystemAdapter — 5e condition vocabulary', () => {
   it('is the canonical schema CONDITIONS list (single source of truth, issue #234)', () => {
     expect(Dnd5eAdapter.conditions).toEqual(CONDITIONS);

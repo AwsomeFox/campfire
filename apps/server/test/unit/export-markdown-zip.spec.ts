@@ -56,7 +56,11 @@ function buildService(entities: {
   const campaign = campaignRow();
   // Each property is a service-shaped object exposing only the methods
   // buildExport / buildMarkdownZip actually call.
+  const emptyDbQuery = {
+    from: () => ({ where: () => ({ limit: async () => [] }) }),
+  };
   return new ExportService(
+    { select: () => emptyDbQuery } as any, // db (AI seat + scribe reads)
     { getOrThrow: async () => campaign } as any, // campaigns
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any, // quests
     { listForCampaign: async () => entities.npcs ?? [] } as any, // npcs
@@ -66,7 +70,19 @@ function buildService(entities: {
     { listForCampaign: noop as any } as any, // notes
     { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members
-    { listForCampaign: noop as any } as any, // audit
+    {
+      listForCampaign: noop as any,
+      listForCampaignExport: async () => ({
+        entries: [],
+        meta: {
+          total: 0,
+          exported: 0,
+          truncated: 0,
+          cutoff: { snapshotMaxId: 0, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
+        },
+      }),
+      finalizeCampaignExportMeta: async (_campaignId: number, meta: unknown) => meta,
+    } as any, // audit
     { listForCampaign: noop as any } as any, // proposals
     {
       listForCampaign: async () => (entities.encounters ?? []).map((e: any) => ({ id: e.id, name: e.name })),

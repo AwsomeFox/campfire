@@ -128,7 +128,7 @@ describe('rate limiting on @Public auth endpoints (e2e, real ThrottlerGuard)', (
  * serve complementary roles in the AI architecture:
  *
  * 1. Rate Throttling (HTTP Layer / Network Level):
- *    - Keyed per IP address with a 1-minute TTL.
+ *    - Keyed per authenticated user with a 1-minute TTL; unauthenticated attempts fall back to IP.
  *    - Rejects burst floods (e.g. prompt-injection loops, client retry storms, unauthenticated/spam attempts)
  *      immediately with HTTP 429 (Too Many Requests).
  *    - Protects server compute and prevents rapid-fire provider API key depletion within seconds/minutes.
@@ -153,6 +153,48 @@ describe('rate limiting on AI invocation routes (e2e, AI throttler)', () => {
     await app.close();
     fs.rmSync(dataDir, { recursive: true, force: true });
     process.env.THROTTLE_DISABLED = '1';
+  });
+
+  it('POST /settings/ai-provider/test: two authenticated users behind one IP get independent AI buckets', async () => {
+    const server = app.getHttpServer();
+    const AI_THROTTLE_LIMIT = 10;
+    const sameIp = '198.51.100.105';
+
+    const adminA = request.agent(server);
+    const setupRes = await adminA
+      .post('/api/v1/auth/setup')
+      .set('X-Forwarded-For', sameIp)
+      .send({ username: 'ai-throttle-admin-a', password: 'admin-a-password-1' });
+    expect(setupRes.status).toBe(201);
+
+    const createAdminBRes = await adminA
+      .post('/api/v1/users')
+      .set('X-Forwarded-For', sameIp)
+      .send({ username: 'ai-throttle-admin-b', password: 'admin-b-password-1', serverRole: 'admin' });
+    expect(createAdminBRes.status).toBe(201);
+
+    const adminB = request.agent(server);
+    const loginAdminBRes = await adminB
+      .post('/api/v1/auth/login')
+      .set('X-Forwarded-For', sameIp)
+      .send({ username: 'ai-throttle-admin-b', password: 'admin-b-password-1' });
+    expect(loginAdminBRes.status).toBe(201);
+
+    const postProviderTest = (agent: ReturnType<typeof request.agent>) =>
+      agent.post('/api/v1/settings/ai-provider/test').set('X-Forwarded-For', sameIp).send({});
+
+    const statuses: number[] = [];
+    for (let i = 0; i < AI_THROTTLE_LIMIT; i++) {
+      const res = await postProviderTest(adminA);
+      statuses.push(res.status);
+    }
+    expect(statuses.every((s) => s !== 429)).toBe(true);
+
+    const sameUserOverLimitRes = await postProviderTest(adminA);
+    expect(sameUserOverLimitRes.status).toBe(429);
+
+    const differentUserSameIpRes = await postProviderTest(adminB);
+    expect(differentUserSameIpRes.status).not.toBe(429);
   });
 
   it('POST /campaigns/1/ai-dm/message: after 10 rapid requests from one IP, the 11th returns 429', async () => {

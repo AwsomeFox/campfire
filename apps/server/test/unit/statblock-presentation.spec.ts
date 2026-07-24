@@ -35,7 +35,7 @@ describe('statblock presentation metadata (issue #763)', () => {
       ].sort(),
     );
     for (const adapter of adapters) {
-      const p = adapter.presentation;
+      const p = adapter.presentation!;
       expect(p.rating.full).toBeTruthy();
       expect(p.defense.full).toBeTruthy();
       expect(p.hitPoints.full).toBeTruthy();
@@ -50,12 +50,12 @@ describe('statblock presentation metadata (issue #763)', () => {
       listRuleSystemAdapters().map((a) => [
         a.id,
         {
-          rating: a.presentation.rating,
-          defense: a.presentation.defense,
-          hitPoints: a.presentation.hitPoints,
-          abilities: a.presentation.abilities,
-          actions: a.presentation.actions,
-          creatureType: a.presentation.creatureType,
+          rating: a.presentation!.rating,
+          defense: a.presentation!.defense,
+          hitPoints: a.presentation!.hitPoints,
+          abilities: a.presentation!.abilities,
+          actions: a.presentation!.actions,
+          creatureType: a.presentation!.creatureType,
         },
       ]),
     );
@@ -63,17 +63,17 @@ describe('statblock presentation metadata (issue #763)', () => {
   });
 
   it('uses native labels: Level / Hit Dice / Guard (not Challenge / Armor Class)', () => {
-    expect(Pf2eAdapter.presentation.rating.full).toBe('Level');
-    expect(Sf2eAdapter.presentation.rating.full).toBe('Level');
-    expect(Archmage13aAdapter.presentation.rating.full).toBe('Level');
-    expect(OpenLegendAdapter.presentation.rating.full).toBe('Level');
-    expect(OpenLegendAdapter.presentation.defense.full).toBe('Guard');
-    expect(OsrAdapter.presentation.rating.full).toBe('Hit Dice');
-    expect(OsrAdapter.presentation.rating.short).toBe('HD');
-    expect(Dnd5eAdapter.presentation.rating.full).toBe('Challenge');
-    expect(Dnd5eAdapter.presentation.defense.full).toBe('Armor Class');
-    expect(Pathfinder1eAdapter.presentation.rating.full).toBe('Challenge Rating');
-    expect(StarfinderAdapter.presentation.defense.full).toBe('Kinetic Armor Class');
+    expect(Pf2eAdapter.presentation!.rating.full).toBe('Level');
+    expect(Sf2eAdapter.presentation!.rating.full).toBe('Level');
+    expect(Archmage13aAdapter.presentation!.rating.full).toBe('Level');
+    expect(OpenLegendAdapter.presentation!.rating.full).toBe('Level');
+    expect(OpenLegendAdapter.presentation!.defense.full).toBe('Guard');
+    expect(OsrAdapter.presentation!.rating.full).toBe('Hit Dice');
+    expect(OsrAdapter.presentation!.rating.short).toBe('HD');
+    expect(Dnd5eAdapter.presentation!.rating.full).toBe('Challenge');
+    expect(Dnd5eAdapter.presentation!.defense.full).toBe('Armor Class');
+    expect(Pathfinder1eAdapter.presentation!.rating.full).toBe('Challenge Rating');
+    expect(StarfinderAdapter.presentation!.defense.full).toBe('Kinetic Armor Class');
   });
 
   it('returns neutral Rating/Defense for unknown and homebrew (empty) rule systems', () => {
@@ -101,10 +101,10 @@ describe('statblock presentation metadata (issue #763)', () => {
   });
 
   it('prefers full accessible terms; short abbreviations are optional', () => {
-    expect(statblockLabelText(Dnd5eAdapter.presentation.defense)).toBe('Armor Class');
-    expect(statblockLabelText(Dnd5eAdapter.presentation.defense, true)).toBe('AC');
-    expect(statblockLabelText(OpenLegendAdapter.presentation.defense, true)).toBe('Guard');
-    expect(statblockLabelText(OsrAdapter.presentation.rating, true)).toBe('HD');
+    expect(statblockLabelText(Dnd5eAdapter.presentation!.defense)).toBe('Armor Class');
+    expect(statblockLabelText(Dnd5eAdapter.presentation!.defense, true)).toBe('AC');
+    expect(statblockLabelText(OpenLegendAdapter.presentation!.defense, true)).toBe('Guard');
+    expect(statblockLabelText(OsrAdapter.presentation!.rating, true)).toBe('HD');
     expect(statblockLabelText(NEUTRAL_STATBLOCK_PRESENTATION.rating, true)).toBe('Rating');
   });
 });
