@@ -21,16 +21,12 @@ import { useAnnounce } from '../../components/Announcer';
 
 type Step = 'targets' | 'preview';
 
-function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow, max: number): Combatant[] {
-  let pool: Combatant[];
-  if (allow === 'self') pool = combatants.filter((c) => c.id === actorId);
-  else {
-    const others = combatants.filter((c) => c.id !== actorId);
-    if (allow === 'enemy') pool = others.filter((c) => c.kind === 'monster' || c.kind === 'npc');
-    else if (allow === 'ally') pool = others.filter((c) => c.kind === 'character');
-    else pool = others;
-  }
-  return max > 0 ? pool.slice(0, max) : pool;
+function legalTargets(combatants: Combatant[], actorId: number, allow: ActionTargetAllow): Combatant[] {
+  if (allow === 'self') return combatants.filter((c) => c.id === actorId);
+  const others = combatants.filter((c) => c.id !== actorId);
+  if (allow === 'enemy') return others.filter((c) => c.kind === 'monster' || c.kind === 'npc');
+  if (allow === 'ally') return others.filter((c) => c.kind === 'character');
+  return others;
 }
 
 export function ActionUsePanel({
@@ -64,8 +60,8 @@ export function ActionUsePanel({
   const [preview, setPreview] = useState<ActionResolveResult | null>(null);
 
   const candidates = useMemo(
-    () => legalTargets(combatants, actorCombatantId, spec.targets.allow, spec.targets.count || combatants.length),
-    [combatants, actorCombatantId, spec.targets.allow, spec.targets.count],
+    () => legalTargets(combatants, actorCombatantId, spec.targets.allow),
+    [combatants, actorCombatantId, spec.targets.allow],
   );
   const needsTarget = spec.targets.count > 0;
 
@@ -87,21 +83,12 @@ export function ActionUsePanel({
   });
 
   const commit = useMutation({
-    mutationFn: (resolution: ActionResolution) => {
-      if (preview?.canApply) {
-        return api.post<ActionResolveResult>(`${API}/encounters/${encounterId}/actions/resolve`, {
-          actorCombatantId,
-          actionIndex,
-          targetIds,
-          commit: true,
-        });
-      }
-      return api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, resolution).then((r) => ({
+    mutationFn: (resolution: ActionResolution) =>
+      api.post<{ undoToken: ActionUndoToken }>(`${API}/encounters/${encounterId}/actions/apply`, resolution).then((r) => ({
         ...preview!,
         applied: true,
         undoToken: r.undoToken,
-      }));
-    },
+      })),
     onMutate: () => onError(null),
     onSuccess: (res) => {
       if (res.undoToken) onApplied(res.undoToken, res.policy);

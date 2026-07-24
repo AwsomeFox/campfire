@@ -6,6 +6,7 @@ import {
   ActionResolveRequest,
   ActionResolveResult,
   ActionSpec,
+  ActionTargetAllow,
   ActionUndoToken,
   DND5E_ADAPTER_ID,
   ResolvedTarget,
@@ -87,6 +88,30 @@ export class ActionResolverService {
       .get();
     if (!row) throw new NotFoundException(`Combatant ${combatantId} not found in encounter ${encounterId}`);
     return row;
+  }
+
+  /** Enforce spec.targets.allow server-side so clients/MCP cannot bypass the UI picker. */
+  private assertTargetAllowed(
+    allow: ActionTargetAllow,
+    actor: typeof combatants.$inferSelect,
+    target: typeof combatants.$inferSelect,
+    actionName: string,
+  ): void {
+    if (allow === 'self') {
+      if (target.id !== actor.id) {
+        throw new BadRequestException(`"${actionName}" may only target the actor.`);
+      }
+      return;
+    }
+    if (target.id === actor.id) {
+      throw new BadRequestException(`"${actionName}" cannot target the actor.`);
+    }
+    if (allow === 'enemy' && target.kind !== 'monster' && target.kind !== 'npc') {
+      throw new BadRequestException(`"${actionName}" may only target enemies.`);
+    }
+    if (allow === 'ally' && target.kind !== 'character') {
+      throw new BadRequestException(`"${actionName}" may only target allies.`);
+    }
   }
 
   private adapterForCampaign(campaignId: number): RuleSystemAdapter {
@@ -310,6 +335,7 @@ export class ActionResolverService {
     const resolvedTargets: ResolvedTarget[] = [];
     for (const tid of targetIds) {
       const target = this.combatantRowOrThrow(encounterId, tid);
+      this.assertTargetAllowed(spec.targets.allow, actor, target, name);
       resolvedTargets.push(this.resolveOneTarget(spec, name, adapter as unknown as ResolverAdapter, actorStats, prof, roll, target));
     }
 
@@ -467,6 +493,11 @@ export class ActionResolverService {
       }
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
       if (!canApply) throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
+    }
+    const { spec } = this.resolveSpec(actor, { actorCombatantId: resolution.actorCombatantId, actionName: resolution.actionName });
+    for (const t of resolution.targets) {
+      const target = this.combatantRowOrThrow(encounterId, t.combatantId);
+      this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
     }
     const undoToken = this.applyInternal(encounter, resolution, actor, user, role);
     return { undoToken };
