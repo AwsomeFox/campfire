@@ -125,8 +125,14 @@ export function GenerateEncounterWizard({
     const filters: Record<string, unknown> = {};
     if (creatureType.trim()) filters.creatureType = creatureType.trim();
     if (environment.trim()) filters.environment = environment.trim();
-    if (minCr.trim()) filters.minCr = Number(minCr);
-    if (maxCr.trim()) filters.maxCr = Number(maxCr);
+    if (minCr.trim()) {
+      const n = Number(minCr);
+      if (Number.isFinite(n)) filters.minCr = n;
+    }
+    if (maxCr.trim()) {
+      const n = Number(maxCr);
+      if (Number.isFinite(n)) filters.maxCr = n;
+    }
     if (includeHazards) filters.includeHazards = true;
     return Object.keys(filters).length > 0 ? filters : undefined;
   }, [creatureType, environment, minCr, maxCr, includeHazards]);
@@ -137,10 +143,11 @@ export function GenerateEncounterWizard({
       setLoading(true);
       setError(null);
       try {
+        const count = maxCount ? Number(maxCount) : undefined;
         const body: Record<string, unknown> = {
           difficulty,
           shape: shape || undefined,
-          count: maxCount ? Number(maxCount) : undefined,
+          count: count !== undefined && Number.isFinite(count) ? count : undefined,
           filters: buildFilters(),
         };
         if (tune && preview) {
@@ -406,7 +413,7 @@ function DifficultyExplanationPanel({ preview }: { preview: EncounterPreview }) 
         </span>
         {preview.matchedBand ? null : (
           <span className="tag tag-neutral" style={{ fontSize: 10 }}>
-            closest to {preview.targetBand}
+            achieved {preview.explanation.band ?? preview.difficulty.label} (requested {preview.targetBand})
           </span>
         )}
       </div>

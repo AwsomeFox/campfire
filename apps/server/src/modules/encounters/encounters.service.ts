@@ -1615,13 +1615,13 @@ export class EncountersService {
     resolvedHpMax: number | null,
   ): EncounterCreatureInspection {
     const mapped = adapter.mapStatblock(data);
-    const toStr = (v: unknown): string | null => {
+    const toStr = (v: unknown, maxLen = 200): string | null => {
       if (v === null || v === undefined) return null;
-      if (typeof v === 'string') return v.slice(0, 200);
-      if (typeof v === 'number') return String(v);
+      if (typeof v === 'string') return v.slice(0, maxLen);
+      if (typeof v === 'number') return String(v).slice(0, maxLen);
       if (typeof v === 'object') {
         const val = (v as Record<string, unknown>).value ?? (v as Record<string, unknown>).ft ?? null;
-        return val !== null ? String(val).slice(0, 200) : null;
+        return val !== null ? String(val).slice(0, maxLen) : null;
       }
       return null;
     };
@@ -1681,11 +1681,11 @@ export class EncountersService {
     const hp = resolvedHpMax ?? adapter.monsterHitPoints(data);
     return {
       hasStatblock: hp !== null || cr !== null || actions.length > 0 || abilities.length > 0,
-      size: toStr(mapped.size),
-      creatureType: toStr(mapped.creatureType),
+      size: toStr(mapped.size, 60),
+      creatureType: toStr(mapped.creatureType, 120),
       armorClass: toInt(mapped.armorClass),
       hitPointsMax: hp,
-      hitPointsText: toStr((data.hit_dice ?? data.hitDice ?? null) as unknown),
+      hitPointsText: toStr((data.hit_dice ?? data.hitDice ?? null) as unknown, 80),
       speed: toStr(mapped.speed),
       challengeRating: cr,
       xp,
@@ -2029,7 +2029,7 @@ export class EncountersService {
       detail: [
         `source=${input.source ?? 'wizard'}`,
         `target=${input.targetBand ?? 'n/a'}`,
-        `party=[${(input.party ?? partyRows.map(() => 0)).length ? (input.party ?? []).join(',') : 'active'}]`,
+        `party=[${input.party?.length ? input.party.join(',') : 'active'}]`,
         `roster=${rosterSummary || 'none'} (${monsterTotal} monster(s), ${partyRows.length} PC(s))`,
         mapAttachmentId ? `map=${mapAttachmentId}` : null,
         input.manualEdits && input.manualEdits.length > 0 ? `manualEdits=${input.manualEdits.join('; ')}` : null,
