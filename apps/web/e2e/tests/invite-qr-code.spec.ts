@@ -147,21 +147,16 @@ test.describe('issue #822 — invite QR code card', () => {
 
   test('shows Suspended overlay when campaign public invites are disabled (#857)', async ({ page }) => {
     const { campaignId } = seed();
-    await page.route(`**/api/v1/campaigns/${campaignId}`, (route) => {
-      if (route.request().method() === 'GET') {
-        return route.fulfill({
-          status: 200,
-          json: {
-            id: campaignId,
-            name: 'Test Campaign',
-            status: 'active',
-            publicInvitesEnabled: false,
-          },
-        });
-      }
-      return route.continue();
+    await page.route('**/api/v1/campaigns', async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const res = await route.fetch();
+      const list = (await res.json()) as Array<{ id: number; publicInvitesEnabled?: boolean }>;
+      const updated = list.map((c) =>
+        c.id === campaignId ? { ...c, publicInvitesEnabled: false } : c,
+      );
+      return route.fulfill({ status: res.status(), json: updated });
     });
-    await mockInvites(page, campaignId, [ACTIVE_INVITE]);
+    await mockInvites(page, campaignId, [{ ...ACTIVE_INVITE, campaignId }]);
     await page.goto(`/c/${campaignId}/members`);
 
     const qrCard = page.getByTestId('invite-qr-card');
@@ -278,9 +273,13 @@ test.describe('issue #822 — invite QR code card', () => {
     await expect(qrCanvas).toBeVisible();
     await expect(qrCanvas).toBeInViewport();
 
-    // Action buttons all visible
-    await expect(qrCard.getByRole('button', { name: 'Show QR code full screen' })).toBeInViewport();
-    await expect(qrCard.getByRole('button', { name: 'Copy invite link' })).toBeInViewport();
+    // Action buttons all visible (scroll — tall invite row can sit below fold on mobile)
+    const fullscreenBtn = qrCard.getByRole('button', { name: 'Show QR code full screen' });
+    const copyBtn = qrCard.getByRole('button', { name: 'Copy invite link' });
+    await fullscreenBtn.scrollIntoViewIfNeeded();
+    await copyBtn.scrollIntoViewIfNeeded();
+    await expect(fullscreenBtn).toBeInViewport();
+    await expect(copyBtn).toBeInViewport();
 
     // axe clean on narrow viewport
     const results = await new AxeBuilder({ page })
