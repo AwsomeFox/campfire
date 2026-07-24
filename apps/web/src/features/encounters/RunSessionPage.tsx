@@ -1384,6 +1384,15 @@ export default function RunSessionPage() {
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
           onGenerateMap={isDm ? generateAndAttachMap : undefined}
+          onImportMap={
+            isDm
+              ? (id) => {
+                  setEncounterMap(id);
+                  setShowMapGuidance(true);
+                  announce('Map imported. Check the grid, set fog, then place tokens.');
+                }
+              : undefined
+          }
           showGuidance={showMapGuidance}
           onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
@@ -1755,6 +1764,7 @@ function BattleMap({
   onSetFog,
   onSetAoe,
   onGenerateMap,
+  onImportMap,
   showGuidance,
   onDismissGuidance,
   onPing,
@@ -1774,6 +1784,8 @@ function BattleMap({
   onSetAoe: (aoe: AoeTemplate[]) => void;
   /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
   onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
+  /** Attach an externally-imported map (issue #411) then show grid/fog guidance. DM-only. */
+  onImportMap?: (attachmentId: number) => void;
   /** After a generated map is attached, walk the DM through grid/fog/token placement. */
   showGuidance?: boolean;
   onDismissGuidance?: () => void;
@@ -2222,7 +2234,7 @@ function BattleMap({
               wired to the atomic generate-and-attach path via onGenerate. */}
           <GetAMapPanel
             campaignId={campaignId}
-            onImported={(id) => onSetMap(id)}
+            onImported={(id) => (onImportMap ? onImportMap(id) : onSetMap(id))}
             onGenerate={onGenerateMap}
             onError={onError}
           />
