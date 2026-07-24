@@ -494,7 +494,12 @@ export class ActionResolverService {
       const { canApply } = this.policyFor(encounter.campaignId, actor, user, role);
       if (!canApply) throw new ForbiddenException('This campaign requires the DM to apply action consequences.');
     }
-    const { spec } = this.resolveSpec(actor, { actorCombatantId: resolution.actorCombatantId, actionName: resolution.actionName });
+    const { spec } = this.resolveSpec(actor, {
+      actorCombatantId: resolution.actorCombatantId,
+      actionName: resolution.actionName,
+      targetIds: [],
+      commit: false,
+    });
     for (const t of resolution.targets) {
       const target = this.combatantRowOrThrow(encounterId, t.combatantId);
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);
