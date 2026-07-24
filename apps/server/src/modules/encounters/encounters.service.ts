@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EMPTY_TURN_STATE, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCreate, EncounterReopen, EncounterUpdate, FogState, RollRequest, actionEconomyForAdapter, estimateEncounterDifficultyForRuleSystem, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterRollInitiativeResult, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -154,9 +154,12 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
  * live-combat aid, never a reason to fail an encounter read.
  */
 function parseTurnState(text: string | null): CombatantTurnState {
-  if (text == null) return { ...EMPTY_TURN_STATE };
+  // Route null/corrupt text through the schema so the returned object always has its OWN
+  // fresh `used` map (the schema uses factory defaults) — never a spread of the shared
+  // EMPTY_TURN_STATE, whose nested `used` object would otherwise be aliased and mutated.
+  if (text == null) return CombatantTurnState.parse({});
   const parsed = CombatantTurnState.safeParse(fromJsonText<unknown>(text, null));
-  return parsed.success ? parsed.data : { ...EMPTY_TURN_STATE };
+  return parsed.success ? parsed.data : CombatantTurnState.parse({});
 }
 
 /** Parse the stored active-effects JSON back into an ActiveEffect[] (issue #413); degrade to []. */
@@ -2933,7 +2936,7 @@ export class EncountersService {
     let row!: typeof combatants.$inferSelect;
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
-      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? { ...EMPTY_TURN_STATE });
+      const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
       const effects = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(fresh.activeEffects, null));
       const activeEffects: ActiveEffectType[] = effects.success ? effects.data : [];
 

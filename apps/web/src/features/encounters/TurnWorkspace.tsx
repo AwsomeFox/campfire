@@ -15,11 +15,12 @@
  * and the suggested-action search is a labelled text input. Keyboard/mobile flows reuse the
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
+import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
 
 interface TurnWorkspaceProps {
@@ -73,6 +74,7 @@ function SlotChip({
 
 export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: TurnWorkspaceProps) {
   const queryClient = useQueryClient();
+  const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -114,6 +116,23 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
     onSettled: settle,
   });
 
+  // Announce "your turn" through the single app-root assertive live region (Announcer),
+  // rather than rendering a second aria-live region here (which would duplicate the app's
+  // canonical assertive region). dedupeKey keys on the actor+round so a refetch doesn't
+  // re-announce the same turn.
+  const isYourTurn = turn?.isYourTurn ?? false;
+  const currentName = turn?.current?.name ?? '';
+  const currentId = turn?.current?.combatantId ?? null;
+  const turnRound = turn?.round ?? 0;
+  useEffect(() => {
+    if (isYourTurn && currentId != null) {
+      announce(`Your turn — round ${turnRound}, ${currentName}.`, {
+        assertive: true,
+        dedupeKey: `your-turn:${encounterId}:${currentId}:${turnRound}`,
+      });
+    }
+  }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+
   const filteredActions = useMemo(() => {
     const list = turn?.suggestedActions ?? [];
     const needle = actionFilter.trim().toLowerCase();
@@ -134,10 +153,8 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
         {turn.next && <span className="text-sm text-muted">Next: {turn.next.name}</span>}
       </div>
 
-      {/* "Your turn" announcement — assertive so screen readers speak it on advance. */}
-      <div aria-live="assertive" className="sr-only">
-        {turn.isYourTurn ? `Your turn — round ${turn.round}, ${turn.current.name}.` : ''}
-      </div>
+      {/* "Your turn" is announced via the app-root Announcer (see the effect above); the
+          banner below is a purely visual cue and is intentionally not its own live region. */}
       {turn.isYourTurn && (
         <div className="rounded-md px-3 py-2 font-semibold" style={{ background: 'var(--cf-difficulty-easy-bg)', color: 'var(--cf-difficulty-easy-fg)' }}>
           It’s your turn.

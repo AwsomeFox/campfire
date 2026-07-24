@@ -1812,8 +1812,8 @@ export type ActionEconomySlotKind = 'action' | 'movement' | 'reaction' | 'resour
  * the tracker counts usage against; `max` is how many are available fresh each turn (or
  * round, per `resetsAt`). `help` is plain-language guidance shown to a new player. A
  * `movement` slot's `max` is a speed in feet (0 when the system is gridless / undefined);
- * a `reaction` slot resets at the START of the owner's turn (5e: one reaction per round,
- * refreshed at your turn), so its `resetsAt` is 'round'.
+ * a `reaction` slot refreshes at the START of the owner's turn (5e: one reaction per round,
+ * refreshed at your turn), so its `resetsAt` is 'turn'.
  */
 export interface ActionEconomySlot {
   readonly key: string;
@@ -1843,7 +1843,7 @@ export const DND5E_ACTION_ECONOMY: ActionEconomyModel = {
   slots: [
     { key: 'action', label: 'Action', help: 'Attack, Cast a Spell, Dash, Dodge, Disengage, Help, Hide, Ready, Search, or Use an Object.', kind: 'action', max: 1, resetsAt: 'turn' },
     { key: 'bonus', label: 'Bonus Action', help: 'Only when a feature, spell, or item specifically grants one this turn.', kind: 'action', max: 1, resetsAt: 'turn' },
-    { key: 'reaction', label: 'Reaction', help: 'One per round, e.g. an opportunity attack or a readied trigger. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'round' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round, e.g. an opportunity attack or a readied trigger. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'turn' },
     { key: 'movement', label: 'Movement', help: 'Move up to your speed; you can split it around your action.', kind: 'movement', max: 30, resetsAt: 'turn' },
   ],
 };
@@ -1852,7 +1852,7 @@ export const DND5E_ACTION_ECONOMY: ActionEconomyModel = {
 export const PF2E_ACTION_ECONOMY: ActionEconomyModel = {
   slots: [
     { key: 'actions', label: 'Actions', help: 'You have three actions each turn; most activities cost 1–3 of them.', kind: 'action', max: 3, resetsAt: 'turn' },
-    { key: 'reaction', label: 'Reaction', help: 'One per round when its trigger occurs. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'round' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round when its trigger occurs. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'turn' },
   ],
 };
 
@@ -4648,12 +4648,16 @@ export type ActiveEffect = z.infer<typeof ActiveEffect>;
  * consumption against the adapter's {@link ActionEconomyModel} slot keys (e.g. `{ action: 1,
  * bonus: 0 }`); `movementUsedFt` is feet moved this turn; `concentration` names the effect the
  * combatant is concentrating on (null = none). `delaying` / `readied` capture the DM/table
- * turn-order tools (a combatant who delayed, or a readied action + its trigger). All reset at
- * the owner's turn boundary by the service, EXCEPT `reaction` usage and `concentration`, which
- * persist across turns until refreshed/broken. Persisted as one JSON column on the combatant.
+ * turn-order tools (a combatant who delayed, or a readied action + its trigger). The whole
+ * `used` map (including reaction) and movement reset at the START of the owner's turn by the
+ * service — a 5e reaction refreshes at the start of your turn — while `concentration` persists
+ * across turns until it is broken. Persisted as one JSON column on the combatant.
  */
 export const CombatantTurnState = z.object({
-  used: z.record(z.string().max(40), z.number().int().nonnegative()).default({}),
+  // Factory default so each parse gets its OWN empty `used` map — the service mutates
+  // `turnState.used` in place, and a shared default object would leak usage between
+  // combatants (and could mutate the module-level EMPTY_TURN_STATE).
+  used: z.record(z.string().max(40), z.number().int().nonnegative()).default(() => ({})),
   movementUsedFt: z.number().nonnegative().default(0),
   concentration: z.string().max(160).nullable().default(null),
   delaying: z.boolean().default(false),
@@ -4712,8 +4716,15 @@ export const Combatant = z.object({
   // false for DMs and for tokens whose position is visible (or truly null in storage).
   tokenHiddenByFog: z.boolean().default(false),
   // Current-turn workspace state (issue #413): per-turn action-economy usage, movement,
-  // concentration, and delay/ready flags. Defaults to EMPTY_TURN_STATE for legacy rows.
-  turnState: CombatantTurnState.default(EMPTY_TURN_STATE),
+  // concentration, and delay/ready flags. Factory default so each parsed combatant gets a
+  // FRESH turn-state (with its own `used` map) rather than sharing one mutable object.
+  turnState: CombatantTurnState.default(() => ({
+    used: {},
+    movementUsedFt: 0,
+    concentration: null,
+    delaying: false,
+    readied: null,
+  })),
   // Structured active effects with duration + save timing (issue #413), alongside the
   // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
   activeEffects: z.array(ActiveEffect).max(50).default([]),
@@ -4999,7 +5010,7 @@ export type EncounterEndTurn = z.infer<typeof EncounterEndTurn>;
  *  - concentration: set/clear what the combatant is concentrating on;
  *  - addEffect / removeEffectId: add or drop a structured ActiveEffect;
  *  - delaying / readied: the delay/ready turn-order tools;
- *  - resetTurn: clear the per-turn slice (used/movement, keep reaction+concentration).
+ *  - resetTurn: clear the per-turn slice (the whole `used` map + movement; concentration is kept).
  * DM may edit any combatant; a player only their own linked character's combatant.
  */
 export const CombatantTurnStatePatch = z.object({
