@@ -1405,9 +1405,7 @@ export class CampaignsService {
       // Scheduled sessions (issue #436): planned game nights with RSVPs. Inserted
       // early — no cross-refs to other entity types. RSVP userIds are install-local,
       // so reassign to the importer while preserving userName/status/note provenance.
-      const scheduleMap = new Map<number, number>();
       for (const s of scheduledSessionRows) {
-        const srcId = intOrNull(s.id);
         const [row] = tx
           .insert(scheduledSessions)
           .values({
@@ -1422,7 +1420,6 @@ export class CampaignsService {
           })
           .returning()
           .all();
-        if (srcId != null) scheduleMap.set(srcId, row.id);
         for (const rsvp of asArr(s.rsvps)) {
           tx.insert(sessionRsvps)
             .values({
@@ -1795,6 +1792,9 @@ export class CampaignsService {
           if (entityId == null) entityType = null; // dangling link in the source — drop it
         }
         const noteSrcId = intOrNull(n.id);
+        const rawVisibility = str(n.visibility, 'private');
+        // Whisper targets are install-local — downgrade to dm_shared so the row stays valid.
+        const visibility = rawVisibility === 'whisper' ? 'dm_shared' : rawVisibility;
         const [noteRow] = tx
           .insert(notes)
           .values({
@@ -1802,8 +1802,8 @@ export class CampaignsService {
             authorUserId: importerId, // author ids are per-install — the importer owns imported notes
             authorName: str(n.authorName),
             kind: str(n.kind, 'note'),
-            visibility: str(n.visibility, 'private'),
-            recipientUserId: null, // whisper targets are install-local (issue #436)
+            visibility,
+            recipientUserId: null,
             entityType,
             entityId,
             body: str(n.body),
