@@ -412,6 +412,24 @@ export function guardDriverLivePlayArgs(
     return { ok: true, args: { ...args } };
   }
 
+  if (toolName === 'update_inventory_item') {
+    if ('qtyDelta' in args && typeof args.qtyDelta === 'number' && args.qtyDelta < 0) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_reduction',
+        message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be positive).',
+      };
+    }
+    if ('qty' in args && typeof args.qty === 'number' && args.qty <= 0) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_reduction',
+        message: 'The driver may not reduce an item quantity to 0 or negative via update_inventory_item.',
+      };
+    }
+    return { ok: true, args: { ...args } };
+  }
+
   return { ok: true, args: { ...args } };
 }
 
