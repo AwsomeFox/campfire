@@ -10,10 +10,9 @@
  * - Synchronized counts and rows across tabs
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import type { Notification, NotificationType } from '@campfire/schema';
 import { parseScheduleNotificationData } from '@campfire/schema';
-import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, API } from '../../lib/api';
 import { Btn, Card, ErrorNote, Skeleton } from '../../components/ui';
@@ -107,13 +106,11 @@ const NOTIFICATION_TYPES: { type: NotificationType; label: string }[] = [
 export default function NotificationsPage() {
   const params = useParams<{ campaignId?: string }>();
   const campaignIdFromParams = parseCampaignIdParam(params.campaignId);
-  const location = useLocation();
   const navigate = useNavigate();
   const announce = useAnnounce();
   const formattingLocale = useFormattingLocale();
-  const { me } = useAuth();
   const { campaigns } = useCampaigns();
-  const { count: globalUnreadCount, markRead, markUnread, markReadBulk, markUnreadBulk } = useNotifications();
+  const { count: globalUnreadCount, markReadBulk, markUnreadBulk } = useNotifications();
 
   // Filters state
   const [selectedCampaignId, setSelectedCampaignId] = useState<string>(
@@ -159,9 +156,7 @@ export default function NotificationsPage() {
 
   // Sync selectedCampaignId when param changes
   useEffect(() => {
-    if (campaignIdFromParams) {
-      setSelectedCampaignId(String(campaignIdFromParams));
-    }
+    setSelectedCampaignId(campaignIdFromParams ? String(campaignIdFromParams) : '');
   }, [campaignIdFromParams]);
 
   const campaignMap = useMemo(() => {
@@ -258,14 +253,11 @@ export default function NotificationsPage() {
     [items],
   );
 
-  const unreadCountForSelectedCampaign = useMemo(() => {
-    if (!selectedCampaignId) return globalUnreadCount;
-    const cid = Number(selectedCampaignId);
-    return items.filter((n) => n.campaignId === cid && !n.readAt).length;
-  }, [selectedCampaignId, globalUnreadCount, items]);
-
   // Execute a mark-read action and record for Undo
-  const executeMarkReadAction = async (opts: { ids?: number[]; campaignId?: number; all?: boolean }, actionName: string) => {
+  const executeMarkReadAction = async (
+    opts: { ids?: number[]; campaignId?: number; all?: boolean },
+    _actionName?: string,
+  ) => {
     const res = await markReadBulk(opts);
     if (res.updated > 0) {
       setPendingUndo({
@@ -281,7 +273,7 @@ export default function NotificationsPage() {
   const handleMarkDisplayedRead = async () => {
     const unreadIds = displayedUnreadItems.map((n) => n.id);
     if (unreadIds.length === 0) return;
-    await executeMarkReadAction({ ids: unreadIds }, 'displayed');
+    await executeMarkReadAction({ ids: unreadIds });
   };
 
   // 2. "Mark this campaign"
@@ -360,12 +352,12 @@ export default function NotificationsPage() {
 
   const handleToggleRead = async (notification: Notification) => {
     if (notification.readAt) {
-      await markUnread(notification);
+      await markUnreadBulk({ ids: [notification.id] });
       setItems((prev) =>
         prev.map((n) => (n.id === notification.id ? { ...n, readAt: null } : n)),
       );
     } else {
-      await markRead(notification);
+      await markReadBulk({ ids: [notification.id] });
       setItems((prev) =>
         prev.map((n) =>
           n.id === notification.id ? { ...n, readAt: new Date().toISOString() } : n,
@@ -381,7 +373,7 @@ export default function NotificationsPage() {
     }
     const href = notificationHref(notification);
     if (!notification.readAt) {
-      await markRead(notification);
+      void markReadBulk({ ids: [notification.id] });
     }
     navigate(href);
   };
@@ -590,8 +582,16 @@ export default function NotificationsPage() {
 
               {/* Main Info */}
               <div
-                className="min-w-0 flex-1 cursor-pointer select-none"
+                className="min-w-0 flex-1 cursor-pointer select-none outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] rounded"
+                role="button"
+                tabIndex={0}
                 onClick={() => void handleRowClick(notification)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void handleRowClick(notification);
+                  }
+                }}
               >
                 <div className="flex items-center gap-2 flex-wrap">
                   {campaignName && (

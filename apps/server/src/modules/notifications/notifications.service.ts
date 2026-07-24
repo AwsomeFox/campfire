@@ -710,7 +710,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
 
-    if (opts.ids && opts.ids.length === 0) return { updated: 0, updatedIds: [] };
+    if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
+      return { updated: 0, updatedIds: [] };
+    }
 
     const conditions = [
       eq(notifications.userId, userId),
@@ -747,7 +749,9 @@ export class NotificationsService implements OnApplicationBootstrap {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0, updatedIds: [] };
 
-    if (opts.ids && opts.ids.length === 0) return { updated: 0, updatedIds: [] };
+    if (!opts.all && !opts.campaignId && (!opts.ids || opts.ids.length === 0)) {
+      return { updated: 0, updatedIds: [] };
+    }
 
     const conditions = [
       eq(notifications.userId, userId),

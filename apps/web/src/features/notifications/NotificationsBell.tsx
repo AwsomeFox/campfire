@@ -288,6 +288,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`, {
         signal: controller.signal,
       });
+      if (countGenerationRef.current !== generation || snapshotVersionRef.current !== snapshotVersion) {
+        return;
+      }
       if (allReadAtRef.current !== null) {
         publishSnapshot({ count: 0, refreshedAt: Date.now() });
         return;
@@ -711,7 +714,7 @@ function notificationCopy(notification: Notification, locale: string | undefined
 }
 
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
-  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead, markReadBulk } = notifications;
+  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
   const formattingLocale = useFormattingLocale();
   const narrow = useIsNarrowViewport();
   const navigate = useNavigate();
@@ -899,15 +902,14 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           className="px-4 py-2 border-t text-center shrink-0"
           style={{ borderColor: 'var(--color-divider)', background: 'var(--color-surface, rgba(0,0,0,0.1))' }}
         >
-          <span
-            role="button"
-            tabIndex={-1}
+          <button
+            type="button"
             onClick={handleViewAllCenter}
-            className="text-xs font-semibold hover:underline cursor-pointer inline-block"
+            className="text-xs font-semibold hover:underline cursor-pointer inline-block border-none bg-transparent p-0"
             style={{ color: 'var(--color-accent)' }}
           >
             Notification Center &rarr;
-          </span>
+          </button>
         </div>
       </div>
     </div>

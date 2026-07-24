@@ -3,13 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { NotificationsService } from './notifications.service';
-import { NotificationPreferencesUpdateDto } from './notifications.dto';
-
-export class BulkNotificationDto {
-  ids?: number[];
-  campaignId?: number;
-  all?: boolean;
-}
+import { BulkNotificationDto, NotificationPreferencesUpdateDto } from './notifications.dto';
 
 /**
  * User-scoped (never campaign-scoped): every route operates on the CALLER's own
@@ -88,14 +82,14 @@ export class NotificationsController {
   @Post('mark-read')
   @ApiOperation({ summary: 'Mark selected, campaign, or all notifications read' })
   @ApiResponse({ status: 201, description: '{ updated, updatedIds }' })
-  async markReadBulk(@CurrentUser() user: RequestUser, @Body() body?: BulkNotificationDto) {
+  async markReadBulk(@CurrentUser() user: RequestUser, @Body() body: BulkNotificationDto) {
     return this.notifications.markReadBulk(user, body);
   }
 
   @Post('mark-unread')
   @ApiOperation({ summary: 'Mark selected, campaign, or all notifications unread' })
   @ApiResponse({ status: 201, description: '{ updated, updatedIds }' })
-  async markUnreadBulk(@CurrentUser() user: RequestUser, @Body() body?: BulkNotificationDto) {
+  async markUnreadBulk(@CurrentUser() user: RequestUser, @Body() body: BulkNotificationDto) {
     return this.notifications.markUnreadBulk(user, body);
   }
 
