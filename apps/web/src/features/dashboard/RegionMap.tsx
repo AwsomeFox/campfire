@@ -322,7 +322,18 @@ export function RegionMap({
   // upload path here). GetAMapPanel owns the preview/reroll; this just does the atomic use.
   async function generateRegionMap(params: GenerateMapParams) {
     const result = await api.post<GeneratedMapResult>(`${API}/campaigns/${campaignId}/maps/generate`, params);
-    await handleMapUpload({ id: result.attachmentId } as Attachment);
+    // Wire the generated attachment as the region map. Do NOT route through handleMapUpload
+    // here: it swallows PATCH errors (for the dropzone flow's inline retry), which would let
+    // the wizard close as if the attach succeeded. Instead let a failure REJECT so the wizard
+    // stays open and surfaces the real error.
+    setBusy(true);
+    try {
+      await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: result.attachmentId });
+      clearMapError();
+      onChange();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleMapRemove() {
