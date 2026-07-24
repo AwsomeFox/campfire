@@ -25,6 +25,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { PageTitle } from '../../components/PageTitle';
 
 interface EventDraft {
   title: string;
@@ -261,7 +262,7 @@ export default function TimelinePage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Timeline</h3>
+        <PageTitle>Timeline</PageTitle>
         <div style={{ flex: 1 }} />
         {isDm && !creating && (
           <Btn

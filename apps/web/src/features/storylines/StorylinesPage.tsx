@@ -27,6 +27,7 @@ import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { PageTitle } from '../../components/PageTitle';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -173,7 +174,7 @@ export default function StorylinesPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Storylines</h3>
+        <PageTitle>Storylines</PageTitle>
         <span className="tag tag-outline" style={{ fontSize: 10 }} title="Visible only to the DM">
           DM only
         </span>
