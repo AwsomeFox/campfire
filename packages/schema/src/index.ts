@@ -4664,6 +4664,7 @@ export const AiDmSeat = z.object({
   tokensUsed: z.number().int().nonnegative().default(0),
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
+  actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   ...timestamps,
 });
 export type AiDmSeat = z.infer<typeof AiDmSeat>;
@@ -4676,6 +4677,7 @@ export const AiDmSeatUpdate = z.object({
   model: z.string().max(120).optional(),
   instructions: z.string().max(20_000).optional(),
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
+  actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;
 

@@ -1210,6 +1210,18 @@ function migrateAiDmSeatsTableForMode(sqlite: Database.Database): void {
   sqlite.exec("ALTER TABLE ai_dm_seats ADD COLUMN mode TEXT NOT NULL DEFAULT 'off'");
 }
 
+function migrateAiDmSeatsTableForActionQueueDepth(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_seats'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_seats)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'action_queue_depth')) return;
+
+  sqlite.exec('ALTER TABLE ai_dm_seats ADD COLUMN action_queue_depth INTEGER DEFAULT 8');
+}
+
 /**
  * Migration for DBs created before the AI scribe (issue #316): the
  * `ai_scribe_configs` + `ai_scribe_jobs` tables didn't exist. Like the
@@ -2318,6 +2330,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
   { name: '0079_notification_preferences', run: migrateNotificationPreferencesTables },
   { name: '0080_starfinder_combat_state', run: migrateStarfinderCombatState },
+  { name: '0081_ai_dm_seats_action_queue_depth', run: migrateAiDmSeatsTableForActionQueueDepth },
 ];
 
 /**

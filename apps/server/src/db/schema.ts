@@ -1110,6 +1110,8 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   lastTurnAt: text('last_turn_at'),
+  /** Depth cap for the FIFO action queue when turns are submitted while running (#1045). */
+  actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

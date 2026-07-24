@@ -537,9 +537,9 @@ export default function AiTablePage() {
     if (!text || locked || submitting || campaignId === undefined) return;
     setSubmitting(true);
     setSubmitError(null);
-    // Prefix with the speaker identity (#317-safe flavour). The DM may also set the scene.
-    const body: { input: string; scene?: string } = {
+    const body: { input: string; scene?: string; characterId?: number } = {
       input: `${speakerPrefix(memberName, characterName)} ${text}`,
+      characterId: myMembership?.characterId ?? undefined,
     };
     if (isDm && sceneField.trim()) body.scene = sceneField.trim();
     try {
