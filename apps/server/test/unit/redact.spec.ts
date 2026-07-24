@@ -3,6 +3,7 @@ import {
   NpcCreate,
   FactionCreate,
   TimelineEventCreate,
+  EncounterCreate,
   type Role,
 } from '@campfire/schema';
 import { redactSecret, redactSecrets, isVisibleTo, filterHidden, resolveCreateHidden } from '../../src/common/redact';
@@ -95,6 +96,7 @@ describe('redact — resolveCreateHidden (issue #754 private-by-default prep)', 
     expect(NpcCreate.parse({ name: 'x' }).hidden).toBeUndefined();
     expect(FactionCreate.parse({ name: 'x' }).hidden).toBeUndefined();
     expect(TimelineEventCreate.parse({ title: 'x' }).hidden).toBeUndefined();
+    expect(EncounterCreate.parse({ name: 'x' }).hidden).toBeUndefined();
     expect(resolveCreateHidden(QuestCreate.parse({ title: 'x' }).hidden)).toBe(true);
   });
 });

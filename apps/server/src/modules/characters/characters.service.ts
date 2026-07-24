@@ -221,14 +221,6 @@ export class CharactersService {
   }
 
   /**
-   * Mirror a character's conditions into linked combatants in still-live encounters
-   * (issue #486). Pair of EncountersService's combatant→sheet write-through: a sheet
-   * `set_character_conditions` / patchConditions / PATCH conditions must show up on
-   * the run-session tracker. Ended encounters keep their historical snapshot.
-   * Overwrites the combatant's conditions array wholesale (last sheet write wins);
-   * see EncountersService.updateCombatant for the full overlap-window contract.
-   */
-  /**
    * Emit `encounter.updated` only while the encounter is still player-visible, so a
    * sheet HP/condition sync into a HIDDEN live encounter cannot leak that encounter's
    * existence onto the shared campaign SSE stream (#754). Mirrors
@@ -248,6 +240,14 @@ export class CharactersService {
     this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
   }
 
+  /**
+   * Mirror a character's conditions into linked combatants in still-live encounters
+   * (issue #486). Pair of EncountersService's combatant→sheet write-through: a sheet
+   * `set_character_conditions` / patchConditions / PATCH conditions must show up on
+   * the run-session tracker. Ended encounters keep their historical snapshot.
+   * Overwrites the combatant's conditions array wholesale (last sheet write wins);
+   * see EncountersService.updateCombatant for the full overlap-window contract.
+   */
   private async syncActiveCombatantConditions(
     characterId: number,
     conditionsJson: string,
