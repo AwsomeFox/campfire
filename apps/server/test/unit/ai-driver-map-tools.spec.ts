@@ -1,5 +1,13 @@
 import { describe, it, expect } from '@jest/globals';
-import { isDriverToolAllowed } from '../../src/modules/ai-driver/ai-driver.service';
+import {
+  DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  guardDriverLivePlayArgs,
+  isDriverToolAllowed,
+  noteDriverGenerateMapCall,
+  recordDriverGeneratedMap,
+  resetDriverTurnCounters,
+  type AiDmSessionState,
+} from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
  * #488: The AI Driver seat could operate a fight (begin_encounter/next_turn/
@@ -7,19 +15,30 @@ import { isDriverToolAllowed } from '../../src/modules/ai-driver/ai-driver.servi
  * map/VTT authoring tool defaulted to deny, so a driver-mode AI could not
  * spin up a random ambush and set up its own board.
  *
- * This suite pins the guarded live-play subset for map authoring:
- *  - `generate_map` — procedurally build a battle map (already DM-role-gated
- *    at the tool layer; produces a hidden attachment that must still be
- *    revealed explicitly through the encounter's fog/attachment machinery).
- *  - `update_encounter` — carries fog geometry, grid config, and shared AoE
- *    templates for live spatial play (also DM-role-gated).
- *  - `reveal_map_region` — remains on the allow-list (was added earlier).
- *
- * It also pins the boundary: hard deletes (`delete_*`), attachment-visibility
- * flips, and non-write map tools that don't exist stay blocked.
+ * This suite pins the guarded live-play subset for map authoring plus the
+ * execution-time guards that bound generate_map and restrict update_encounter
+ * to VTT-only fields with session-generated map linkage.
  */
 describe('AI Driver battle-map tools (#488)', () => {
   const writeTool = (name: string) => ({ name, mutating: true, proposalCapable: false });
+
+  function session(overrides: Partial<AiDmSessionState> = {}): AiDmSessionState {
+    return {
+      campaignId: 1,
+      status: 'idle',
+      state: 'running',
+      scene: null,
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: [],
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+      ...overrides,
+    };
+  }
 
   it('allows generate_map — the driver can originate a battlefield in the flow of play', () => {
     expect(isDriverToolAllowed(writeTool('generate_map'))).toBe(true);
@@ -38,23 +57,109 @@ describe('AI Driver battle-map tools (#488)', () => {
   });
 
   it('still blocks delete_attachment — hidden handouts and generated maps cannot be purged by the seat', () => {
-    // Even proposal-capable, the `delete_` prefix guard refuses.
     expect(isDriverToolAllowed({ name: 'delete_attachment', mutating: true, proposalCapable: true })).toBe(false);
   });
 
   it('still blocks update_attachment (attachment visibility) — revealing hidden handouts stays a DM decision', () => {
-    // `update_attachment` is not on the allow-list; default-deny holds.
     expect(isDriverToolAllowed(writeTool('update_attachment'))).toBe(false);
   });
 
   it('exercises the full exploration -> combat map path (generate -> update -> reveal -> begin)', () => {
-    // The whole map-authoring loop is reachable without a human intervention:
-    //   1. generate_map (build the battle map)
-    //   2. update_encounter (align grid / set fog)
-    //   3. reveal_map_region (lift fog as the party explores)
-    //   4. begin_encounter (start the fight)
     for (const name of ['generate_map', 'update_encounter', 'reveal_map_region', 'begin_encounter']) {
       expect(isDriverToolAllowed(writeTool(name))).toBe(true);
     }
+  });
+});
+
+describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () => {
+  function session(overrides: Partial<AiDmSessionState> = {}): AiDmSessionState {
+    return {
+      campaignId: 1,
+      status: 'idle',
+      state: 'running',
+      scene: null,
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: [],
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+      ...overrides,
+    };
+  }
+
+  it('allows the first generate_map call each turn and blocks subsequent ones', () => {
+    const s = session();
+    resetDriverTurnCounters(s);
+    expect(guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'cave' }, s).ok).toBe(true);
+    noteDriverGenerateMapCall(s);
+    const blocked = guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'dungeon' }, s);
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.code).toBe('generate_map_budget_exhausted');
+    expect(DRIVER_GENERATE_MAP_BUDGET_PER_TURN).toBe(1);
+  });
+
+  it('resets generate_map budget at turn start', () => {
+    const s = session({ generateMapCallsThisTurn: 1 });
+    resetDriverTurnCounters(s);
+    expect(guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'cave' }, s).ok).toBe(true);
+  });
+
+  it('strips prep fields from update_encounter, keeping only VTT overlays', () => {
+    const s = session({ driverGeneratedMapIds: [42] });
+    const result = guardDriverLivePlayArgs(
+      'update_encounter',
+      {
+        encounterId: 7,
+        name: 'Renamed ambush',
+        hidden: false,
+        locationId: 99,
+        fog: { enabled: true, revealed: [] },
+        gridSize: 50,
+        mapAttachmentId: 42,
+      },
+      s,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.args).toEqual({
+        encounterId: 7,
+        fog: { enabled: true, revealed: [] },
+        gridSize: 50,
+        mapAttachmentId: 42,
+      });
+      expect(result.args).not.toHaveProperty('hidden');
+      expect(result.args).not.toHaveProperty('name');
+      expect(result.args).not.toHaveProperty('locationId');
+    }
+  });
+
+  it('rejects linking mapAttachmentId to an attachment the seat did not generate', () => {
+    const s = session({ driverGeneratedMapIds: [10] });
+    const result = guardDriverLivePlayArgs(
+      'update_encounter',
+      { encounterId: 7, mapAttachmentId: 999 },
+      s,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe('forbidden_map_link');
+  });
+
+  it('allows mapAttachmentId:null as detach/undo', () => {
+    const s = session();
+    const result = guardDriverLivePlayArgs('update_encounter', { encounterId: 7, mapAttachmentId: null }, s);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.args.mapAttachmentId).toBeNull();
+  });
+
+  it('tracks generated map ids for later linkage', () => {
+    const s = session();
+    recordDriverGeneratedMap(s, 55);
+    recordDriverGeneratedMap(s, 55);
+    expect(s.driverGeneratedMapIds).toEqual([55]);
+    const result = guardDriverLivePlayArgs('update_encounter', { encounterId: 1, mapAttachmentId: 55 }, s);
+    expect(result.ok).toBe(true);
   });
 });
