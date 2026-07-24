@@ -3672,23 +3672,39 @@ function AddCombatantPanel({
     }
   }
 
-  function addDroppedRuleEntry(event: DragEvent<HTMLDivElement>) {
+  async function addDroppedRuleEntry(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     if (saving) return;
+    let payload: { id?: unknown; name?: unknown; type?: unknown };
     try {
-      const payload = JSON.parse(event.dataTransfer.getData('application/x-campfire-rule-entry')) as {
-        id?: unknown;
-        name?: unknown;
-        type?: unknown;
-      };
-      if (
-        typeof payload.id !== 'number' ||
-        typeof payload.name !== 'string' ||
-        (payload.type !== 'monster' && payload.type !== 'hazard')
-      ) return;
-      void addFromCompendium({ id: payload.id, name: payload.name, type: payload.type } as RuleEntry);
+      payload = JSON.parse(event.dataTransfer.getData('application/x-campfire-rule-entry'));
     } catch {
       // Ignore unrelated/invalid drags; the drop zone accepts only Campfire rule entries.
+      return;
+    }
+    if (
+      typeof payload.id !== 'number' ||
+      typeof payload.name !== 'string' ||
+      (payload.type !== 'monster' && payload.type !== 'hazard')
+    ) return;
+    const droppedType = payload.type;
+    const droppedId = payload.id;
+    setSaving(true);
+    setError(null);
+    try {
+      // Resolve the FULL entry from the rules read path (the drag payload only carries
+      // id/name/type, but RuleEntry requires many more fields — trusting a cast would
+      // mask bugs). Confirm the resolved type still matches what was dragged before adding.
+      const entry = await api.get<RuleEntry>(`${API}/rules/entries/${droppedId}`);
+      if (entry.type !== droppedType) {
+        setError("That compendium entry doesn't match the dragged monster/hazard anymore.");
+        return;
+      }
+      await addFromCompendium(entry);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -3753,7 +3769,7 @@ function AddCombatantPanel({
           event.dataTransfer.dropEffect = 'copy';
         }
       }}
-      onDrop={addDroppedRuleEntry}
+      onDrop={(event) => void addDroppedRuleEntry(event)}
     >
       <span className="card-kicker">Add combatant</span>
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>

@@ -1040,7 +1040,7 @@ export class McpToolsService {
         packSlug: z.string().min(1).max(160).optional().describe('Restrict to a single installed rule pack by slug (list_rule_packs)'),
         includeHazards: z.boolean().optional().describe('Also draw compendium hazards (traps/environmental dangers) as budgeted building blocks alongside monsters; omit for monsters only'),
         shape: EncounterShape.optional().describe('solo (1) | pair (2) | group (3–6) | horde (7+); omit to let the budget pick the count'),
-        count: z.number().int().min(1).max(30).optional().describe('Upper bound on the number of monsters (default 12)'),
+        count: z.number().int().min(1).max(30).optional().describe('Upper bound on the number of monsters/hazards (default 12)'),
         seed: z.number().int().nonnegative().max(4294967295).optional().describe('Deterministic seed — pass a returned seed to reproduce, omit for a fresh group'),
       },
       async ({ campaignId, difficulty, party, creatureType, environment, minCr, maxCr, packSlug, includeHazards, shape, count, seed }) => {

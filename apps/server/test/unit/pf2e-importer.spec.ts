@@ -94,10 +94,17 @@ describe('pf2e-importer — section fetch + mapping', () => {
 
   it('maps hazards as first-class budgetable entries and excludes adventure publications', async () => {
     const { entries, skippedCount } = await fetchPf2eSection(fake.baseUrl, 'hazards', silentLogger);
-    expect(entries.map((e) => e.name)).toEqual(['Burning Floor']);
-    expect(entries[0].type).toBe('hazard');
-    expect(JSON.parse(entries[0].dataJson!)).toMatchObject({ level: 3, ac: 20, hp: 32, complexity: 'Simple' });
-    expect(skippedCount).toBe(1);
+    // "Story Trap" (Example Adventure Path) is excluded; "Rulebook Trap" — whose source
+    // merely contains the word "adventure" — is a rulebook and must be retained.
+    expect(entries.map((e) => e.name).sort()).toEqual(['Burning Floor', 'Rulebook Trap']);
+    expect(entries.some((e) => e.name === 'Story Trap')).toBe(false);
+    const burningFloor = entries.find((e) => e.name === 'Burning Floor')!;
+    expect(burningFloor.type).toBe('hazard');
+    expect(JSON.parse(burningFloor.dataJson!)).toMatchObject({ level: 3, ac: 20, hp: 32, complexity: 'Simple' });
+    // A rulebook title containing "adventure" is NOT treated as an adventure publication.
+    const rulebookTrap = entries.find((e) => e.name === 'Rulebook Trap')!;
+    expect(rulebookTrap.source).toBe('Pathfinder Book of Adventure');
+    expect(skippedCount).toBe(1); // only the true Adventure Path row is dropped
   });
 
   it('maps deities, rituals, planes, curses, and diseases into searchable compendium types', async () => {

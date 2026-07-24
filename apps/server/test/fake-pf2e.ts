@@ -221,6 +221,22 @@ const HAZARDS = [
     source: 'Example Adventure Path',
     license: 'ORC',
   },
+  {
+    // A genuine *rulebook* whose title merely contains the word "adventure": it must NOT be
+    // excluded as an adventure/scenario publication (the source guard is publication-line
+    // precise, not a bare "adventure" substring match).
+    id: 'rulebook-trap',
+    name: 'Rulebook Trap',
+    type: 'Hazard',
+    level: 2,
+    ac: 18,
+    hp: 24,
+    stealth: 8,
+    complexity: 'Simple',
+    text: 'A generic hazard printed in a rules reference.',
+    source: 'Pathfinder Book of Adventure',
+    license: 'ORC',
+  },
 ];
 
 const REFERENCES: Record<string, Array<Record<string, unknown>>> = {

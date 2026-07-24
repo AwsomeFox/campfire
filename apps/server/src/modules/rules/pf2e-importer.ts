@@ -226,7 +226,11 @@ function sourceOf(src: Record<string, unknown>): string {
  */
 function isAdventureSource(src: Record<string, unknown>): boolean {
   const source = sourceOf(src);
-  return /\b(adventure path|adventure|scenario|society scenario|quest|bounty|one[- ]shot)\b/i.test(source);
+  // Match Paizo adventure/scenario *publication-line* patterns rather than a bare
+  // "adventure" substring, which would false-positive on rulebooks whose titles merely
+  // contain the word (e.g. "…Book of Adventure"). We still fail closed on the genuine
+  // product lines: Adventure Path, (Society) Scenario, Bounty, numbered Quest, One-Shot.
+  return /\b(?:adventure path|society scenario|scenario|bounty|one[- ]shot)\b|\bquest\s+#/i.test(source);
 }
 
 function traitsOf(src: Record<string, unknown>): string[] {
@@ -426,7 +430,7 @@ function mapHazard(src: Record<string, unknown>, defaultLicense?: string): Impor
     dataJson: JSON.stringify({
       level,
       ac: num(src.ac),
-      hp: num(src.hp) ?? 1,
+      hp: num(src.hp),
       stealth: num(src.stealth),
       complexity: complexity || null,
       disable: src.disable ?? null,
