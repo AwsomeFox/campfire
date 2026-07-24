@@ -5,6 +5,7 @@ import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { BackupService } from '../../src/modules/backup/backup.service';
+import { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { BACKUP_CADENCE_KEY, type BackupCadenceState } from '../../src/modules/backup/backup-cadence';
@@ -93,12 +94,14 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     // it for inserts/reads, so handing them the proxy directly mirrors runtime.
     const db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
+    const aiProviderConfig = { invalidateCachedKey: jest.fn() } as unknown as AiProviderConfigService;
     return new BackupService(
       holder,
       db,
       audit,
       new SettingsService(db),
       new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
+      aiProviderConfig,
     );
   }
 

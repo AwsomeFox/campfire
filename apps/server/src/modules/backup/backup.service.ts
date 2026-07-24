@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, scryptSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,8 @@ import {
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
 import { DB, DB_HOLDER, DbHolder, dbFilePath, resolveDataDir, type DrizzleDb } from '../../db/db.module';
+import { decryptSecret } from '../../common/crypto';
+import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { count, isNotNull } from 'drizzle-orm';
 import { aiProviderConfigs } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -91,6 +93,8 @@ function uploadsRoot(dataDir: string): string {
  *  as a plain string to avoid a cross-module dependency (backup already sits
  *  above provider config in the module graph). */
 const AI_KEYFILE_NAME = 'ai-config.key';
+/** Kept in sync with ai-provider-config.service.ts — passphrase stretching for AI_CONFIG_KEY. */
+const AI_CONFIG_KEY_SALT = 'campfire:ai-provider-config:v1';
 
 /** Options accepted by {@link BackupService.buildBackup}. */
 export interface BuildBackupOptions {
@@ -131,6 +135,59 @@ function looksLikeSqlite(buf: Buffer): boolean {
   return buf.length >= SQLITE_MAGIC.length && buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC);
 }
 
+function keyMaterialFromEnvOrHex(raw: string): Buffer {
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
+  return scryptSync(raw, AI_CONFIG_KEY_SALT, 32);
+}
+
+/** Normalize on-disk keyfile bytes (64-hex UTF-8) or raw 32-byte material. */
+function aiKeyMaterialToBuffer(material: Buffer): Buffer {
+  const asText = material.toString('utf8').trim();
+  if (/^[0-9a-fA-F]{64}$/.test(asText)) return Buffer.from(asText, 'hex');
+  return material;
+}
+
+/** The encryption key that will be effective after restore completes. */
+function resolvePostRestoreAiKey(dataDir: string, restoredKeyBytes: Buffer | null): Buffer | null {
+  const env = process.env.AI_CONFIG_KEY?.trim();
+  if (env) return keyMaterialFromEnvOrHex(env);
+  if (restoredKeyBytes) return aiKeyMaterialToBuffer(restoredKeyBytes);
+  try {
+    const existing = fs.readFileSync(path.join(dataDir, AI_KEYFILE_NAME), 'utf8').trim();
+    if (/^[0-9a-fA-F]{64}$/.test(existing)) return Buffer.from(existing, 'hex');
+  } catch {
+    // no keyfile on host
+  }
+  return null;
+}
+
+/** #496: prove staged credentials decrypt with the post-restore key before overwriting live data. */
+function validateStagedAiCredentialDecryptability(stagedDbPath: string, key: Buffer | null): void {
+  const probe = new Database(stagedDbPath, { readonly: true, fileMustExist: true });
+  try {
+    const row = probe
+      .prepare(
+        "SELECT encrypted_api_key AS encryptedApiKey FROM ai_provider_configs WHERE encrypted_api_key IS NOT NULL LIMIT 1",
+      )
+      .get() as { encryptedApiKey: string } | undefined;
+    if (!row?.encryptedApiKey) return;
+    if (!key) {
+      throw new BadRequestException(
+        'Invalid backup archive — stored AI credentials cannot be decrypted without the AI encryption key',
+      );
+    }
+    try {
+      decryptSecret(row.encryptedApiKey, key);
+    } catch {
+      throw new BadRequestException(
+        'Invalid backup archive — stored AI credentials cannot be decrypted with the restored encryption key',
+      );
+    }
+  } finally {
+    probe.close();
+  }
+}
+
 @Injectable()
 export class BackupService implements OnApplicationBootstrap {
   private readonly logger = new Logger(BackupService.name);
@@ -149,6 +206,7 @@ export class BackupService implements OnApplicationBootstrap {
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly attachments: AttachmentsService,
+    private readonly aiProviderConfig: AiProviderConfigService,
   ) {}
 
   /**
@@ -477,11 +535,22 @@ export class BackupService implements OnApplicationBootstrap {
     const zip = await this.loadBackupZip(buffer);
     const manifest = await this.readManifestFromZip(zip);
 
+    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
+    if (manifest.aiKeyIncluded && !envelopeEntry) {
+      throw new BadRequestException(
+        'Invalid backup archive — manifest claims an AI key envelope but backup.key-envelope.json is missing',
+      );
+    }
+    if (!manifest.aiKeyIncluded && envelopeEntry) {
+      throw new BadRequestException(
+        'Invalid backup archive — manifest does not include an AI key envelope but backup.key-envelope.json is present',
+      );
+    }
+
     // #496: If the archive carries an encrypted AI keyfile envelope, unwrap it
     // BEFORE we destroy the live DB — a wrong/missing passphrase must fail with
     // the server untouched. `keyBytes` may be null (no envelope in archive OR
     // no passphrase supplied but archive has no envelope either).
-    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
     let restoredKeyBytes: Buffer | null = null;
     if (envelopeEntry) {
       const passphrase = options?.keyPassphrase?.trim();
@@ -539,6 +608,11 @@ export class BackupService implements OnApplicationBootstrap {
         throw new BadRequestException('Invalid backup archive — database could not be opened');
       }
 
+      validateStagedAiCredentialDecryptability(
+        stagedDbPath,
+        resolvePostRestoreAiKey(resolveDataDir(), restoredKeyBytes),
+      );
+
       // --- Collect + path-check uploads before touching anything ---
       const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
       for (const name of Object.keys(zip.files)) {
@@ -582,7 +656,8 @@ export class BackupService implements OnApplicationBootstrap {
           if (!envSetOnHost) {
             const keyfilePath = path.join(dataDir, AI_KEYFILE_NAME);
             fs.mkdirSync(path.dirname(keyfilePath), { recursive: true });
-            fs.writeFileSync(keyfilePath, restoredKeyBytes.toString('utf8'), { mode: 0o600 });
+            fs.writeFileSync(keyfilePath, restoredKeyBytes.toString('utf8'));
+            fs.chmodSync(keyfilePath, 0o600);
           } else {
             this.logger.warn(
               'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
@@ -611,6 +686,8 @@ export class BackupService implements OnApplicationBootstrap {
           }`,
         );
       }
+
+      this.aiProviderConfig.invalidateCachedKey();
 
       const result: RestoreResult = {
         ok: true,

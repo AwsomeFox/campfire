@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
+import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { SettingsModule } from '../settings/settings.module';
 import { BackupService } from './backup.service';
 import { BackupController } from './backup.controller';
@@ -12,7 +13,7 @@ import { BackupController } from './backup.controller';
  * (lastBackupAt / nextRunAt) introduced in issue #732.
  */
 @Module({
-  imports: [AuditModule, AttachmentsModule, SettingsModule],
+  imports: [AuditModule, AttachmentsModule, AiProviderConfigModule, SettingsModule],
   controllers: [BackupController],
   providers: [BackupService],
   exports: [BackupService],

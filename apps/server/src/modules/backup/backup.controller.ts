@@ -5,7 +5,6 @@ import {
   Get,
   HttpCode,
   Post,
-  Query,
   Res,
   UploadedFile,
   UseInterceptors,
@@ -35,15 +34,31 @@ export class BackupController {
     summary: 'Download a whole-server backup',
     description:
       'Server-admin only. Returns a zip archive containing a WAL-safe snapshot of the SQLite database (via VACUUM INTO) plus every uploaded file, with a manifest. ' +
-      'Pass ?keyPassphrase=<phrase> (issue #496) to include the auto-generated AI credential encryption keyfile as an encrypted envelope in the archive; ' +
-      'without it, a restore to a fresh DATA_DIR cannot decrypt stored provider API keys unless the operator has set AI_CONFIG_KEY out-of-band. ' +
-      'The passphrase MUST be at least 12 characters; short values are rejected before the archive is produced.',
+      'To include the auto-generated AI credential encryption keyfile as an encrypted envelope (issue #496), use POST /backup/download with a JSON body instead — passphrases must not travel in query strings. ' +
+      'Without the envelope, a restore to a fresh DATA_DIR cannot decrypt stored provider API keys unless the operator has set AI_CONFIG_KEY out-of-band.',
   })
   @ApiResponse({ status: 200, description: 'Zip file download (application/zip, Content-Disposition attachment).' })
-  async download(
+  async download(@Res() res: Response): Promise<void> {
+    await this.sendBackup(res);
+  }
+
+  @Post('download')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Download a whole-server backup (with optional key envelope passphrase)',
+    description:
+      'Server-admin only. Same archive as GET /backup, but accepts the issue-#496 keyfile envelope passphrase in the POST body so it is not logged in query strings or browser history. ' +
+      `The passphrase MUST be at least 12 characters; short values are rejected before the archive is produced.`,
+  })
+  @ApiResponse({ status: 200, description: 'Zip file download (application/zip, Content-Disposition attachment).' })
+  async downloadWithKeyEnvelope(
     @Res() res: Response,
-    @Query('keyPassphrase') keyPassphrase?: string,
+    @Body('keyPassphrase') keyPassphrase?: string,
   ): Promise<void> {
+    await this.sendBackup(res, keyPassphrase);
+  }
+
+  private async sendBackup(res: Response, keyPassphrase?: string): Promise<void> {
     const buffer = await this.backup.buildBackup(
       keyPassphrase && keyPassphrase.length > 0 ? { keyPassphrase } : undefined,
     );

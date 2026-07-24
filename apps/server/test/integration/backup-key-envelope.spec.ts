@@ -6,11 +6,14 @@ import { DbHolder, type DrizzleDb } from '../../src/db/db.module';
 import { SettingsService } from '../../src/modules/settings/settings.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { BackupService, RESTORE_CONFIRM_TOKEN } from '../../src/modules/backup/backup.service';
+import { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { KEY_ENVELOPE_ENTRY } from '../../src/modules/backup/backup-key-envelope';
 import type { BackupManifest } from '../../src/modules/backup/backup-manifest';
 import type { RequestUser } from '../../src/common/user.types';
+import { encryptSecret, decryptSecret } from '../../src/common/crypto';
+import { aiProviderConfigs } from '../../src/db/schema';
 
 /**
  * #496: End-to-end coverage of the passphrase-encrypted AI keyfile envelope.
@@ -66,12 +69,14 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
   function makeService(): BackupService {
     const db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
+    const aiProviderConfig = { invalidateCachedKey: jest.fn() } as unknown as AiProviderConfigService;
     return new BackupService(
       holder,
       db,
       audit,
       new SettingsService(db),
       new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
+      aiProviderConfig,
     );
   }
 
@@ -209,5 +214,48 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     // field is present as a number so the UI can render "N credentials
     // depend on this key" copy.
     expect(typeof view.aiCredentialCount === 'number' || view.aiCredentialCount === null).toBe(true);
+  });
+
+  it('rejects restore when manifest claims an envelope but the entry is missing', async () => {
+    const service = makeService();
+    const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
+    const zip = await JSZip.loadAsync(buffer);
+    zip.remove(KEY_ENVELOPE_ENTRY);
+    const tampered = await zip.generateAsync({ type: 'nodebuffer' });
+    await expect(
+      service.restore(tampered, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE }),
+    ).rejects.toThrow(/manifest claims an AI key envelope/i);
+  });
+
+  it('restored keyfile decrypts stored provider credentials after envelope restore', async () => {
+    const key = Buffer.from('deadbeef'.repeat(8), 'hex');
+    const plaintext = 'sk-test-api-key-12345';
+    const encrypted = encryptSecret(plaintext, key);
+    const db = holder.proxy as DrizzleDb;
+    const now = new Date().toISOString();
+    await db.insert(aiProviderConfigs).values({
+      scope: 'server',
+      providerType: 'openai',
+      model: 'gpt-4',
+      params: '{}',
+      encryptedApiKey: encrypted,
+      keyLast4: '2345',
+      allowedModels: '[]',
+      createdBy: 'admin',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const service = makeService();
+    const buffer = await service.buildBackup({ keyPassphrase: PASSPHRASE });
+    fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
+
+    const result = await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });
+    expect(result.ok).toBe(true);
+
+    const restoredKey = Buffer.from(fs.readFileSync(path.join(dataDir, 'ai-config.key'), 'utf8').trim(), 'hex');
+    const rows = await db.select().from(aiProviderConfigs);
+    expect(rows).toHaveLength(1);
+    expect(decryptSecret(rows[0].encryptedApiKey!, restoredKey)).toBe(plaintext);
   });
 });
