@@ -98,13 +98,16 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
     }
   }, []);
 
-  // Acquire/release based on `enabled`.
+  // Acquire/release based on `enabled`; cleanup releases on disable or unmount.
   useEffect(() => {
-    if (enabled) {
-      void acquire();
-    } else {
+    if (!enabled) {
       void release();
+      return;
     }
+    void acquire();
+    return () => {
+      void release();
+    };
   }, [enabled, acquire, release]);
 
   // Reacquire after visibility restoration.
@@ -128,16 +131,11 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
     };
   }, [enabled, acquire]);
 
-  // Cleanup on unmount.
+  // Track mount state for async acquire guards.
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      const sentinel = sentinelRef.current;
-      if (sentinel) {
-        sentinelRef.current = null;
-        void sentinel.release().catch(() => {});
-      }
     };
   }, []);
 
