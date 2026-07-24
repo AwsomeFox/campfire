@@ -48,13 +48,27 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 export default function EncounterListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
@@ -120,7 +134,7 @@ export default function EncounterListPage() {
       )}
 
       {canDmWrite && creating && (
-        <NewEncounterForm campaignId={id} onCancel={() => setCreating(false)} />
+        <NewEncounterForm campaignId={id} onCancel={closeCreating} />
       )}
 
       {loading ? (

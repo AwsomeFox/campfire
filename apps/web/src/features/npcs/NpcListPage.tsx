@@ -20,7 +20,7 @@ export default function NpcListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
@@ -29,6 +29,20 @@ export default function NpcListPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
@@ -86,7 +100,7 @@ export default function NpcListPage() {
       setNewName('');
       setNewRole('');
       setAudience('dm');
-      setCreating(false);
+      closeCreating();
       await load();
       navigate(`/c/${id}/npcs/${npc.id}`);
     } catch (err) {
@@ -153,7 +167,7 @@ export default function NpcListPage() {
                 ghost
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
-                  setCreating(false);
+                  closeCreating();
                   setNewName('');
                   setNewRole('');
                   setAudience('dm');

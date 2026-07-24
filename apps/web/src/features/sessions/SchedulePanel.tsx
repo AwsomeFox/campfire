@@ -98,6 +98,20 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(() => searchParams.get('action') === 'new');
 
+  const closeAddForm = useCallback(() => {
+    setShowAddForm(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
       setShowAddForm(true);
@@ -232,10 +246,10 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         <ScheduleForm
           onSubmit={async (body) => {
             await api.post<ScheduledSessionWithRsvps>(`${API}/campaigns/${campaignId}/schedule`, body);
-            setShowAddForm(false);
+            closeAddForm();
             void load();
           }}
-          onCancel={() => setShowAddForm(false)}
+          onCancel={closeAddForm}
         />
       )}
 

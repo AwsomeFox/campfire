@@ -54,7 +54,7 @@ export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [locations, setLocations] = useState<Location[]>([]);
@@ -62,6 +62,20 @@ export default function LocationListPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
 
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
@@ -117,7 +131,7 @@ export default function LocationListPage() {
       setNewName('');
       setNewKind('');
       setNewParentId('');
-      setCreating(false);
+      closeCreating();
       await load();
       navigate(`/c/${id}/locations/${loc.id}`);
     } catch (err) {
@@ -195,7 +209,7 @@ export default function LocationListPage() {
                 ghost
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
-                  setCreating(false);
+                  closeCreating();
                   setNewName('');
                   setNewKind('');
                   setNewParentId('');

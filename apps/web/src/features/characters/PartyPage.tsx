@@ -40,6 +40,20 @@ export default function PartyPage() {
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
 
+  const closeCreating = useCallback(() => {
+    setCreating(false);
+    if (searchParams.get('action') === 'new') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
   useEffect(() => {
     if (searchParams.get('action') === 'new') {
       setCreating(true);
@@ -193,7 +207,15 @@ export default function PartyPage() {
       {/* Wait for the roster load so an empty-state create form (autoFocus) does not
           flash during loading and steal route-change focus from the page h1 (#591). */}
       {canCreate && !loading && (creating || characters.length === 0) && (
-        <NewCharacterForm campaignId={id} ddbAllowed={ddbAllowed} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
+        <NewCharacterForm
+          campaignId={id}
+          ddbAllowed={ddbAllowed}
+          onCancel={characters.length > 0 ? closeCreating : undefined}
+          onCreated={() => {
+            closeCreating();
+            void load();
+          }}
+        />
       )}
 
       {pendingUndo && (
