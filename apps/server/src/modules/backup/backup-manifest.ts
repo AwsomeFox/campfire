@@ -23,6 +23,59 @@ export function serverAppVersion(): string {
   return APP_VERSION;
 }
 
+/**
+ * Per-attachment reconciliation record in the manifest (#828). Written by
+ * buildBackup for every committed attachment row visible in the DB snapshot,
+ * so a restore can verify each file's bytes match the DB's expectation.
+ */
+export interface BackupAttachmentRecord {
+  /** Attachment row id (primary key). */
+  id: number;
+  /** Owning campaign id. */
+  campaignId: number;
+  /** Canonical path within the archive (relative to uploads/ root). */
+  path: string;
+  /** File size in bytes at snapshot time. */
+  size: number;
+  /** Attachment mime type. */
+  mime: string;
+  /** DM-only visibility flag. */
+  hidden: boolean;
+  /** sha256 hex digest of the file bytes as captured. */
+  sha256: string;
+}
+
+/**
+ * Reconciliation summary written to the manifest (#828). Records how well the
+ * uploaded files match the DB snapshot's attachment rows. missing/changed/orphan
+ * counts of zero indicate a fully consistent archive; a non-zero missing or
+ * changed count means the archive is partial and should not be treated as a
+ * clean restore source without operator review.
+ */
+export interface BackupReconciliation {
+  /** Unique id for this backup generation (uuid-ish, monotonically fresh). */
+  generation: string;
+  /** Total committed attachment rows found in the DB snapshot. */
+  totalAttachments: number;
+  /** Attachment rows whose file could not be read from disk (missing/ENOENT). */
+  missing: number;
+  /** Files whose size changed between initial listing and final read (retries exhausted). */
+  changed: number;
+  /**
+   * Files present under uploads/ that no attachment row references (paths, capped for
+   * archive size — the full count is `orphanCount`). Includes reserved / uncommitted
+   * upload staging leftovers.
+   */
+  orphans: string[];
+  /** Total number of orphan files (may exceed `orphans.length` if capped). */
+  orphanCount: number;
+  /** Whether the archive is fully reconciled (missing === 0 && changed === 0). */
+  clean: boolean;
+}
+
+/** Cap on how many orphan paths we list in the manifest before truncating. */
+export const BACKUP_ORPHAN_LIST_CAP = 500;
+
 export interface BackupManifest {
   app: string;
   kind: string;
@@ -41,6 +94,16 @@ export interface BackupManifest {
    * an older server can tell the operator which app version is required.
    */
   minCampfireVersion?: string;
+  /**
+   * Per-attachment reconciliation records (#828). Written by v1 archives from
+   * this Campfire release onward; older archives omit this field.
+   */
+  attachments?: BackupAttachmentRecord[];
+  /**
+   * Reconciliation summary (#828). Written by v1 archives from this release onward;
+   * older archives omit this field (they were produced before reconciliation).
+   */
+  reconciliation?: BackupReconciliation;
 }
 
 /** Non-destructive summary returned by backup inspect (issue #514). */
@@ -98,6 +161,58 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
       ? schemaVersion
       : undefined;
 
+  // #828: preserve optional reconciliation fields when re-reading a manifest.
+  const attachments = Array.isArray(raw.attachments)
+    ? (raw.attachments as unknown[])
+        .map((entry): BackupAttachmentRecord | null => {
+          if (!entry || typeof entry !== 'object') return null;
+          const rec = entry as Record<string, unknown>;
+          if (
+            typeof rec.id !== 'number' ||
+            typeof rec.campaignId !== 'number' ||
+            typeof rec.path !== 'string' ||
+            typeof rec.size !== 'number' ||
+            typeof rec.mime !== 'string' ||
+            typeof rec.sha256 !== 'string'
+          ) {
+            return null;
+          }
+          return {
+            id: rec.id,
+            campaignId: rec.campaignId,
+            path: rec.path,
+            size: rec.size,
+            mime: rec.mime,
+            hidden: rec.hidden === true,
+            sha256: rec.sha256,
+          };
+        })
+        .filter((r): r is BackupAttachmentRecord => r !== null)
+    : undefined;
+
+  let reconciliation: BackupReconciliation | undefined;
+  if (raw.reconciliation && typeof raw.reconciliation === 'object') {
+    const r = raw.reconciliation as Record<string, unknown>;
+    if (
+      typeof r.generation === 'string' &&
+      typeof r.totalAttachments === 'number' &&
+      typeof r.missing === 'number' &&
+      typeof r.changed === 'number' &&
+      Array.isArray(r.orphans) &&
+      typeof r.orphanCount === 'number'
+    ) {
+      reconciliation = {
+        generation: r.generation,
+        totalAttachments: r.totalAttachments,
+        missing: r.missing,
+        changed: r.changed,
+        orphans: (r.orphans as unknown[]).filter((x): x is string => typeof x === 'string'),
+        orphanCount: r.orphanCount,
+        clean: r.clean === true,
+      };
+    }
+  }
+
   return {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
@@ -108,6 +223,8 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
     uploadCount,
     ...(appVersion ? { appVersion } : {}),
     ...(parsedSchema !== undefined ? { schemaVersion: parsedSchema } : {}),
+    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+    ...(reconciliation ? { reconciliation } : {}),
   };
 }
 
