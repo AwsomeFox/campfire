@@ -1104,6 +1104,7 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   lastTurnAt: text('last_turn_at'),
+  actionQueueDepth: integer('action_queue_depth').default(8),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
