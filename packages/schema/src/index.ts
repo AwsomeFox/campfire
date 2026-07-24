@@ -4650,6 +4650,18 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
     "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
 } as const;
 
+export const AiDmProactiveSettings = z.object({
+  enabled: z.boolean().default(false),
+  triggers: z.object({
+    encounterEnded: z.boolean().default(true),
+    hpCritical: z.boolean().default(true),
+    objectiveCompleted: z.boolean().default(true),
+  }).default({ encounterEnded: true, hpCritical: true, objectiveCompleted: true }),
+  cooldownSeconds: z.number().int().min(30).max(3600).default(300),
+  maxProactiveTokensPerHour: z.number().int().min(0).max(50_000).default(5_000),
+});
+export type AiDmProactiveSettings = z.infer<typeof AiDmProactiveSettings>;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
@@ -4664,6 +4676,7 @@ export const AiDmSeat = z.object({
   tokensUsed: z.number().int().nonnegative().default(0),
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
+  proactiveSettings: AiDmProactiveSettings.default({}),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
   ...timestamps,
 });
@@ -4677,6 +4690,7 @@ export const AiDmSeatUpdate = z.object({
   model: z.string().max(120).optional(),
   instructions: z.string().max(20_000).optional(),
   tokenBudget: z.number().int().min(0).max(1_000_000_000).optional(),
+  proactiveSettings: AiDmProactiveSettings.optional(),
   actionQueueDepth: z.number().int().min(1).max(20).default(8).optional(),
 });
 export type AiDmSeatUpdate = z.infer<typeof AiDmSeatUpdate>;

@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
+import { AiDmProactiveSettings } from '@campfire/schema';
 import type { AiDmMode, AiDmSeat, AiDmSeatUpdate, AiDmTurnRequest, AiDmTurnResult, AiDmUsageHistoryEntry, AiDmUsageHistoryResponse, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiDmUsageHistory } from '../../db/schema';
@@ -38,6 +39,7 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     actionQueueDepth: row.actionQueueDepth ?? 8,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    proactiveSettings: AiDmProactiveSettings.parse(row.proactiveSettings ?? {}),
   };
 }
 
@@ -54,6 +56,12 @@ function defaultSeat(campaignId: number): AiDmSeat {
     tokensUsed: 0,
     turnCount: 0,
     lastTurnAt: null,
+    proactiveSettings: {
+      enabled: false,
+      triggers: { encounterEnded: true, hpCritical: true, objectiveCompleted: true },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    },
     actionQueueDepth: 8,
     createdAt: ts,
     updatedAt: ts,
@@ -83,7 +91,12 @@ export class AiDmService {
    * AiDriverService at construction so the seat path can tear down the live
    * in-memory driver session without creating an AiDm→AiDriver DI cycle.
    */
-  private driverSessionTeardown: ((campaignId: number) => void) | null = null;
+  private driverSessionTeardown?: (campaignId: number) => void;
+  private proactiveSettingsCallback?: (
+    campaignId: number,
+    settings?: AiDmProactiveSettings,
+    seatEnabled?: boolean,
+  ) => void;
 
   /**
    * Per-campaign, in-process budget-spend queues (#1058). Each value is the tail
@@ -101,6 +114,13 @@ export class AiDmService {
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
   ) {}
+
+  /** Register proactive settings change callback (#1044). */
+  registerProactiveSettingsCallback(
+    fn: (campaignId: number, settings?: AiDmProactiveSettings, seatEnabled?: boolean) => void,
+  ): void {
+    this.proactiveSettingsCallback = fn;
+  }
 
   /**
    * Run one provider-spend operation while holding the campaign's advisory
@@ -282,6 +302,7 @@ export class AiDmService {
         lastTurnAt: null,
         createdAt: ts,
         updatedAt: ts,
+        proactiveSettings: (input.proactiveSettings ?? base.proactiveSettings) as any,
       });
     } else {
       await this.db
@@ -292,6 +313,7 @@ export class AiDmService {
           ...(input.model !== undefined ? { model: input.model } : {}),
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+          ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
           ...(input.actionQueueDepth !== undefined ? { actionQueueDepth: input.actionQueueDepth } : {}),
           updatedAt: ts,
         })
@@ -307,6 +329,8 @@ export class AiDmService {
       campaignId,
       detail: changed.join(', ') || 'no-op',
     });
+
+    this.proactiveSettingsCallback?.(campaignId, input.proactiveSettings, nextEnabled ?? current.enabled);
 
     // Leaving Driver must drop the live in-memory session (status/state/actingDm/vote/stuck).
     // Otherwise a driver→off→driver cycle can strand the seat behind a human_control handback

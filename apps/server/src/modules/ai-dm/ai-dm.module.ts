@@ -19,7 +19,13 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
  * (useClass/useFactory) — the metering, gating and audit around it are unchanged.
  */
 @Module({
-  imports: [AuditModule, SettingsModule, RoleAccessModule, AiProviderConfigModule, ProposalRecordsModule],
+  imports: [
+    AuditModule,
+    SettingsModule,
+    RoleAccessModule,
+    AiProviderConfigModule,
+    ProposalRecordsModule,
+  ],
   controllers: [AiDmController, CoDmController],
   providers: [AiDmService, CoDmService, { provide: AI_DM_PROVIDER, useClass: NoopAiDmProvider }],
   // AI_DM_PROVIDER is exported so the scribe (#316) shares the SAME injected provider seam.

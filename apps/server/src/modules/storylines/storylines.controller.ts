@@ -73,6 +73,7 @@ export class ArcsController {
   @Patch(':id')
   @ApiOperation({ summary: 'Update a story arc', description: 'DM only.' })
   @ApiResponse({ status: 200, description: 'Updated arc.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: StoryArcUpdateDto,
@@ -80,7 +81,8 @@ export class ArcsController {
   ) {
     const row = await this.storylines.getArcRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.storylines.updateArc(id, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.storylines.updateArc(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Post(':id/status')
