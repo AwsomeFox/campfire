@@ -218,6 +218,7 @@ function RevisionDialog({
                 })}
               </div>
             )}
+            {restoreError && <ErrorNote message={restoreError} />}
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Btn ghost ref={closeRef} onClick={onClose} className="w-full sm:w-auto">
                 Close preview
@@ -362,8 +363,10 @@ export function RevisionHistoryPanel({
       onRestored?.();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409 && err.code === 'STALE_WRITE') {
-        // Reload live prose so the next restore attempt carries a fresh version.
+        // Reload live prose + history, then return to inspect so the dialog matches the
+        // refreshed tip instead of staying on a stale confirm step.
         onRestored?.();
+        setDialogStep('inspect');
         setRestoreError(
           'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
             'The latest content was reloaded; review the history and try again if you still want to restore.',

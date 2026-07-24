@@ -227,7 +227,9 @@ export class RevisionsService {
           authorName: '',
           authorSource: 'human',
           authorSourceDetail: '',
-          createdAt: '',
+          // Author/time of prior prose is unknowable; stamp createdAt with the close
+          // time so clients never parse an empty date string.
+          createdAt: ts,
           replacedByUserId: actor.userId,
           replacedByName: actor.name,
           replacedBySource: actor.source,
@@ -329,7 +331,9 @@ export class RevisionsService {
         authorName: '',
         authorSource: 'human',
         authorSourceDetail: '',
-        createdAt: '',
+        // Author/time of prior prose is unknowable; stamp createdAt with the close
+        // time so clients never parse an empty date string.
+        createdAt: ts,
         replacedByUserId: actor.userId,
         replacedByName: actor.name,
         replacedBySource: actor.source,
@@ -377,32 +381,67 @@ export class RevisionsService {
     entityType: RevisionEntityType,
     entityId: number,
   ): { campaignId: number; prose: string; updatedAt: string } | null {
-    switch (entityType) {
-      case 'session': {
-        const row = db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.recap, updatedAt: row.updatedAt } : null;
-      }
-      case 'quest': {
-        const row = db.select().from(quests).where(eq(quests.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'npc': {
-        const row = db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'location': {
-        const row = db.select().from(locations).where(eq(locations.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'faction': {
-        const row = db.select().from(factions).where(eq(factions.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'note': {
-        const row = db.select().from(notes).where(eq(notes.id, entityId)).limit(1).get();
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-    }
+    // Per-type loaders keep table/column wiring in one place when new prose entities land.
+    const loaders: Record<
+      RevisionEntityType,
+      () => { campaignId: number; prose: string; updatedAt: string } | null
+    > = {
+      session: () => {
+        const row = db
+          .select({ campaignId: sessions.campaignId, prose: sessions.recap, updatedAt: sessions.updatedAt })
+          .from(sessions)
+          .where(eq(sessions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      quest: () => {
+        const row = db
+          .select({ campaignId: quests.campaignId, prose: quests.body, updatedAt: quests.updatedAt })
+          .from(quests)
+          .where(eq(quests.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      npc: () => {
+        const row = db
+          .select({ campaignId: npcs.campaignId, prose: npcs.body, updatedAt: npcs.updatedAt })
+          .from(npcs)
+          .where(eq(npcs.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      location: () => {
+        const row = db
+          .select({ campaignId: locations.campaignId, prose: locations.body, updatedAt: locations.updatedAt })
+          .from(locations)
+          .where(eq(locations.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      faction: () => {
+        const row = db
+          .select({ campaignId: factions.campaignId, prose: factions.body, updatedAt: factions.updatedAt })
+          .from(factions)
+          .where(eq(factions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      note: () => {
+        const row = db
+          .select({ campaignId: notes.campaignId, prose: notes.body, updatedAt: notes.updatedAt })
+          .from(notes)
+          .where(eq(notes.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+    };
+    return loaders[entityType]();
   }
 
   /**
@@ -426,7 +465,9 @@ export class RevisionsService {
 
   /**
    * Write an entity's prose column back and bump updatedAt, compare-and-swapping on
-   * `expectedUpdatedAt`. Returns false when the row was concurrently changed (0 rows).
+   * `currentUpdatedAt` (the version read inside the current transaction — not the
+   * caller's optimistic-concurrency token). Returns false when the row was
+   * concurrently changed (0 rows).
    */
   private writeProseCas(
     db: SyncDb,
@@ -434,7 +475,7 @@ export class RevisionsService {
     entityId: number,
     prose: string,
     ts: string,
-    expectedUpdatedAt: string,
+    currentUpdatedAt: string,
   ): boolean {
     const changesOf = (result: unknown): number =>
       (result as { changes?: number }).changes ?? 0;
@@ -445,7 +486,7 @@ export class RevisionsService {
             db
               .update(sessions)
               .set({ recap: prose, updatedAt: ts })
-              .where(and(eq(sessions.id, entityId), eq(sessions.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(sessions.id, entityId), eq(sessions.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -455,7 +496,7 @@ export class RevisionsService {
             db
               .update(quests)
               .set({ body: prose, updatedAt: ts })
-              .where(and(eq(quests.id, entityId), eq(quests.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(quests.id, entityId), eq(quests.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -465,7 +506,7 @@ export class RevisionsService {
             db
               .update(npcs)
               .set({ body: prose, updatedAt: ts })
-              .where(and(eq(npcs.id, entityId), eq(npcs.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(npcs.id, entityId), eq(npcs.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -475,7 +516,7 @@ export class RevisionsService {
             db
               .update(locations)
               .set({ body: prose, updatedAt: ts })
-              .where(and(eq(locations.id, entityId), eq(locations.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(locations.id, entityId), eq(locations.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -485,7 +526,7 @@ export class RevisionsService {
             db
               .update(factions)
               .set({ body: prose, updatedAt: ts })
-              .where(and(eq(factions.id, entityId), eq(factions.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(factions.id, entityId), eq(factions.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -495,7 +536,7 @@ export class RevisionsService {
             db
               .update(notes)
               .set({ body: prose, updatedAt: ts })
-              .where(and(eq(notes.id, entityId), eq(notes.updatedAt, expectedUpdatedAt)))
+              .where(and(eq(notes.id, entityId), eq(notes.updatedAt, currentUpdatedAt)))
               .run(),
           ) > 0
         );
@@ -567,7 +608,10 @@ export class RevisionsService {
         });
       }
 
-      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, target.updatedAt)) {
+      // CAS baseline is the in-tx read (`target.updatedAt`), not the caller's token —
+      // assertNotStale already validated opts.expectedUpdatedAt against that baseline.
+      const casBaseline = target.updatedAt;
+      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, casBaseline)) {
         // Row moved between the in-tx read and the CAS write (should be rare under
         // better-sqlite3's write lock); surface the same STALE_WRITE shape as PATCH.
         throw new ConflictException({
@@ -575,8 +619,8 @@ export class RevisionsService {
           message:
             'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
             'Reload to get the latest version, then restore again.',
-          expectedUpdatedAt: opts?.expectedUpdatedAt ?? target.updatedAt,
-          currentUpdatedAt: this.loadTarget(tx, entityType, entityId)?.updatedAt ?? target.updatedAt,
+          expectedUpdatedAt: casBaseline,
+          currentUpdatedAt: this.loadTarget(tx, entityType, entityId)?.updatedAt ?? casBaseline,
         });
       }
 

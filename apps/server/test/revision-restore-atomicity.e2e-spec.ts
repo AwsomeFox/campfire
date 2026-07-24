@@ -230,7 +230,11 @@ describe('revision restore atomicity (e2e) — #513', () => {
     expect(after.restoreAuditCount).toBe(before.restoreAuditCount + 1);
   });
 
-  it('concurrent restores leave exactly one open tip and prose matching one outcome', async () => {
+  async function seedSessionWithTwoClosedTips(): Promise<{
+    sessionId: number;
+    restoreV1: number;
+    restoreV2: number;
+  }> {
     const server = ctx.app.getHttpServer();
     const created = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/sessions`)
@@ -255,12 +259,20 @@ describe('revision restore atomicity (e2e) — #513', () => {
     const restoreV2 = byRecap.get('v2-mid');
     expect(restoreV1).toBeDefined();
     expect(restoreV2).toBeDefined();
+    return { sessionId, restoreV1: restoreV1!, restoreV2: restoreV2! };
+  }
 
+  async function assertConcurrentRestoreOutcome(
+    sessionId: number,
+    first: number,
+    second: number,
+  ): Promise<void> {
+    const server = ctx.app.getHttpServer();
     // Fire both restores together — better-sqlite3 serializes the transactions; the
     // invariant under test is that tip close/open cannot leave two open tips.
     const [a, b] = await Promise.all([
-      request(server).post(`/api/v1/revisions/session/${sessionId}/${restoreV1}/restore`).set(dm),
-      request(server).post(`/api/v1/revisions/session/${sessionId}/${restoreV2}/restore`).set(dm),
+      request(server).post(`/api/v1/revisions/session/${sessionId}/${first}/restore`).set(dm),
+      request(server).post(`/api/v1/revisions/session/${sessionId}/${second}/restore`).set(dm),
     ]);
     expect([a.status, b.status].sort()).toEqual([201, 201]);
 
@@ -272,8 +284,29 @@ describe('revision restore atomicity (e2e) — #513', () => {
       .get(sessionId) as { n: number };
     expect(openTips.n).toBe(1);
 
+    const closedRecaps = (
+      rawDb()
+        .prepare(
+          `SELECT snapshot FROM entity_revisions
+           WHERE entity_type = 'session' AND entity_id = ? AND replaced_at IS NOT NULL`,
+        )
+        .all(sessionId) as Array<{ snapshot: string }>
+    ).map((row) => (JSON.parse(row.snapshot) as { recap?: string }).recap);
+    // Both restore targets remain as closed tips regardless of which request won.
+    expect(closedRecaps).toEqual(expect.arrayContaining(['v1-original', 'v2-mid']));
+
     const session = await request(server).get(`/api/v1/sessions/${sessionId}`).set(dm);
     expect(session.status).toBe(200);
     expect(['v1-original', 'v2-mid']).toContain(session.body.recap);
+  }
+
+  it('concurrent restores leave exactly one open tip and prose matching one outcome', async () => {
+    const { sessionId, restoreV1, restoreV2 } = await seedSessionWithTwoClosedTips();
+    await assertConcurrentRestoreOutcome(sessionId, restoreV1, restoreV2);
+  });
+
+  it('concurrent restores with swapped request order still keep one tip and both closed targets', async () => {
+    const { sessionId, restoreV1, restoreV2 } = await seedSessionWithTwoClosedTips();
+    await assertConcurrentRestoreOutcome(sessionId, restoreV2, restoreV1);
   });
 });
