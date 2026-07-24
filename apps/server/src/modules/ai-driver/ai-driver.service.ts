@@ -1883,6 +1883,22 @@ function approvalKey(tool: string, entityId: number): string {
  */
 const REDACTED_ARG_KEYS = ['apikey', 'password', 'dmsecret', 'secret', 'token', 'authorization', 'bearer'];
 
+/** Battle-map coordinates — must not match the `token` secret substring (#1248). */
+const NON_SECRET_ARG_KEYS = new Set(['tokenx', 'tokeny']);
+
+function isSecretArgKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (NON_SECRET_ARG_KEYS.has(lower)) return false;
+  return REDACTED_ARG_KEYS.some((k) => lower.includes(k));
+}
+
+/** Keep well-formed identifier keys; redact model-controlled key names that embed secrets. */
+function auditArgKeyLabel(key: string, isSecret: boolean): string {
+  if (!isSecret) return key;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return key;
+  return '<redacted>';
+}
+
 /**
  * Summarize a tool-call args object into a redaction-safe, DM-readable string (#1072).
  * The summary is a compact `key=value` list where:
@@ -1899,8 +1915,7 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
   const MAX_TOTAL = 400;
   const ELLIPSIS = '…';
   for (const [key, value] of Object.entries(args)) {
-    const lower = key.toLowerCase();
-    const isSecret = REDACTED_ARG_KEYS.some((k) => lower.includes(k));
+    const isSecret = isSecretArgKey(key);
     let rendered: string;
     if (isSecret) {
       rendered = '<redacted>';
@@ -1915,7 +1930,7 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
     } else {
       rendered = '<object>';
     }
-    const entry = `${key}=${rendered}`;
+    const entry = `${auditArgKeyLabel(key, isSecret)}=${rendered}`;
     // Only account for the ", " separator when appending after existing entries.
     const separatorLen = parts.length === 0 ? 0 : 2;
     // Check the *projected* length before pushing, so a large entry can't push

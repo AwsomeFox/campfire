@@ -118,17 +118,27 @@ describe('summarizeToolArgs (#1072)', () => {
   });
 
   it('rejects an entry that would push the summary past the cap (Copilot review)', () => {
-    // Fill most of the budget with a first entry, then add a second entry whose
-    // rendered length would blow past MAX_TOTAL. The summarizer must skip that
-    // second entry (and emit the ellipsis) instead of overshooting.
-    const summary = summarizeToolArgs({
-      note: 'x'.repeat(60), // fits under 60-char string cap, ~65 chars rendered
-      description: 'y'.repeat(60),
-      followup: 'z'.repeat(60),
-      later: 'w'.repeat(60),
-      giant: JSON.stringify({ padding: 'p'.repeat(500) }),
-    });
+    const bigArgs: Record<string, string> = {};
+    for (let i = 0; i < 12; i++) {
+      bigArgs[`field${String(i).padStart(2, '0')}`] = 'x'.repeat(60);
+    }
+    const summary = summarizeToolArgs(bigArgs);
     expect(summary.length).toBeLessThanOrEqual(400);
+    expect(summary).toContain('…');
+    expect(summary).not.toContain('field11=');
+  });
+
+  it('preserves battle-map tokenX/tokenY coordinates (#1248)', () => {
+    const summary = summarizeToolArgs({ tokenX: 42, tokenY: 17, combatantId: 9 });
+    expect(summary).toContain('tokenX=42');
+    expect(summary).toContain('tokenY=17');
+    expect(summary).not.toContain('<redacted>');
+  });
+
+  it('redacts model-controlled key names that embed credential material', () => {
+    const summary = summarizeToolArgs({ 'apiKey-sk-live-deadbeef': 'x' });
+    expect(summary).toBe('<redacted>=<redacted>');
+    expect(summary).not.toContain('sk-live');
   });
 
   it('null values render as "null"', () => {
