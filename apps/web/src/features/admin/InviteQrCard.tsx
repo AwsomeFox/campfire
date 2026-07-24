@@ -11,6 +11,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import type { CampaignInvite } from '@campfire/schema';
+import { CopyControl } from '../../components/CopyControl';
+import { useDialog } from '../../components/useDialog';
+import { INVITE_COPY_FAILURE, INVITE_COPY_SUCCESS } from './inviteRoleOptions';
 
 // --- Helpers ----------------------------------------------------------------
 
@@ -52,12 +55,12 @@ export interface InviteQrCardProps {
 export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const inviteStillValid = isInviteActive(invite);
   const active = inviteStillValid && scannable;
   const url = inviteUrl(invite.code);
+  const urlFieldId = `qr-invite-link-${invite.id}`;
 
   // Render QR to canvas whenever invite code changes or activity status changes
   const renderQr = useCallback(async () => {
@@ -90,7 +93,7 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
         errorCorrectionLevel: 'M',
       });
       setError(null);
-    } catch (err) {
+    } catch {
       setError('Failed to generate QR code');
     }
   }, [active, url]);
@@ -100,16 +103,6 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
   }, [renderQr]);
 
   // --- Actions ---------------------------------------------------------------
-
-  async function handleCopy() {
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      setError('Clipboard unavailable — copy from the text field instead.');
-    }
-  }
 
   function handleDownload() {
     const canvas = canvasRef.current;
@@ -139,7 +132,17 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
       </html>
     `);
     printWindow.document.close();
-    printWindow.print();
+    const img = printWindow.document.querySelector('img');
+    const doPrint = () => {
+      printWindow.focus();
+      printWindow.print();
+    };
+    if (!img || img.complete) {
+      doPrint();
+    } else {
+      img.addEventListener('load', doPrint, { once: true });
+      img.addEventListener('error', doPrint, { once: true });
+    }
   }
 
   function handleFullscreen() {
@@ -149,18 +152,6 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
   function handleExitFullscreen() {
     setFullscreen(false);
   }
-
-  // Handle Escape to exit fullscreen
-  useEffect(() => {
-    if (!fullscreen) return;
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setFullscreen(false);
-      }
-    }
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [fullscreen]);
 
   // --- Render ----------------------------------------------------------------
 
@@ -219,6 +210,7 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
 
           {/* URL fallback (always visible, accessible) */}
           <input
+            id={urlFieldId}
             className="input text-xs w-full"
             readOnly
             value={url}
@@ -265,33 +257,64 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
             >
               Print
             </button>
-            <button
-              type="button"
+            <CopyControl
+              text={url}
+              selectTargetId={urlFieldId}
+              label="Copy link"
+              copiedLabel="Copied!"
+              aria-label="Copy invite link"
+              successAnnouncement={INVITE_COPY_SUCCESS}
+              failureAnnouncement={INVITE_COPY_FAILURE}
+              showFailureMessage={false}
+              unstyled
               className="btn btn-primary text-xs"
               style={{ minHeight: 32 }}
-              onClick={handleCopy}
-              aria-label="Copy invite link"
-            >
-              {copied ? 'Copied!' : 'Copy link'}
-            </button>
+              onResult={(outcome) => {
+                if (!outcome.ok) {
+                  setError(INVITE_COPY_FAILURE);
+                } else {
+                  setError((current) => (current === INVITE_COPY_FAILURE ? null : current));
+                }
+              }}
+            />
           </div>
         </div>
       </div>
 
       {/* Full-screen overlay */}
       {fullscreen && active && (
-        <div
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/95"
-          role="dialog"
-          aria-modal="true"
-          aria-label="QR code full screen display"
-          data-testid="qr-fullscreen"
-          onClick={handleExitFullscreen}
-        >
-          <QrFullscreen url={url} invite={invite} onClose={handleExitFullscreen} />
-        </div>
+        <QrFullscreenOverlay url={url} invite={invite} onClose={handleExitFullscreen} />
       )}
     </>
+  );
+}
+
+/**
+ * Full-screen overlay with focus trap and inert background (issue #92).
+ */
+function QrFullscreenOverlay({
+  url,
+  invite,
+  onClose,
+}: {
+  url: string;
+  invite: CampaignInvite;
+  onClose: () => void;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({ onClose, inertBackground: true });
+
+  return (
+    <div
+      ref={dialogRef}
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/95"
+      role="dialog"
+      aria-modal="true"
+      aria-label="QR code full screen display"
+      data-testid="qr-fullscreen"
+      onClick={onClose}
+    >
+      <QrFullscreen url={url} invite={invite} onClose={onClose} />
+    </div>
   );
 }
 
@@ -318,6 +341,8 @@ function QrFullscreen({
       margin: 4,
       color: { dark: '#000000', light: '#ffffff' },
       errorCorrectionLevel: 'M',
+    }).catch(() => {
+      // Non-fatal: card-level QR already rendered; fullscreen is a convenience view.
     });
   }, [url]);
 
@@ -343,7 +368,6 @@ function QrFullscreen({
         className="btn btn-secondary"
         onClick={onClose}
         aria-label="Exit full screen"
-        autoFocus
       >
         Close
       </button>
