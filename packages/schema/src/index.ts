@@ -514,6 +514,14 @@ export function xpProgressionFromThresholds(
   if (thresholds.length === 0) {
     throw new Error('xpProgressionFromThresholds: thresholds must not be empty');
   }
+  if (thresholds.some((v, i) => i > 0 && v <= thresholds[i - 1]!)) {
+    throw new Error('xpProgressionFromThresholds: thresholds must be strictly increasing');
+  }
+  if (Number.isFinite(maxLevel) && thresholds.length < maxLevel) {
+    throw new Error(
+      `xpProgressionFromThresholds: thresholds.length (${thresholds.length}) must be >= maxLevel (${maxLevel})`,
+    );
+  }
   const cap = maxLevel === Infinity ? thresholds.length : Math.min(maxLevel, thresholds.length);
   return {
     supportsXpProgression: true,

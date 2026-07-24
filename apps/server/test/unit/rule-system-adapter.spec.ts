@@ -12,6 +12,7 @@ import {
   StarfinderAdapter,
   Archmage13aAdapter,
   OsrAdapter,
+  xpProgressForCharacter,
   xpProgressionFromThresholds,
   xpProgressionSupported,
 } from '@campfire/schema';
@@ -285,5 +286,27 @@ describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
 
   it('xpProgressionFromThresholds rejects an empty threshold table', () => {
     expect(() => xpProgressionFromThresholds([], 20)).toThrow(/must not be empty/);
+  });
+
+  it('xpProgressionFromThresholds rejects non-monotonic thresholds', () => {
+    expect(() => xpProgressionFromThresholds([0, 1000, 500, 2000], 4)).toThrow(/strictly increasing/);
+  });
+
+  it('xpProgressionFromThresholds rejects threshold tables shorter than maxLevel', () => {
+    expect(() => xpProgressionFromThresholds([0, 1000], 5)).toThrow(/must be >= maxLevel/);
+  });
+
+  it('xpProgressForCharacter computes advisory progress for 5e', () => {
+    const p = xpProgressForCharacter(Dnd5eAdapter, 4, 6_499);
+    expect(p.supported).toBe(true);
+    expect(p.ready).toBe(false);
+    expect(p.pct).toBeCloseTo(99.9, 0);
+  });
+
+  it('xpProgressForCharacter returns supported:false for milestone-first adapters', () => {
+    const p = xpProgressForCharacter(Archmage13aAdapter, 5, 100_000);
+    expect(p.supported).toBe(false);
+    expect(p.ready).toBe(false);
+    expect(p.pct).toBe(0);
   });
 });
