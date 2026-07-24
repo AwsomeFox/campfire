@@ -10,9 +10,10 @@ import type {
   Role,
 } from '@campfire/schema';
 import { isOpenLicense, licenseForbidsRedistribution } from '@campfire/schema';
-import type { RequestUser } from '../../common/user.types';
+import { auditActor, type RequestUser } from '../../common/user.types';
 import { AttachmentsService, sniffImageMime } from '../attachments/attachments.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { AuditService } from '../audit/audit.service';
 import { generateMap } from './map-generator';
 import { OPEN_MAP_SOURCES, getMapSource } from './map-sources';
 
@@ -44,6 +45,7 @@ export class MapsService {
   constructor(
     private readonly attachments: AttachmentsService,
     private readonly encounters: EncountersService,
+    private readonly audit: AuditService,
   ) {}
 
   /** Resolve the seed (caller's, or a fresh crypto-random one) and run the generator. */
@@ -105,6 +107,7 @@ export class MapsService {
       // source and the exact seed, so a generated map is always attributable and
       // reproducible from the audit trail alone.
       `map:generator-builtin:seed=${map.seed}`,
+      'map.generate',
     );
     return {
       attachmentId: attachment.id,
@@ -143,6 +146,15 @@ export class MapsService {
       user,
       role,
     );
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'map.attach',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId,
+      detail: `mapId=${result.attachmentId};seed=${result.seed}`,
+    });
     return result;
   }
 
@@ -237,6 +249,7 @@ export class MapsService {
       user,
       role,
       auditDetail,
+      'map.import',
     );
 
     return {

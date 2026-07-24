@@ -152,6 +152,15 @@ describe('procedural map generation (e2e, issue #306)', () => {
     const file = await fetchSvg(server, gen.body.attachmentId);
     expect(file.status).toBe(200);
     expect(file.contentType).toContain('image/svg+xml');
+
+    // Audit trail records map.generate and map.attach for encounter map generation.
+    const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+    const attachRow = audit.body.find(
+      (a: { action: string; entityId: number }) =>
+        a.action === 'map.attach' && a.entityId === encounterId,
+    );
+    expect(attachRow).toBeDefined();
+    expect(attachRow.detail).toContain(`mapId=${gen.body.attachmentId}`);
   });
 
   it('a non-DM member cannot generate a map (403)', async () => {
@@ -184,7 +193,7 @@ describe('procedural map generation (e2e, issue #306)', () => {
     expect(audit.status).toBe(200);
     const row = audit.body.find(
       (a: { action: string; entityId: number }) =>
-        a.action === 'attachment.generate' && a.entityId === gen.body.attachmentId,
+        a.action === 'map.generate' && a.entityId === gen.body.attachmentId,
     );
     expect(row).toBeDefined();
     // actor + source (generator-builtin) + seed all recoverable from the audit trail.

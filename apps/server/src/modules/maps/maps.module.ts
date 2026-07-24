@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AuditModule } from '../audit/audit.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { AttachmentsModule } from '../attachments/attachments.module';
 import { EncountersModule } from '../encounters/encounters.module';
@@ -7,7 +8,7 @@ import { CampaignMapsController, EncounterMapController } from './maps.controlle
 
 /** Procedural battle-map generation (issue #306) — REST + shared service for the MCP tool. */
 @Module({
-  imports: [RoleAccessModule, AttachmentsModule, EncountersModule],
+  imports: [RoleAccessModule, AttachmentsModule, EncountersModule, AuditModule],
   controllers: [CampaignMapsController, EncounterMapController],
   providers: [MapsService],
   exports: [MapsService],
