@@ -291,6 +291,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
   'create_encounter',
