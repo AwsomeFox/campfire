@@ -118,7 +118,7 @@ function normalizeManifestV1(raw: Record<string, unknown>, sourceVersion = 1): B
     // Truncate user-controlled value to avoid log/response inflation.
     const truncated = db.length > 60 ? db.slice(0, 60) + '…' : db;
     throw new BadRequestException(
-      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version 1, got "${truncated}"`,
+      `Invalid backup archive — manifest.db must be "${DB_ENTRY_V1}" for format version ${sourceVersion}, got "${truncated}"`,
     );
   }
   if (typeof dbBytes !== 'number' || !Number.isFinite(dbBytes) || dbBytes < 0) {
