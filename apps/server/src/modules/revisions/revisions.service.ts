@@ -4,16 +4,23 @@ import type { EntityRevision, RevisionAuthorSource, Role, RevisionEntityType } f
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   auditLog,
+  comments,
   entityRevisions,
   factions,
   locations,
   notes,
   npcs,
   quests,
+  scheduledSessions,
+  sessionZero,
   sessions,
+  storyBeats,
+  timelineCalendars,
+  timelineEvents,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -46,13 +53,20 @@ import type { RequestUser } from '../../common/user.types';
  */
 
 /** The prose field snapshotted/restored for each supported entity type. */
-const PROSE_FIELD: Record<RevisionEntityType, 'recap' | 'body'> = {
+type ProseField = 'recap' | 'body' | 'note' | 'notes';
+const PROSE_FIELD: Record<RevisionEntityType, ProseField> = {
   session: 'recap',
   quest: 'body',
   npc: 'body',
   location: 'body',
   faction: 'body',
   note: 'body',
+  timeline_event: 'body',
+  timeline_calendar: 'note',
+  scheduled_session: 'notes',
+  comment: 'body',
+  story_beat: 'body',
+  session_zero: 'body',
 };
 
 const AUTHOR_SOURCES = new Set<RevisionAuthorSource>(['human', 'ai', 'tool']);
@@ -130,7 +144,7 @@ export class RevisionsService {
   }
 
   /** The prose field name for an entity type (public so callers can key their snapshots). */
-  proseField(entityType: RevisionEntityType): 'recap' | 'body' {
+  proseField(entityType: RevisionEntityType): ProseField {
     return PROSE_FIELD[entityType];
   }
 
@@ -345,6 +359,41 @@ export class RevisionsService {
       .run();
   }
 
+  /** Record a structured prior snapshot (Session Zero safety charter — issue #881). */
+  async recordSnapshot(params: {
+    entityType: RevisionEntityType;
+    entityId: number;
+    campaignId: number;
+    snapshot: Record<string, unknown>;
+    user: RequestUser;
+  }): Promise<void> {
+    const ts = nowIso();
+    const actor = revisionActorProvenance(params.user);
+    // Prior Session Zero content has no author provenance on the entity row — attribute
+    // only the replacing editor and mark authorshipKnown=false (issue #881).
+    this.db
+      .insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText(params.snapshot),
+        authorUserId: '',
+        authorName: '',
+        authorSource: 'human',
+        authorSourceDetail: '',
+        createdAt: ts,
+        replacedByUserId: actor.userId,
+        replacedByName: actor.name,
+        replacedBySource: actor.source,
+        replacedBySourceDetail: actor.sourceDetail,
+        replacedAt: ts,
+        restoredFromRevisionId: null,
+        authorshipKnown: false,
+      })
+      .run();
+  }
+
   /** Delete every revision for one entity — called by the owning service's remove() so a single entity delete leaves no orphan. */
   async removeForEntity(entityType: RevisionEntityType, entityId: number): Promise<void> {
     await this.db
@@ -436,6 +485,60 @@ export class RevisionsService {
           .select({ campaignId: notes.campaignId, prose: notes.body, updatedAt: notes.updatedAt })
           .from(notes)
           .where(eq(notes.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      timeline_event: () => {
+        const row = db
+          .select({ campaignId: timelineEvents.campaignId, prose: timelineEvents.body, updatedAt: timelineEvents.updatedAt })
+          .from(timelineEvents)
+          .where(eq(timelineEvents.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      timeline_calendar: () => {
+        const row = db
+          .select({ campaignId: timelineCalendars.campaignId, prose: timelineCalendars.note, updatedAt: timelineCalendars.updatedAt })
+          .from(timelineCalendars)
+          .where(eq(timelineCalendars.campaignId, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      scheduled_session: () => {
+        const row = db
+          .select({ campaignId: scheduledSessions.campaignId, prose: scheduledSessions.notes, updatedAt: scheduledSessions.updatedAt })
+          .from(scheduledSessions)
+          .where(eq(scheduledSessions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      session_zero: () => {
+        const row = db
+          .select({ campaignId: sessionZero.campaignId, prose: sessionZero.houseRules, updatedAt: sessionZero.updatedAt })
+          .from(sessionZero)
+          .where(eq(sessionZero.campaignId, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      comment: () => {
+        const row = db
+          .select({ campaignId: comments.campaignId, prose: comments.body, updatedAt: comments.updatedAt })
+          .from(comments)
+          .where(eq(comments.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      story_beat: () => {
+        const row = db
+          .select({ campaignId: storyBeats.campaignId, prose: storyBeats.body, updatedAt: storyBeats.updatedAt })
+          .from(storyBeats)
+          .where(eq(storyBeats.id, entityId))
           .limit(1)
           .get();
         return row ?? null;
@@ -540,6 +643,58 @@ export class RevisionsService {
               .run(),
           ) > 0
         );
+      case 'timeline_event':
+        return (
+          changesOf(
+            db
+              .update(timelineEvents)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(timelineEvents.id, entityId), eq(timelineEvents.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'timeline_calendar':
+        return (
+          changesOf(
+            db
+              .update(timelineCalendars)
+              .set({ note: prose, updatedAt: ts })
+              .where(and(eq(timelineCalendars.campaignId, entityId), eq(timelineCalendars.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'scheduled_session':
+        return (
+          changesOf(
+            db
+              .update(scheduledSessions)
+              .set({ notes: prose, updatedAt: ts })
+              .where(and(eq(scheduledSessions.id, entityId), eq(scheduledSessions.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'comment':
+        return (
+          changesOf(
+            db
+              .update(comments)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(comments.id, entityId), eq(comments.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'story_beat':
+        return (
+          changesOf(
+            db
+              .update(storyBeats)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(storyBeats.id, entityId), eq(storyBeats.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'session_zero':
+        return false;
     }
   }
 
@@ -588,6 +743,94 @@ export class RevisionsService {
     // better-sqlite3 serializes this synchronous callback: tip close, tip open, prose
     // CAS, and audit either all land or all roll back. A throw (including 409) aborts.
     this.db.transaction((tx) => {
+      if (entityType === 'session_zero') {
+        const current = tx
+          .select()
+          .from(sessionZero)
+          .where(eq(sessionZero.campaignId, entityId))
+          .limit(1)
+          .get();
+        if (!current) throw new NotFoundException(`session_zero ${entityId} not found`);
+        this.assertNotStale(current, opts?.expectedUpdatedAt);
+        const structured = fromJsonText<Record<string, unknown>>(revision.snapshot, {});
+        const currentSnapshot = {
+          lines: fromJsonText<string[]>(current.lines, []),
+          veils: fromJsonText<string[]>(current.veils, []),
+          safetyTools: fromJsonText<string[]>(current.safetyTools, []),
+          houseRules: current.houseRules,
+          toneAndExpectations: current.toneAndExpectations,
+        };
+        const restoredSnapshot = {
+          lines: Array.isArray(structured.lines) ? structured.lines.filter((value): value is string => typeof value === 'string') : [],
+          veils: Array.isArray(structured.veils) ? structured.veils.filter((value): value is string => typeof value === 'string') : [],
+          safetyTools: Array.isArray(structured.safetyTools)
+            ? structured.safetyTools.filter((value): value is string => typeof value === 'string')
+            : [],
+          houseRules: typeof structured.houseRules === 'string' ? structured.houseRules : '',
+          toneAndExpectations: typeof structured.toneAndExpectations === 'string' ? structured.toneAndExpectations : '',
+        };
+        if (JSON.stringify(currentSnapshot) !== JSON.stringify(restoredSnapshot)) {
+          const actor = revisionActorProvenance(user);
+          tx.insert(entityRevisions)
+            .values({
+              campaignId: current.campaignId,
+              entityType,
+              entityId,
+              snapshot: toJsonText(currentSnapshot),
+              authorUserId: actor.userId,
+              authorName: actor.name,
+              authorSource: actor.source,
+              authorSourceDetail: actor.sourceDetail,
+              createdAt: ts,
+              replacedByUserId: actor.userId,
+              replacedByName: actor.name,
+              replacedBySource: actor.source,
+              replacedBySourceDetail: actor.sourceDetail,
+              replacedAt: ts,
+              restoredFromRevisionId: null,
+              authorshipKnown: true,
+            })
+            .run();
+        }
+        const nextUpdated = nextUpdatedAt(current.updatedAt);
+        const changed =
+          tx
+            .update(sessionZero)
+            .set({
+              lines: toJsonText(restoredSnapshot.lines),
+              veils: toJsonText(restoredSnapshot.veils),
+              safetyTools: toJsonText(restoredSnapshot.safetyTools),
+              houseRules: restoredSnapshot.houseRules,
+              toneAndExpectations: restoredSnapshot.toneAndExpectations,
+              updatedAt: nextUpdated,
+            })
+            .where(and(eq(sessionZero.campaignId, entityId), eq(sessionZero.updatedAt, current.updatedAt)))
+            .run().changes ?? 0;
+        if (changed === 0) {
+          throw new ConflictException({
+            code: 'STALE_WRITE',
+            message:
+              'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
+              'Reload to get the latest version, then restore again.',
+            expectedUpdatedAt: current.updatedAt,
+            currentUpdatedAt: tx.select().from(sessionZero).where(eq(sessionZero.campaignId, entityId)).limit(1).get()?.updatedAt ?? current.updatedAt,
+          });
+        }
+        tx.insert(auditLog)
+          .values({
+            campaignId: current.campaignId,
+            actor: auditActor(user),
+            actorRole: role,
+            action: `${entityType}.revision.restore`,
+            entityType,
+            entityId,
+            detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+            createdAt: nextUpdated,
+          })
+          .run();
+        return;
+      }
+
       const target = this.loadTarget(tx, entityType, entityId);
       if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
       this.assertNotStale(target, opts?.expectedUpdatedAt);

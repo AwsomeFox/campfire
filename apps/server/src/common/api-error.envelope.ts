@@ -97,6 +97,10 @@ export interface ApiErrorEnvelope {
   requestId?: string;
   /** Per-field validation errors (only present when the failure is a validation failure). */
   errors?: FieldError[];
+  /** Optimistic-concurrency token the client sent (STALE_WRITE only). */
+  expectedUpdatedAt?: string;
+  /** Live revision token to retry against (STALE_WRITE only). */
+  currentUpdatedAt?: string;
 }
 
 /** A short, stable title for each status — RFC 9457 `title`. */
@@ -388,6 +392,14 @@ export function buildMcpEnvelope(err: unknown): { error: ApiErrorEnvelope } {
     requestId: randomUUID(),
   };
   if (norm.errors && norm.errors.length > 0) error.errors = norm.errors;
+  if (isHttpException(err)) {
+    const res = (err as HttpException).getResponse();
+    if (typeof res === 'object' && res !== null) {
+      const obj = res as { expectedUpdatedAt?: unknown; currentUpdatedAt?: unknown };
+      if (typeof obj.expectedUpdatedAt === 'string') error.expectedUpdatedAt = obj.expectedUpdatedAt;
+      if (typeof obj.currentUpdatedAt === 'string') error.currentUpdatedAt = obj.currentUpdatedAt;
+    }
+  }
   return { error };
 }
 

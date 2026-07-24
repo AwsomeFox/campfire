@@ -94,10 +94,34 @@ export class CommentsController {
       'rewritten under a player who didn\'t write it. Character attribution is immutable after posting. A self-edit just bumps updatedAt.',
   })
   @ApiResponse({ status: 200, description: 'Updated comment.', type: CommentDto })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: CommentUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.comments.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId, { write: true });
-    return this.comments.update(id, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.comments.update(id, fields, user, role, { expectedUpdatedAt });
+  }
+
+  @Get(':id/revisions')
+  @ApiOperation({ summary: 'List comment edit history', description: 'Author or DM only, with normal anchor visibility checks.' })
+  @ApiResponse({ status: 200, description: 'Prior comment-body snapshots, newest first.' })
+  async revisions(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.comments.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.comments.listRevisions(id, user, role);
+  }
+
+  @Post(':id/revisions/:revisionId/restore')
+  @ApiOperation({ summary: 'Restore a prior comment body', description: 'Author or DM only. The current body is first recorded, so restore is reversible.' })
+  @ApiResponse({ status: 201, description: 'Restored; returns refreshed revision history.' })
+  async restoreRevision(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('revisionId', ParseIntPipe) revisionId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.comments.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.comments.restoreRevision(id, revisionId, user, role);
   }
 
   @Delete(':id')

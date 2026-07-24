@@ -14,7 +14,9 @@ import type { StoryArc, StoryBeat, StoryBranch, StoryBeatWithBranches, StoryArcW
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { storyArcs, storyBeats, storyBranches, sessions, quests, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 
@@ -80,6 +82,7 @@ export class StorylinesService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   // ---------- arcs ----------
@@ -284,18 +287,43 @@ export class StorylinesService {
     return beatToDomain(row);
   }
 
-  async updateBeat(id: number, input: StoryBeatUpdateInput, user: RequestUser, role: Role): Promise<StoryBeat> {
+  async updateBeat(
+    id: number,
+    input: StoryBeatUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<StoryBeat> {
     const existing = await this.getBeatRowOrThrow(id);
     // Validate any play-record links being SET (non-null) belong to the beat's campaign
     // (issue #264). `null` clears a link; an omitted field leaves it unchanged.
     if (input.sessionId != null) await this.assertEntityInCampaign('session', input.sessionId, existing.campaignId);
     if (input.questId != null) await this.assertEntityInCampaign('quest', input.questId, existing.campaignId);
     if (input.encounterId != null) await this.assertEntityInCampaign('encounter', input.encounterId, existing.campaignId);
-    const [row] = await this.db
+    const updated = await this.db
       .update(storyBeats)
-      .set({ ...input, updatedAt: nowIso() })
-      .where(eq(storyBeats.id, id))
+      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(storyBeats.id, id), eq(storyBeats.updatedAt, opts.expectedUpdatedAt))
+          : eq(storyBeats.id, id),
+      )
       .returning();
+    if (!updated[0]) {
+      const current = await this.getBeatRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    const row = updated[0];
+    if (input.body !== undefined && input.body !== existing.body) {
+      await this.revisions.commitProseVersion({
+        entityType: 'story_beat',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.body,
+        nextProse: input.body,
+        user,
+      });
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,

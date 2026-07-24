@@ -14,7 +14,7 @@ import {
   partitionSchedules,
   scheduleEndsAtMs,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
@@ -34,7 +34,6 @@ import {
   clearCancelledScheduleDetail,
   readCancelledScheduleDetail,
 } from '../../lib/scheduleNotificationCopy';
-import { RsvpChooser } from './RsvpChooser';
 import {
   initialRsvpSaveState,
   reduceRsvpSave,
@@ -69,6 +68,24 @@ import {
   sessionScheduledAnnouncement,
   sessionUpdatedAnnouncement,
 } from './schedulePanelA11y';
+import { RsvpChooser } from './RsvpChooser';
+import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+
+interface ScheduleDraft {
+  scheduledAt: string;
+  durationMinutes: number;
+  title: string;
+  location: string;
+  notes: string;
+}
+const SCHEDULE_CONFLICT_FIELDS: Array<ConflictField<ScheduleDraft>> = [
+  { key: 'scheduledAt', label: 'When' },
+  { key: 'durationMinutes', label: 'Duration' },
+  { key: 'title', label: 'Title', merge: true },
+  { key: 'location', label: 'Where', merge: true },
+  { key: 'notes', label: 'Notes', merge: true },
+];
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const formattingLocale = useFormattingLocale();
@@ -436,7 +453,11 @@ function ScheduleItem({
       <ScheduleForm
         initial={schedule}
         onSubmit={async (body) => {
-          await api.patch<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}`, body);
+          const { expectedUpdatedAt, ...payload } = body;
+          await api.patch<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}`, {
+            ...payload,
+            expectedUpdatedAt,
+          });
           setEditing(false);
           onChange();
         }}
@@ -623,6 +644,16 @@ function ScheduleItem({
             </Btn>
           </div>
         )}
+        {isDm && (
+          <RevisionHistoryPanel
+            entityType="scheduled_session"
+            entityId={schedule.id}
+            currentSnapshot={{ notes: schedule.notes }}
+            expectedUpdatedAt={schedule.updatedAt}
+            onRestored={onChange}
+            label="Schedule notes history"
+          />
+        )}
       </div>
 
       {confirmingCancel && (
@@ -671,7 +702,7 @@ function ScheduleForm({
   onCancel,
 }: {
   initial?: ScheduledSessionWithRsvps;
-  onSubmit: (body: { scheduledAt: string; durationMinutes: number; title: string; location: string; notes: string }) => Promise<void>;
+  onSubmit: (body: ScheduleDraft & { expectedUpdatedAt?: string }) => Promise<void>;
   onCancel: () => void;
 }) {
   const announce = useAnnounce();
@@ -687,6 +718,23 @@ function ScheduleForm({
   const [notes, setNotes] = useState(initial?.notes ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [base, setBase] = useState<ScheduleDraft | null>(initial ? {
+    scheduledAt: initial.scheduledAt,
+    durationMinutes: initial.durationMinutes,
+    title: initial.title,
+    location: initial.location,
+    notes: initial.notes,
+  } : null);
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(initial?.updatedAt ?? null);
+  const [conflict, setConflict] = useState<{ base: ScheduleDraft; theirs: ScheduleDraft } | null>(null);
+
+  function applyDraft(value: ScheduleDraft) {
+    setWhen(isoToDatetimeLocalInputValue(value.scheduledAt));
+    setDuration(String(value.durationMinutes));
+    setTitle(value.title);
+    setLocation(value.location);
+    setNotes(value.notes);
+  }
 
   async function save() {
     const parsed = Date.parse(when);
@@ -697,7 +745,7 @@ function ScheduleForm({
     }
     setSaving(true);
     setError(null);
-    const body = {
+    const body: ScheduleDraft = {
       scheduledAt: new Date(parsed).toISOString(),
       durationMinutes: (() => {
         if (!Number.isFinite(minutes)) return initial ? initial.durationMinutes : 240;
@@ -709,14 +757,41 @@ function ScheduleForm({
       notes,
     };
     try {
-      await onSubmit(body);
+      await onSubmit({ ...body, expectedUpdatedAt: expectedUpdatedAt ?? undefined });
       announce(initial ? sessionUpdatedAnnouncement(body.title) : sessionScheduledAnnouncement(body.title));
-    } catch {
-      setError(SESSION_SAVE_FAILED_ANNOUNCEMENT);
-      announce(SESSION_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
+    } catch (err) {
+      if (initial && isStaleWrite(err)) {
+        try {
+          const latest = await api.get<ScheduledSessionWithRsvps>(`${API}/schedule/${initial.id}`);
+          const theirs: ScheduleDraft = {
+            scheduledAt: latest.scheduledAt,
+            durationMinutes: latest.durationMinutes,
+            title: latest.title,
+            location: latest.location,
+            notes: latest.notes,
+          };
+          setConflict({ base: base ?? body, theirs });
+          setBase(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+        } catch {
+          setError("The schedule changed, but the latest version couldn't be loaded. Your draft is still here.");
+          announce("The schedule changed, but the latest version couldn't be loaded. Your draft is still here.", { assertive: true });
+        }
+      } else {
+        setError(SESSION_SAVE_FAILED_ANNOUNCEMENT);
+        announce(SESSION_SAVE_FAILED_ANNOUNCEMENT, { assertive: true });
+      }
       setSaving(false);
     }
   }
+
+  const conflictMine: ScheduleDraft = {
+    scheduledAt: Number.isNaN(Date.parse(when)) ? when : new Date(Date.parse(when)).toISOString(),
+    durationMinutes: Number(duration),
+    title,
+    location,
+    notes,
+  };
 
   return (
     <Card
@@ -730,6 +805,16 @@ function ScheduleForm({
         <div id={formErrorId}>
           <ErrorNote message={error} />
         </div>
+      )}
+      {conflict && (
+        <StaleWriteConflict
+          base={conflict.base}
+          mine={conflictMine}
+          theirs={conflict.theirs}
+          fields={SCHEDULE_CONFLICT_FIELDS}
+          onResolve={(key, value) => applyDraft({ ...conflictMine, [key]: value } as ScheduleDraft)}
+          onReloadAll={() => { applyDraft(conflict.theirs); setBase(conflict.theirs); setConflict(null); }}
+        />
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <LabeledField

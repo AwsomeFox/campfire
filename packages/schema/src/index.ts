@@ -1200,7 +1200,20 @@ export type NoteListPage = z.infer<typeof NoteListPage>;
 // factions (body) — AND notes (body). Notes carry their own per-note visibility/
 // author-only-edit model, so revision reads are gated on the note's OWN visibility
 // and restore is author-only — see RevisionsController.
-export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
+export const RevisionEntityType = z.enum([
+  'session',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'note',
+  'timeline_event',
+  'timeline_calendar',
+  'scheduled_session',
+  'session_zero',
+  'comment',
+  'story_beat',
+]);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
 
 /** How the version's prose was produced — human editor, AI seat, or tool/PAT. */

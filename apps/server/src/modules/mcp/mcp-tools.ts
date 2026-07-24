@@ -69,6 +69,7 @@ import {
   CommentUpdate,
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
+  SessionZeroUpdate,
   RsvpSetBody,
   RsvpSet,
   GenerateMapParams,
@@ -122,6 +123,19 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { APP_VERSION } from '../../common/build-metadata';
 
 const SERVER_INFO = { name: 'campfire', version: APP_VERSION };
+const SharedEditorRevisionType = z.enum([
+  'session',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'timeline_event',
+  'timeline_calendar',
+  'scheduled_session',
+  'session_zero',
+  'story_beat',
+  'comment',
+]);
 
 interface ToolResult {
   [x: string]: unknown;
@@ -595,6 +609,25 @@ export class McpToolsService {
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
         return this.campaigns.summary(campaignId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_revisions',
+      'List recoverable prior prose/safety snapshots for a shared editor. DM only except comment history, which is ' +
+        'author-or-DM and inherits the anchored entity visibility rules.',
+      { entityType: SharedEditorRevisionType, entityId: Id.describe('Entity id; campaign id for session_zero/timeline_calendar') },
+      async ({ entityType, entityId }) => {
+        const type = SharedEditorRevisionType.parse(entityType);
+        if (type === 'comment') {
+          const row = await this.comments.getRowOrThrow(entityId as number);
+          const role = await this.access.requireMember(user, row.campaignId);
+          return this.comments.listRevisions(entityId as number, user, role);
+        }
+        const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+        await this.access.requireRole(user, campaignId, 'dm', { allowArchived: true });
+        return this.revisions.listForEntity(type, entityId as number);
       },
     );
 
@@ -1422,6 +1455,30 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'restore_revision',
+      'Restore a recoverable shared-editor snapshot. The current content is recorded first, making restore reversible. ' +
+        'DM only except comment history, which remains author-or-DM with normal anchor visibility.',
+      {
+        entityType: SharedEditorRevisionType,
+        entityId: Id.describe('Entity id; campaign id for session_zero/timeline_calendar'),
+        revisionId: Id.describe('Revision id from list_revisions'),
+      },
+      async ({ entityType, entityId, revisionId }) => {
+        const type = SharedEditorRevisionType.parse(entityType);
+        if (type === 'comment') {
+          const row = await this.comments.getRowOrThrow(entityId as number);
+          const role = await this.access.requireMember(user, row.campaignId, { write: true });
+          return this.comments.restoreRevision(entityId as number, revisionId as number, user, role);
+        }
+        const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+        const role = await this.access.requireRole(user, campaignId, 'dm');
+        return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'set_my_support_preference',
       'Create or replace the authenticated participant\'s own practical support preference. This cannot edit another ' +
         'participant. Human visibility (table|facilitator) and AI use consent are independent required choices. When ' +
@@ -1698,12 +1755,12 @@ export class McpToolsService {
       user,
       'update_beat',
       'DM only: update a beat\'s title, body, status, or sortOrder.',
-      { beatId: Id.describe('Story beat id'), ...StoryBeatUpdate.shape },
-      async ({ beatId, ...fields }) => {
+      { beatId: Id.describe('Story beat id'), expectedUpdatedAt: ExpectedUpdatedAt, ...StoryBeatUpdate.shape },
+      async ({ beatId, expectedUpdatedAt, ...fields }) => {
         const row = await this.storylines.getBeatRowOrThrow(beatId as number);
         const validated = StoryBeatUpdate.parse(fields);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.storylines.updateBeat(beatId as number, validated, user, role);
+        return this.storylines.updateBeat(beatId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -3553,6 +3610,22 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'update_session_zero',
+      'DM only: update the shared Session Zero charter. Supply expectedUpdatedAt from get_session_zero to prevent ' +
+        'overwriting newer lines, veils, safety tools, house rules, or tone expectations.',
+      { campaignId: CampaignIdArg, expectedUpdatedAt: ExpectedUpdatedAt, ...SessionZeroUpdate.shape },
+      async ({ campaignId, expectedUpdatedAt, ...fields }) => {
+        const validated = SessionZeroUpdate.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.sessionZero.update(campaignId as number, validated, user, role, {
+          expectedUpdatedAt: expectedUpdatedAt as string | undefined,
+        });
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'create_timeline_event',
       'DM only: add an in-world timeline event (issue #63). Free-text `inWorldDate` (fantasy calendars aren\'t ' +
         'ISO-parseable) plus a DM-controlled `sortIndex` for narrative order. Supports a dmSecret field (DM-only text, ' +
@@ -3571,12 +3644,12 @@ export class McpToolsService {
       'update_timeline_event',
       'DM only: update an in-world timeline event\'s title, inWorldDate, body, era, sortIndex, dmSecret, or hidden flag ' +
         '(set hidden=false to reveal a previously-hidden event to players).',
-      { eventId: Id.describe('Timeline event id — from list_timeline'), ...TimelineEventUpdate.shape },
-      async ({ eventId, ...fields }) => {
+      { eventId: Id.describe('Timeline event id — from list_timeline'), expectedUpdatedAt: ExpectedUpdatedAt, ...TimelineEventUpdate.shape },
+      async ({ eventId, expectedUpdatedAt, ...fields }) => {
         const row = await this.timeline.getEventRowOrThrow(eventId as number);
         const validated = TimelineEventUpdate.parse(fields);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.timeline.updateEvent(eventId as number, validated, user, role);
+        return this.timeline.updateEvent(eventId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -3600,11 +3673,11 @@ export class McpToolsService {
       'set_calendar',
       'DM only: set the campaign\'s current in-world date and/or calendar note (issue #63). Upserts the single ' +
         'per-campaign calendar row.',
-      { campaignId: CampaignIdArg, ...TimelineCalendarUpdate.shape },
-      async ({ campaignId, ...fields }) => {
+      { campaignId: CampaignIdArg, expectedUpdatedAt: ExpectedUpdatedAt, ...TimelineCalendarUpdate.shape },
+      async ({ campaignId, expectedUpdatedAt, ...fields }) => {
         const validated = TimelineCalendarUpdate.parse(fields);
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
-        return this.timeline.setCalendar(campaignId as number, validated, user, role);
+        return this.timeline.setCalendar(campaignId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -3631,12 +3704,12 @@ export class McpToolsService {
       user,
       'update_comment',
       'Edit a discussion comment body. Author or DM only. Character attribution is immutable after posting; changing inCharacter is rejected.',
-      { commentId: Id.describe('Comment id — from list_comments'), ...CommentUpdate.shape },
-      async ({ commentId, ...fields }) => {
+      { commentId: Id.describe('Comment id — from list_comments'), expectedUpdatedAt: ExpectedUpdatedAt, ...CommentUpdate.shape },
+      async ({ commentId, expectedUpdatedAt, ...fields }) => {
         const row = await this.comments.getRowOrThrow(commentId as number);
         const validated = CommentUpdate.parse(fields);
         const role = await this.access.requireMember(user, row.campaignId, { write: true });
-        return this.comments.update(commentId as number, validated, user, role);
+        return this.comments.update(commentId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 
@@ -3692,12 +3765,12 @@ export class McpToolsService {
       'update_scheduled_session',
       'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
         '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
-      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionUpdate.shape },
-      async ({ scheduleId, ...fields }) => {
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), expectedUpdatedAt: ExpectedUpdatedAt, ...ScheduledSessionUpdate.shape },
+      async ({ scheduleId, expectedUpdatedAt, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
         const validated = ScheduledSessionUpdate.parse(fields);
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
-        return this.scheduling.update(scheduleId as number, validated, user, role);
+        return this.scheduling.update(scheduleId as number, validated, user, role, { expectedUpdatedAt: expectedUpdatedAt as string | undefined });
       },
     );
 

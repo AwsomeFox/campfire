@@ -21,7 +21,7 @@ import type {
   ArcStatus,
   BeatStatus,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import {
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
@@ -621,9 +621,14 @@ function BeatRow({
     setPendingLinkPatch(null);
     setBusy(true);
     try {
-      await api.patch(`${API}/beats/${beat.id}`, patch);
+      await api.patch(`${API}/beats/${beat.id}`, { ...patch, expectedUpdatedAt: beat.updatedAt });
       await onChange();
-    } catch {
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        await onChange();
+        setLinkError("This beat changed elsewhere. Links were refreshed — pick your link again.");
+        return;
+      }
       // Issue #688: the link didn't save. The beat keeps its server-known links (the select
       // is controlled by beat.<field>, which only changes on a successful refresh), and we
       // hold the attempted patch so Retry re-sends exactly the author's intent.

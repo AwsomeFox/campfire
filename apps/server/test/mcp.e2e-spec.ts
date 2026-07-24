@@ -45,6 +45,7 @@ const ALL_TOOLS = [
   'run_scribe',
   'read_inbox',
   'list_proposals',
+  'list_revisions',
   'lookup_rule',
   'list_rule_packs',
   'get_rule_entry',
@@ -108,6 +109,7 @@ const ALL_TOOLS = [
   'set_location_discovery',
   'add_session_recap',
   'update_session',
+  'update_session_zero',
   'delete_session',
   'create_session_share',
   'update_session_share',
@@ -177,6 +179,7 @@ const ALL_TOOLS = [
   'update_comment',
   'delete_comment',
   'restore_comment',
+  'restore_revision',
   'schedule_session',
   'update_scheduled_session',
   'cancel_scheduled_session',
@@ -274,7 +277,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(165);
+    expect(tools).toHaveLength(168);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool

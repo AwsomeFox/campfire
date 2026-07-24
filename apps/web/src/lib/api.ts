@@ -7,7 +7,6 @@
  * - provenance-safe 401 → {@link noteUnauthorizedResponse} (issue #885); network
  *   failures never look like session expiry
  */
-import { joinPublicBase } from './public-base';
 
 import { noteUnauthorizedResponse } from './sessionExpiry';
 
@@ -66,6 +65,15 @@ function summarizeFieldErrors(fieldErrors: FieldError[]): string {
     .join('; ');
 }
 
+function parseStaleWriteFields(body: unknown): { currentUpdatedAt?: string; expectedUpdatedAt?: string } {
+  if (!body || typeof body !== 'object') return {};
+  const stale = body as { currentUpdatedAt?: unknown; expectedUpdatedAt?: unknown };
+  return {
+    currentUpdatedAt: typeof stale.currentUpdatedAt === 'string' ? stale.currentUpdatedAt : undefined,
+    expectedUpdatedAt: typeof stale.expectedUpdatedAt === 'string' ? stale.expectedUpdatedAt : undefined,
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -83,6 +91,10 @@ export class ApiError extends Error {
      * {@link translateApiError}. When absent, the human-readable `message` is used as-is.
      */
     public code?: string,
+    /** Current server revision supplied with a STALE_WRITE response. */
+    public currentUpdatedAt?: string,
+    /** Revision the rejected request attempted to compare against. */
+    public expectedUpdatedAt?: string,
   ) {
     super(message);
   }
@@ -105,7 +117,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
 
-  const res = await fetch(joinPublicBase(path), {
+  const res = await fetch(path, {
     ...init,
     credentials: 'include',
     headers,
@@ -118,6 +130,8 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     let message = res.statusText;
     let fieldErrors: FieldError[] = [];
     let code: string | undefined;
+    let currentUpdatedAt: string | undefined;
+    let expectedUpdatedAt: string | undefined;
     try {
       const body = await res.json();
       fieldErrors = parseFieldErrors(body);
@@ -125,6 +139,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
       // the client can translate it, falling back to the human message below.
       const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
       if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
+      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
       // Prefer the structured field-level reasons — the server's `message` for a validation
       // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
       if (fieldErrors.length > 0) {
@@ -135,7 +150,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     } catch {
       /* non-json error body */
     }
-    throw new ApiError(res.status, message, fieldErrors, code);
+    throw new ApiError(res.status, message, fieldErrors, code, currentUpdatedAt, expectedUpdatedAt);
   }
   // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
   // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
@@ -158,18 +173,24 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
   const devUser = localStorage.getItem('cf.devUser');
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
-  const res = await fetch(joinPublicBase(path), { ...init, credentials: 'include', headers });
+  const res = await fetch(path, { ...init, credentials: 'include', headers });
   if (!res.ok) {
     noteUnauthorizedResponse(path, res.status);
     // Reuse the same error shaping as `request` so callers' catch blocks are identical.
     let message = res.statusText;
+    let code: string | undefined;
+    let currentUpdatedAt: string | undefined;
+    let expectedUpdatedAt: string | undefined;
     try {
       const body = await res.json();
+      const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
+      if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
+      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
       message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
     } catch {
       /* non-json error body */
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, [], code, currentUpdatedAt, expectedUpdatedAt);
   }
   const text = await res.text();
   const data = (text === '' ? undefined : JSON.parse(text)) as T;
@@ -185,17 +206,11 @@ export const api = {
     request<T>(path, { ...init, method: 'DELETE' }),
 };
 
-/**
- * Un-prefixed API base path. The {@link api} methods (and {@link getWithHeaders})
- * apply {@link PUBLIC_BASE} themselves via {@link joinPublicBase}, so feature
- * code keeps the same ``${API}/campaigns`` template it always has and the
- * prefix is applied exactly once. Pre-#798 behavior (`PUBLIC_BASE='/'`) is
- * unchanged: `joinPublicBase('/api/v1/campaigns') === '/api/v1/campaigns'`.
- *
- * IMPORTANT: do NOT export a pre-prefixed constant — that double-prefixes every
- * call (`/campfire/campfire/api/v1/...`). `API` stays the raw `/api/v1` stem.
- */
 export const API = '/api/v1';
+
+export function isStaleWrite(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 409 && err.code === 'STALE_WRITE';
+}
 
 /**
  * Classify an error from {@link request} as TRANSIENT (worth retrying) vs PERSISTENT

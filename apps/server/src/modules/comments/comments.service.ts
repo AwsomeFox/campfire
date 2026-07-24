@@ -14,6 +14,8 @@ import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
+import { RevisionsService } from '../revisions/revisions.service';
 
 type CommentCreateInput = z.infer<typeof CommentCreate>;
 type CommentUpdateInput = z.infer<typeof CommentUpdate>;
@@ -81,6 +83,7 @@ export class CommentsService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /**
@@ -441,37 +444,58 @@ export class CommentsService {
    * leaving author_user_id / author_name untouched. The UI then renders "Author: X
    * (edited by DM Y)"; a self-edit just bumps updated_at like before.
    */
-  async update(id: number, input: CommentUpdateInput, user: RequestUser, role: Role): Promise<Comment> {
+  async update(
+    id: number,
+    input: CommentUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Comment> {
     const existing = await this.getRowOrThrow(id);
     // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
     await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
-    // editor !== author is the trust-relevant case (a DM rewording a player's
-    // prose). A self-edit is just an ordinary content edit — it leaves the editor
-    // provenance columns untouched, the way updated_at already drives the UI's
-    // generic "edited" badge.
     const moderatorEdit = existing.authorUserId !== user.id;
     if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {
       throw new BadRequestException('In-character attribution is immutable after posting');
     }
-    // Persona attribution is immutable, so an empty payload or an inCharacter-only
-    // echo must not bump updatedAt / stamp editedAt as if the body changed.
     if (input.body === undefined) {
       throw new BadRequestException('Comment update must include a body change');
     }
     if (input.body === existing.body) {
       throw new BadRequestException('Comment update must change the body');
     }
-    const ts = nowIso();
+    const ts = nextUpdatedAt(existing.updatedAt);
     const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts, body: input.body };
     if (moderatorEdit) {
       patch.editedAt = ts;
       patch.editedBy = auditActor(user);
     }
 
-    const [row] = await this.db.update(comments).set(patch).where(eq(comments.id, id)).returning();
+    const updated = await this.db
+      .update(comments)
+      .set(patch)
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(comments.id, id), eq(comments.updatedAt, opts.expectedUpdatedAt))
+          : eq(comments.id, id),
+      )
+      .returning();
+    if (!updated[0]) {
+      const current = await this.getRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    const row = updated[0];
+    await this.revisions.commitProseVersion({
+      entityType: 'comment',
+      entityId: id,
+      campaignId: existing.campaignId,
+      priorProse: existing.body,
+      nextProse: input.body,
+      user,
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -479,12 +503,27 @@ export class CommentsService {
       entityType: 'comment',
       entityId: id,
       campaignId: existing.campaignId,
-      // Lets an incident reviewer tell a self-edit from a DM-moderated rewrite:
-      // the audit actor/role already show WHO, but this makes the moderator-edit
-      // case greppable alongside the edited_by row provenance.
       detail: moderatorEdit ? 'moderator edit (author preserved, editor recorded)' : '',
     });
     return toDomain(row);
+  }
+
+  async listRevisions(id: number, user: RequestUser, role: Role) {
+    const existing = await this.getRowOrThrow(id);
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
+    if (existing.authorUserId !== user.id && role !== 'dm') {
+      throw new ForbiddenException('Only the author or a DM may view this comment history');
+    }
+    return this.revisions.listForEntity('comment', id);
+  }
+
+  async restoreRevision(id: number, revisionId: number, user: RequestUser, role: Role) {
+    const existing = await this.getRowOrThrow(id);
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
+    if (existing.authorUserId !== user.id && role !== 'dm') {
+      throw new ForbiddenException('Only the author or a DM may restore this comment history');
+    }
+    return this.revisions.restore('comment', id, revisionId, user, role);
   }
 
   /**

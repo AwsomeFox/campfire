@@ -66,9 +66,22 @@ export class ScheduleController {
     private readonly access: CampaignAccessService,
   ) {}
 
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a scheduled session', description: 'Requires campaign membership. Includes RSVPs.' })
+  @ApiResponse({ status: 200, description: 'Scheduled session with RSVPs.' })
+  async get(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionWithRsvps> {
+    const row = await this.scheduling.getRowOrThrow(id);
+    await this.access.requireMember(user, row.campaignId);
+    return this.scheduling.getWithRsvps(id);
+  }
+
   @Patch(':id')
   @ApiOperation({ summary: 'Update a scheduled session', description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'Updated scheduled session.' })
+  @ApiResponse({ status: 409, description: 'STALE_WRITE with the current revision token.' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: ScheduledSessionUpdateDto,
@@ -76,7 +89,8 @@ export class ScheduleController {
   ): Promise<ScheduledSessionWithRsvps> {
     const row = await this.scheduling.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.scheduling.update(id, body, user, role);
+    const { expectedUpdatedAt, ...fields } = body;
+    return this.scheduling.update(id, fields, user, role, { expectedUpdatedAt });
   }
 
   @Delete(':id')

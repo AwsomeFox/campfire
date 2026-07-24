@@ -5,9 +5,9 @@
  * every campaign member; author-or-DM may edit/delete. One level of threading:
  * top-level comments, with replies nested one deep.
  */
-import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Character, Comment, EntityType } from '@campfire/schema';
-import { api, API } from '../../lib/api';
+import { api, API, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useAnnounce } from '../../components/Announcer';
 import { Field, sanitizeFieldPrefix } from '../../components/Field';
@@ -26,6 +26,11 @@ import { Btn, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { entityTargetProps } from '../../lib/entityLinks';
+import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+
+interface CommentDraft { body: string }
+const COMMENT_CONFLICT_FIELDS: Array<ConflictField<CommentDraft>> = [{ key: 'body', label: 'Comment', merge: true }];
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -59,6 +64,7 @@ export function CommentsThread({
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
+  const loadSequence = useRef(0);
 
   // Roster is fetched once per campaign/user — not on every comment reload.
   useEffect(() => {
@@ -82,22 +88,33 @@ export function CommentsThread({
   }, [campaignId, myUserId]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setError(null);
     try {
       const list = await api.get<Comment[]>(
         `${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`,
       );
+      if (sequence !== loadSequence.current) return;
       setComments(list);
     } catch {
+      if (sequence !== loadSequence.current) return;
       setError("Couldn't load the discussion.");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [campaignId, entityType, entityId]);
 
   useEffect(() => {
     setLoading(true);
     void load();
+  }, [load]);
+
+  useEffect(() => {
+    const refreshAfterResume = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', refreshAfterResume);
+    return () => document.removeEventListener('visibilitychange', refreshAfterResume);
   }, [load]);
 
   // Group into top-level comments + their direct replies (one level deep).
@@ -225,6 +242,10 @@ function CommentCard({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(comment.body);
+  const [base, setBase] = useState<CommentDraft>({ body: comment.body });
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(comment.updatedAt);
+  const [conflict, setConflict] = useState<{ base: CommentDraft; theirs: CommentDraft } | null>(null);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const editReactId = useId();
@@ -243,11 +264,25 @@ function CommentCard({
     setSaving(true);
     setError(null);
     try {
-      await api.patch(`${API}/comments/${comment.id}`, { body: draft });
+      await api.patch(`${API}/comments/${comment.id}`, { body: draft, expectedUpdatedAt });
       setEditing(false);
+      setConflict(null);
+      setHistoryNonce((value) => value + 1);
       onChanged();
-    } catch {
-      setError("Couldn't save the edit.");
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<Comment>(`${API}/comments/${comment.id}`);
+          const theirs = { body: latest.body };
+          setConflict({ base, theirs });
+          setBase(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+        } catch {
+          setError("The comment changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setError("Couldn't save the edit.");
+      }
     } finally {
       setSaving(false);
     }
@@ -281,6 +316,16 @@ function CommentCard({
       {error && <ErrorNote message={error} />}
       {editing ? (
         <div className="space-y-2" data-testid="comment-edit">
+          {conflict && (
+            <StaleWriteConflict
+              base={conflict.base}
+              mine={{ body: draft }}
+              theirs={conflict.theirs}
+              fields={COMMENT_CONFLICT_FIELDS}
+              onResolve={(_key, value) => setDraft(String(value))}
+              onReloadAll={() => { setDraft(conflict.theirs.body); setBase(conflict.theirs); setConflict(null); }}
+            />
+          )}
           <Field
             idPrefix={editPrefix}
             name={COMMENTS_FIELD.body}
@@ -298,7 +343,7 @@ function CommentCard({
               Cancel
             </Btn>
             <Btn className="!min-h-0 !py-1 text-xs" onClick={save} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
+              {saving ? 'Saving…' : conflict ? 'Save resolution' : 'Save'}
             </Btn>
           </div>
         </div>
@@ -315,7 +360,16 @@ function CommentCard({
             </button>
           )}
           {canModerate && (
-            <button onClick={() => setEditing(true)} className="text-slate-500 hover:text-slate-300">
+            <button
+              onClick={() => {
+                setDraft(comment.body);
+                setBase({ body: comment.body });
+                setExpectedUpdatedAt(comment.updatedAt);
+                setConflict(null);
+                setEditing(true);
+              }}
+              className="text-slate-500 hover:text-slate-300"
+            >
               Edit
             </button>
           )}
@@ -325,6 +379,17 @@ function CommentCard({
             </button>
           )}
         </div>
+      )}
+      {canModerate && !editing && comment.deletedAt === null && (
+        <RevisionHistoryPanel
+          entityType="comment"
+          entityId={comment.id}
+          currentSnapshot={{ body: comment.body }}
+          expectedUpdatedAt={comment.updatedAt}
+          reloadNonce={historyNonce}
+          onRestored={() => { setHistoryNonce((value) => value + 1); onChanged(); }}
+          label="Comment history"
+        />
       )}
     </div>
   );

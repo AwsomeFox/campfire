@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { useParams } from 'react-router-dom';
 import type { TimelineEvent, TimelineCalendar } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
@@ -30,6 +30,8 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { PageTitle } from '../../components/PageTitle';
+import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import {
   TIMELINE_BODY_HELP,
   TIMELINE_BODY_LABEL,
@@ -58,6 +60,21 @@ interface EventDraft {
   /** Audience at edit time; create form uses a separate AudienceField defaulting to DM-only (#754). */
   hidden: boolean;
 }
+
+interface CalendarDraft { currentDate: string; note: string }
+const EVENT_CONFLICT_FIELDS: Array<ConflictField<EventDraft>> = [
+  { key: 'title', label: 'Title', merge: true },
+  { key: 'inWorldDate', label: 'In-world date', merge: true },
+  { key: 'era', label: 'Era', merge: true },
+  { key: 'sortIndex', label: 'Order' },
+  { key: 'body', label: 'Description', merge: true },
+  { key: 'dmSecret', label: 'DM secret', merge: true },
+  { key: 'hidden', label: 'Hidden from players' },
+];
+const CALENDAR_CONFLICT_FIELDS: Array<ConflictField<CalendarDraft>> = [
+  { key: 'currentDate', label: 'Current in-world date', merge: true },
+  { key: 'note', label: 'Calendar note', merge: true },
+];
 
 function emptyDraft(sortIndex = 0): EventDraft {
   // #754: new timeline events default to DM-only prep.
@@ -110,6 +127,9 @@ export default function TimelinePage() {
   // DM editing state
   const [editingCalendar, setEditingCalendar] = useState(false);
   const [calDraft, setCalDraft] = useState({ currentDate: '', note: '' });
+  const [calBase, setCalBase] = useState<CalendarDraft | null>(null);
+  const [calExpected, setCalExpected] = useState<string | null>(null);
+  const [calConflict, setCalConflict] = useState<{ base: CalendarDraft; theirs: CalendarDraft } | null>(null);
   const [creating, setCreating] = useState(false);
   const [newDraft, setNewDraft] = useState<EventDraft>(emptyDraft());
   const [newFieldErrors, setNewFieldErrors] = useState<TimelineEventFieldErrors>({});
@@ -118,6 +138,10 @@ export default function TimelinePage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<EventDraft>(emptyDraft());
   const [editFieldErrors, setEditFieldErrors] = useState<TimelineEventFieldErrors>({});
+  const [editBase, setEditBase] = useState<EventDraft | null>(null);
+  const [editExpected, setEditExpected] = useState<string | null>(null);
+  const [eventConflict, setEventConflict] = useState<{ base: EventDraft; theirs: EventDraft } | null>(null);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   // Selected timeline event for the Visible-to-players bar (#754). Set on public
@@ -130,8 +154,10 @@ export default function TimelinePage() {
   const restoreNewEventFocusRef = useRef(false);
   const restoreEditFocusIdRef = useRef<number | null>(null);
   const restoreCalendarFocusRef = useRef(false);
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setError(null);
     setForbidden(false);
@@ -140,13 +166,16 @@ export default function TimelinePage() {
         api.get<TimelineCalendar>(`${API}/campaigns/${cid}/timeline/calendar`),
         api.get<TimelineEvent[]>(`${API}/campaigns/${cid}/timeline`),
       ]);
+      if (sequence !== loadSequence.current) return;
       setCalendar(cal);
       setEvents(list);
     } catch (e) {
-      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
-      else setError("Couldn't load the timeline.");
+      if (sequence === loadSequence.current) {
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
+        else setError("Couldn't load the timeline.");
+      }
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [cid]);
 
@@ -185,6 +214,14 @@ export default function TimelinePage() {
     }
   }, [editingCalendar]);
 
+  useEffect(() => {
+    const refreshAfterResume = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', refreshAfterResume);
+    return () => document.removeEventListener('visibilitychange', refreshAfterResume);
+  }, [load]);
+
   const saveCalendar = async () => {
     setBusy(true);
     setActionError(null);
@@ -192,12 +229,26 @@ export default function TimelinePage() {
       const updated = await api.put<TimelineCalendar>(`${API}/campaigns/${cid}/timeline/calendar`, {
         currentDate: calDraft.currentDate.trim(),
         note: calDraft.note,
+        expectedUpdatedAt: calExpected ?? undefined,
       });
       setCalendar(updated);
       restoreCalendarFocusRef.current = true;
       setEditingCalendar(false);
-    } catch {
-      setActionError("Couldn't save the current date.");
+      setCalConflict(null);
+      setHistoryNonce((value) => value + 1);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<TimelineCalendar>(`${API}/campaigns/${cid}/timeline/calendar`);
+          const theirs = { currentDate: latest.currentDate, note: latest.note };
+          setCalConflict({ base: calBase ?? calDraft, theirs });
+          setCalBase(theirs);
+          setCalExpected(latest.updatedAt);
+          setCalendar(latest);
+        } catch {
+          setActionError("The calendar changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else setActionError("Couldn't save the current date.");
     } finally {
       setBusy(false);
     }
@@ -242,14 +293,32 @@ export default function TimelinePage() {
     setBusy(true);
     setActionError(null);
     try {
-      await api.patch<TimelineEvent>(`${API}/timeline/${id}`, draftToPayload(editDraft));
+      await api.patch<TimelineEvent>(`${API}/timeline/${id}`, {
+        ...draftToPayload(editDraft),
+        expectedUpdatedAt: editExpected ?? undefined,
+      });
       setEditFieldErrors({});
       restoreEditFocusIdRef.current = id;
       setEditingId(null);
+      setEventConflict(null);
+      setHistoryNonce((value) => value + 1);
       await load();
-    } catch {
-      setActionError("Couldn't save the event.");
-      focusField(timelineFieldId(TIMELINE_EDIT_FORM_PREFIX, 'title'));
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<TimelineEvent>(`${API}/timeline/${id}`);
+          const theirs = draftFrom(latest);
+          setEventConflict({ base: editBase ?? editDraft, theirs });
+          setEditBase(theirs);
+          setEditExpected(latest.updatedAt);
+          setEvents((list) => list.map((event) => event.id === id ? latest : event));
+        } catch {
+          setActionError("The event changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setActionError("Couldn't save the event.");
+        focusField(timelineFieldId(TIMELINE_EDIT_FORM_PREFIX, 'title'));
+      }
     } finally {
       setBusy(false);
     }
@@ -347,6 +416,16 @@ export default function TimelinePage() {
         <div className="card elev-sm">
           {editingCalendar ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {calConflict && (
+                <StaleWriteConflict
+                  base={calConflict.base}
+                  mine={calDraft}
+                  theirs={calConflict.theirs}
+                  fields={CALENDAR_CONFLICT_FIELDS}
+                  onResolve={(key, value) => setCalDraft((draft) => ({ ...draft, [key]: value }))}
+                  onReloadAll={() => { setCalDraft(calConflict.theirs); setCalBase(calConflict.theirs); setCalConflict(null); }}
+                />
+              )}
               <label htmlFor="timeline-calendar-current-date" className="text-muted" style={{ fontSize: 11 }}>
                 Current in-world date
               </label>
@@ -371,7 +450,7 @@ export default function TimelinePage() {
                 onChange={(ev) => setCalDraft((d) => ({ ...d, note: ev.target.value }))}
               />
               <div style={{ display: 'flex', gap: 8 }}>
-                <Btn onClick={saveCalendar} disabled={busy}>Save</Btn>
+                <Btn onClick={saveCalendar} disabled={busy}>{calConflict ? 'Save resolution' : 'Save'}</Btn>
                 <Btn
                   ghost
                   onClick={() => {
@@ -406,6 +485,9 @@ export default function TimelinePage() {
                   style={{ fontSize: 12 }}
                   onClick={() => {
                     setCalDraft({ currentDate: calendar?.currentDate ?? '', note: calendar?.note ?? '' });
+                    setCalBase({ currentDate: calendar?.currentDate ?? '', note: calendar?.note ?? '' });
+                    setCalExpected(calendar?.updatedAt ?? null);
+                    setCalConflict(null);
                     setEditingCalendar(true);
                     setActionError(null);
                   }}
@@ -413,6 +495,19 @@ export default function TimelinePage() {
                   Edit
                 </Btn>
               )}
+            </div>
+          )}
+          {isDm && calendar && !editingCalendar && (
+            <div className="mt-3">
+              <RevisionHistoryPanel
+                entityType="timeline_calendar"
+                entityId={cid}
+                currentSnapshot={{ note: calendar.note }}
+                expectedUpdatedAt={calendar.updatedAt}
+                reloadNonce={historyNonce}
+                onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
+                label="Calendar note history"
+              />
             </div>
           )}
         </div>
@@ -465,6 +560,18 @@ export default function TimelinePage() {
             <li key={e.id} className="card elev-sm" {...entityTargetProps('timeline', e.id)}>
               {editingId === e.id ? (
                 <div data-testid="timeline-event-edit-form">
+                  {eventConflict && (
+                    <div className="mb-3">
+                      <StaleWriteConflict
+                        base={eventConflict.base}
+                        mine={editDraft}
+                        theirs={eventConflict.theirs}
+                        fields={EVENT_CONFLICT_FIELDS}
+                        onResolve={(key, value) => setEditDraft((draft) => ({ ...draft, [key]: value }))}
+                        onReloadAll={() => { setEditDraft(eventConflict.theirs); setEditBase(eventConflict.theirs); setEventConflict(null); }}
+                      />
+                    </div>
+                  )}
                   <EventForm
                     idPrefix={TIMELINE_EDIT_FORM_PREFIX}
                     draft={editDraft}
@@ -473,7 +580,7 @@ export default function TimelinePage() {
                     onClearFieldError={(field) => setEditFieldErrors((fe) => ({ ...fe, [field]: undefined }))}
                   />
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-                    <Btn onClick={() => saveEdit(e.id)} disabled={busy}>Save</Btn>
+                    <Btn onClick={() => saveEdit(e.id)} disabled={busy}>{eventConflict ? 'Save resolution' : 'Save'}</Btn>
                     <Btn
                       ghost
                       onClick={() => {
@@ -535,6 +642,9 @@ export default function TimelinePage() {
                       style={{ fontSize: 12 }}
                       onClick={() => {
                         setEditDraft(draftFrom(e));
+                        setEditBase(draftFrom(e));
+                        setEditExpected(e.updatedAt);
+                        setEventConflict(null);
                         setEditFieldErrors({});
                         setEditingId(e.id);
                         // #754: track the edited event for the "Visible to players"
@@ -550,6 +660,19 @@ export default function TimelinePage() {
                       Edit
                     </Btn>
                   )}
+                </div>
+              )}
+              {isDm && editingId !== e.id && (
+                <div className="mt-3">
+                  <RevisionHistoryPanel
+                    entityType="timeline_event"
+                    entityId={e.id}
+                    currentSnapshot={{ body: e.body }}
+                    expectedUpdatedAt={e.updatedAt}
+                    reloadNonce={historyNonce}
+                    onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
+                    label="Event description history"
+                  />
                 </div>
               )}
             </li>

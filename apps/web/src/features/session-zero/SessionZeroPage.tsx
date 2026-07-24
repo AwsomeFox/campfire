@@ -15,10 +15,10 @@
  * Data:
  *   GET/PUT  /api/v1/campaigns/:campaignId/session-zero
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
@@ -40,6 +40,8 @@ import {
 } from '../../components/formFieldLabels';
 import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
+import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 interface Draft {
   lines: string[];
@@ -60,6 +62,14 @@ const EMPTY_SUPPORT_DRAFT: SupportDraft = {
   visibility: 'facilitator',
   aiUseConsent: false,
 };
+
+const CONFLICT_FIELDS: Array<ConflictField<Draft>> = [
+  { key: 'lines', label: 'Lines', merge: true },
+  { key: 'veils', label: 'Veils', merge: true },
+  { key: 'safetyTools', label: 'Safety tools', merge: true },
+  { key: 'houseRules', label: 'House rules', merge: true },
+  { key: 'toneAndExpectations', label: 'Tone & expectations', merge: true },
+];
 
 function draftFrom(c: SessionZero): Draft {
   return {
@@ -106,10 +116,16 @@ export default function SessionZeroPage() {
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [baseDraft, setBaseDraft] = useState<Draft | null>(null);
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{ base: Draft; theirs: Draft } | null>(null);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setError(null);
     setForbidden(false);
@@ -119,6 +135,7 @@ export default function SessionZeroPage() {
         api.get<ParticipantSupportPreference | null>(`${API}/campaigns/${cid}/session-zero/support-preferences/me`),
         api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
       ]);
+      if (sequence !== loadSequence.current) return;
       setCharter(c);
       setOwnSupport(own ?? null);
       setVisibleSupports(visible);
@@ -128,10 +145,11 @@ export default function SessionZeroPage() {
           : EMPTY_SUPPORT_DRAFT,
       );
     } catch (e) {
+      if (sequence !== loadSequence.current) return;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
       else setError("Couldn't load the session-zero charter.");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [cid]);
 
@@ -139,9 +157,21 @@ export default function SessionZeroPage() {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
 
+  useEffect(() => {
+    const refreshAfterResume = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', refreshAfterResume);
+    return () => document.removeEventListener('visibilitychange', refreshAfterResume);
+  }, [load]);
+
   const startEdit = () => {
     if (!charter) return;
-    setDraft(draftFrom(charter));
+    const next = draftFrom(charter);
+    setDraft(next);
+    setBaseDraft(next);
+    setExpectedUpdatedAt(charter.updatedAt);
+    setConflict(null);
     setEditing(true);
     setActionError(null);
   };
@@ -157,12 +187,29 @@ export default function SessionZeroPage() {
         safetyTools: cleanList(draft.safetyTools),
         houseRules: draft.houseRules,
         toneAndExpectations: draft.toneAndExpectations,
+        expectedUpdatedAt: expectedUpdatedAt ?? undefined,
       });
       setCharter(updated);
       setEditing(false);
       setDraft(null);
-    } catch {
-      setActionError("Couldn't save the charter.");
+      setBaseDraft(null);
+      setConflict(null);
+      setHistoryNonce((value) => value + 1);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<SessionZero>(`${API}/campaigns/${cid}/session-zero`);
+          const theirs = draftFrom(latest);
+          setConflict({ base: baseDraft ?? draft, theirs });
+          setBaseDraft(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+          setCharter(latest);
+        } catch {
+          setActionError("The charter changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setActionError("Couldn't save the charter.");
+      }
     } finally {
       setBusy(false);
     }
@@ -262,10 +309,44 @@ export default function SessionZeroPage() {
       ) : null}
 
       {editing && draft && (
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Btn onClick={save} disabled={busy}>Save charter</Btn>
-          <Btn ghost onClick={() => { setEditing(false); setDraft(null); }} disabled={busy}>Cancel</Btn>
-        </div>
+        <>
+          {conflict && (
+            <StaleWriteConflict
+              base={conflict.base}
+              mine={draft}
+              theirs={conflict.theirs}
+              fields={CONFLICT_FIELDS}
+              onResolve={(key, value) => setDraft((current) => current ? { ...current, [key]: value } : current)}
+              onReloadAll={() => {
+                setDraft(conflict.theirs);
+                setBaseDraft(conflict.theirs);
+                setConflict(null);
+              }}
+            />
+          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Btn onClick={save} disabled={busy}>{conflict ? 'Save resolution' : 'Save charter'}</Btn>
+            <Btn ghost onClick={() => { setEditing(false); setDraft(null); setConflict(null); }} disabled={busy}>Cancel</Btn>
+          </div>
+        </>
+      )}
+
+      {isDm && charter && !editing && (
+        <RevisionHistoryPanel
+          entityType="session_zero"
+          entityId={cid}
+          currentSnapshot={{
+            lines: charter.lines.join('\n'),
+            veils: charter.veils.join('\n'),
+            safetyTools: charter.safetyTools.join('\n'),
+            houseRules: charter.houseRules,
+            toneAndExpectations: charter.toneAndExpectations,
+          }}
+          expectedUpdatedAt={charter.updatedAt}
+          reloadNonce={historyNonce}
+          onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
+          label="Charter history"
+        />
       )}
 
       {!loading && (
