@@ -21,7 +21,8 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(isDriverToolAllowed({ name: 'award_xp', mutating: true, proposalCapable: false })).toBe(true);
   });
 
-  it('delete_inventory_item is NOT allowed (delete_ prefix blocked)', () => {
+  it('delete_inventory_item is NOT allowed (delete_ prefix blocked even if proposalCapable)', () => {
     expect(isDriverToolAllowed({ name: 'delete_inventory_item', mutating: true, proposalCapable: false })).toBe(false);
+    expect(isDriverToolAllowed({ name: 'delete_inventory_item', mutating: true, proposalCapable: true })).toBe(false);
   });
 });

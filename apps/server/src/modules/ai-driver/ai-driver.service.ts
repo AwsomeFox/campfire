@@ -163,11 +163,31 @@ export interface AiDmSessionState {
    */
   secretReadApprovals?: Record<string, AiDmSecretReadApproval>;
   /**
+   * Attachment ids produced by generate_map during this session (#488). The driver may only
+   * link mapAttachmentId to ids in this set (or null to detach); arbitrary campaign attachments
+   * stay off-limits so hidden handouts cannot be exposed via update_encounter.
+   */
+  driverGeneratedMapIds?: number[];
+  /** generate_map calls consumed this turn — reset at turn start (#488 / #474 policy-lite). */
+  generateMapCallsThisTurn?: number;
+  /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
    * must not write ladder/status updates that would race a replacement session.
    */
   detached?: boolean;
+}
+
+/** Session fields used only for internal execution guard bookkeeping, never exposed to members. */
+type AiDmSessionPrivateGuardFields = 'secretReadApprovals' | 'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'detached';
+
+/** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
+export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
+
+/** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
+export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
+  const { secretReadApprovals: _approvals, driverGeneratedMapIds: _mapIds, generateMapCallsThisTurn: _mapCalls, detached: _detached, ...rest } = session;
+  return rest;
 }
 
 /**
@@ -264,7 +284,9 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
-  // encounter / turn flow
+  // encounter / turn flow — includes create_encounter so the AI can originate a fight
+  // during play (#1075).
+  'create_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',
@@ -276,21 +298,122 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   'award_xp',
   'level_up_character',
-  // economy / loot — the AI DM can award treasure and items post-encounter (#1021),
-  // consistent with award_xp already being live-play allowed.
-  'adjust_treasury',
-  'add_inventory_item',
-  'update_inventory_item',
-  // scene / exploration
+  // scene / exploration / world consequences
   'reveal_map_region',
   'check_objective',
   'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
+  // battle-map authoring (#488) — spin up a battlefield and shape VTT overlays mid-encounter.
+  // Execution-time guards (guardDriverLivePlayArgs) bound generate_map to one call per turn,
+  // restrict update_encounter to VTT fields only, and limit map linkage to session-generated
+  // maps (mapAttachmentId:null detaches/undoes).
+  'generate_map',
+  'update_encounter',
+  // private information delivery (#1023)
+  'whisper_to_player',
+  // economy / loot (#1021) — parity with award_xp (explicit live-play allow-list exception)
+  'adjust_treasury',
+  'add_inventory_item',
+  'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
 ]);
 
 /** Tool-name prefixes the driver seat may never call — every hard delete (delete_*), even proposed. */
 const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
+
+/** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
+export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
+
+/**
+ * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
+ * hidden) and arbitrary map linkage are stripped at execution so hidden handouts cannot be
+ * exposed without update_attachment.
+ */
+const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
+  'encounterId',
+  'expectedUpdatedAt',
+  'mapAttachmentId',
+  'gridSize',
+  'gridScale',
+  'gridUnit',
+  'gridSnap',
+  'gridType',
+  'fog',
+  'aoe',
+]);
+
+export type DriverLivePlayArgGuardResult =
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; code: string; message: string };
+
+/** Reset per-turn live-play counters at the start of each driver turn. */
+export function resetDriverTurnCounters(session: AiDmSessionState): void {
+  session.generateMapCallsThisTurn = 0;
+}
+
+/** Record a generate_map quota consumption for the current turn. */
+export function noteDriverGenerateMapCall(session: AiDmSessionState): void {
+  session.generateMapCallsThisTurn = (session.generateMapCallsThisTurn ?? 0) + 1;
+}
+
+/** Track an attachment id produced by generate_map so update_encounter may link it. */
+export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId: number): void {
+  session.driverGeneratedMapIds = session.driverGeneratedMapIds ?? [];
+  if (!session.driverGeneratedMapIds.includes(attachmentId)) session.driverGeneratedMapIds.push(attachmentId);
+}
+
+/**
+ * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
+ *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
+ *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
+ *    session-generated map id.
+ */
+export function guardDriverLivePlayArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  session: Pick<AiDmSessionState, 'driverGeneratedMapIds' | 'generateMapCallsThisTurn'>,
+): DriverLivePlayArgGuardResult {
+  if (toolName === 'generate_map') {
+    const calls = session.generateMapCallsThisTurn ?? 0;
+    if (calls >= DRIVER_GENERATE_MAP_BUDGET_PER_TURN) {
+      return {
+        ok: false,
+        code: 'generate_map_budget_exhausted',
+        message: `The driver may call generate_map at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
+      };
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'update_encounter') {
+    const rejected = Object.keys(args).filter((key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key));
+    if (rejected.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          `The driver may only set VTT fields on update_encounter (fog, grid, aoe, mapAttachmentId). Rejected: ${rejected.join(', ')}.`,
+      };
+    }
+    if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
+      const id = Number(args.mapAttachmentId);
+      const allowed = session.driverGeneratedMapIds ?? [];
+      if (!Number.isFinite(id) || !allowed.includes(id)) {
+        return {
+          ok: false,
+          code: 'forbidden_map_link',
+          message:
+            'The driver may only link mapAttachmentId to a map it generated this session, or pass null to detach.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  return { ok: true, args: { ...args } };
+}
 
 /**
  * DM-only AGGREGATE read tools — never driveable by the autonomous seat (issue #557). These
@@ -733,7 +856,11 @@ export class AiDriverService {
       .filter((t) => isDriverToolAllowed(t) && !DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name))
       .map((t) => ({
         name: t.name,
-        description: t.description,
+        description:
+          t.name === 'update_encounter'
+            ? 'DM only: adjust battle-map VTT overlays for an encounter — fog, grid config, AoE templates, and mapAttachmentId ' +
+              '(session-generated maps only; null detaches). Prep fields (name, location/quest/session links, hidden) are NOT available to the driver seat.'
+            : t.description,
         parameters: t.inputSchema,
       }));
 
@@ -744,6 +871,7 @@ export class AiDriverService {
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
+    resetDriverTurnCounters(session);
     this.stream.emit({ type: 'turn.start', campaignId });
 
     const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, HARD_MAX_STEPS);
@@ -772,46 +900,99 @@ export class AiDriverService {
           stopReason = 'budget_exhausted';
           break;
         }
-        steps = step + 1;
+        const stepNumber = step + 1;
 
-        const maxTokens = Math.min(perStepCap, budgetRemaining);
-        const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
-          system,
-          messages,
-          // Issue #564: the executable model derives ONLY from the effective provider
-          // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-          model: execModel,
-          maxTokens,
-          tools: toolSchemas,
+        // Driver and scribe share the same campaign mutex (#1058). Re-read the
+        // seat after ownership, then keep provider streaming and metering in one
+        // critical section. A scribe that spent while this turn waited can
+        // exhaust the budget without this driver making another provider call.
+        const spend = await this.aiDm.withSpendLock(campaignId, async () => {
+          const currentSeat = await this.aiDm.getSeat(campaignId);
+          const currentRemaining = currentSeat.tokenBudget - currentSeat.tokensUsed;
+          if (currentRemaining <= 0) {
+            return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
+          }
+          if (session.detached || isFrozen(session)) {
+            return {
+              kind: 'aborted' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
+          }
+          // assertRunnable's server-cap check happened before this turn entered
+          // the queue. Repeat it under ownership so a preceding Scribe spend
+          // cannot make that admission stale while the Driver waits.
+          try {
+            await this.aiDm.assertWithinServerTokenCap();
+          } catch {
+            return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
+          }
+
+          const maxTokens = Math.min(perStepCap, currentRemaining);
+          steps = stepNumber;
+          const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
+            system,
+            messages,
+            // Issue #564: the executable model derives ONLY from the effective provider
+            // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+            model: execModel,
+            maxTokens,
+            tools: toolSchemas,
+          });
+
+          // Meter this step's REAL usage before releasing the mutex, including
+          // a completed/partial stream that was frozen before narration/tool
+          // delivery. The SQL clamp remains defense in depth; another local
+          // spender cannot pass a stale budget gate while this call is billed.
+          let usage = result?.usage.totalTokens ?? 0;
+          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+          // rather than silently fail-open on budget enforcement.
+          const outputText = text || result?.text || '';
+          if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
+            const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
+            // ~4 chars per token is a conservative English-language estimate.
+            usage = Math.max(1, Math.ceil(outputChars / 4));
+            this.logger.warn(
+              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+            );
+          }
+          const servedModel = result?.model || execModel;
+          const metered = await this.aiDm.meterTurn(campaignId, usage, {
+            actor,
+            action: 'ai-dm.driver.turn',
+            detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
+          });
+          if (aborted || session.detached || isFrozen(session)) {
+            return {
+              kind: 'aborted' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
+          return { kind: 'metered' as const, text, result, metered };
         });
-        if (aborted || session.detached || isFrozen(session)) {
+
+        if (spend.kind === 'budget_exhausted' || spend.kind === 'server_cap') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          stopReason = 'budget_exhausted';
+          break;
+        }
+        if (spend.kind === 'aborted') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
-          if (text) finalNarration = text;
+          if (spend.text) finalNarration = spend.text;
           break;
         }
 
-        // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
-        // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
-        // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
-        let usage = result?.usage.totalTokens ?? 0;
-        // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
-        // omit streaming usage. When that happens usage is 0 despite real content. Estimate
-        // rather than silently fail-open on budget enforcement.
-        const outputText = text || result?.text || '';
-        if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
-          const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
-          // ~4 chars per token is a conservative English-language estimate.
-          usage = Math.max(1, Math.ceil(outputChars / 4));
-          this.logger.warn(
-            `Provider did not report streaming usage for step ${steps} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
-          );
-        }
-        const servedModel = result?.model || execModel;
-        const metered = await this.aiDm.meterTurn(campaignId, usage, {
-          actor,
-          action: 'ai-dm.driver.turn',
-          detail: `step ${steps} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-        });
+        const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
@@ -1065,6 +1246,35 @@ export class AiDriverService {
         continue;
       }
 
+      // (1b) Battle-map live-play guards (#488 / #474 policy-lite): bounded generate_map budget,
+      // VTT-only update_encounter fields, map linkage restricted to session-generated maps.
+      if (tool?.mutating) {
+        const liveGuard = guardDriverLivePlayArgs(call.name, args, session);
+        if (!liveGuard.ok) {
+          const text = JSON.stringify({
+            error: { status: 403, code: liveGuard.code, message: liveGuard.message },
+          });
+          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
+          executed.push({ name: call.name, isError: true, proposed: false });
+          this.logger.warn(`Blocked live-play guard on ${call.name} for ${actor} (triggered by ${triggeredBy.id}): ${liveGuard.code}`);
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.blocked',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `blocked ${call.name}: ${liveGuard.code} (triggered by ${triggeredBy.id})`,
+          });
+          toolErrored = true;
+          continue;
+        }
+        const guardedArgs = { ...liveGuard.args };
+        for (const key of Object.keys(args)) delete args[key];
+        Object.assign(args, guardedArgs);
+        if (call.name === 'generate_map') noteDriverGenerateMapCall(session);
+      }
+
       // (2) Secrecy policy (#557): pick the principal this read runs under. Writes always run
       // under the DM seat principal (their write authority is bound to this campaign); reads
       // run under the player-scoped contextPrincipal by default, so hidden entities 404 and
@@ -1124,6 +1334,15 @@ export class AiDriverService {
 
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
+
+      if (call.name === 'generate_map' && !res.isError) {
+        try {
+          const parsed = JSON.parse(res.text) as { attachmentId?: unknown };
+          if (typeof parsed.attachmentId === 'number') recordDriverGeneratedMap(session, parsed.attachmentId);
+        } catch {
+          // Non-JSON tool payload — skip tracking.
+        }
+      }
 
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
       // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
