@@ -298,6 +298,25 @@ export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
   creatureType: { full: 'Type' },
 };
 
+/** Starfinder 1e cumulative XP thresholds (Core Rulebook — same curve as PF1e, issue #441). */
+const STARFINDER_XP_THRESHOLDS = [
+  0, 1_000, 3_000, 6_000, 10_000, 15_000, 21_000, 28_000, 36_000, 45_000, 55_000, 66_000, 78_000, 91_000,
+  105_000, 120_000, 136_000, 153_000, 171_000, 190_000,
+] as const;
+
+function starfinderXpForLevel(level: number): number {
+  const clamped = Math.max(1, Math.min(20, Math.floor(level)));
+  return STARFINDER_XP_THRESHOLDS[clamped - 1]!;
+}
+
+function starfinderLevelForXp(xp: number): number {
+  let level = 1;
+  for (let i = 0; i < STARFINDER_XP_THRESHOLDS.length; i++) {
+    if (xp >= STARFINDER_XP_THRESHOLDS[i]!) level = i + 1;
+  }
+  return level;
+}
+
 export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',
@@ -309,6 +328,9 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   initiativeDie: 20,
   // Starfinder 1e caps characters at level 20 (Core Rulebook), the same ceiling as 5e/PF.
   maxLevel: 20,
+  supportsXpProgression: true,
+  xpForLevel: starfinderXpForLevel,
+  levelForXp: starfinderLevelForXp,
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
