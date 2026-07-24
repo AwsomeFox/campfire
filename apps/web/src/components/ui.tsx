@@ -114,14 +114,28 @@ export function DmPanel({ children }: { children: ReactNode }) {
   );
 }
 
-export function EmptyState({ icon = 'candle-flame', title, hint }: { icon?: string; title: string; hint?: string }) {
+export function EmptyState({
+  icon = 'candle-flame',
+  title,
+  hint,
+  action,
+  children,
+}: {
+  icon?: string;
+  title: string;
+  hint?: string;
+  action?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
   return (
-    <div className="cf-inset border-dashed p-6 text-center space-y-1">
+    <div className="cf-inset border-dashed p-6 text-center space-y-2">
       <p className="flex justify-center text-[var(--color-neutral-500)]">
         <GameIcon slug={icon} size={30} reserveSpace />
       </p>
       <p className="text-sm font-semibold text-[var(--color-neutral-300)]">{title}</p>
-      {hint && <p className="text-xs text-[var(--color-neutral-600)]">{hint}</p>}
+      {hint && <p className="text-xs text-[var(--color-neutral-600)] max-w-md mx-auto">{hint}</p>}
+      {action && <div className="pt-1 flex justify-center flex-wrap gap-2">{action}</div>}
+      {children}
     </div>
   );
 }
