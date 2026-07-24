@@ -904,6 +904,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
         >
           <button
             type="button"
+            tabIndex={-1}
             onClick={handleViewAllCenter}
             className="text-xs font-semibold hover:underline cursor-pointer inline-block border-none bg-transparent p-0"
             style={{ color: 'var(--color-accent)' }}
