@@ -105,6 +105,15 @@ export const Campaign = z.object({
   // When true, only the DM may award XP / level up characters (issue #270); when false
   // (default) any character owner may self-progress, preserving the original behavior.
   dmControlsProgression: z.boolean().default(false),
+  // When true, only the DM may advance combat turns (issue #413) — a player's "End turn"
+  // on their own active combatant is rejected, preserving the classic DM-only "Next turn"
+  // control. When false (default) a player may end their OWN combatant's turn (server still
+  // validates ownership + that it is that combatant's turn, and advancement is serialized).
+  dmControlsTurns: z.boolean().default(false),
+  // When true, a player's "End turn" is staged as a request the DM confirms rather than
+  // advancing immediately (issue #413). When false (default) an authorized player end-turn
+  // advances directly. Independent of dmControlsTurns (which forbids player end-turn entirely).
+  requireDmTurnConfirmation: z.boolean().default(false),
   // Campaign-level privacy kill switch for unauthenticated recap links. This is
   // mutated through the dedicated session-share policy endpoint so disabling it
   // can atomically revoke every active capability rather than leaving old URLs
@@ -132,7 +141,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 // Clone/template input — POST /campaigns/:id/clone.
@@ -1785,6 +1794,77 @@ export function statblockLabelText(label: StatblockPresentationLabel, preferShor
   return preferShort && label.short ? label.short : label.full;
 }
 
+// ---------- adapter-defined action economy (issue #413) ----------
+// The turn-workspace surfaces "what can I do now?" as a set of ACTION-ECONOMY SLOTS —
+// but the shape of a turn is a per-system decision, not a 5e constant. 5e is
+// action / bonus action / reaction / movement; PF2e is a three-action economy plus a
+// reaction; a dice-pool / narrative system may have none. This capability lives on the
+// RuleSystemAdapter (like `conditions` and `presentation`) so the run-session code reads
+// the slots from the campaign's adapter instead of hardcoding the 5e four. Adapters that
+// don't define one fall back to {@link NEUTRAL_ACTION_ECONOMY} (a single generic "Action"
+// slot), never to 5e's — so a non-5e fight never mislabels its turn as bonus-action-shaped.
+
+/** How an action-economy slot behaves for the tracker + when its usage counter refreshes. */
+export type ActionEconomySlotKind = 'action' | 'movement' | 'reaction' | 'resource';
+
+/**
+ * One adapter-defined slot in a turn's action economy (issue #413). `key` is a stable id
+ * the tracker counts usage against; `max` is how many are available fresh each turn (or
+ * round, per `resetsAt`). `help` is plain-language guidance shown to a new player. A
+ * `movement` slot's `max` is a speed in feet (0 when the system is gridless / undefined);
+ * a `reaction` slot resets at the START of the owner's turn (5e: one reaction per round,
+ * refreshed at your turn), so its `resetsAt` is 'round'.
+ */
+export interface ActionEconomySlot {
+  readonly key: string;
+  readonly label: string;
+  readonly help: string;
+  readonly kind: ActionEconomySlotKind;
+  /** Fresh count each period. For a movement slot this is a distance (ft); 0 = system default/none. */
+  readonly max: number;
+  /** When the used-counter refreshes: at the owner's turn start, or at the top of each round. */
+  readonly resetsAt: 'turn' | 'round';
+}
+
+/** An ordered set of action-economy slots for one rule system (issue #413). */
+export interface ActionEconomyModel {
+  readonly slots: readonly ActionEconomySlot[];
+}
+
+/** Neutral fallback for adapters that don't define an action economy — one generic Action. */
+export const NEUTRAL_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'action', label: 'Action', help: 'Take one action on your turn.', kind: 'action', max: 1, resetsAt: 'turn' },
+  ],
+};
+
+/** D&D 5e action economy: action, bonus action, reaction, and movement (issue #413). */
+export const DND5E_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'action', label: 'Action', help: 'Attack, Cast a Spell, Dash, Dodge, Disengage, Help, Hide, Ready, Search, or Use an Object.', kind: 'action', max: 1, resetsAt: 'turn' },
+    { key: 'bonus', label: 'Bonus Action', help: 'Only when a feature, spell, or item specifically grants one this turn.', kind: 'action', max: 1, resetsAt: 'turn' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round, e.g. an opportunity attack or a readied trigger. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'round' },
+    { key: 'movement', label: 'Movement', help: 'Move up to your speed; you can split it around your action.', kind: 'movement', max: 30, resetsAt: 'turn' },
+  ],
+};
+
+/** Pathfinder 2e action economy: three actions plus one reaction (issue #413). */
+export const PF2E_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'actions', label: 'Actions', help: 'You have three actions each turn; most activities cost 1–3 of them.', kind: 'action', max: 3, resetsAt: 'turn' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round when its trigger occurs. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'round' },
+  ],
+};
+
+/**
+ * Resolve the action-economy model for an adapter (issue #413). Falls back to the
+ * neutral single-Action model when the adapter doesn't define one — never to 5e's, so a
+ * non-5e system that hasn't opted in isn't given bonus-action / reaction slots it lacks.
+ */
+export function actionEconomyForAdapter(adapter: Pick<RuleSystemAdapter, 'actionEconomy'>): ActionEconomyModel {
+  return adapter.actionEconomy ?? NEUTRAL_ACTION_ECONOMY;
+}
+
 export interface RuleSystemAdapter {
   /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
   readonly id: string;
@@ -1846,6 +1926,15 @@ export interface RuleSystemAdapter {
   initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
+  /**
+   * OPTIONAL — the action-economy model for this system's turn workspace (issue #413):
+   * the ordered slots (action / bonus / reaction / movement, or PF2e's three actions,
+   * or a system with none) a player consults to answer "what can I do now?". Omit it and
+   * {@link actionEconomyForAdapter} falls back to {@link NEUTRAL_ACTION_ECONOMY} — a single
+   * generic Action — never to 5e's, so a non-5e fight never inherits bonus-action / reaction
+   * slots it doesn't have. This is the seam that keeps the turn tracker from hardcoding 5e.
+   */
+  readonly actionEconomy?: ActionEconomyModel;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -1956,6 +2045,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
   conditions: CONDITIONS,
+  // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
+  actionEconomy: DND5E_ACTION_ECONOMY,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
@@ -2460,6 +2551,9 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // Do NOT re-sort by DEX/initMod after equal initiative totals.
   initiativeTiebreak: sortOrderAscTiebreak,
   conditions: PF2E_CONDITIONS,
+  // PF2e turn workspace (issue #413): the three-action economy plus a reaction — a
+  // concrete demonstration that action economy is adapter-defined, not the 5e four.
+  actionEconomy: PF2E_ACTION_ECONOMY,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
     // under `abilityMods`. Surface those under the seam's `abilityScores` field with
@@ -4511,6 +4605,71 @@ export type HpBand = z.infer<typeof HpBand>;
 // DeathState is declared near the top of the file (ahead of Character) so the
 // persistent Character echo can reference it; see its full docblock there.
 
+// ---------- current-turn workspace: effects + per-turn action economy (issue #413) ----------
+
+/**
+ * When a repeating effect prompts a save or applies its tick (issue #413). 5e "save ends"
+ * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
+ * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
+ */
+export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
+export type EffectTiming = z.infer<typeof EffectTiming>;
+
+/** What an active effect does, so the workspace can raise the right start/end-turn prompt. */
+export const ActiveEffectKind = z.enum(['ongoing-damage', 'regeneration', 'condition', 'buff', 'other']);
+export type ActiveEffectKind = z.infer<typeof ActiveEffectKind>;
+
+/**
+ * One tracked active effect on a combatant (issue #413) — the structured counterpart to the
+ * free-text `conditions` list, carrying DURATION and SAVE TIMING so the turn workspace can
+ * prompt "ongoing 5 fire damage (start of turn)" or "repeat DC 13 CON save (ends at end of
+ * turn)" and expire it automatically. `roundsRemaining` null = until removed; the service
+ * decrements it at the owner's turn boundary and drops the effect at 0. Persisted as a JSON
+ * array on the combatant (same convention as `conditions`), so it needs no new column per field.
+ */
+export const ActiveEffect = z.object({
+  id: z.string().min(1).max(40),
+  name: z.string().min(1).max(120),
+  kind: ActiveEffectKind.default('other'),
+  timing: EffectTiming.default('none'),
+  // Rounds left before the effect expires; null = indefinite (until manually removed).
+  roundsRemaining: z.number().int().nonnegative().nullable().default(null),
+  // Ongoing damage / regeneration magnitude applied at `timing`; null = no automatic HP tick.
+  amount: z.number().int().nullable().default(null),
+  // Repeat-save context for "save ends" effects; null when the effect has no save.
+  saveAbility: z.string().max(24).nullable().default(null),
+  saveDc: z.number().int().nullable().default(null),
+  notes: z.string().max(300).default(''),
+});
+export type ActiveEffect = z.infer<typeof ActiveEffect>;
+
+/**
+ * Per-turn action-economy + resource tracking on a combatant (issue #413). `used` counts
+ * consumption against the adapter's {@link ActionEconomyModel} slot keys (e.g. `{ action: 1,
+ * bonus: 0 }`); `movementUsedFt` is feet moved this turn; `concentration` names the effect the
+ * combatant is concentrating on (null = none). `delaying` / `readied` capture the DM/table
+ * turn-order tools (a combatant who delayed, or a readied action + its trigger). All reset at
+ * the owner's turn boundary by the service, EXCEPT `reaction` usage and `concentration`, which
+ * persist across turns until refreshed/broken. Persisted as one JSON column on the combatant.
+ */
+export const CombatantTurnState = z.object({
+  used: z.record(z.string().max(40), z.number().int().nonnegative()).default({}),
+  movementUsedFt: z.number().nonnegative().default(0),
+  concentration: z.string().max(160).nullable().default(null),
+  delaying: z.boolean().default(false),
+  readied: z.string().max(200).nullable().default(null),
+});
+export type CombatantTurnState = z.infer<typeof CombatantTurnState>;
+
+/** Default (empty) turn state — a combatant that has used nothing and holds no effects. */
+export const EMPTY_TURN_STATE: CombatantTurnState = {
+  used: {},
+  movementUsedFt: 0,
+  concentration: null,
+  delaying: false,
+  readied: null,
+};
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -4552,6 +4711,12 @@ export const Combatant = z.object({
   // revealed area" from a truly unplaced token — without leaking coordinates. Always
   // false for DMs and for tokens whose position is visible (or truly null in storage).
   tokenHiddenByFog: z.boolean().default(false),
+  // Current-turn workspace state (issue #413): per-turn action-economy usage, movement,
+  // concentration, and delay/ready flags. Defaults to EMPTY_TURN_STATE for legacy rows.
+  turnState: CombatantTurnState.default(EMPTY_TURN_STATE),
+  // Structured active effects with duration + save timing (issue #413), alongside the
+  // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
+  activeEffects: z.array(ActiveEffect).max(50).default([]),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -4680,7 +4845,10 @@ export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiati
 // add/remove, death, rolls, next-turn/round, notes, overrides, and corrections), so
 // the DM can reconstruct "round 2: Ember Hound took 8 damage" for a recap and a
 // refresh no longer wipes it.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction']);
+// 'effect' (issue #413) records a start/end-of-turn effect resolution (ongoing damage,
+// regeneration tick, an expired effect, a prompted repeat save). Appended alongside the
+// existing types by the turn-advancement path; free-text column, so older DBs are unaffected.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
 
 export const EncounterEvent = z.object({
@@ -4710,6 +4878,145 @@ export const EncounterEvent = z.object({
   createdAt: IsoDate,
 });
 export type EncounterEvent = z.infer<typeof EncounterEvent>;
+
+// ---------- current-turn workspace read model (issue #413) ----------
+// The turn workspace answers "what can I do now?" for the active combatant: the
+// adapter-defined action-economy slots (with usage + plain-language help), movement /
+// resources / reaction / concentration / active effects, suggested actions, and the
+// start/end-of-turn prompts the player and DM should resolve before advancing. It is a
+// READ MODEL derived server-side from the encounter + combatant + campaign-adapter state;
+// GET /encounters/:id/turn returns it, and it re-derives on every read (no stored blob).
+
+/** One action-economy slot as presented in the workspace: the adapter's slot + live usage. */
+export const TurnActionSlot = z.object({
+  key: z.string(),
+  label: z.string(),
+  help: z.string(),
+  kind: z.enum(['action', 'movement', 'reaction', 'resource']),
+  max: z.number().int().nonnegative(),
+  used: z.number().nonnegative(),
+  resetsAt: z.enum(['turn', 'round']),
+});
+export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
+
+/** A suggested action pulled from the active combatant's sheet / statblock (issue #413). */
+export const TurnSuggestedAction = z.object({
+  name: z.string().min(1).max(160),
+  // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  source: z.string().max(40),
+  summary: z.string().max(600).default(''),
+});
+export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
+
+/** What a turn prompt is about, so the client can group/iconify it. */
+export const TurnPromptKind = z.enum([
+  'death-save',
+  'ongoing-damage',
+  'regeneration',
+  'recharge',
+  'repeat-save',
+  'expiring-effect',
+  'unresolved-action',
+  'concentration',
+]);
+export type TurnPromptKind = z.infer<typeof TurnPromptKind>;
+
+/**
+ * A start- or end-of-turn prompt the active combatant / DM should resolve (issue #413):
+ * a death save for a dying PC, an ongoing-damage tick, a regeneration heal, a "save ends"
+ * repeat save, an expiring effect, or an unresolved action at end of turn. Derived from
+ * combatant state; carries the effect id when it maps to an ActiveEffect so a client can act on it.
+ */
+export const TurnPrompt = z.object({
+  id: z.string().min(1).max(80),
+  kind: TurnPromptKind,
+  timing: z.enum(['start', 'end']),
+  combatantId: Id,
+  combatantName: z.string(),
+  message: z.string().max(300),
+  effectId: z.string().max(40).nullable().default(null),
+});
+export type TurnPrompt = z.infer<typeof TurnPrompt>;
+
+/** The current active combatant's identity + who (if anyone) controls it, for "your turn". */
+export const TurnActor = z.object({
+  combatantId: Id,
+  name: z.string(),
+  kind: CombatantKind,
+  characterId: Id.nullable().default(null),
+  // The user who owns the linked character (null for monsters/NPCs, or an unlinked PC).
+  ownerUserId: z.string().nullable().default(null),
+});
+export type TurnActor = z.infer<typeof TurnActor>;
+
+export const TurnWorkspace = z.object({
+  encounterId: Id,
+  status: EncounterStatus,
+  round: z.number().int().nonnegative(),
+  // The current actor (null when not running / empty roster) and who acts next.
+  current: TurnActor.nullable(),
+  next: TurnActor.nullable(),
+  // True when the requesting user owns the current combatant's character (drives the
+  // "your turn" announcement + enabling the player End-turn control).
+  isYourTurn: z.boolean(),
+  // True when the requesting user is permitted to end the current turn right now
+  // (DM always; a player only on their own turn when dmControlsTurns is false).
+  canEndTurn: z.boolean(),
+  // Campaign turn-control settings echoed for the client (issue #413).
+  dmControlsTurns: z.boolean(),
+  requireDmTurnConfirmation: z.boolean(),
+  // Adapter-defined action-economy slots + live usage for the current combatant.
+  actionEconomy: z.array(TurnActionSlot),
+  // Movement summary (feet) for the current combatant, when the system tracks it.
+  movement: z.object({ maxFt: z.number().nonnegative(), usedFt: z.number().nonnegative() }).nullable(),
+  reactionAvailable: z.boolean(),
+  concentration: z.string().nullable(),
+  activeEffects: z.array(ActiveEffect),
+  suggestedActions: z.array(TurnSuggestedAction),
+  startPrompts: z.array(TurnPrompt),
+  endPrompts: z.array(TurnPrompt),
+});
+export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
+
+/**
+ * Body for POST /encounters/:id/end-turn (issue #413). `expectedCurrentCombatantId` opts
+ * into double-advance protection: the server only advances when the live current combatant
+ * still matches (a stale/duplicate click after someone else advanced is a 409, not a second
+ * skipped turn). `confirm` is set by the DM to approve a player's staged end-turn when the
+ * campaign requires DM confirmation.
+ */
+export const EncounterEndTurn = z.object({
+  expectedCurrentCombatantId: Id.nullable().optional(),
+  confirm: z.boolean().optional(),
+});
+export type EncounterEndTurn = z.infer<typeof EncounterEndTurn>;
+
+/**
+ * Body for POST /encounters/:id/combatants/:cid/turn-state (issue #413) — declare/resolve
+ * action economy and effects on a combatant. All fields optional and independent:
+ *  - useSlot / releaseSlot: increment / decrement usage of an action-economy slot by 1;
+ *  - setSlotUsed: set a slot's usage to an absolute count (movement uses moveFt instead);
+ *  - moveFt: add feet to movementUsedFt (negative to correct); resetMovement clears it;
+ *  - concentration: set/clear what the combatant is concentrating on;
+ *  - addEffect / removeEffectId: add or drop a structured ActiveEffect;
+ *  - delaying / readied: the delay/ready turn-order tools;
+ *  - resetTurn: clear the per-turn slice (used/movement, keep reaction+concentration).
+ * DM may edit any combatant; a player only their own linked character's combatant.
+ */
+export const CombatantTurnStatePatch = z.object({
+  useSlot: z.string().max(40).optional(),
+  releaseSlot: z.string().max(40).optional(),
+  setSlotUsed: z.object({ key: z.string().max(40), used: z.number().int().nonnegative() }).optional(),
+  moveFt: z.number().optional(),
+  resetMovement: z.boolean().optional(),
+  concentration: z.string().max(160).nullable().optional(),
+  addEffect: ActiveEffect.optional(),
+  removeEffectId: z.string().max(40).optional(),
+  delaying: z.boolean().optional(),
+  readied: z.string().max(200).nullable().optional(),
+  resetTurn: z.boolean().optional(),
+});
+export type CombatantTurnStatePatch = z.infer<typeof CombatantTurnStatePatch>;
 
 // ---------- inventory & loot (party treasury + per-character items) ----------
 export const ItemOwnerType = z.enum(['party', 'character']);

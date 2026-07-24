@@ -238,6 +238,8 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     currentLocationId: row.currentLocationId,
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
     dmControlsProgression: row.dmControlsProgression,
+    dmControlsTurns: row.dmControlsTurns,
+    requireDmTurnConfirmation: row.requireDmTurnConfirmation,
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
     sessionCount: row.sessionCount,
@@ -431,6 +433,8 @@ export class CampaignsService {
         currentLocationId: input.currentLocationId ?? null,
         dangerLevel: input.dangerLevel ?? 'low',
         dmControlsProgression: input.dmControlsProgression ?? false,
+        dmControlsTurns: input.dmControlsTurns ?? false,
+        requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
         publicRecapSharingEnabled: true,
         // Brand-new campaigns that start archived cannot accept joins until the
         // DM both unarchives and deliberately re-enables invites (#857).
@@ -707,6 +711,8 @@ export class CampaignsService {
           currentLocationId: null, // remapped below (full mode only)
           dangerLevel: source.dangerLevel,
           dmControlsProgression: source.dmControlsProgression,
+          dmControlsTurns: source.dmControlsTurns,
+          requireDmTurnConfirmation: source.requireDmTurnConfirmation,
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           publicInvitesEnabled: source.publicInvitesEnabled,
           sessionCount: template ? 0 : source.sessionCount,
@@ -1334,6 +1340,8 @@ export class CampaignsService {
           currentLocationId: null, // remapped below
           dangerLevel: str(campaignSrc.dangerLevel, 'low'),
           dmControlsProgression: boolOf(campaignSrc.dmControlsProgression),
+          dmControlsTurns: boolOf(campaignSrc.dmControlsTurns),
+          requireDmTurnConfirmation: boolOf(campaignSrc.requireDmTurnConfirmation),
           // Older exports predate the policy field and retain the historical
           // enabled default. Explicitly disabled campaigns stay disabled.
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,

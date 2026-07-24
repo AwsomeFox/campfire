@@ -17,6 +17,11 @@ export const campaigns = sqliteTable('campaigns', {
   // When true, only the DM may award XP / level up characters (issue #270). Added in
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
   dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
+  // Issue #413: turn-advancement controls. dmControlsTurns keeps advancement DM-only;
+  // requireDmTurnConfirmation stages a player end-turn for DM approval. Added by migration
+  // on older DBs — see db/db.module.ts migrateCampaignsTableForTurnControls().
+  dmControlsTurns: integer('dm_controls_turns', { mode: 'boolean' }).notNull().default(false),
+  requireDmTurnConfirmation: integer('require_dm_turn_confirmation', { mode: 'boolean' }).notNull().default(false),
   publicRecapSharingEnabled: integer('public_recap_sharing_enabled', { mode: 'boolean' }).notNull().default(true),
   // Issue #857: when false, public invite preview/accept/join all 404 with the
   // uniform inactive message. Archive/trash auto-clears this; restore/unarchive
@@ -1047,6 +1052,13 @@ export const combatants = sqliteTable('combatants', {
   // the compare-and-set token so a re-end cannot silently overwrite intervening sheet HP.
   // Nullable for legacy rows; first sync after upgrade stamps it.
   sheetSyncedUpdatedAt: text('sheet_synced_updated_at'),
+  // Issue #413: current-turn workspace state as a JSON CombatantTurnState blob (per-turn
+  // action-economy usage, movement, concentration, delay/ready) and structured active
+  // effects as a JSON ActiveEffect[] blob (duration + save timing). Nullable; added by
+  // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTurnState().
+  // null = defaults (EMPTY_TURN_STATE / []).
+  turnState: text('turn_state'),
+  activeEffects: text('active_effects'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
@@ -355,6 +355,81 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.nextTurn(id, user, role);
+  }
+
+  @Get(':id/turn')
+  @ApiOperation({
+    summary: 'Get the current-turn workspace (issue #413)',
+    description:
+      'Requires campaign membership. The focused "what can I do now?" view for the active combatant: prominent actor / ' +
+      'round / next actor, a "your turn" flag, the adapter-defined action-economy slots with plain-language help + live ' +
+      'usage, movement / reaction / concentration / active effects, suggested actions from the sheet or statblock, and ' +
+      'the start/end-of-turn prompts to resolve before advancing. The detailed workspace is only populated for the DM ' +
+      'or the user who owns the current combatant’s character — other viewers get identity + round only (secrecy).',
+  })
+  @ApiResponse({ status: 200, description: 'The current-turn workspace.' })
+  async turn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getTurnWorkspace(id, user, role);
+  }
+
+  @Post(':id/end-turn')
+  @ApiOperation({
+    summary: 'End the current combatant’s turn (issue #413)',
+    description:
+      'Any campaign member with write access. The DM may always end the current turn; a PLAYER may end the turn of ' +
+      'their OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server ' +
+      'validates ownership + that it is actually that combatant’s turn, serializes advancement, and guards against ' +
+      'double-advance via the optional expectedCurrentCombatantId (a stale click after someone else advanced returns ' +
+      '409). When the campaign requires DM confirmation, a player end-turn is staged (409) and the DM confirms with ' +
+      'confirm:true. Advancing resolves start/end-of-turn effects and logs structured combat-log events.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter advanced to the next turn.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running / no current combatant.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or the owning player of the current combatant, or DM-only advancement is set.' })
+  @ApiResponse({ status: 409, description: 'The turn already advanced (double-advance guard) or DM confirmation is required.' })
+  async endTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterEndTurnDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.endTurn(id, body, user, role);
+  }
+
+  @Post(':id/undo-turn')
+  @ApiOperation({
+    summary: 'Undo the last turn advance (issue #413)',
+    description:
+      'dm role required. Steps the turn pointer BACKWARD (decrementing the round when unwrapping past the top). ' +
+      'Effect ticks applied while advancing are not reversed — the DM re-applies any effect corrections manually.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter turn pointer moved back.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running.' })
+  async undoTurn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.undoTurn(id, user, role);
+  }
+
+  @Post(':id/combatants/:cid/turn-state')
+  @ApiOperation({
+    summary: 'Declare / resolve turn state on a combatant (issue #413)',
+    description:
+      'Track the current turn’s action economy and effects: use/release/set an action-economy slot, spend movement, ' +
+      'set/clear concentration, add/remove a structured active effect (duration + save timing), or mark a combatant ' +
+      'delaying / readying an action. The DM may edit any combatant; a player only a combatant linked to a character ' +
+      'they own. Changes compose atomically under concurrency.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated combatant.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or the owning player.' })
+  async turnState(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantTurnStatePatchDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.updateCombatantTurnState(id, cid, body, user, role);
   }
 
   @Post(':id/end')

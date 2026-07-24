@@ -32,6 +32,8 @@ export const queryKeys = {
   encounter: (encounterId: number) => ['encounter', encounterId] as const,
   encounterDifficulty: (encounterId: number) => ['encounter', encounterId, 'difficulty'] as const,
   encounterEvents: (encounterId: number) => ['encounter', encounterId, 'events'] as const,
+  /** Current-turn workspace (issue #413) — "what can I do now?" for the active combatant. */
+  encounterTurn: (encounterId: number) => ['encounter', encounterId, 'turn'] as const,
   /** All encounters in a campaign (the list surface). */
   campaignEncounters: (campaignId: number) => ['campaign', campaignId, 'encounters'] as const,
   campaignCharacters: (campaignId: number) => ['campaign', campaignId, 'characters'] as const,
