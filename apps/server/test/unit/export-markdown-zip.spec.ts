@@ -43,7 +43,7 @@ function buildService(entities: {
     { listForCampaign: async () => entities.locations ?? [] } as any, // locations
     { listRecapsForCampaign: async () => entities.sessions ?? [] } as any, // sessions
     { listForCampaign: async () => entities.characters ?? [] } as any, // characters
-    { listForCampaign: noop as any } as any, // notes
+    { listForCampaign: noop as any, listAllForCampaign: async () => [] } as any, // notes
     { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members
     {

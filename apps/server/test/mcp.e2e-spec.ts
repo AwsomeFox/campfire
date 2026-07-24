@@ -1632,7 +1632,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const listNotesResult = await client.callTool({ name: 'list_notes', arguments: { campaignId, mine: true } });
     expect(listNotesResult.isError).toBeFalsy();
-    expect((parseResult(listNotesResult) as unknown[]).some((n) => (n as { id: number }).id === note.id)).toBe(true);
+    expect((parseResult(listNotesResult) as { items: Array<{ id: number }> }).items.some((n) => n.id === note.id)).toBe(true);
 
     const deleteNoteResult = await client.callTool({ name: 'delete_note', arguments: { noteId: note.id } });
     expect(deleteNoteResult.isError).toBeFalsy();
@@ -1792,7 +1792,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const inboxList = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
     expect(inboxList.isError).toBeFalsy();
-    expect((parseResult(inboxList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
+    expect((parseResult(inboxList) as { items: Array<{ id: number }> }).items.some((n) => n.id === item.id)).toBe(true);
 
     const resolveResult = await dmClient.callTool({
       name: 'resolve_inbox_item',
@@ -1827,10 +1827,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     // resolved history via read_inbox { resolved: true }; open list no longer has it
     const openAfter = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId } });
-    expect((parseResult(openAfter) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(false);
+    expect((parseResult(openAfter) as { items: Array<{ id: number }> }).items.some((n) => n.id === item.id)).toBe(false);
     const historyList = await dmClient.callTool({ name: 'read_inbox', arguments: { campaignId, resolved: true } });
     expect(historyList.isError).toBeFalsy();
-    expect((parseResult(historyList) as Array<{ id: number }>).some((n) => n.id === item.id)).toBe(true);
+    expect((parseResult(historyList) as { items: Array<{ id: number }> }).items.some((n) => n.id === item.id)).toBe(true);
 
     // half-provided entity link is rejected
     const secondItem = parseResult(
@@ -1878,12 +1878,12 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     // Over MCP list_notes: target sees it, the non-target never does.
     const targetClient = await mcpClient(targetToken);
-    const targetNotes = parseResult(await targetClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as Array<{ id: number }>;
-    expect(targetNotes.some((n) => n.id === whisper.id)).toBe(true);
+    const targetNotes = parseResult(await targetClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as { items: Array<{ id: number }> };
+    expect(targetNotes.items.some((n) => n.id === whisper.id)).toBe(true);
 
     const otherClient = await mcpClient(otherToken);
-    const otherNotes = parseResult(await otherClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as Array<{ id: number }>;
-    expect(otherNotes.some((n) => n.id === whisper.id)).toBe(false);
+    const otherNotes = parseResult(await otherClient.callTool({ name: 'list_notes', arguments: { campaignId } })) as { items: Array<{ id: number }> };
+    expect(otherNotes.items.some((n) => n.id === whisper.id)).toBe(false);
   });
 
   it('add_member -> update_member -> remove_member round-trip (dm only)', async () => {
