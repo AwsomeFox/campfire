@@ -1755,6 +1755,26 @@ export class AiDriverService {
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
 
+    // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
+    // AI can narrate coherently without needing to chain read tools every turn. All reads go
+    // through the player-scoped contextToolset so hidden entities / dmSecret / unexplored
+    // locations stay excluded (same secrecy guarantee as the campaign summary above).
+    //
+    // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
+    // the turn. The system prompt is read fresh every turn, so world-state changes propagate
+    // to the next player interaction without a cache-invalidation step.
+    const calendar = await safeRead(contextToolset, 'get_calendar', { campaignId });
+    if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
+
+    const activeEncounters = await safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' });
+    if (activeEncounters && activeEncounters.trim() !== '' && activeEncounters.trim() !== '[]') {
+      parts.push(`## Running encounters\n${activeEncounters}`);
+    }
+
+    // Party HP/conditions/status — filtered to what a player can see (dmSecret stripped).
+    const party = await safeRead(contextToolset, 'get_party', { campaignId });
+    if (party) parts.push(`## Party status\n${party}`);
+
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
     // every turn, so revocation cannot linger in a cached prompt.
