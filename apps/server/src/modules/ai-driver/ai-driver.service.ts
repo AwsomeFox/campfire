@@ -1897,11 +1897,8 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
   const parts: string[] = [];
   let totalLen = 0;
   const MAX_TOTAL = 400;
+  const ELLIPSIS = '…';
   for (const [key, value] of Object.entries(args)) {
-    if (totalLen >= MAX_TOTAL) {
-      parts.push('…');
-      break;
-    }
     const lower = key.toLowerCase();
     const isSecret = REDACTED_ARG_KEYS.some((k) => lower.includes(k));
     let rendered: string;
@@ -1919,7 +1916,19 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
       rendered = '<object>';
     }
     const entry = `${key}=${rendered}`;
-    totalLen += entry.length + 2; // +2 for ", "
+    // Only account for the ", " separator when appending after existing entries.
+    const separatorLen = parts.length === 0 ? 0 : 2;
+    // Check the *projected* length before pushing, so a large entry can't push
+    // the summary well past MAX_TOTAL (Copilot review, #1248).
+    if (totalLen + separatorLen + entry.length > MAX_TOTAL) {
+      // Reserve room for the ellipsis marker too.
+      const ellipsisSep = parts.length === 0 ? 0 : 2;
+      if (totalLen + ellipsisSep + ELLIPSIS.length <= MAX_TOTAL) {
+        parts.push(ELLIPSIS);
+      }
+      break;
+    }
+    totalLen += separatorLen + entry.length;
     parts.push(entry);
   }
   return parts.join(', ');
