@@ -30,7 +30,8 @@ import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
@@ -76,6 +77,12 @@ export default function SessionsPage() {
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: cid,
+    target: 'recap',
+    label: 'Draft a recap with AI',
+    enabled: isDm && tab === 'log',
+  });
 
   // Roving-tabindex tablist — the selected tab holds tabindex 0, the rest -1, so
   // a single Tab keystroke lands in the panel and arrow keys move between tabs
@@ -334,31 +341,37 @@ export default function SessionsPage() {
   // remains `display: none` below the desktop breakpoint.
   const showDetailOnMobile = Boolean(selected) || (isDm && (showAddForm || sessions.length === 0));
 
+  const secondaryActions: PageHeaderSecondaryAction[] = [];
+  if (isDm) {
+    secondaryActions.push({ key: 'trash', label: 'Trash', href: `/c/${cid}/trash` });
+  }
+  if (draftAction) {
+    secondaryActions.push(draftAction);
+  }
+
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      <div className="flex items-center gap-2.5">
-        <h1 className="text-2xl font-extrabold text-white">Sessions</h1>
-        <div className="flex-1" />
-        {isDm && (
-          <Link to={`/c/${cid}/trash`} className="text-xs text-slate-500 hover:text-slate-300" title="Restore deleted entities">
-            Trash
-          </Link>
-        )}
-        {isDm && tab === 'log' && <DraftWithAiButton campaignId={cid} target="recap" label="Draft a recap with AI" />}
-        {isDm && tab === 'log' && (
-          <Btn
-            className="!min-h-0 !py-1.5 text-xs"
-            onClick={() => {
-              setShowAddForm(true);
-              if (selected) backToList();
-            }}
-          >
-            + Add recap
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Sessions"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          isDm && tab === 'log' ? (
+            <Btn
+              type="button"
+              className="cf-page-header__action"
+              onClick={() => {
+                setShowAddForm(true);
+                if (selected) backToList();
+              }}
+            >
+              + Add recap
+            </Btn>
+          ) : undefined
+        }
+      />
+      {draftDialog}
 
       {/*
         Log/Schedule tablist (issue #706) — was a colour-only segmented control with

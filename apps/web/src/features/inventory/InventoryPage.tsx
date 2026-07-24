@@ -13,6 +13,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { PageHeader } from '../../components/PageHeader';
 import { Field } from '../../components/Field';
 import {
   INVENTORY_ADD_PREFIX,
@@ -172,15 +173,16 @@ export default function InventoryPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-extrabold text-white">Inventory</h1>
-        <div className="flex-1" />
-        {canEdit && !adding && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setAdding(true)}>
-            + Add item
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Inventory"
+        primaryAction={
+          canEdit && !adding ? (
+            <Btn type="button" className="cf-page-header__action" onClick={() => setAdding(true)}>
+              + Add item
+            </Btn>
+          ) : undefined
+        }
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

@@ -11,8 +11,9 @@ import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { initials } from '../../lib/avatarText';
 
 export default function NpcListPage() {
@@ -35,6 +36,10 @@ export default function NpcListPage() {
   const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'npc',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,20 +117,25 @@ export default function NpcListPage() {
     );
   }
 
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAction ? [draftAction] : [];
+
   return (
     <div data-testid="npc-list-surface" className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="hooded-figure" size={18} /> NPCs</h1>
-          <div className="flex items-center gap-2">
-            <DraftWithAiButton campaignId={id} target="npc" />
-            {isDm && !creating && (
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="hooded-figure" size={18} />}
+          title="NPCs"
+          secondaryActions={secondaryActions}
+          primaryAction={
+            isDm && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
                 + New NPC
               </Btn>
-            )}
-          </div>
-        </div>
+            ) : undefined
+          }
+        />
+        {draftDialog}
 
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">
