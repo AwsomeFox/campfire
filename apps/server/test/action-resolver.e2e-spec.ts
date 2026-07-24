@@ -1,0 +1,160 @@
+import request from 'supertest';
+import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { rulePacks, ruleEntries } from '../src/db/schema';
+
+/**
+ * Issue #414 — structured action resolver at the HTTP API layer (real Nest app + SQLite).
+ * Exercises the four controller routes end-to-end over HTTP with dev-role auth headers:
+ *   GET  /encounters/:id/combatants/:cid/actions   — list usable actions (+ resolvable flag)
+ *   POST /encounters/:id/actions/resolve            — resolve (+ optional atomic commit)
+ *   POST /encounters/:id/actions/undo               — reverse an applied resolution
+ * plus the authorization boundary (a player may not resolve another player's character) and
+ * the "unsupported shape → 400, never silent math" contract. Damage is pinned deterministically
+ * with a save spell at DC 21 (a monster with no stated saves rolls at +0, so a d20 tops out at
+ * 20 → always fails → full damage), so the assertions never depend on the RNG.
+ */
+const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
+const player = { 'x-dev-role': 'player', 'x-dev-user': 'p-1' };
+const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'p-2' };
+
+// A DEX-save spell that always fails vs a +0 monster (DC 21), dealing flat 6 fire on a failure
+// (a formula-free DamagePart so the total is deterministic without a roller). Its freeform
+// notes must survive the round-trip (issue #414: preserve AND surface notes).
+const scorchingRay = {
+  name: 'Scorching Ray',
+  kind: 'spell',
+  toHit: '',
+  damage: '6 fire',
+  notes: 'Three rays of fire.',
+  spec: {
+    mode: 'save',
+    save: { ability: 'DEX', dc: { kind: 'fixed', dc: 21 } },
+    cost: { slot: 'action', count: 1 },
+    targets: { count: 1, allow: 'enemy' },
+    outcomes: { failure: { damage: [{ flat: 6, type: 'fire' }] }, success: { halfDamage: true } },
+  },
+};
+
+describe('action resolver (e2e HTTP)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let actorId: number; // the player's PC combatant
+  let monsterId: number; // the target monster combatant
+  let monsterHp: number; // the monster's resolved starting HP (statblock-derived)
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Resolver Campaign' });
+    campaignId = campRes.body.id;
+
+    // A PC owned by dev:p-1 carrying the structured action.
+    const charRes = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Wizard', stats: { DEX: 10, INT: 18 }, ac: 12, hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1', actions: [scorchingRay] });
+    expect(charRes.status).toBe(201);
+
+    // Seed a monster rule entry (with an AC + HP statblock, no fire resistance).
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    const [pack] = await db.insert(rulePacks).values({ slug: 'resolver-pack', name: 'Resolver Pack', installedAt: ts, entryCount: 1 }).returning();
+    const [entry] = await db
+      .insert(ruleEntries)
+      .values({
+        packId: pack.id,
+        slug: 'straw-dummy',
+        name: 'Straw Dummy',
+        type: 'monster',
+        dataJson: JSON.stringify({ armor_class: 12, hit_points: 30 }),
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+
+    // Encounter auto-adds the party PC; then add the monster target.
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
+    expect(encRes.status).toBe(201);
+    encounterId = encRes.body.id;
+    actorId = encRes.body.combatants[0].id;
+
+    const monRes = await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', ruleEntryId: entry.id });
+    expect(monRes.status).toBe(201);
+    monsterId = monRes.body.id;
+    monsterHp = monRes.body.hpCurrent; // DM view: exact HP (statblock-derived, not redacted)
+    expect(monsterHp).toBeGreaterThan(6);
+
+    // Put the encounter into a running round so HP applies land.
+    await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ status: 'running', round: 1 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('lists a PC’s usable actions with the resolvable flag + preserved freeform notes', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}/combatants/${actorId}/actions`).set(player);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].name).toBe('Scorching Ray');
+    expect(res.body[0].mode).toBe('save');
+    expect(res.body[0].resolvable).toBe(true);
+    expect(res.body[0].notes).toBe('Three rays of fire.'); // freeform preserved
+  });
+
+  it('a player may not list another player’s character actions (403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}/combatants/${actorId}/actions`).set(otherPlayer);
+    expect(res.status).toBe(403);
+  });
+
+  it('a player resolves + commits their own PC action against a monster, then undoes it', async () => {
+    const server = ctx.app.getHttpServer();
+    const resolveRes = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(player)
+      .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId], commit: true });
+    expect(resolveRes.status).toBe(200);
+    expect(resolveRes.body.applied).toBe(true);
+    expect(resolveRes.body.policy).toBe('automatic');
+    const target = resolveRes.body.resolution.targets[0];
+    expect(target.outcome).toBe('failure'); // DC 21 always fails vs a +0 save
+    expect(target.totalDamage).toBe(6); // flat 6 fire, no resistance
+    const undoToken = resolveRes.body.undoToken;
+    expect(undoToken).not.toBeNull();
+
+    // The monster's HP dropped by 6 (the DM sees exact HP).
+    const afterApply = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monsterAfter = afterApply.body.combatants.find((c: { id: number }) => c.id === monsterId);
+    expect(monsterAfter.hpCurrent).toBe(monsterHp - 6);
+
+    // Undo restores the monster's HP exactly.
+    const undoRes = await request(server).post(`/api/v1/encounters/${encounterId}/actions/undo`).set(player).send(undoToken);
+    expect(undoRes.status).toBe(200);
+    const afterUndo = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const monsterRestored = afterUndo.body.combatants.find((c: { id: number }) => c.id === monsterId);
+    expect(monsterRestored.hpCurrent).toBe(monsterHp);
+  });
+
+  it('a player may not resolve another player’s character action (403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(otherPlayer)
+      .send({ actorCombatantId: actorId, actionIndex: 0, targetIds: [monsterId] });
+    expect(res.status).toBe(403);
+  });
+
+  it('an unsupported action shape is refused (400) rather than inventing numbers', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/actions/resolve`)
+      .set(player)
+      .send({ actorCombatantId: actorId, spec: { mode: 'attack' }, targetIds: [monsterId] });
+    expect(res.status).toBe(400);
+  });
+});
