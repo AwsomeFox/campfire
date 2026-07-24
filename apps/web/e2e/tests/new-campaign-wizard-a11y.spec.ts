@@ -13,10 +13,10 @@ test.describe('New campaign wizard headings (#521)', () => {
   test('uses one h1, h2 step headings, focus, announcements, and document title', async ({ page }) => {
     await page.goto('/?newCampaign=1');
 
-    const wizardMain = page.locator('main[aria-labelledby="new-campaign-title"]');
-    const pageTitle = wizardMain.getByRole('heading', { level: 1, name: 'New campaign' });
+    const wizardSection = page.locator('section[aria-labelledby="new-campaign-title"]');
+    const pageTitle = wizardSection.getByRole('heading', { level: 1, name: 'New campaign' });
     await expect(pageTitle).toBeVisible();
-    await expect(wizardMain.getByRole('heading', { level: 1 })).toHaveCount(1);
+    await expect(wizardSection.getByRole('heading', { level: 1 })).toHaveCount(1);
 
     const detailsHeading = page.getByRole('heading', { level: 2, name: 'Campaign details' });
     await expect(detailsHeading).toBeVisible();
@@ -41,7 +41,7 @@ test.describe('New campaign wizard headings (#521)', () => {
     await expect.poll(async () => polite.textContent()).toContain('Campaign details');
 
     const results = await new AxeBuilder({ page })
-      .include('main[aria-labelledby="new-campaign-title"]')
+      .include('section[aria-labelledby="new-campaign-title"]')
       .analyze();
     expect(results.violations.filter((v) => v.id === 'heading-order')).toEqual([]);
   });

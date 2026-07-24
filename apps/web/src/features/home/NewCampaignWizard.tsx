@@ -133,7 +133,7 @@ export function NewCampaignWizard({
           ← Campaigns
         </button>
       </header>
-      <main
+      <section
         className="w-full mx-auto flex flex-col gap-4"
         style={{ maxWidth: 560, padding: '28px 20px 48px' }}
         aria-labelledby="new-campaign-title"
@@ -349,7 +349,7 @@ export function NewCampaignWizard({
             </div>
           </div>
         )}
-      </main>
+      </section>
     </div>
   );
 }
