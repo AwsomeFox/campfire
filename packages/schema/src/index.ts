@@ -1457,6 +1457,9 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
  *   - 'open-legend' — Open Legend community codex (issue #299)
  *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
+ *   - 'datasworn'   — Ironsworn: Starforged, via the canonical rsek/datasworn CC-BY-4.0
+ *                     JSON dataset (issue #405; a PbtA reference-text pack — one real
+ *                     statblock section, NPCs, the rest reference text)
  *   - 'other'       — generic/placeholder (routes to the Open5e path for back-compat)
  * The existing Open5e/PF2e request shape is unchanged: callers still pass `source: 'open5e'`
  * (or 'pf2e'). Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.
@@ -1470,6 +1473,7 @@ export const RulePackInstallSource = z.enum([
   'archmage',
   'open-legend',
   'osr',
+  'datasworn',
   'other',
 ]);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
@@ -1515,6 +1519,13 @@ export const RulePackInstallSection = z.enum([
   'creatures',
   'banes',
   'boons',
+  // Datasworn / Ironsworn: Starforged (issue #405). A PbtA/narrative game whose native model
+  // is oracles/moves/assets — only `npcs` maps cleanly to a statblock; the rest is reference text.
+  'npcs',
+  'assets',
+  'moves',
+  'oracles',
+  'truths',
 ]);
 export type RulePackInstallSection = z.infer<typeof RulePackInstallSection>;
 
@@ -1639,6 +1650,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     license: 'CC-BY-SA-4.0 (Basic Fantasy) / OGL v1.0a (OSRIC, S&W, Labyrinth Lord, OSE)',
     note: 'Basic Fantasy is CC-BY-SA but published only as PDF/ODT — not machine-readable — and the OGL retroclones have no JSON API. Upload a converted pack, or pass `url`.',
     candidateSourceUrl: 'https://basicfantasy.org/downloads.html',
+  },
+  datasworn: {
+    source: 'datasworn',
+    label: 'Ironsworn: Starforged (datasworn)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'CC-BY-4.0',
+    note: 'Live import of the canonical rsek/datasworn Starforged JSON (a single CC-BY-4.0 data file). A PbtA reference-text pack: NPCs import as monster statblocks; assets, moves, oracles, and truths import as reference sections.',
+    candidateSourceUrl: 'https://raw.githubusercontent.com/rsek/datasworn/main/datasworn/starforged/starforged.json',
   },
   other: {
     source: 'other',
@@ -2510,6 +2530,8 @@ import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
 import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
 export * from './osr-adapter';
+import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
+export * from './adapters/starforged';
 
 /**
  * Registry of rule-system adapters, keyed by family id (and, for a system with its own
@@ -2537,6 +2559,13 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
   'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
+  // Ironsworn: Starforged (issue #405). Registered under BOTH its family id and the datasworn
+  // pack slug a campaign's `ruleSystem` holds (matching the sibling adapters), so this
+  // PbtA/narrative pack resolves to the neutral Starforged adapter instead of silently
+  // inheriting 5e combat via the unknown-slug fallback. STARFORGED_PACK_SLUG mirrors the
+  // importer's DATASWORN_PACK_SLUG ('ironsworn-starforged').
+  [STARFORGED_ADAPTER_ID]: StarforgedAdapter,
+  [STARFORGED_PACK_SLUG]: StarforgedAdapter,
 };
 // OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
 for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
@@ -2745,7 +2774,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'datasworn', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),

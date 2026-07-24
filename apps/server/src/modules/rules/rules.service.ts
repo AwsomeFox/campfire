@@ -94,6 +94,17 @@ import {
   osrSource,
   type OsrSection,
 } from './osr-importer';
+import {
+  ALL_DATASWORN_SECTIONS,
+  DATASWORN_LICENSE,
+  DATASWORN_MAX_ENTRIES_PER_SECTION,
+  DATASWORN_PACK_NAME,
+  DATASWORN_PACK_SLUG,
+  DATASWORN_STARFORGED_URL,
+  fetchDataswornDocument,
+  mapDataswornSection,
+  type DataswornSection,
+} from './datasworn-importer';
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -350,6 +361,7 @@ export class RulesService {
     archmage: ALL_ARCHMAGE_SECTIONS,
     'open-legend': ALL_OPEN_LEGEND_SECTIONS,
     osr: ALL_OSR_SECTIONS,
+    datasworn: ALL_DATASWORN_SECTIONS,
     other: ALL_OPEN5E_SECTIONS,
   };
 
@@ -415,6 +427,8 @@ export class RulesService {
         return this.enqueueOpenLegendInstall(input, user);
       case 'osr':
         return this.enqueueOsrInstall(input, user);
+      case 'datasworn':
+        return this.enqueueDataswornInstall(input, user);
       case 'open5e':
       case 'other':
       default:
@@ -450,6 +464,8 @@ export class RulesService {
         return this.installFromOpenLegend(input, user, onSectionDone);
       case 'osr':
         return this.installFromOsr(input, user, onSectionDone);
+      case 'datasworn':
+        return this.installFromDatasworn(input, user, onSectionDone);
       case 'open5e':
       case 'other':
       default:
@@ -589,6 +605,26 @@ export class RulesService {
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOsr(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue an Ironsworn: Starforged (datasworn) install (issue #405). Unlike the paginated
+   * siblings, datasworn is a SINGLE JSON document, so installFromDatasworn fetches the file
+   * once and maps each requested section from memory — but it still reports per-section
+   * progress, so the background-job machinery is identical. Installs under
+   * DATASWORN_PACK_SLUG. Sections are npcs/assets/moves/oracles/truths (see the importer).
+   */
+  enqueueDataswornInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: DataswornSection[] = input.sections?.length
+      ? (input.sections as DataswornSection[])
+      : ALL_DATASWORN_SECTIONS;
+    const job = this.newJob('datasworn', sections);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromDatasworn(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -1088,6 +1124,55 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs the Ironsworn: Starforged (datasworn) rule pack (issue #405), or incrementally
+   * adds missing entries if `ironsworn-starforged` already exists. Datasworn is a SINGLE JSON
+   * document, so — unlike the paginated importers — this fetches the whole file ONCE and maps
+   * each requested section out of it (npcs→monster, assets→item, moves/oracles/truths→section),
+   * reporting per-section progress the caller polls. Oracles are flattened recursively (they
+   * are collections-of-collections). Every entry carries CC-BY-4.0 licensing + attribution
+   * built from the object's own provenance. The canonical source is live and open, so no
+   * `url` is required (an explicit `url` overrides the default file location for tests/mirrors).
+   */
+  async installFromDatasworn(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const url = input.url ?? DATASWORN_STARFORGED_URL;
+    const sections: DataswornSection[] = input.sections?.length
+      ? (input.sections as DataswornSection[])
+      : ALL_DATASWORN_SECTIONS;
+
+    // Fetch + validate the whole document ONCE, then map each requested section from memory.
+    const doc = await fetchDataswornDocument(url);
+    let totalSkipped = 0;
+    const allEntries: ImportedEntry[] = [];
+    for (const section of sections) {
+      const result = mapDataswornSection(doc, section);
+      totalSkipped += result.skippedCount;
+      allEntries.push(...result.entries);
+      onSectionDone?.(section, result.entries.length);
+    }
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Datasworn import returned no entries for the requested sections');
+    }
+
+    return this.persistPack(
+      {
+        slug: DATASWORN_PACK_SLUG,
+        name: DATASWORN_PACK_NAME,
+        version: nowIso().slice(0, 10),
+        license: DATASWORN_LICENSE,
+        sourceUrl: url,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
     );
   }
 

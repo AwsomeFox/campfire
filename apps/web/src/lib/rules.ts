@@ -47,6 +47,12 @@ export const SECTION_LABELS: Record<RulePackInstallSection, string> = {
   creatures: 'Creatures',
   banes: 'Banes',
   boons: 'Boons',
+  // Datasworn / Ironsworn: Starforged (issue #405)
+  npcs: 'NPCs',
+  assets: 'Assets',
+  moves: 'Moves',
+  oracles: 'Oracles',
+  truths: 'Truths',
 };
 
 /** Human label for a section name (falls back to a title-cased raw value for anything unknown). */
@@ -199,6 +205,19 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     packSlug: 'basic-fantasy',
     requiresUrl: SOURCES_REQUIRING_URL.has('osr'),
     osrVariants: OSR_VARIANTS,
+  },
+  {
+    source: 'datasworn',
+    label: 'Ironsworn: Starforged',
+    license: 'datasworn · CC-BY-4.0',
+    blurb:
+      'Ironsworn: Starforged via the canonical datasworn dataset — a PbtA sci-fi reference pack. ' +
+      'NPCs import as statblocks; assets, moves, oracles and truths import as reference sections.',
+    mechanics:
+      'PbtA/narrative: no initiative/AC/levels — action rolls vs oracles & moves. Imported as reference text, with NPCs as the one statblock section.',
+    sections: ['npcs', 'assets', 'moves', 'oracles', 'truths'],
+    packSlug: 'ironsworn-starforged',
+    requiresUrl: SOURCES_REQUIRING_URL.has('datasworn'),
   },
 ];
 

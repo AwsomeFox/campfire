@@ -66,8 +66,9 @@ export class RulesController {
     description:
       "Server admin only (packs are server-wide). `source` selects the importer: 'open5e' (D&D 5e, default), " +
       "'pf2e' (Pathfinder 2e), 'sf2e' (Starfinder 2e), 'pf1e' (Pathfinder 1e), 'starfinder', 'archmage' (13th Age), 'open-legend', " +
-      "or 'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'). Sections are " +
-      'validated per-source (a foreign section is rejected 400). open5e/pf2e/sf2e/open-legend have a wired live ' +
+      "'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'), or 'datasworn' " +
+      '(Ironsworn: Starforged, a CC-BY-4.0 reference-text pack). Sections are ' +
+      'validated per-source (a foreign section is rejected 400). open5e/pf2e/sf2e/open-legend/datasworn have a wired live ' +
       'open source and install with no `url`; pf1e/starfinder/archmage/osr have no open source (#346, see ' +
       'GET /rules/sources) — install those via POST /rules/packs/upload or pass an explicit `url`. Returns 202 with a job to poll.',
   })
