@@ -155,7 +155,7 @@ export class TokensService {
         throw new ForbiddenException('You do not have access to this campaign');
       }
       const lifecycle = await this.campaignAccess.getLifecycle(campaignId);
-      if (lifecycle?.deletedAt != null) {
+      if (!lifecycle || lifecycle.deletedAt != null) {
         throw new NotFoundException(`Campaign ${campaignId} not found`);
       }
     }

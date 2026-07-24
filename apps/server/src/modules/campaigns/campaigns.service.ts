@@ -2316,7 +2316,6 @@ export class CampaignsService {
         campaignId: id,
         detail: 'soft-delete (trashed)',
       });
-      this.events.emit({ type: 'campaign.trashed', campaignId: id });
       return;
     }
 
@@ -2534,14 +2533,38 @@ export class CampaignsService {
 
     await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    const outcome = await this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
+    let outcome;
+    let fsDetail = '';
+    try {
+      outcome = await this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
+    } catch (err) {
+      fsDetail = err instanceof Error ? err.message : String(err);
+      const completedAt = nowIso();
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'campaign.purge',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: null,
+        detail: JSON.stringify({
+          tombstoneId: tombstone.id,
+          campaignId: id,
+          campaignNameHash,
+          status: 'failed',
+          requestedAt,
+          completedAt,
+          fsError: fsDetail.slice(0, 500),
+        }),
+      });
+      await this.db
+        .update(campaignPurgeTombstones)
+        .set({ status: 'failed', detail: fsDetail.slice(0, 500), completedAt })
+        .where(eq(campaignPurgeTombstones.id, tombstone.id));
+      throw err;
+    }
 
     const completedAt = nowIso();
-    await this.db
-      .update(campaignPurgeTombstones)
-      .set({ status: 'completed', completedAt })
-      .where(eq(campaignPurgeTombstones.id, tombstone.id));
-
     // Server-level audit (campaignId null) so the purge remains discoverable after
     // memberships — and therefore GET /campaigns/:id/audit — are gone (issue #867).
     await this.audit.log({
@@ -2560,6 +2583,10 @@ export class CampaignsService {
         completedAt,
       }),
     });
+    await this.db
+      .update(campaignPurgeTombstones)
+      .set({ status: 'completed', completedAt })
+      .where(eq(campaignPurgeTombstones.id, tombstone.id));
 
     return outcome;
   }

@@ -1,5 +1,5 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, count, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, exists, isNull, sql } from 'drizzle-orm';
 import type { EntityType, Notification, NotificationType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaignMembers, campaigns, notifications } from '../../db/schema';
@@ -199,10 +199,6 @@ export class NotificationsService {
   async markAllRead(user: RequestUser): Promise<{ updated: number }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0 };
-    const liveCampaignIds = this.db
-      .select({ id: campaigns.id })
-      .from(campaigns)
-      .where(isNull(campaigns.deletedAt));
     const updated = await this.db
       .update(notifications)
       .set({ readAt: nowIso() })
@@ -210,7 +206,12 @@ export class NotificationsService {
         and(
           eq(notifications.userId, userId),
           isNull(notifications.readAt),
-          inArray(notifications.campaignId, liveCampaignIds),
+          exists(
+            this.db
+              .select({ one: sql`1` })
+              .from(campaigns)
+              .where(and(eq(campaigns.id, notifications.campaignId), isNull(campaigns.deletedAt))),
+          ),
         ),
       )
       .returning({ id: notifications.id });
