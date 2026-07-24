@@ -36,8 +36,11 @@ test.describe('Long translated name reveal & accessible truncation (issue #632)'
   test('CSS defines .cf-name-reveal for focus/hover/touch reveal and responsive text wrapping', () => {
     const css = readFileSync(INDEX_CSS, 'utf8');
     expect(css).toMatch(/\.cf-name-reveal\s*\{/);
+    expect(css).toMatch(/\.cf-name-reveal:focus/);
     expect(css).toMatch(/\.cf-name-reveal:focus-visible/);
+    expect(css).toMatch(/\.cf-name-reveal:active/);
     expect(css).toMatch(/\.cf-name-reveal:hover/);
+    expect(css).toMatch(/@media\s*\(\s*hover:\s*none\s*\)\s*and\s*\(\s*pointer:\s*coarse\s*\)/);
     expect(css).toMatch(/overflow:\s*visible/);
     expect(css).toMatch(/white-space:\s*normal/);
     expect(css).toMatch(/word-break:\s*break-word/);
