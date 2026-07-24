@@ -7,6 +7,7 @@
  * - provenance-safe 401 → {@link noteUnauthorizedResponse} (issue #885); network
  *   failures never look like session expiry
  */
+import { joinPublicBase } from './public-base';
 
 import { noteUnauthorizedResponse } from './sessionExpiry';
 
@@ -104,7 +105,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
 
-  const res = await fetch(path, {
+  const res = await fetch(joinPublicBase(path), {
     ...init,
     credentials: 'include',
     headers,
@@ -157,7 +158,7 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
   const devUser = localStorage.getItem('cf.devUser');
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
-  const res = await fetch(path, { ...init, credentials: 'include', headers });
+  const res = await fetch(joinPublicBase(path), { ...init, credentials: 'include', headers });
   if (!res.ok) {
     noteUnauthorizedResponse(path, res.status);
     // Reuse the same error shaping as `request` so callers' catch blocks are identical.
@@ -183,6 +184,16 @@ export const api = {
   delete: <T>(path: string, init?: RequestInit) => request<T>(path, { ...init, method: 'DELETE' }),
 };
 
+/**
+ * Un-prefixed API base path. The {@link api} methods (and {@link getWithHeaders})
+ * apply {@link PUBLIC_BASE} themselves via {@link joinPublicBase}, so feature
+ * code keeps the same ``${API}/campaigns`` template it always has and the
+ * prefix is applied exactly once. Pre-#798 behavior (`PUBLIC_BASE='/'`) is
+ * unchanged: `joinPublicBase('/api/v1/campaigns') === '/api/v1/campaigns'`.
+ *
+ * IMPORTANT: do NOT export a pre-prefixed constant — that double-prefixes every
+ * call (`/campfire/campfire/api/v1/...`). `API` stays the raw `/api/v1` stem.
+ */
 export const API = '/api/v1';
 
 /**

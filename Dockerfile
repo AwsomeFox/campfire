@@ -50,6 +50,19 @@ COPY packages/schema packages/schema
 COPY apps/server apps/server
 COPY apps/web apps/web
 
+# Issue #798: PUBLIC_BASE is the reverse-proxy subpath the image will be served
+# under (e.g. /campfire when the public URL is https://host/campfire/...). It is
+# baked into the web build at compile time — Vite uses it to rewrite every
+# asset/chunk URL, the PWA manifest's scope/start_url, the service-worker
+# navigate-fallback patterns, and the in-app API client/router prefix. Default
+# `/` is a root deployment (identical to pre-#798 behavior). Passed through to
+# `vite build` as an env var; the server reads the same value at runtime below.
+# Re-building the image is required to change it (the prefix is a build-time
+# constant by design — the browser cannot be told at runtime which path to
+# fetch assets from).
+ARG PUBLIC_BASE=/
+ENV PUBLIC_BASE=${PUBLIC_BASE}
+
 RUN npm run build
 
 # ---------------------------------------------------------------------------
@@ -80,12 +93,16 @@ WORKDIR /app
 # Re-declare so LABEL/ENV see the release build-args (Docker scoping).
 ARG APP_VERSION=0.0.0-dev
 ARG APP_COMMIT=
-
+# Issue #798: re-declare PUBLIC_BASE in the final stage so the SERVER's
+# resolvePublicBase() (used to prefix OIDC redirects + scope the OIDC flow
+# cookie path) reads the same value the WEB build was stamped with.
+ARG PUBLIC_BASE=/
 ENV NODE_ENV=production \
     WEB_DIST=/app/web-dist \
     DATA_DIR=/data \
     PORT=8080 \
-    APP_COMMIT=${APP_COMMIT}
+    APP_COMMIT=${APP_COMMIT} \
+    PUBLIC_BASE=${PUBLIC_BASE}
 
 LABEL org.opencontainers.image.title="Campfire" \
       org.opencontainers.image.description="Self-hosted, AI-operable D&D campaign tracker" \

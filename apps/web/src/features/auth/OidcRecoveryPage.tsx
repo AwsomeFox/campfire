@@ -5,6 +5,7 @@ import {
   type OidcRecoveryCategory,
 } from '@campfire/schema';
 import { useAuthStatus } from '../../app/AuthStatusGate';
+import { joinPublicBase } from '../../lib/public-base';
 
 interface RecoveryCopy {
   title: string;
@@ -136,7 +137,7 @@ export function OidcRecoveryPage() {
 
         <div className="w-full flex flex-col gap-3" style={{ marginTop: 4 }}>
           <a
-            href="/api/v1/auth/oidc/login"
+            href={joinPublicBase('/api/v1/auth/oidc/login')}
             className="btn btn-primary btn-block"
             style={{ minHeight: 44 }}
           >

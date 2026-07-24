@@ -73,6 +73,13 @@ test.describe('pwaCachePolicy matchers (#879)', () => {
     expect(matchApiJsonCache(req('/api/v1/encounters/9/events'))).toBe(true);
   });
 
+  test('matchers accept reverse-proxy prefixed API paths (issue #798)', () => {
+    expect(matchNetworkOnlyApi(req('/campfire/api/v1/me'))).toBe(true);
+    expect(matchApiJsonCache(req('/campfire/api/v1/campaigns'))).toBe(true);
+    expect(matchApiImageCache(req('/campfire/api/v1/attachments/9?size=thumb'))).toBe(true);
+    expect(matchApiJsonCache(req('/campfire/api/v1/me'))).toBe(false);
+  });
+
   test('NetworkOnly matches backup, export, admin, auth, and full attachments', () => {
     expect(matchNetworkOnlyApi(req('/api/v1/backup'))).toBe(true);
     expect(matchNetworkOnlyApi(req('/api/v1/campaigns/3/export'))).toBe(true);

@@ -13,6 +13,7 @@ import { useTranslation } from 'react-i18next';
 import type { Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { safeInternalPath } from '../../lib/safeInternalPath';
+import { joinPublicBase } from '../../lib/public-base';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
@@ -389,10 +390,13 @@ export function LoginPage() {
   const oidcProviderName = status?.oidcProviderName?.trim() || 'SSO';
   // Forward the intended target through SSO. The OIDC login endpoint stashes a
   // validated relative path and the callback returns there (issue #478).
+  // The href is prefixed with PUBLIC_BASE so the reverse proxy routes the
+  // /auth/oidc/login GET to this Campfire instance (issue #798).
+  const oidcLoginBase = joinPublicBase('/api/v1/auth/oidc/login');
   const oidcLoginHref =
     redirectTo === '/'
-      ? '/api/v1/auth/oidc/login'
-      : `/api/v1/auth/oidc/login?redirect=${encodeURIComponent(redirectTo)}`;
+      ? oidcLoginBase
+      : `${oidcLoginBase}?redirect=${encodeURIComponent(redirectTo)}`;
   const signupEnabled = Boolean(status?.signupEnabled);
   const installHint = typeof window !== 'undefined'
     && !window.matchMedia('(display-mode: standalone)').matches

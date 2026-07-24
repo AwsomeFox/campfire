@@ -11,6 +11,7 @@ import {
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
+import { joinPublicBase } from '../../lib/public-base';
 import { Card, Btn, TextInput, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CopyControl } from '../../components/CopyControl';
@@ -72,7 +73,11 @@ function mcpConnectCommand(origin: string, token?: string): string {
  */
 function ConnectAiBlock({ token }: { token?: string }) {
   const origin = window.location.origin;
-  const mcpUrl = `${origin}/mcp`;
+  // The MCP JSON-RPC endpoint lives at /mcp inside Nest (root-excluded from the
+  // /api/v1 prefix). Behind a reverse-proxy subpath the operator reaches it at
+  // `${PUBLIC_BASE}/mcp`, so the connect command they hand an agent points at
+  // the externally-visible URL (issue #798).
+  const mcpUrl = `${origin}${joinPublicBase('/mcp')}`;
   const command = mcpConnectCommand(origin, token);
   const mcpId = useId();
   const commandId = useId();
