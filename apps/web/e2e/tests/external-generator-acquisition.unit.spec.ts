@@ -70,9 +70,9 @@ test.describe('describeExportProblem — issue #411 validation', () => {
     expect(msg).toContain('application/pdf');
   });
 
-  test('rejects an unknown (empty) type gracefully', () => {
-    const msg = describeExportProblem({ type: '', size: 1000 });
-    expect(msg).toContain('that file type');
+  test('allows an empty browser-reported type (server sniffs the bytes)', () => {
+    // Some platforms/browsers report an empty MIME for a valid image; don't fail fast here.
+    expect(describeExportProblem({ type: '', size: 1000 })).toBeNull();
   });
 
   test('rejects an oversized export and suggests shrinking it', () => {

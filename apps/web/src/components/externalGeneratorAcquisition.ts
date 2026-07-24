@@ -60,10 +60,13 @@ export interface ExportCandidate {
  * than bare rejections, per the issue's "explain how to fix invalid/oversized files".
  */
 export function describeExportProblem(file: ExportCandidate): string | null {
-  if (!(ACCEPTED_EXPORT_MIME as readonly string[]).includes(file.type)) {
-    const shown = file.type ? `“${file.type}”` : 'that file type';
+  // Only reject a NON-EMPTY type that isn't in the accepted set. Some platforms/browsers
+  // report an empty `type` for a legitimate PNG/JPEG/WebP; the server accepts by magic-byte
+  // sniff, so blocking an empty type here would wrongly reject a valid export. Let it through
+  // and let the server be the authority on the actual bytes.
+  if (file.type && !(ACCEPTED_EXPORT_MIME as readonly string[]).includes(file.type)) {
     return (
-      `Campfire can't import ${shown}. Most generators can export a PNG (best for maps), ` +
+      `Campfire can't import “${file.type}”. Most generators can export a PNG (best for maps), ` +
       'JPEG, or WebP — re-export in one of those and drop it here.'
     );
   }

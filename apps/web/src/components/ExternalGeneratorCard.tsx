@@ -105,10 +105,6 @@ export function ExternalGeneratorCard({
   // The object URL we own and must revoke to avoid a blob leak (mirrors ImageUpload).
   const previewUrlRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    previewUrlRef.current = previewUrl;
-  }, [previewUrl]);
-
   // Revoke any staged preview URL on unmount.
   useEffect(
     () => () => {
@@ -122,6 +118,10 @@ export function ExternalGeneratorCard({
       // Revoke the previous preview before staging a new one.
       if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
       const url = URL.createObjectURL(picked);
+      // Track the owned URL synchronously (not via a post-render effect) so the unmount
+      // cleanup can always revoke the newest one even if the component unmounts before a
+      // render commits.
+      previewUrlRef.current = url;
       setFile(picked);
       setPreviewUrl(url);
       setTitle((t) => t || titleFromFile(picked));
@@ -155,6 +155,7 @@ export function ExternalGeneratorCard({
 
   function clearStaged() {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = null;
     setFile(null);
     setPreviewUrl(null);
     setDims(null);
