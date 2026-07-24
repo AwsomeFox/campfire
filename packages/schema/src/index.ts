@@ -504,7 +504,9 @@ export interface XpProgress {
   readonly pct: number;
 }
 
-/** Build `xpForLevel` / `levelForXp` from a cumulative threshold table (issue #441). */
+/** Build `xpForLevel` / `levelForXp` from a cumulative threshold table (issue #441).
+ * `thresholds` must be non-empty and strictly increasing; length should match `maxLevel`
+ * when the system has a finite level cap. */
 export function xpProgressionFromThresholds(
   thresholds: readonly number[],
   maxLevel: number,
@@ -2360,19 +2362,23 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
 /** Whether this adapter owns XP threshold math (issue #441). */
 export function xpProgressionSupported(
   adapter: Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'>,
-): boolean {
+): adapter is RuleSystemAdapter & {
+  supportsXpProgression: true;
+  xpForLevel: (level: number) => number;
+  levelForXp: (xp: number) => number;
+} {
   return !!(adapter.supportsXpProgression && adapter.xpForLevel && adapter.levelForXp);
 }
 
 /** Total XP required to reach `level` for a campaign's rule-system adapter. */
 export function xpForLevelForAdapter(adapter: RuleSystemAdapter, level: number): number {
-  if (xpProgressionSupported(adapter)) return adapter.xpForLevel!(level);
+  if (xpProgressionSupported(adapter)) return adapter.xpForLevel(level);
   return Dnd5eAdapter.xpForLevel!(level);
 }
 
 /** Highest level the given total XP qualifies for under a campaign's rule-system adapter. */
 export function levelForXpForAdapter(adapter: RuleSystemAdapter, xp: number): number {
-  if (xpProgressionSupported(adapter)) return adapter.levelForXp!(xp);
+  if (xpProgressionSupported(adapter)) return adapter.levelForXp(xp);
   return Dnd5eAdapter.levelForXp!(xp);
 }
 
@@ -2386,7 +2392,7 @@ export function xpProgressForCharacter(adapter: RuleSystemAdapter, level: number
   const nextThreshold = atCap ? null : adapter.xpForLevel(level + 1);
   const ready = nextThreshold != null && xp >= nextThreshold;
   const pct =
-    nextThreshold == null
+    nextThreshold == null || nextThreshold === currentThreshold
       ? 100
       : Math.max(0, Math.min(100, ((xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
   return { supported: true, atCap, currentThreshold, nextThreshold, ready, pct };

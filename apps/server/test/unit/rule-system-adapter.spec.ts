@@ -12,6 +12,8 @@ import {
   StarfinderAdapter,
   Archmage13aAdapter,
   OsrAdapter,
+  xpProgressionFromThresholds,
+  xpProgressionSupported,
 } from '@campfire/schema';
 
 /**
@@ -278,6 +280,10 @@ describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
 
   it('13th Age does not model XP thresholds (milestone-first)', () => {
     expect(Archmage13aAdapter.maxLevel).toBe(10);
-    expect(Archmage13aAdapter.supportsXpProgression).not.toBe(true);
+    expect(xpProgressionSupported(Archmage13aAdapter)).toBe(false);
+  });
+
+  it('xpProgressionFromThresholds rejects an empty threshold table', () => {
+    expect(() => xpProgressionFromThresholds([], 20)).toThrow(/must not be empty/);
   });
 });
