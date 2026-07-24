@@ -100,7 +100,7 @@ export default function MyNotesPage() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [total, setTotal] = useState(0);
   const [hasMore, setHasMore] = useState(false);
-  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -305,15 +305,12 @@ export default function MyNotesPage() {
     setEditingNoteId(null);
   }
 
-  // Server already applied visibility + body search; keep a light entityName match
-  // on the loaded page so anchored-name hits still surface in the current window.
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return notes;
-    return notes.filter(
-      (n) => n.body.toLowerCase().includes(q) || (n.entityName?.toLowerCase().includes(q) ?? false),
-    );
-  }, [notes, search]);
+  // Search is applied SERVER-SIDE over both note bodies AND anchored entity names, with
+  // Unicode-aware folding, across the complete filtered set (issue #608/#624). Render the
+  // server results directly — a client-side re-filter here would drop fold-matched
+  // entity-name hits the server legitimately returned (its naive lowercase includes()
+  // can't see ß→ss / accent folds).
+  const filtered = notes;
 
   const mine = useMemo(
     () => filtered.filter((n) => !myUserId || n.authorUserId === myUserId),

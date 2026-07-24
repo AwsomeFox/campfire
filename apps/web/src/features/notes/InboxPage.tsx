@@ -30,7 +30,7 @@ interface InboxListState {
   items: Note[];
   total: number;
   hasMore: boolean;
-  nextCursor?: string;
+  nextCursor?: string | null;
 }
 
 const EMPTY_LIST: InboxListState = { items: [], total: 0, hasMore: false };
@@ -172,6 +172,7 @@ export default function InboxPage() {
 
   // Notification deep-links use /inbox?inbox=:id#entity-inbox-:id. Resolved rows
   // only render under History, so switch the tab before EntityDeepLinkFocus runs.
+  const deepFetchRef = useRef<number | null>(null);
   useEffect(() => {
     if (!Number.isFinite(deepInboxId)) return;
     if (openList.items.some((item) => item.id === deepInboxId)) {
@@ -181,8 +182,36 @@ export default function InboxPage() {
     }
     if (historyList.items.some((item) => item.id === deepInboxId)) {
       setView('history');
+      return;
     }
-  }, [deepInboxId, openList.items, historyList.items]);
+    // With default pagination the deep-linked item can live beyond the first loaded page.
+    // Once the initial load settles, fetch it directly (once) so the correct tab opens and
+    // the row renders/expands even when it's not on page one.
+    if (loading || deepFetchRef.current === deepInboxId) return;
+    deepFetchRef.current = deepInboxId;
+    let cancelled = false;
+    void api
+      .get<Note>(`${API}/notes/${deepInboxId}`)
+      .then((note) => {
+        if (cancelled || note.kind !== 'inbox') return;
+        const inject = (prev: InboxListState): InboxListState =>
+          prev.items.some((i) => i.id === note.id) ? prev : { ...prev, items: [note, ...prev.items] };
+        if (note.resolved) {
+          setView('history');
+          setHistoryList(inject);
+        } else {
+          setView('open');
+          setOpenList(inject);
+          setExpandedId(note.id);
+        }
+      })
+      .catch(() => {
+        /* not accessible / not found — leave the loaded lists as-is */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deepInboxId, openList.items, historyList.items, loading]);
 
   async function resolve(item: Note, resolvedNote: string, link: { entityType: EntityTypeValue; entityId: number } | null) {
     try {

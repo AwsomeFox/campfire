@@ -23,7 +23,7 @@ export class CampaignNotesController {
     description:
       'Requires campaign membership. private notes are only visible to their author (or a dm); ' +
       'dm_shared only to dm; party_shared to all members. Returns a paginated page ' +
-      '(`items`, `total`, `hasMore`, optional `nextCursor`) — default page size ' +
+      '(`items`, `total`, `hasMore`, `nextCursor` (null when exhausted)) — default page size ' +
       `${NOTES_LIST_DEFAULT_LIMIT}, max ${NOTES_LIST_MAX_LIMIT}. Newest first; continue with cursor ` +
       'from a previous nextCursor (issue #608).',
   })
@@ -44,7 +44,7 @@ export class CampaignNotesController {
     description: `Page size (default ${NOTES_LIST_DEFAULT_LIMIT}, max ${NOTES_LIST_MAX_LIMIT}).`,
   })
   @ApiQuery({ name: 'cursor', required: false, description: "Opaque cursor from a previous page's nextCursor." })
-  @ApiResponse({ status: 200, description: 'Paginated notes visible to the caller (`items`, `total`, `hasMore`, `nextCursor?`).' })
+  @ApiResponse({ status: 200, description: 'Paginated notes visible to the caller (`items`, `total`, `hasMore`, `nextCursor` (null when exhausted)).' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
@@ -98,7 +98,7 @@ export class CampaignNotesController {
     description:
       'dm role required. Defaults to open (unresolved) items; pass resolved=true for the resolved history ' +
       '(newest resolution first), including any entity link each item was resolved into. Returns a paginated ' +
-      `page (items, total, hasMore, optional nextCursor) — default page size ${NOTES_LIST_DEFAULT_LIMIT}, ` +
+      `page (items, total, hasMore, nextCursor (null when exhausted)) — default page size ${NOTES_LIST_DEFAULT_LIMIT}, ` +
       `max ${NOTES_LIST_MAX_LIMIT}. Newest first (issue #608).`,
   })
   @ApiQuery({ name: 'resolved', required: false, type: Boolean, description: 'If true, list resolved items instead of open ones.' })
@@ -109,7 +109,7 @@ export class CampaignNotesController {
     description: `Page size (default ${NOTES_LIST_DEFAULT_LIMIT}, max ${NOTES_LIST_MAX_LIMIT}).`,
   })
   @ApiQuery({ name: 'cursor', required: false, description: "Opaque cursor from a previous page's nextCursor." })
-  @ApiResponse({ status: 200, description: 'Paginated inbox items (`items`, `total`, `hasMore`, `nextCursor?`).' })
+  @ApiResponse({ status: 200, description: 'Paginated inbox items (`items`, `total`, `hasMore`, `nextCursor` (null when exhausted)).' })
   async listInbox(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,

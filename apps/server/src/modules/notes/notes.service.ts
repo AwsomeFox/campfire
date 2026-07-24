@@ -384,28 +384,43 @@ export class NotesService {
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
     if (filters.visibility) conds.push(eq(notes.visibility, filters.visibility));
 
-    // Free-text search over note bodies (issue #65 / #624). Needle is folded with the
-    // shared helper (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and
-    // cannot see ß→ss / İ / accent case folds, so when `q` is set we fold-match in JS
-    // then apply the keyset page — paging stays correct (#608) without relying on SQL lower().
+    // Free-text search (issue #65 / #624). The needle is folded with the shared helper
+    // (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and cannot see
+    // ß→ss / İ / accent case folds, so `q` is fold-matched in JS.
     //
-    // Search scans at most NOTES_SEARCH_SCAN_LIMIT of the most-recent rows so the in-memory
-    // filter stays O(constant). Total and pagination reflect only that window; a SQL full-text
-    // move is a future follow-up.
-    const NOTES_SEARCH_SCAN_LIMIT = 5_000;
+    // To keep the documented "filters apply before paging" guarantee correct at any size
+    // (#608), the scan walks the COMPLETE filtered set in keyset batches — not a truncated
+    // newest-N window that would make `total` wrong and strand older matches. Each row is
+    // matched against its body OR its anchored entity name (resolved per batch, bounded
+    // queries) so an entity-name search still surfaces its notes; only matched rows are kept.
+    const SEARCH_SCAN_BATCH = 1_000;
     const search = filters.q?.trim() ? foldForSearch(filters.q.trim()) : '';
 
     let visible: Array<typeof notes.$inferSelect>;
     let total: number;
 
     if (search) {
-      const all = await this.db
-        .select()
-        .from(notes)
-        .where(and(...conds))
-        .orderBy(desc(notes.id))
-        .limit(NOTES_SEARCH_SCAN_LIMIT);
-      const matched = all.filter((r) => foldedIncludes(r.body, search));
+      const matched: Array<typeof notes.$inferSelect> = [];
+      let scanId: number | undefined;
+      for (;;) {
+        const batchConds = scanId !== undefined ? [...conds, lt(notes.id, scanId)] : conds;
+        const batch = await this.db
+          .select()
+          .from(notes)
+          .where(and(...batchConds))
+          .orderBy(desc(notes.id))
+          .limit(SEARCH_SCAN_BATCH);
+        if (batch.length === 0) break;
+        const batchNames = await this.resolveEntityNames(campaignId, batch);
+        for (const r of batch) {
+          const name = entityNameFor(r, batchNames);
+          if (foldedIncludes(r.body, search) || (name ? foldedIncludes(name, search) : false)) {
+            matched.push(r);
+          }
+        }
+        scanId = batch[batch.length - 1]!.id;
+        if (batch.length < SEARCH_SCAN_BATCH) break;
+      }
       total = matched.length;
       const afterCursor = cursor ? matched.filter((r) => r.id < cursor.i) : matched;
       visible = afterCursor.slice(0, limit + 1);
@@ -426,8 +441,10 @@ export class NotesService {
     const recipientNames = await this.resolveRecipientNames(pageRows);
     const items = pageRows.map((r) => toDomain(r, entityNameFor(r, names), this.recipientNameFor(r, recipientNames)));
     const last = pageRows[pageRows.length - 1];
+    // Always present, `null` when exhausted — a stable REST/MCP contract (issue #608),
+    // rather than omitting the key (which JSON does for `undefined`).
     const nextCursor =
-      hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : undefined;
+      hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : null;
     return { items, total, hasMore, nextCursor, limit };
   }
 
@@ -817,7 +834,7 @@ export class NotesService {
       const rows = hasMore ? fetched.slice(0, limit) : fetched;
       const last = rows[rows.length - 1];
       const nextCursor =
-        hasMore && last ? encodeNotesCursor({ v: 1, m: 'updated', u: last.updatedAt, i: last.id }) : undefined;
+        hasMore && last ? encodeNotesCursor({ v: 1, m: 'updated', u: last.updatedAt, i: last.id }) : null;
       return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
     }
 
@@ -832,7 +849,7 @@ export class NotesService {
     const hasMore = fetched.length > limit;
     const rows = hasMore ? fetched.slice(0, limit) : fetched;
     const last = rows[rows.length - 1];
-    const nextCursor = hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : undefined;
+    const nextCursor = hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : null;
     return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
   }
 

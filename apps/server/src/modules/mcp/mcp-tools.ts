@@ -882,7 +882,7 @@ export class McpToolsService {
       'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
         'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
         'including any entity link each item was resolved into. Returns a page ' +
-        '({ items, total, hasMore, nextCursor?, limit }) — default 50, max 200; continue with cursor (issue #608).',
+        '({ items, total, hasMore, nextCursor (null when exhausted), limit }) — default 50, max 200; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
         resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones'),
@@ -1114,7 +1114,7 @@ export class McpToolsService {
       'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), party_shared ' +
         '(everyone), or whisper (author + the single targeted recipient + any dm). A whisper the caller is not the ' +
         'target of is never returned. Optionally filter by the entity the note is linked to, visibility, or to just ' +
-        'the caller\'s own notes. Returns a page ({ items, total, hasMore, nextCursor?, limit }) — default 50, max 200; ' +
+        'the caller\'s own notes. Returns a page ({ items, total, hasMore, nextCursor (null when exhausted), limit }) — default 50, max 200; ' +
         'newest first; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
