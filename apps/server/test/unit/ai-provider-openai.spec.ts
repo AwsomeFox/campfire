@@ -21,7 +21,7 @@ const req: AiGenerateRequest = {
 describe('OpenAiProvider — request mapping', () => {
   it('sends system+messages, model, params, and the configured endpoint/auth', async () => {
     const { fetchImpl, calls } = fakeFetch(jsonResponse(completion('Hello.')));
-    const p = new OpenAiProvider({ apiKey: 'sk-test', baseUrl: 'https://proxy.local/v1', model: 'default', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'sk-test', baseUrl: 'https://proxy.local/v1', model: 'default', endpointMode: 'chat_completions', fetchImpl });
     await p.generate(req);
 
     expect(calls).toHaveLength(1);
@@ -39,7 +39,7 @@ describe('OpenAiProvider — request mapping', () => {
 
   it('maps the tool registry to OpenAI function tools and defaults tool_choice to auto', async () => {
     const { fetchImpl, calls } = fakeFetch(jsonResponse(completion('ok')));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     await p.generate({
       ...req,
       tools: [{ name: 'roll_dice', description: 'Roll dice', parameters: { type: 'object', properties: { sides: { type: 'number' } } } }],
@@ -53,7 +53,7 @@ describe('OpenAiProvider — request mapping', () => {
 
   it('maps assistant tool calls and tool results back into OpenAI wire messages', async () => {
     const { fetchImpl, calls } = fakeFetch(jsonResponse(completion('done')));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     await p.generate({
       model: 'm',
       messages: [
@@ -75,7 +75,7 @@ describe('OpenAiProvider — request mapping', () => {
 describe('OpenAiProvider — non-streaming completion parsing', () => {
   it('returns narration text + real usage + finishReason', async () => {
     const { fetchImpl } = fakeFetch(jsonResponse(completion('You push the door open.', { prompt: 42, completion: 8 })));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     const result = await p.generate(req);
     expect(result.text).toBe('You push the door open.');
     expect(result.toolCalls).toEqual([]);
@@ -99,7 +99,7 @@ describe('OpenAiProvider — non-streaming completion parsing', () => {
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     };
     const { fetchImpl } = fakeFetch(jsonResponse(body));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     const result = await p.generate(req);
     expect(result.finishReason).toBe('tool_calls');
     expect(result.toolCalls).toEqual([{ id: 'call_abc', name: 'roll_dice', arguments: { sides: 20, count: 2 } }]);
@@ -107,7 +107,7 @@ describe('OpenAiProvider — non-streaming completion parsing', () => {
 
   it('falls back to summing usage when total_tokens is absent', async () => {
     const { fetchImpl } = fakeFetch(jsonResponse(completion('x', { prompt: 3, completion: 4, omitTotal: true })));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     const result = await p.generate(req);
     expect(result.usage.totalTokens).toBe(7);
   });
@@ -125,7 +125,7 @@ describe('OpenAiProvider — streaming', () => {
       'data: [DONE]\n\n',
     ];
     const { fetchImpl, calls } = fakeFetch(streamResponse(frames));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     const events = await collect(p.stream(req));
 
     // stream_options requested so usage arrives in the terminal chunk
@@ -145,20 +145,20 @@ describe('OpenAiProvider — streaming', () => {
 describe('OpenAiProvider — error handling', () => {
   it('maps 401 to a non-retryable auth error (no retry)', async () => {
     const { fetchImpl, calls } = fakeFetch(errorResponse(401, '{"error":"bad key"}'));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl, retry: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 } });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl, retry: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 } });
     await expect(p.generate(req)).rejects.toMatchObject({ kind: 'auth', retryable: false });
     expect(calls).toHaveLength(1);
   });
 
   it('maps a 400 context-length overflow to a context_length error', async () => {
     const { fetchImpl } = fakeFetch(errorResponse(400, '{"error":{"message":"This model\'s maximum context length is 8192 tokens"}}'));
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl });
     await expect(p.generate(req)).rejects.toMatchObject({ kind: 'context_length' });
   });
 
   it('retries a 429 then succeeds, honouring the retry budget', async () => {
     const { fetchImpl, calls } = sequenceFetch([errorResponse(429, 'slow down'), jsonResponse(completion('recovered'))]);
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl, retry: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 2 } });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl, retry: { maxRetries: 2, baseDelayMs: 1, maxDelayMs: 2 } });
     const result = await p.generate(req);
     expect(result.text).toBe('recovered');
     expect(calls).toHaveLength(2);
@@ -168,7 +168,7 @@ describe('OpenAiProvider — error handling', () => {
     const fetchImpl = async () => {
       throw new Error('ECONNREFUSED');
     };
-    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl, retry: { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1 } });
+    const p = new OpenAiProvider({ apiKey: 'k', model: 'm', endpointMode: 'chat_completions', fetchImpl, retry: { maxRetries: 0, baseDelayMs: 1, maxDelayMs: 1 } });
     await expect(p.generate(req)).rejects.toBeInstanceOf(AiProviderError);
     await expect(p.generate(req)).rejects.toMatchObject({ kind: 'transport' });
   });
