@@ -89,7 +89,7 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     expect(guardDriverLivePlayArgs('generate_map', { campaignId: 1, kind: 'cave' }, s).ok).toBe(true);
   });
 
-  it('strips prep fields from update_encounter, keeping only VTT overlays', () => {
+  it('rejects prep fields on update_encounter instead of silently dropping them', () => {
     const s = session({ driverGeneratedMapIds: [42] });
     const result = guardDriverLivePlayArgs(
       'update_encounter',
@@ -97,7 +97,25 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
         encounterId: 7,
         name: 'Renamed ambush',
         hidden: false,
-        locationId: 99,
+        fog: { enabled: true, revealed: [] },
+        mapAttachmentId: 42,
+      },
+      s,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('forbidden_encounter_field');
+      expect(result.message).toContain('name');
+      expect(result.message).toContain('hidden');
+    }
+  });
+
+  it('allows VTT-only update_encounter fields through the guard', () => {
+    const s = session({ driverGeneratedMapIds: [42] });
+    const result = guardDriverLivePlayArgs(
+      'update_encounter',
+      {
+        encounterId: 7,
         fog: { enabled: true, revealed: [] },
         gridSize: 50,
         mapAttachmentId: 42,
@@ -112,9 +130,6 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
         gridSize: 50,
         mapAttachmentId: 42,
       });
-      expect(result.args).not.toHaveProperty('hidden');
-      expect(result.args).not.toHaveProperty('name');
-      expect(result.args).not.toHaveProperty('locationId');
     }
   });
 

@@ -385,12 +385,17 @@ export function guardDriverLivePlayArgs(
   }
 
   if (toolName === 'update_encounter') {
-    const sanitized: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(args)) {
-      if (DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key)) sanitized[key] = value;
+    const rejected = Object.keys(args).filter((key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key));
+    if (rejected.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          `The driver may only set VTT fields on update_encounter (fog, grid, aoe, mapAttachmentId). Rejected: ${rejected.join(', ')}.`,
+      };
     }
-    if ('mapAttachmentId' in sanitized && sanitized.mapAttachmentId !== null && sanitized.mapAttachmentId !== undefined) {
-      const id = Number(sanitized.mapAttachmentId);
+    if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
+      const id = Number(args.mapAttachmentId);
       const allowed = session.driverGeneratedMapIds ?? [];
       if (!Number.isFinite(id) || !allowed.includes(id)) {
         return {
@@ -401,7 +406,7 @@ export function guardDriverLivePlayArgs(
         };
       }
     }
-    return { ok: true, args: sanitized };
+    return { ok: true, args: { ...args } };
   }
 
   return { ok: true, args: { ...args } };
@@ -848,7 +853,11 @@ export class AiDriverService {
       .filter((t) => isDriverToolAllowed(t) && !DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name))
       .map((t) => ({
         name: t.name,
-        description: t.description,
+        description:
+          t.name === 'update_encounter'
+            ? 'DM only: adjust battle-map VTT overlays for an encounter — fog, grid config, AoE templates, and mapAttachmentId ' +
+              '(session-generated maps only; null detaches). Prep fields (name, location/quest/session links, hidden) are NOT available to the driver seat.'
+            : t.description,
         parameters: t.inputSchema,
       }));
 
