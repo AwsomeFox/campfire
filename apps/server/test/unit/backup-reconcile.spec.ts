@@ -6,6 +6,8 @@ import {
   type BackupReconciliation,
 } from '../../src/modules/backup/backup-manifest';
 
+// BackupReconciliation still used for the typed fixture in the happy-path parse test.
+
 /**
  * #828 unit coverage for the backup manifest's reconciliation fields. The full
  * integration test (concurrent upload/delete during backup) requires a running
@@ -114,26 +116,46 @@ describe('Backup manifest reconciliation (#828)', () => {
     expect(Number.isInteger(BACKUP_ORPHAN_LIST_CAP)).toBe(true);
   });
 
-  it('marks reconciliation.clean=true only when missing and changed are both 0', () => {
-    const cleanRecon: BackupReconciliation = {
-      generation: 'g',
-      totalAttachments: 5,
-      missing: 0,
-      changed: 0,
-      orphans: [],
-      orphanCount: 0,
-      clean: true,
-    };
-    const dirtyRecon: BackupReconciliation = {
-      generation: 'g',
-      totalAttachments: 5,
-      missing: 1,
-      changed: 0,
-      orphans: [],
-      orphanCount: 0,
-      clean: false,
-    };
-    expect(cleanRecon.clean).toBe(true);
-    expect(dirtyRecon.clean).toBe(false);
+  it('recomputes reconciliation.clean from missing/changed (ignores supplied flag)', () => {
+    const inconsistent = parseBackupManifest({
+      app: 'campfire',
+      kind: 'server-backup',
+      version: 1,
+      createdAt: '2026-07-23T10:00:00Z',
+      db: 'db/campfire.db',
+      dbBytes: 4096,
+      uploadCount: 0,
+      reconciliation: {
+        generation: 'g',
+        totalAttachments: 5,
+        missing: 1,
+        changed: 0,
+        orphans: [],
+        orphanCount: 0,
+        clean: true, // lie — parser must not trust this
+      },
+    });
+    expect(inconsistent.reconciliation?.clean).toBe(false);
+
+    const clean = parseBackupManifest({
+      app: 'campfire',
+      kind: 'server-backup',
+      version: 1,
+      createdAt: '2026-07-23T10:00:00Z',
+      db: 'db/campfire.db',
+      dbBytes: 4096,
+      uploadCount: 0,
+      reconciliation: {
+        generation: 'g',
+        totalAttachments: 5,
+        missing: 0,
+        changed: 0,
+        orphans: [],
+        orphanCount: 0,
+        clean: false, // lie the other way
+      },
+    });
+    expect(clean.reconciliation?.clean).toBe(true);
   });
 });
+

@@ -201,6 +201,8 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
       Array.isArray(r.orphans) &&
       typeof r.orphanCount === 'number'
     ) {
+      // `clean` is derived — never trust a caller-supplied boolean that could disagree
+      // with missing/changed (e.g. missing:1 + clean:true).
       reconciliation = {
         generation: r.generation,
         totalAttachments: r.totalAttachments,
@@ -208,7 +210,7 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
         changed: r.changed,
         orphans: (r.orphans as unknown[]).filter((x): x is string => typeof x === 'string'),
         orphanCount: r.orphanCount,
-        clean: r.clean === true,
+        clean: r.missing === 0 && r.changed === 0,
       };
     }
   }

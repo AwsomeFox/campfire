@@ -103,27 +103,6 @@ function looksLikeSqlite(buf: Buffer): boolean {
 const MAX_ATTACHMENT_RETRIES = 3;
 
 /**
- * MIME → file extension used for the canonical `<campaignId>/<id>.<ext>` layout on disk
- * (mirrors the private map inside AttachmentsService.filePath). Backup reads files by
- * this same convention so it stays in lockstep with what the app actually stores.
- * Missing MIMEs fall back to 'bin', matching AttachmentsService.
- */
-const BACKUP_MIME_TO_EXT: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-  'image/svg+xml': 'svg',
-  'application/pdf': 'pdf',
-};
-
-/** Canonical relative path (from uploads/ root) for a snapshot attachment row (#828). */
-function canonicalBackupPath(row: { campaignId: number; id: number; mime: string }): string {
-  const ext = BACKUP_MIME_TO_EXT[row.mime] ?? 'bin';
-  return `${row.campaignId}/${row.id}.${ext}`;
-}
-
-/**
  * Read a file with retry-on-size-change (#828). If the file's size differs between two
  * reads (indicating a concurrent overwrite), retry up to {@link MAX_ATTACHMENT_RETRIES}
  * times. Returns the final captured bytes and whether the size changed at any point.
@@ -345,27 +324,22 @@ export class BackupService implements OnApplicationBootstrap {
   }
 
   /**
-   * Build a downloadable backup archive: a WAL-safe hot snapshot of the SQLite
-   * DB (via `VACUUM INTO`, which checkpoints the WAL into a single clean file
-   * without blocking writers or requiring the app to be quiesced) plus every
-   * file under DATA_DIR/uploads, wrapped with a manifest.
-   */
-  /**
    * Build a downloadable backup archive with attachment reconciliation (#828).
    *
    * Flow:
-   *   1. Snapshot the DB via `VACUUM INTO` — this fixes the "generation" for the whole
-   *      backup. The snapshot is our authoritative source of truth about what attachment
-   *      rows exist and what files they reference.
+   *   1. Snapshot the DB via `VACUUM INTO` (WAL-safe hot snapshot; does not block writers)
+   *      — this fixes the "generation" for the whole backup. The snapshot is the
+   *      authoritative source of truth about which attachment rows exist.
    *   2. Open the snapshot read-only and enumerate every committed attachment row.
-   *   3. For each row, resolve its canonical path and read the file with retry-on-size-
-   *      change (a concurrent overwrite can slip in between listing and reading; we
-   *      retry up to MAX_ATTACHMENT_RETRIES to catch a stable read).
+   *   3. For each row, resolve its on-disk path via {@link AttachmentsService.filePath}
+   *      (same MIME→ext maps as live serving) and read with retry-on-size-change.
    *   4. Compute sha256 of the captured bytes and record the attachment in the manifest.
+   *      A captured byte length that differs from the snapshot row's `size` counts as
+   *      `changed` (restoring would leave the DB inconsistent with the file).
    *   5. Scan the live uploads/ tree once more and record any files that are NOT
    *      referenced by any committed attachment row as `orphans`.
-   *   6. Fail loudly if any file went missing (ENOENT) or kept changing under retries;
-   *      partial archives should not silently claim success.
+   *   6. Fail loudly if any file went missing (ENOENT) or changed under capture;
+   *      partial / inconsistent archives should not silently claim success.
    *
    * Uploads referenced by the DB snapshot land at their canonical path
    * `<campaignId>/<id>.<ext>` under `uploads/` in the archive. Orphan files (in the
@@ -417,17 +391,22 @@ export class BackupService implements OnApplicationBootstrap {
       let changed = 0;
 
       for (const row of snapshotRows) {
-        const rel = canonicalBackupPath(row);
-        const abs = path.join(uploads, rel);
+        // Resolve through AttachmentsService so backup MIME→ext matches live storage
+        // (ALLOWED_MIME_TO_EXT + GENERATED_MIME_TO_EXT, else `.bin`) — never invent
+        // extensions the app would not have written.
+        const abs = this.attachments.filePath(row);
+        const rel = path.relative(uploads, abs).split(path.sep).join('/');
         const captured = readWithRetry(abs);
         if (captured === null) {
-          // The file is truly gone (ENOENT after retries). Record the row's metadata but
-          // do NOT add the file to the zip — a restore that references a missing file
-          // would fail on read; the reconciliation section signals the problem loudly.
+          // The file is truly gone (ENOENT after retries). Do NOT add the file to the
+          // zip — a restore that references a missing file would fail on read; the
+          // reconciliation section signals the problem loudly.
           missing++;
           continue;
         }
-        if (captured.changed) changed++;
+        // Concurrent overwrite OR captured bytes disagree with the snapshot row size
+        // → restored DB would be internally inconsistent with the archived file.
+        if (captured.changed || captured.bytes.length !== row.size) changed++;
         zip.file(`${UPLOADS_PREFIX}${rel}`, captured.bytes);
         capturedPaths.add(rel);
         attachmentRecords.push({
@@ -478,13 +457,13 @@ export class BackupService implements OnApplicationBootstrap {
       };
       zip.file(MANIFEST_ENTRY, JSON.stringify(manifest, null, 2));
 
-      // Fail loudly if any file was missing after retries — partial archives should
-      // never silently claim success (#828 AC). Orphans are informational and don't
-      // block the archive: they're either reserved uploads (recoverable on restore)
-      // or concurrent writes that arrived after the generation boundary.
-      if (missing > 0) {
+      // Fail loudly if any file was missing or changed under capture — partial /
+      // inconsistent archives should never silently claim success (#828 AC). Orphans
+      // are informational and don't block the archive: they're either reserved uploads
+      // (recoverable on restore) or concurrent writes after the generation boundary.
+      if (missing > 0 || changed > 0) {
         throw new Error(
-          `Backup failed reconciliation: ${missing} attachment row(s) reference files that are missing on disk. ` +
+          `Backup failed reconciliation: ${missing} missing, ${changed} changed attachment file(s). ` +
             `Backup generation ${reconciliation.generation} — see manifest.reconciliation for details.`,
         );
       }
