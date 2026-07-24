@@ -4242,6 +4242,26 @@ export const GeneratedMapResult = z.object({
 });
 export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
 
+/**
+ * Result of a *preview* generate call (issue #409): the rendered SVG markup plus the
+ * same reproducibility/grid metadata a real generate returns — but with NO attachment.
+ * The map-generation wizard renders this to show the DM a candidate map (and lets them
+ * reroll the seed) WITHOUT persisting anything, so previewing/rerolling never leaves an
+ * orphan attachment or burns the campaign's storage quota. Because generation is
+ * deterministic by seed, "Use this map" reproduces the previewed map exactly by replaying
+ * the same seed through the normal (persisting) generate/attach endpoints.
+ */
+export const GeneratedMapPreview = z.object({
+  svg: z.string(),
+  seed: z.string(),
+  kind: MapKind,
+  widthCells: z.number().int().positive(),
+  heightCells: z.number().int().positive(),
+  roomCount: z.number().int().nonnegative(),
+  gridConfig: MapGridConfig,
+});
+export type GeneratedMapPreview = z.infer<typeof GeneratedMapPreview>;
+
 // ---------- open map SOURCES (issue #303) ----------
 // Complements the first-party procedural generator (#306) with EXTERNAL, license-clean
 // ways for a DM to get a map. The hard reality (#303): there is no bulk dataset of open

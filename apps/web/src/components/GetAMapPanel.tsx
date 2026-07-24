@@ -15,9 +15,10 @@
  * single source of truth for what's license-clean.
  */
 import { useEffect, useState } from 'react';
-import type { MapSource } from '@campfire/schema';
+import type { GenerateMapParams, MapSource } from '@campfire/schema';
 import { api, API, ApiError } from '../lib/api';
 import { importMapWithAttribution } from './ImageUpload';
+import { GenerateMapPanel } from './GenerateMapPanel';
 import { Field } from './Field';
 import {
   MAP_AUTHOR_HELP,
@@ -40,15 +41,26 @@ import { useAiDmSeat } from '../lib/query';
 export function GetAMapPanel({
   campaignId,
   onImported,
+  onGenerate,
   onError,
 }: {
   campaignId: number;
   /** Called with the new hidden 'map' attachment id after a successful import. */
   onImported: (attachmentId: number) => void;
+  /**
+   * Atomically attach a generated map by replaying its previewed seed/params through the
+   * persisting endpoint (issue #409). When provided, the first-party procedural generator
+   * (`generator-builtin`) becomes discoverable here beside upload/import and its wizard
+   * (preview → reroll → use) is wired to this handler. Omit it on surfaces that can't
+   * attach a generated map. The surface owns the atomic attach so it can apply the
+   * returned grid/scale in the same operation.
+   */
+  onGenerate?: (params: GenerateMapParams) => Promise<void>;
   onError?: (message: string) => void;
 }) {
   const [sources, setSources] = useState<MapSource[] | null>(null);
   const [open, setOpen] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
   const [importSource, setImportSource] = useState<MapSource | null>(null);
 
   // Same self-gate as DraftWithAiButton (DM + AI-DM seat enabled, co_dm/driver mode) —
@@ -70,8 +82,13 @@ export function GetAMapPanel({
     };
   }, [campaignId]);
 
+  // The first-party procedural generator (#306) — surfaced as its own wizard (#409) rather
+  // than the external-source list, which is why GetAMapPanel historically filtered it out.
+  const builtinGenerator = (sources ?? []).find((s) => s.kind === 'generator-builtin');
+  const canGenerate = !!onGenerate && !!builtinGenerator;
+
   const hasSources = !!sources && sources.length > 0;
-  if (!hasSources && !canDraftWithAi) return null;
+  if (!hasSources && !canDraftWithAi && !canGenerate) return null;
 
   const generators = (sources ?? []).filter((s) => s.kind === 'generator-external');
   const importable = (sources ?? []).filter((s) => s.importable);
@@ -98,8 +115,35 @@ export function GetAMapPanel({
             <span style={{ flex: 1 }} />
           </>
         )}
+        {canGenerate && (
+          <button
+            type="button"
+            data-testid="generate-map-toggle"
+            className="cf-chip"
+            aria-expanded={generatorOpen}
+            onClick={() => setGeneratorOpen((v) => !v)}
+            style={{ cursor: 'pointer' }}
+            title={builtinGenerator?.description}
+          >
+            {generatorOpen ? 'Close generator' : '✨ Generate a map'}
+          </button>
+        )}
         {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
       </div>
+
+      {/* First-party procedural generator wizard (issue #409): preview → reroll → use,
+          without attaching or revealing until the DM commits. */}
+      {canGenerate && generatorOpen && (
+        <GenerateMapPanel
+          campaignId={campaignId}
+          onError={onError}
+          onCancel={() => setGeneratorOpen(false)}
+          onUse={async (params) => {
+            await onGenerate!(params);
+            setGeneratorOpen(false);
+          }}
+        />
+      )}
 
       {open && hasSources && (
         <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>

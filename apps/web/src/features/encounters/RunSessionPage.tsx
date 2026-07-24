@@ -25,6 +25,8 @@ import type {
   EncounterEvent,
   EncounterWithCombatants,
   FogState,
+  GenerateMapParams,
+  GeneratedMapResult,
   GridType,
   HpResyncDirection,
   HpSyncConflict,
@@ -659,9 +661,14 @@ export default function RunSessionPage() {
     setActionError(null);
     refetchEncounter();
   }, [refetchEncounter]);
-  // Drop action errors when navigating to a different encounter.
+  // Post-attach map-setup guidance (issue #409) — shown right after a generated map is
+  // attached, dismissible, and reset when navigating to a different encounter.
+  const [showMapGuidance, setShowMapGuidance] = useState(false);
+  // Drop action errors (and any lingering map-attach guidance) when navigating to a
+  // different encounter.
   useEffect(() => {
     setActionError(null);
+    setShowMapGuidance(false);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -1033,6 +1040,23 @@ export default function RunSessionPage() {
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
 
+  // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
+  // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
+  // saves it hidden (never on the player Handouts card), sets it as the encounter's battle
+  // map, and aligns the VTT grid/scale — all server-side, in one call. We then refresh and
+  // guide the DM through grid check → fog → token placement. (`showMapGuidance` state is
+  // declared earlier, beside the other transient encounter UI state.)
+  const generateAndAttachMap = useCallback(
+    async (params: GenerateMapParams) => {
+      setActionError(null);
+      await api.post<GeneratedMapResult>(`${API}/encounters/${eid}/generate-map`, params);
+      invalidateEncounter(queryClient, eid);
+      setShowMapGuidance(true);
+      announce('Generated map attached. Check the grid, set fog, then place tokens.');
+    },
+    [eid, queryClient, announce],
+  );
+
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
@@ -1342,6 +1366,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
+          onGenerateMap={isDm ? generateAndAttachMap : undefined}
+          showGuidance={showMapGuidance}
+          onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
           pings={pings}
           onError={surfaceActionError}
@@ -1710,6 +1737,9 @@ function BattleMap({
   onSetGrid,
   onSetFog,
   onSetAoe,
+  onGenerateMap,
+  showGuidance,
+  onDismissGuidance,
   onPing,
   pings,
   onError,
@@ -1725,6 +1755,11 @@ function BattleMap({
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
+  /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
+  onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
+  /** After a generated map is attached, walk the DM through grid/fog/token placement. */
+  showGuidance?: boolean;
+  onDismissGuidance?: () => void;
   onPing: (x: number, y: number) => void;
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
@@ -2166,13 +2201,54 @@ function BattleMap({
             onError={onError}
           />
           {/* Open, license-clean map sources (issue #303): generator links + One Page Dungeon
-              (CC-BY-SA) import. Complements the built-in procedural generator (#306). */}
-          <GetAMapPanel campaignId={campaignId} onImported={(id) => onSetMap(id)} onError={onError} />
+              (CC-BY-SA) import — plus the built-in procedural generator wizard (#306/#409),
+              wired to the atomic generate-and-attach path via onGenerate. */}
+          <GetAMapPanel
+            campaignId={campaignId}
+            onImported={(id) => onSetMap(id)}
+            onGenerate={onGenerateMap}
+            onError={onError}
+          />
         </div>
       )}
 
       {mapImageUrl && (
         <>
+          {/* Post-attach guidance (issue #409): after a generated map is attached it stays
+              hidden (DM-only) with an aligned grid — walk the DM through the next steps so
+              the map is table-ready. Dismissible; only shown right after an attach. */}
+          {isDm && showGuidance && (
+            <div
+              data-testid="map-attach-guidance"
+              role="status"
+              className="cf-inset"
+              style={{ margin: '8px 14px 0', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span className="card-kicker">Map attached — next steps</span>
+                <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  aria-label="Dismiss map setup guidance"
+                  onClick={onDismissGuidance}
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+                The map is saved DM-only (hidden from the player Handouts card) with its grid
+                pre-aligned. To make it table-ready:
+              </p>
+              <ol className="text-muted" style={{ fontSize: 12, margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <li><strong>Check the grid</strong> — open <em>Grid &amp; fog</em> to confirm cell size and scale.</li>
+                <li><strong>Set fog</strong> — toggle <em>Fog</em> on, then use the <em>Reveal</em> tool to show only what the party can see.</li>
+                <li><strong>Place tokens</strong> — drop each combatant from the <em>Unplaced</em> tray onto the map.</li>
+              </ol>
+            </div>
+          )}
+
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
           <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}

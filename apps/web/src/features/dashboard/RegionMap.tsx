@@ -7,10 +7,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { Link } from 'react-router-dom';
-import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
+import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location, Role } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { clampPercentInt } from './mapPercent';
 
 export { clampPercentInt };
@@ -315,6 +316,15 @@ export function RegionMap({
     }
   }
 
+  // First-party generator "Use this map" (issue #409): the wizard previews without saving;
+  // Use replays the previewed seed through POST .../maps/generate to persist the exact map,
+  // then wires it as the campaign region map (which reveals it to the party, matching the
+  // upload path here). GetAMapPanel owns the preview/reroll; this just does the atomic use.
+  async function generateRegionMap(params: GenerateMapParams) {
+    const result = await api.post<GeneratedMapResult>(`${API}/campaigns/${campaignId}/maps/generate`, params);
+    await handleMapUpload({ id: result.attachmentId } as Attachment);
+  }
+
   async function handleMapRemove() {
     setBusy(true);
     try {
@@ -507,6 +517,15 @@ export function RegionMap({
           <DmMapUploader
             campaignId={campaignId}
             onUploaded={handleMapUpload}
+            onError={handleUploaderError}
+          />
+          {/* Built-in generation discoverable beside upload (issue #409): the procedural
+              generator wizard + external license-clean sources. Using a generated map here
+              wires it as the campaign region map (revealed to the party, like an upload). */}
+          <GetAMapPanel
+            campaignId={campaignId}
+            onImported={(id) => void handleMapUpload({ id } as Attachment)}
+            onGenerate={generateRegionMap}
             onError={handleUploaderError}
           />
         </div>
