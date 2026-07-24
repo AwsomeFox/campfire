@@ -497,6 +497,15 @@ export class ScribeService implements OnApplicationBootstrap {
     const configs = await this.db.select().from(aiScribeConfigs);
     const results: ScribeRunResult[] = [];
     for (const cfg of configs) {
+      // Issue #867: never background-generate for a trashed campaign — Trash freezes
+      // jobs the same way it freezes REST/MCP/AI. Missing campaigns are also skipped.
+      const [campaign] = await this.db
+        .select({ deletedAt: campaigns.deletedAt })
+        .from(campaigns)
+        .where(eq(campaigns.id, cfg.campaignId))
+        .limit(1);
+      if (!campaign || campaign.deletedAt != null) continue;
+
       const trigger: ScribeTrigger | null = cfg.postSession && (await this.hasEndedSession(cfg.campaignId, now))
         ? 'post_session'
         : cfg.cron

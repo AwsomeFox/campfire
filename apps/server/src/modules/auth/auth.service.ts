@@ -6,12 +6,12 @@ import {
   OnApplicationBootstrap,
   UnauthorizedException,
 } from '@nestjs/common';
-import { eq, lt } from 'drizzle-orm';
+import { and, eq, isNull, lt } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SetupRequest, LoginRequest, SignupRequest } from '@campfire/schema';
 import type { Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers } from '../../db/schema';
+import { users, userSessions, campaignMembers, campaigns } from '../../db/schema';
 import { randomBytes } from 'node:crypto';
 import { nowIso } from '../../common/time';
 import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
@@ -337,11 +337,15 @@ export class AuthService implements OnApplicationBootstrap {
    */
   async buildMe(userId: number, tokenContext?: TokenContext): Promise<Me> {
     const user = await this.usersService.getOrThrow(userId);
-    const rows = await this.db.select().from(campaignMembers).where(eq(campaignMembers.userId, userId));
+    const rows = await this.db
+      .select({ membership: campaignMembers })
+      .from(campaignMembers)
+      .innerJoin(campaigns, eq(campaigns.id, campaignMembers.campaignId))
+      .where(and(eq(campaignMembers.userId, userId), isNull(campaigns.deletedAt)));
     let memberships = rows.map((m) => ({
-      campaignId: m.campaignId,
-      role: m.role as Me['memberships'][number]['role'],
-      characterId: m.characterId,
+      campaignId: m.membership.campaignId,
+      role: m.membership.role as Me['memberships'][number]['role'],
+      characterId: m.membership.characterId,
     }));
     // Issue #723: the install/data-generation identity rides on every /me so the
     // PWA can namespace (and invalidate) its SW runtime cache. Fetched in PARALLEL

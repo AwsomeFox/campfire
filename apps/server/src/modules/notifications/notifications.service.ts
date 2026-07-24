@@ -1,8 +1,8 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { EntityType, Notification, NotificationType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaignMembers, notifications } from '../../db/schema';
+import { campaignMembers, campaigns, notifications } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import type { RequestUser } from '../../common/user.types';
 
@@ -151,11 +151,16 @@ export class NotificationsService {
     const userId = numericUserId(user.id);
     if (userId === null) return [];
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
-    const where = opts.unreadOnly
-      ? and(eq(notifications.userId, userId), isNull(notifications.readAt))
-      : eq(notifications.userId, userId);
-    const rows = await this.db.select().from(notifications).where(where).orderBy(desc(notifications.id)).limit(limit);
-    return rows.map(toDomain);
+    const conditions = [eq(notifications.userId, userId), isNull(campaigns.deletedAt)];
+    if (opts.unreadOnly) conditions.push(isNull(notifications.readAt));
+    const rows = await this.db
+      .select({ notification: notifications })
+      .from(notifications)
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(...conditions))
+      .orderBy(desc(notifications.id))
+      .limit(limit);
+    return rows.map((row) => toDomain(row.notification));
   }
 
   async unreadCount(user: RequestUser): Promise<number> {
@@ -164,14 +169,21 @@ export class NotificationsService {
     const rows = await this.db
       .select({ id: notifications.id })
       .from(notifications)
-      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), isNull(campaigns.deletedAt)));
     return rows.length;
   }
 
   /** Recipient-only; someone else's notification 404s (not 403) so ids don't leak. */
   async markRead(id: number, user: RequestUser): Promise<Notification> {
     const userId = numericUserId(user.id);
-    const [row] = await this.db.select().from(notifications).where(eq(notifications.id, id)).limit(1);
+    const [joined] = await this.db
+      .select({ notification: notifications })
+      .from(notifications)
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(eq(notifications.id, id), isNull(campaigns.deletedAt)))
+      .limit(1);
+    const row = joined?.notification;
     if (!row || userId === null || row.userId !== userId) {
       throw new NotFoundException(`Notification ${id} not found`);
     }
@@ -187,10 +199,16 @@ export class NotificationsService {
   async markAllRead(user: RequestUser): Promise<{ updated: number }> {
     const userId = numericUserId(user.id);
     if (userId === null) return { updated: 0 };
+    const liveIds = await this.db
+      .select({ id: notifications.id })
+      .from(notifications)
+      .innerJoin(campaigns, eq(campaigns.id, notifications.campaignId))
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt), isNull(campaigns.deletedAt)));
+    if (liveIds.length === 0) return { updated: 0 };
     const updated = await this.db
       .update(notifications)
       .set({ readAt: nowIso() })
-      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)))
+      .where(inArray(notifications.id, liveIds.map((row) => row.id)))
       .returning({ id: notifications.id });
     return { updated: updated.length };
   }

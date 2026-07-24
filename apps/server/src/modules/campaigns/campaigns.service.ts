@@ -5,7 +5,14 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
-import { CampaignClone, CampaignCreate, CampaignImport, CampaignUpdate } from '@campfire/schema';
+import {
+  CAMPAIGN_PURGE_CONFIRM_TOKEN,
+  CampaignClone,
+  CampaignCreate,
+  CampaignImport,
+  CampaignPurge,
+  CampaignUpdate,
+} from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -47,6 +54,7 @@ import {
   encounterEvents,
   auditLog,
   participantSupportPreferences,
+  campaignPurgeTombstones,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
@@ -65,6 +73,7 @@ import { CommentsService } from '../comments/comments.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
 import { InvitesService } from '../membership/invites.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
@@ -254,6 +263,8 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
 
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -271,6 +282,7 @@ export class CampaignsService {
     private readonly members: MembersService,
     private readonly invites: InvitesService,
     private readonly fsDeletion: FsDeletionService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   /**
@@ -357,7 +369,7 @@ export class CampaignsService {
   async getOrThrow(id: number, opts?: { includeDeleted?: boolean }): Promise<Campaign> {
     const [row] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
     if (!row || (!opts?.includeDeleted && row.deletedAt != null)) {
-      throw new NotFoundException(`Campaign ${id} not found`);
+      throw new NotFoundException('Campaign not found');
     }
     return toDomain(row);
   }
@@ -2304,6 +2316,7 @@ export class CampaignsService {
         campaignId: id,
         detail: 'soft-delete (trashed)',
       });
+      this.events.emit({ type: 'campaign.trashed', campaignId: id });
       return;
     }
 
@@ -2320,21 +2333,26 @@ export class CampaignsService {
       campaignId: id,
       detail: 'soft-delete (trashed)',
     });
+    // Issue #867: tear down open SSE / AI narration streams so a stale tab cannot
+    // keep receiving ticks for a frozen campaign. Control signal only.
+    this.events.emit({ type: 'campaign.trashed', campaignId: id });
   }
 
   /**
    * Restore a trashed campaign (issue #116) — clears `deleted_at` so it returns to
    * normal listings with every child row + upload intact. 404 if the campaign
    * doesn't exist or isn't actually trashed (restoring a live campaign is a no-op error).
+   *
+   * Issue #867: the UPDATE is predicated on `deleted_at IS NOT NULL` so a concurrent
+   * purge that commits first leaves restore as 404 (never resurrects a wiped row).
    */
   async restore(id: number, user: RequestUser): Promise<Campaign> {
-    const existing = await this.getOrThrow(id, { includeDeleted: true });
-    if (existing.deletedAt == null) throw new NotFoundException(`Campaign ${id} is not in the trash`);
     const [row] = await this.db
       .update(campaigns)
       .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(campaigns.id, id))
+      .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
       .returning();
+    if (!row) throw new NotFoundException(`Campaign ${id} is not in the trash`);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -2347,32 +2365,45 @@ export class CampaignsService {
   }
 
   /**
-   * Permanently purge a campaign (issue #116) — the deliberate, irreversible second
-   * step that the old one-click DELETE used to be. Full cascade delete across EVERY
-   * campaign-scoped table (issue #235): a pre-#69 DB carries no FK constraints (SQLite
-   * can't ALTER-ADD one) so this hand cascade is its ONLY teardown, and it previously
-   * covered only ~12 of the ~30 child tables — leaving story_arcs/beats/branches,
-   * timeline_events/calendars, session_zero, factions, session_shares/attendees,
-   * scheduled_sessions/rsvps, comments, entity_revisions, campaign_invites, dice_rolls,
-   * notifications, inventory_items, party_treasury, ai_dm_seats and encounter_events
-   * orphaned. The list is now complete (see the in-body comment + the db-cascades test).
-   * All DB rows are removed in one db.transaction() (better-sqlite3 synchronous transaction
-   * API — same pattern as QuestsService.remove()/RulesService.uninstall()), with the
-   * campaigns row cleared last so a mid-transaction failure never leaves an
-   * orphaned-but-still-"deleted"-looking campaign.
-   * The on-disk upload directory is removed after the transaction commits (best-effort,
-   * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of truth for what
-   * exists; a stray directory is harmless, but we still try synchronously here since this is
-   * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
-   * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
+   * Permanently purge a trashed campaign (issue #116 / #867) — the deliberate,
+   * irreversible second step. Refused unless `deletedAt IS NOT NULL` and the caller
+   * supplied `{ confirm: "PURGE" }`. Full cascade delete across EVERY campaign-scoped
+   * table (issue #235). A concurrent restore that clears deletedAt first makes the
+   * in-transaction gate fail closed (404). Retains a sanitized server-level tombstone
+   * plus a campaignId-null admin audit row so purge evidence survives membership loss.
    */
-  async purge(id: number, user: RequestUser): Promise<FsDeletionOutcome> {
-    await this.getOrThrow(id, { includeDeleted: true });
+  async purge(id: number, user: RequestUser, body: CampaignPurge): Promise<FsDeletionOutcome> {
+    if (body.confirm !== CAMPAIGN_PURGE_CONFIRM_TOKEN) {
+      throw new BadRequestException(
+        `Purge is destructive — resend with the confirmation token "${CAMPAIGN_PURGE_CONFIRM_TOKEN}" in the "confirm" field`,
+      );
+    }
+
+    const existing = await this.getOrThrow(id, { includeDeleted: true });
+    if (existing.deletedAt == null) {
+      throw new NotFoundException(`Campaign ${id} is not in the trash`);
+    }
+
+    const actor = auditActor(user);
+    const requestedAt = nowIso();
+    const campaignNameHash = crypto.createHash('sha256').update(existing.name).digest('hex');
+    const [tombstone] = await this.db
+      .insert(campaignPurgeTombstones)
+      .values({
+        campaignId: id,
+        campaignNameHash,
+        actor,
+        status: 'requested',
+        detail: '',
+        requestedAt,
+        completedAt: null,
+      })
+      .returning();
 
     const auditCtx = {
       scope: 'campaign_purge' as const,
       auditPrefix: 'campaign.purge',
-      actor: auditActor(user),
+      actor,
       actorRole: 'dm' as const,
       campaignId: id,
       entityType: 'campaign',
@@ -2395,6 +2426,7 @@ export class CampaignsService {
     // campaign-scoped table, add it here too, and extend the db-cascades orphan test.
     //
     // audit_log is deliberately excluded (it must outlive the campaign — see bootstrap.sql).
+    // campaign_purge_tombstones is also excluded (server-level evidence, issue #867).
     // The user/auth/oauth/rule-pack graphs are not campaign-scoped and are left untouched.
 
     // Two-hop children keyed off a parent id, not campaign_id — collect the parent ids
@@ -2407,63 +2439,129 @@ export class CampaignsService {
     ).map((r) => r.id);
     const storyBeatIds = (await this.db.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.campaignId, id))).map((r) => r.id);
 
-    this.db.transaction((tx) => {
-      // ---- two-hop children first (keyed off a parent id, no campaign_id of their own).
-      // Guard the empty case: `inArray(col, [])` is a degenerate/invalid IN clause and
-      // there is nothing to delete anyway.
-      if (questIds.length > 0) {
-        tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
-      }
-      if (encounterIds.length > 0) {
-        tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
-        tx.delete(encounterEvents).where(inArray(encounterEvents.encounterId, encounterIds)).run();
-      }
-      if (sessionIds.length > 0) {
-        tx.delete(sessionAttendees).where(inArray(sessionAttendees.sessionId, sessionIds)).run();
-      }
-      if (scheduledSessionIds.length > 0) {
-        tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
-      }
-      if (storyBeatIds.length > 0) {
-        tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
-      }
+    try {
+      this.db.transaction((tx) => {
+        // Atomic trash gate (issue #867): refuse if a concurrent restore cleared
+        // deletedAt (or the row is already gone). Checked inside the same transaction
+        // that destroys children so restore-vs-purge cannot interleave mid-cascade.
+        const stillTrashed = tx
+          .select({ id: campaigns.id })
+          .from(campaigns)
+          .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
+          .limit(1)
+          .all();
+        if (stillTrashed.length === 0) {
+          throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        }
 
-      // ---- everything keyed directly off campaign_id.
-      tx.delete(quests).where(eq(quests.campaignId, id)).run();
-      tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
-      tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
-      tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
-      tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
-      tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
-      tx.delete(participantSupportPreferences).where(eq(participantSupportPreferences.campaignId, id)).run();
-      tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
-      tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
-      tx.delete(factions).where(eq(factions.campaignId, id)).run();
-      tx.delete(locations).where(eq(locations.campaignId, id)).run();
-      tx.delete(characters).where(eq(characters.campaignId, id)).run();
-      tx.delete(notes).where(eq(notes.campaignId, id)).run();
-      tx.delete(comments).where(eq(comments.campaignId, id)).run();
-      tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
-      tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
-      tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
-      tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
-      tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
-      tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
-      tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
-      tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
-      tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
-      tx.delete(diceRolls).where(eq(diceRolls.campaignId, id)).run();
-      tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
-      tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
-      tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
-      tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
+        // ---- two-hop children first (keyed off a parent id, no campaign_id of their own).
+        // Guard the empty case: `inArray(col, [])` is a degenerate/invalid IN clause and
+        // there is nothing to delete anyway.
+        if (questIds.length > 0) {
+          tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
+        }
+        if (encounterIds.length > 0) {
+          tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
+          tx.delete(encounterEvents).where(inArray(encounterEvents.encounterId, encounterIds)).run();
+        }
+        if (sessionIds.length > 0) {
+          tx.delete(sessionAttendees).where(inArray(sessionAttendees.sessionId, sessionIds)).run();
+        }
+        if (scheduledSessionIds.length > 0) {
+          tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
+        }
+        if (storyBeatIds.length > 0) {
+          tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
+        }
 
-      tx.delete(campaigns).where(eq(campaigns.id, id)).run();
-    });
+        // ---- everything keyed directly off campaign_id.
+        tx.delete(quests).where(eq(quests.campaignId, id)).run();
+        tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
+        tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
+        tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
+        tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
+        tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
+        tx.delete(participantSupportPreferences).where(eq(participantSupportPreferences.campaignId, id)).run();
+        tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
+        tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
+        tx.delete(factions).where(eq(factions.campaignId, id)).run();
+        tx.delete(locations).where(eq(locations.campaignId, id)).run();
+        tx.delete(characters).where(eq(characters.campaignId, id)).run();
+        tx.delete(notes).where(eq(notes.campaignId, id)).run();
+        tx.delete(comments).where(eq(comments.campaignId, id)).run();
+        tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
+        tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
+        tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
+        tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
+        tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
+        tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
+        tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
+        tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
+        tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
+        tx.delete(diceRolls).where(eq(diceRolls.campaignId, id)).run();
+        tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
+        tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
+        tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
+        tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
+
+        tx.delete(campaigns).where(eq(campaigns.id, id)).run();
+      });
+    } catch (err) {
+      const completedAt = nowIso();
+      const detail = err instanceof Error ? err.message : String(err);
+      await this.db
+        .update(campaignPurgeTombstones)
+        .set({ status: 'failed', detail: detail.slice(0, 500), completedAt })
+        .where(eq(campaignPurgeTombstones.id, tombstone.id));
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'campaign.purge',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: null,
+        detail: JSON.stringify({
+          tombstoneId: tombstone.id,
+          campaignId: id,
+          campaignNameHash,
+          status: 'failed',
+          requestedAt,
+          completedAt,
+        }),
+      });
+      throw err;
+    }
 
     await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    return this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
+    const outcome = await this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
+
+    const completedAt = nowIso();
+    await this.db
+      .update(campaignPurgeTombstones)
+      .set({ status: 'completed', completedAt })
+      .where(eq(campaignPurgeTombstones.id, tombstone.id));
+
+    // Server-level audit (campaignId null) so the purge remains discoverable after
+    // memberships — and therefore GET /campaigns/:id/audit — are gone (issue #867).
+    await this.audit.log({
+      actor,
+      actorRole: 'dm',
+      action: 'campaign.purge',
+      entityType: 'campaign',
+      entityId: id,
+      campaignId: null,
+      detail: JSON.stringify({
+        tombstoneId: tombstone.id,
+        campaignId: id,
+        campaignNameHash,
+        status: 'completed',
+        requestedAt,
+        completedAt,
+      }),
+    });
+
+    return outcome;
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {

@@ -513,6 +513,9 @@ export class SchedulingService {
     const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.icsToken, token)).limit(1);
     if (!campaign) throw new NotFoundException('Unknown calendar feed');
     if (icsTokenIsExpired(campaign.icsTokenExpiresAt)) throw new NotFoundException('Unknown calendar feed');
+    // Issue #867: a trashed campaign's public calendar feed must look identical to
+    // an unknown/rotated token — no schedule disclosure after Trash.
+    if (campaign.deletedAt != null) throw new NotFoundException('Unknown calendar feed');
     const schedules = await this.listForCampaign(campaign.id);
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }

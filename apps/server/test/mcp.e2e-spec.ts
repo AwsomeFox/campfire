@@ -2571,6 +2571,35 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(after.some((p) => p.id === packId)).toBe(false);
   });
 
+  it('#867 MCP tools treat a trashed campaign as nonexistent and resume only after authorized restore', async () => {
+    const name = 'MCP Trash Boundary';
+    const created = await dmAgent.post('/api/v1/campaigns').send({ name });
+    const trashedCampaignId = created.body.id as number;
+    const client = await mcpClient(dmToken);
+
+    const before = await client.callTool({
+      name: 'create_quest',
+      arguments: { campaignId: trashedCampaignId, title: 'Before trash' },
+    });
+    expect(before.isError).toBeFalsy();
+
+    expect((await dmAgent.delete(`/api/v1/campaigns/${trashedCampaignId}`)).status).toBe(200);
+    const read = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: trashedCampaignId } });
+    const write = await client.callTool({
+      name: 'create_quest',
+      arguments: { campaignId: trashedCampaignId, title: 'Stale MCP drift' },
+    });
+    for (const blocked of [read, write]) {
+      expect(blocked.isError).toBe(true);
+      expect((blocked.content as TextContent[])[0].text).toContain('404');
+      expect((blocked.content as TextContent[])[0].text).not.toContain(name);
+    }
+
+    expect((await dmAgent.post(`/api/v1/campaigns/${trashedCampaignId}/restore`)).status).toBe(201);
+    const after = await client.callTool({ name: 'get_campaign_summary', arguments: { campaignId: trashedCampaignId } });
+    expect(after.isError).toBeFalsy();
+  });
+
   it('request without Authorization gets 401; GET gets 405', async () => {
     const noAuth = await request(ctx.app.getHttpServer())
       .post('/mcp')

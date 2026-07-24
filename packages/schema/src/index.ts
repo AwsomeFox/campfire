@@ -137,12 +137,26 @@ export const Campaign = z.object({
   // trash: excluded from normal listings but its rows + on-disk uploads survive for a
   // grace period, restorable via POST /campaigns/:id/restore. A deliberate second
   // step (DELETE /campaigns/:id/purge) is what finally hard-cascades + wipes the disk.
+  // Issue #867: trash freezes EVERY child API (REST/MCP/AI/streams/jobs); only Trash
+  // list + restore + purge (with confirm) are exempt. Live purge is refused.
   deletedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
 export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
+
+/**
+ * DELETE /campaigns/:id/purge body (issue #867). Purge is irreversible and refused
+ * unless the campaign is already trashed (`deletedAt IS NOT NULL`). Callers must
+ * echo the exact confirmation token so a stray DELETE (replay, stale tab, MCP)
+ * cannot destroy a campaign without an explicit destructive acknowledgement.
+ */
+export const CAMPAIGN_PURGE_CONFIRM_TOKEN = 'PURGE' as const;
+export const CampaignPurge = z.object({
+  confirm: z.literal(CAMPAIGN_PURGE_CONFIRM_TOKEN),
+});
+export type CampaignPurge = z.infer<typeof CampaignPurge>;
 
 // Clone/template input — POST /campaigns/:id/clone.
 //  - 'full': faithful duplicate (everything except members, attachments and audit/proposals/tokens)
@@ -5752,6 +5766,10 @@ export const CampaignEventType = z.enum([
   // permission-checked REST endpoints, never carried on the wire.
   'check.requested',
   'check.resolved',
+  // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
+  // stream on the campaign (control signal — filtered from the data path like
+  // membership.revoked). A reconnect hits requireMember and 404s.
+  'campaign.trashed',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -5859,6 +5877,13 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     requestId: Id,
     characterId: Id,
     userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #867: the campaign was soft-deleted (moved to Trash). Control signal only —
+    // SSE controllers complete every open stream; filtered from the data path.
+    type: z.literal('campaign.trashed'),
+    campaignId: Id,
     at: IsoDate,
   }),
 ]);

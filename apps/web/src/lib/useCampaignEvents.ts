@@ -76,6 +76,11 @@ function isCampaignEvent(value: unknown): value is CampaignEvent {
   if (v.type === 'check.requested' || v.type === 'check.resolved') {
     return typeof v.requestId === 'number' && typeof v.characterId === 'number' && typeof v.userId === 'string';
   }
+  if (v.type === 'campaign.trashed') {
+    // Issue #867: control signal — server filters it from the data path; accept
+    // the shape so the guard stays honest if filtering ever changes.
+    return true;
+  }
   return false;
 }
 

@@ -487,6 +487,19 @@ CREATE TABLE IF NOT EXISTS membership_integrity_repairs (
   UNIQUE(member_id, reason)
 );
 
+-- Issue #867: purge evidence that outlives the campaign hard-cascade. No FKs —
+-- the campaigns row is deleted by purge itself. Name is stored as sha256 only.
+CREATE TABLE IF NOT EXISTS campaign_purge_tombstones (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL,
+  campaign_name_hash TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  requested_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS campaign_invites (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
