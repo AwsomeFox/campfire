@@ -82,6 +82,38 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
     expect(offered).toContain('create_quest'); // proposal-capable canon
   });
 
+  // ── #1021 ────────────────────────────────────────────────────────────────────
+  it('#1021 driver can directly execute adjust_treasury and add_inventory_item during live play', async () => {
+    const campaignId = await h.createCampaign('Loot Live Play');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script(
+      {
+        text: 'Awarding victory loot!',
+        toolCalls: [
+          { id: 't1', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: 50 } } },
+          { id: 'i1', name: 'add_inventory_item', arguments: { campaignId, name: 'Ruby Ring', ownerType: 'party', qty: 1 } },
+        ],
+      },
+      { text: 'The party gathers the spoils.' },
+    );
+    const res = await h.sendMessage(campaignId, { input: 'loot the room' });
+    expect(res.status).toBe(201);
+    expect(res.body.toolCalls).toEqual([
+      { name: 'adjust_treasury', isError: false, proposed: false },
+      { name: 'add_inventory_item', isError: false, proposed: false },
+    ]);
+
+    // Verify treasury and inventory persistence directly on campaign resources.
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body.gp).toBe(50);
+
+    const items = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(items.status).toBe(200);
+    expect(items.body.some((i: { name: string }) => i.name === 'Ruby Ring')).toBe(true);
+  });
+
   // ── #384 part 1 ───────────────────────────────────────────────────────────────
   it('#384 the seat is scoped to its campaign — an entity-keyed write to ANOTHER campaign 403s', async () => {
     const campA = await h.createCampaign('Sec Scope A');

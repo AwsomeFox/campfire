@@ -1193,8 +1193,8 @@ against realistic payloads with no network dependency in CI. It also backs
 the `lookup_rule` smoke test in `mcp.e2e-spec.ts`.
 
 Run with `npm run test -w apps/server` (repo root) or `npm test` from this
-directory. Jest is configured `maxWorkers: 1` since every suite opens its own
-SQLite file — safe to parallelize later if it becomes a bottleneck.
+directory. Jest is configured `maxWorkers: '50%'` to parallelize execution across
+available CPU cores, with each suite isolated to its own temporary SQLite directory.
 
 ## Deviations from spec
 

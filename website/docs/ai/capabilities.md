@@ -71,8 +71,7 @@ The seat has three modes, set in the web UI:
 - **Driver** — the AI **holds the seat and runs the live session**, calling the
   play tools itself. Even here, **canon writes are still forced through proposals**;
   the driver is **tool-scoped to live-play tools** (dice, initiative, encounter and
-  turn flow, HP/conditions, XP, treasury adjustments, inventory loot grants, map
-  reveal, notes) and is **refused** cross-campaign
+  turn flow, HP/conditions, XP, loot and treasury grants, map reveal, notes) and is **refused** cross-campaign
   calls and any admin/destructive tool (deletes, `update_campaign`,
   `uninstall_rule_pack`, `withdraw_proposal`).
 

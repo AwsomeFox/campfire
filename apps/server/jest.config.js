@@ -16,11 +16,11 @@ module.exports = {
     '^@campfire/schema$': '<rootDir>/../../packages/schema/src/index.ts',
   },
   testTimeout: 30000,
-  maxWorkers: 1,
+  maxWorkers: '50%',
   // The integration-heavy suite creates a fresh Nest application and SQLite
-  // database for many files. Recycle Jest's lone worker between files once it
+  // database for many files. Recycle Jest workers between files once memory
   // grows past this bound instead of letting retained module state accumulate
-  // until the GitHub runner's Node heap is exhausted.
+  // until the runner's Node heap is exhausted.
   workerIdleMemoryLimit: '1024MB',
   // Floor for CI `test:cov` (#562) — previously unset, so a coverage regression
   // could land silently forever. Global floors sit a few points below the
