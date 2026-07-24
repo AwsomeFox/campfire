@@ -165,8 +165,8 @@
       "short": "KAC"
     },
     "hitPoints": {
-      "full": "Hit Points",
-      "short": "HP"
+      "full": "Stamina + Hit Points",
+      "short": "SP + HP"
     },
     "abilities": {
       "full": "Abilities"

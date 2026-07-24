@@ -74,6 +74,13 @@ describe('statblock presentation metadata (issue #763)', () => {
     expect(Dnd5eAdapter.presentation!.defense.full).toBe('Armor Class');
     expect(Pathfinder1eAdapter.presentation!.rating.full).toBe('Challenge Rating');
     expect(StarfinderAdapter.presentation!.defense.full).toBe('Kinetic Armor Class');
+    expect(StarfinderAdapter.presentation!.hitPoints.full).toBe('Stamina + Hit Points');
+  });
+
+  it('maps 13th Age role before generic type for creatureType', () => {
+    expect(
+      Archmage13aAdapter.mapStatblock({ role: 'spoiler', type: 'humanoid' }).creatureType,
+    ).toBe('spoiler');
   });
 
   it('returns neutral Rating/Defense for unknown and homebrew (empty) rule systems', () => {

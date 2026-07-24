@@ -146,17 +146,7 @@ export interface StarfinderRuleSystemAdapter extends RuleSystemAdapter {
   hitPointsBreakdown(d: Record<string, unknown>): StarfinderHitPoints;
 }
 
-/**
- * The Starfinder 1e adapter. Ability modifier and initiative are the shared d20 rules; the
- * Starfinder-specific behavior is concentrated in `mapStatblock`/`monsterHitPoints` (the
- * SP+HP pool and EAC/KAC), with `armorClasses()`/`hitPointsBreakdown()` for surfaces that
- * need the full sci-fi detail the single-slot RuleSystemAdapter interface can't carry.
- */
-/**
- * Starfinder presentation — CR for rating; the generic defense slot carries KAC, so the
- * accessible label is Kinetic Armor Class (short KAC). EAC remains available via
- * `armorClasses()` for surfaces that show both.
- */
+/** Starfinder presentation — CR for rating; KAC in the defense slot; SP+HP in the HP slot. */
 export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
   rating: { full: 'Challenge Rating', short: 'CR' },
   defense: { full: 'Kinetic Armor Class', short: 'KAC' },
@@ -166,6 +156,12 @@ export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
   creatureType: { full: 'Type' },
 };
 
+/**
+ * The Starfinder 1e adapter. Ability modifier and initiative are the shared d20 rules; the
+ * Starfinder-specific behavior is concentrated in `mapStatblock`/`monsterHitPoints` (the
+ * SP+HP pool and EAC/KAC), with `armorClasses()`/`hitPointsBreakdown()` for surfaces that
+ * need the full sci-fi detail the single-slot RuleSystemAdapter interface can't carry.
+ */
 export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',

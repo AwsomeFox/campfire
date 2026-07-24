@@ -342,20 +342,21 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
   if (!block) return null;
 
   const { presentation } = block;
-  const metaBits = [block.size, block.creatureType].filter(Boolean).join(' ');
+  const metaBits = block.size ? [block.size] : [];
   const ratingText = statblockVisibleLabels(block).ratingLine ?? '';
 
   return (
     <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
-      {(metaBits || ratingText) && (
+      {(metaBits.length > 0 || ratingText) && (
         <p className="text-muted" style={{ margin: 0, fontSize: 12.5, fontStyle: 'italic' }}>
-          {metaBits}
-          {metaBits && ratingText ? ' · ' : ''}
+          {metaBits.join(' ')}
+          {metaBits.length > 0 && ratingText ? ' · ' : ''}
           {ratingText}
         </p>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {block.creatureType && <KeyLine label={presentation.creatureType} value={block.creatureType} />}
         {block.armorClass && <KeyLine label={presentation.defense} value={block.armorClass} />}
         {block.hitPoints && <KeyLine label={presentation.hitPoints} value={block.hitPoints} />}
         {block.speed && <KeyLine label={SPEED_LABEL} value={block.speed} />}

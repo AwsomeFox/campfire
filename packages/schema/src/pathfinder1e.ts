@@ -148,11 +148,6 @@ export function pf1eArmorClass(parts: {
   return 10 + dexMod + sum;
 }
 
-/**
- * The Pathfinder 1e adapter. Satisfies the shared `RuleSystemAdapter` seam so every combat
- * call site (initiative rolling, statblock mapping, HP resolution, condition chips) routes
- * through it when a campaign selects the PF1e pack — no per-system branching in the combat code.
- */
 /** PF1e presentation — Challenge Rating + Armor Class (ascending AC, like 5e). */
 export const PF1E_STATBLOCK_PRESENTATION: StatblockPresentation = {
   rating: { full: 'Challenge Rating', short: 'CR' },
@@ -163,6 +158,11 @@ export const PF1E_STATBLOCK_PRESENTATION: StatblockPresentation = {
   creatureType: { full: 'Type' },
 };
 
+/**
+ * The Pathfinder 1e adapter. Satisfies the shared `RuleSystemAdapter` seam so every combat
+ * call site (initiative rolling, statblock mapping, HP resolution, condition chips) routes
+ * through it when a campaign selects the PF1e pack — no per-system branching in the combat code.
+ */
 export const Pathfinder1eAdapter: RuleSystemAdapter = {
   id: PF1E_ADAPTER_ID,
   label: 'Pathfinder 1e',

@@ -9,12 +9,15 @@
  * parity contract between those surfaces.
  */
 import { expect, test } from '@playwright/test';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   NEUTRAL_STATBLOCK_PRESENTATION,
   listRuleSystemAdapters,
   statblockPresentation,
 } from '@campfire/schema';
 import {
+  StatBlock,
   parseMonsterStatblock,
   statblockVisibleLabels,
 } from '../../src/components/StatBlock';
@@ -86,16 +89,15 @@ test.describe('statblock labels (issue #763)', () => {
     expect(labels.ratingLine).toBe('Rating 2');
   });
 
-  test('compendium / encounter parity: both surfaces share parseMonsterStatblock labels', () => {
-    // ReaderPage and RunSessionPage both call StatBlock with the campaign ruleSystem.
-    // Parity = the same ruleSystem + dataJson yields identical visible labels regardless
-    // of which surface asked (headingLevel is the only StatBlock prop that differs).
-    for (const ruleSystem of listRuleSystemAdapters().map((a) => a.id)) {
-      const compendium = parseMonsterStatblock(SAMPLE, ruleSystem);
-      const encounter = parseMonsterStatblock(SAMPLE, ruleSystem);
-      expect(statblockVisibleLabels(compendium!)).toEqual(statblockVisibleLabels(encounter!));
-      expect(compendium!.presentation).toEqual(statblockPresentation(ruleSystem));
-    }
+  test('compendium / encounter parity: StatBlock renders adapter-native labels', () => {
+    const openLegendHtml = renderToStaticMarkup(
+      <StatBlock data={SAMPLE} ruleSystem="open-legend" />,
+    );
+    expect(openLegendHtml).toContain('Guard');
+    expect(openLegendHtml).not.toMatch(/>\s*Armor Class\s*</);
+
+    const osrHtml = renderToStaticMarkup(<StatBlock data={SAMPLE} ruleSystem="osr" />);
+    expect(osrHtml).toContain('Hit Dice');
   });
 
   test('full accessible terms are present; short abbreviations are optional extras', () => {
