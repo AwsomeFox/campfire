@@ -549,6 +549,7 @@ describe('ai-provider-config effective indicator (issue #399, e2e)', () => {
     server = ctx.app.getHttpServer();
     const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Effective Indicator Campaign' });
     campaignId = campRes.body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/members`).set(dm).send({ username: 'aipc-player', role: 'player' });
   });
 
   afterAll(async () => {
