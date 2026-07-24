@@ -400,7 +400,8 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/npcs`)
         .set(dm)
-        .send({ name: 'Café Müller', body: 'Sells tea.' })
+        // #754: player-visible so the player-scoped CAFÉ search below can match it.
+        .send({ name: 'Café Müller', body: 'Sells tea.', hidden: false })
     ).body.id;
     const istanbulId = (
       await request(server)

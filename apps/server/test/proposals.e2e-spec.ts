@@ -34,7 +34,9 @@ describe('proposals (e2e, real cookie sessions)', () => {
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerId, role: 'player' });
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: viewerId, role: 'viewer' });
 
-    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Original Title', reward: '10gp' });
+    // #754: quests are private-by-default; make it player-visible so a non-DM member
+    // can see it to propose edits/deletes against it.
+    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Original Title', reward: '10gp', hidden: false });
     questId = questRes.body.id;
   });
 
@@ -175,7 +177,7 @@ describe('proposals (e2e, real cookie sessions)', () => {
   it('snapshot is frozen at propose time, even if the entity changes before review', async () => {
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'Snapshot Quest', reward: '5gp' });
+      .send({ title: 'Snapshot Quest', reward: '5gp', hidden: false });
     const snapshotQuestId = questRes.body.id;
 
     const proposeRes = await playerAgent
@@ -200,7 +202,7 @@ describe('proposals (e2e, real cookie sessions)', () => {
   // ---------- #98: delete proposal action ----------
 
   it('member proposes a delete -> 202 pending, entity untouched; dm approves -> entity removed', async () => {
-    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Doomed Quest', reward: '3gp' });
+    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Doomed Quest', reward: '3gp', hidden: false });
     const doomedId = questRes.body.id;
 
     const proposeRes = await playerAgent.delete(`/api/v1/quests/${doomedId}?proposed=true`);
@@ -519,7 +521,7 @@ describe('proposals (e2e, real cookie sessions)', () => {
   it('concurrent double-approve of an UPDATE proposal applies the write once (no double-apply)', async () => {
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'Update Race Quest', reward: '0gp' });
+      .send({ title: 'Update Race Quest', reward: '0gp', hidden: false });
     const raceQuestId = questRes.body.id;
 
     const proposeRes = await playerAgent
@@ -541,7 +543,7 @@ describe('proposals (e2e, real cookie sessions)', () => {
   it('concurrent approve vs reject resolves to a single outcome consistently', async () => {
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'Approve-Reject Race', reward: '0gp' });
+      .send({ title: 'Approve-Reject Race', reward: '0gp', hidden: false });
     const raceQuestId = questRes.body.id;
 
     const proposeRes = await playerAgent
@@ -576,7 +578,7 @@ describe('proposals (e2e, real cookie sessions)', () => {
   it('approve then reject (sequential): reject of an already-approved proposal is a 409 no-op', async () => {
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'Seq Approve Then Reject', reward: '0gp' });
+      .send({ title: 'Seq Approve Then Reject', reward: '0gp', hidden: false });
     const seqQuestId = questRes.body.id;
 
     const proposeRes = await playerAgent
