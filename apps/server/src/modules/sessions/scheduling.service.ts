@@ -368,13 +368,13 @@ export class SchedulingService {
       throw new BadRequestException('status is required for the first RSVP submission');
     }
 
-    const statusChanged = input.status !== undefined && existing?.status !== input.status;
+    const statusChanged = input.status !== undefined && (!existing || existing.status !== input.status);
     const noteChanged =
       input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
 
     if (existing) {
       const update: {
-        status?: typeof nextStatus;
+        status?: SessionRsvp['status'];
         userName: string;
         updatedAt: string;
         note?: string;
