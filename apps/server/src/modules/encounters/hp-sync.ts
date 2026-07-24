@@ -12,6 +12,10 @@ export type HpSyncDeathState = 'none' | 'dying' | 'stable' | 'dead';
 export type HpSyncSlice = {
   hpCurrent: number;
   hpTemp: number;
+  spCurrent: number;
+  spMax: number;
+  rpCurrent: number;
+  rpMax: number;
   deathState: HpSyncDeathState;
   deathSaveSuccesses: number;
   deathSaveFailures: number;
@@ -30,6 +34,10 @@ export type HpResyncDirection = 'keep_combatant' | 'pull_sheet';
 export function hpSyncSliceOf(row: {
   hpCurrent: number;
   hpTemp: number;
+  spCurrent?: number | null;
+  spMax?: number | null;
+  rpCurrent?: number | null;
+  rpMax?: number | null;
   deathState: string;
   deathSaveSuccesses: number;
   deathSaveFailures: number;
@@ -37,6 +45,10 @@ export function hpSyncSliceOf(row: {
   return {
     hpCurrent: row.hpCurrent,
     hpTemp: row.hpTemp,
+    spCurrent: row.spCurrent ?? 0,
+    spMax: row.spMax ?? 0,
+    rpCurrent: row.rpCurrent ?? 0,
+    rpMax: row.rpMax ?? 0,
     deathState: row.deathState as HpSyncDeathState,
     deathSaveSuccesses: row.deathSaveSuccesses,
     deathSaveFailures: row.deathSaveFailures,
@@ -47,6 +59,10 @@ export function hpSyncSlicesEqual(a: HpSyncSlice, b: HpSyncSlice): boolean {
   return (
     a.hpCurrent === b.hpCurrent &&
     a.hpTemp === b.hpTemp &&
+    a.spCurrent === b.spCurrent &&
+    a.spMax === b.spMax &&
+    a.rpCurrent === b.rpCurrent &&
+    a.rpMax === b.rpMax &&
     a.deathState === b.deathState &&
     a.deathSaveSuccesses === b.deathSaveSuccesses &&
     a.deathSaveFailures === b.deathSaveFailures

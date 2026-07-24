@@ -326,20 +326,50 @@ export default function CharacterPage() {
           </Card>
 
           <Card className="space-y-3">
-            <div className="flex items-baseline gap-2.5">
-              <p className="card-kicker">Hit points</p>
-              <span className="text-xs text-slate-500">AC {character.ac ?? '—'}</span>
+            <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
+              <p className="card-kicker mb-0">Hit points & Defenses</p>
+              <div className="text-xs text-slate-400 font-semibold">
+                {character.eac != null || character.kac != null ? (
+                  <span>EAC <strong className="text-white">{character.eac ?? '—'}</strong> · KAC <strong className="text-white">{character.kac ?? '—'}</strong></span>
+                ) : (
+                  <span>AC {character.ac ?? '—'}</span>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-3.5 flex-wrap">
               <span className="font-heading text-[34px] leading-none">
                 {character.hpCurrent}
-                <span className="text-base text-slate-500"> / {character.hpMax}</span>
+                <span className="text-base text-slate-500"> / {character.hpMax} HP</span>
               </span>
               <div className="flex-1 min-w-[120px]">
                 <HpBar current={character.hpCurrent} max={character.hpMax} />
               </div>
             </div>
-            {canEdit && <HpEditor character={character} onChange={load} onError={setActionError} />}
+            {(character.spMax > 0 || character.rpMax > 0) && (
+              <div className="space-y-2 pt-2 border-t border-slate-800">
+                {character.spMax > 0 && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-slate-400 font-medium">
+                      <span>Stamina Points (SP)</span>
+                      <span className="text-white">{character.spCurrent} / {character.spMax}</span>
+                    </div>
+                    <HpBar current={character.spCurrent} max={character.spMax} />
+                  </div>
+                )}
+                {character.rpMax > 0 && (
+                  <div className="flex items-center justify-between text-xs text-slate-400 font-medium">
+                    <span>Resolve Points (RP)</span>
+                    <span className="text-white font-semibold">{character.rpCurrent} / {character.rpMax}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {canEdit && (
+              <div className="space-y-2">
+                <HpEditor character={character} onChange={load} onError={setActionError} />
+                <RestControls character={character} onChange={load} onError={setActionError} />
+              </div>
+            )}
           </Card>
 
           <XpCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
@@ -1137,6 +1167,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
   const [kind, setKind] = useState('');
   const [toHit, setToHit] = useState('');
   const [damage, setDamage] = useState('');
+  const [targetAc, setTargetAc] = useState('');
   const [notes, setNotes] = useState('');
   // Roll-mode chooser (issue #713): the attack "to hit" roll mode. Applies to
   // every action's attack roll in this card; a shift/alt-click still overrides
@@ -1168,6 +1199,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     setKind('');
     setToHit('');
     setDamage('');
+    setTargetAc('');
     setNotes('');
     setEditingIndex(null);
   }
@@ -1179,6 +1211,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       kind: kind.trim(),
       toHit: toHit.trim(),
       damage: damage.trim(),
+      targetAc: targetAc.trim(),
       notes: notes.trim(),
     };
     const ok = await saveActions([...character.actions, action], "Couldn't add the action.");
@@ -1195,6 +1228,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
       kind: kind.trim(),
       toHit: toHit.trim(),
       damage: damage.trim(),
+      targetAc: targetAc.trim(),
       notes: notes.trim(),
     };
     const next = character.actions.map((a, i) => (i === editingIndex ? action : a));
@@ -1209,6 +1243,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
     setKind(a.kind);
     setToHit(a.toHit);
     setDamage(a.damage);
+    setTargetAc(a.targetAc ?? '');
     setNotes(a.notes);
     setEditingIndex(index);
     setAdding(false);
@@ -1264,11 +1299,13 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
               kind={kind}
               toHit={toHit}
               damage={damage}
+              targetAc={targetAc}
               notes={notes}
               setName={setName}
               setKind={setKind}
               setToHit={setToHit}
               setDamage={setDamage}
+              setTargetAc={setTargetAc}
               setNotes={setNotes}
               onCancel={resetForm}
               onSave={saveEdit}
@@ -1287,6 +1324,11 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                 {action.kind && (
                   <span className="tag tag-neutral">
                     {action.kind}
+                  </span>
+                )}
+                {action.targetAc && (
+                  <span className="tag tag-neutral text-[10px]" title="Target Armor Class">
+                    vs {action.targetAc}
                   </span>
                 )}
               </p>
@@ -1370,11 +1412,13 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
           kind={kind}
           toHit={toHit}
           damage={damage}
+          targetAc={targetAc}
           notes={notes}
           setName={setName}
           setKind={setKind}
           setToHit={setToHit}
           setDamage={setDamage}
+          setTargetAc={setTargetAc}
           setNotes={setNotes}
           onCancel={() => { resetForm(); setAdding(false); }}
           onSave={add}
@@ -1398,11 +1442,13 @@ function ActionForm({
   kind,
   toHit,
   damage,
+  targetAc: _targetAc,
   notes,
   setName,
   setKind,
   setToHit,
   setDamage,
+  setTargetAc: _setTargetAc,
   setNotes,
   onCancel,
   onSave,
@@ -1414,11 +1460,13 @@ function ActionForm({
   kind: string;
   toHit: string;
   damage: string;
+  targetAc: string;
   notes: string;
   setName: (v: string) => void;
   setKind: (v: string) => void;
   setToHit: (v: string) => void;
   setDamage: (v: string) => void;
+  setTargetAc: (v: string) => void;
   setNotes: (v: string) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -2037,6 +2085,55 @@ function DmSecretCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function RestControls({
+  character,
+  onChange,
+  onError,
+}: {
+  character: Character;
+  onChange: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  async function takeRest(type: 'stamina' | 'night') {
+    if (busy) return;
+    setBusy(true);
+    onError(null);
+    try {
+      await api.post(`${API}/characters/${character.id}/rest`, { type });
+      onChange();
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : "Couldn't complete rest.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex gap-2 items-center flex-wrap pt-1">
+      <Btn
+        ghost
+        className="!min-h-0 !py-1 text-xs"
+        disabled={busy || character.rpCurrent < 1}
+        onClick={() => void takeRest('stamina')}
+        title="Spend 1 RP to restore full Stamina Points (10-min rest)"
+      >
+        ⚡ Stamina Rest (1 RP)
+      </Btn>
+      <Btn
+        ghost
+        className="!min-h-0 !py-1 text-xs"
+        disabled={busy}
+        onClick={() => void takeRest('night')}
+        title="Full Night's Rest (8 hours) — restores full SP, RP, and HP equal to Level"
+      >
+        🌙 Night's Rest
+      </Btn>
     </div>
   );
 }
