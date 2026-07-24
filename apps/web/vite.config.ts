@@ -50,9 +50,18 @@ const viteBase = PUBLIC_BASE === "/" ? "/" : `${PUBLIC_BASE}/`;
  * Root deployments get the historical `/^\/api/` style patterns unchanged.
  */
 function denyPath(suffix: string): RegExp {
+  if (PUBLIC_BASE === "/") {
+    return new RegExp(`^${suffix}`);
+  }
   const escaped = PUBLIC_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const tail = suffix.replace(/^\//, "");
   return new RegExp(`^${escaped}/${tail}`);
+}
+
+/** Strip the public base from a dev-proxy path without regex metachar surprises. */
+function stripPublicBase(path: string): string {
+  if (path.startsWith(PUBLIC_BASE)) return path.slice(PUBLIC_BASE.length) || "/";
+  return path;
 }
 
 export default defineConfig({
@@ -193,23 +202,17 @@ export default defineConfig({
       [HAS_SUBPATH ? `${PUBLIC_BASE}/api` : "/api"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
-        rewrite: HAS_SUBPATH
-          ? (path) => path.replace(new RegExp(`^${PUBLIC_BASE}`), "")
-          : undefined,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
       [HAS_SUBPATH ? `${PUBLIC_BASE}/healthz` : "/healthz"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
-        rewrite: HAS_SUBPATH
-          ? (path) => path.replace(new RegExp(`^${PUBLIC_BASE}`), "")
-          : undefined,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
       [HAS_SUBPATH ? `${PUBLIC_BASE}/readyz` : "/readyz"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
-        rewrite: HAS_SUBPATH
-          ? (path) => path.replace(new RegExp(`^${PUBLIC_BASE}`), "")
-          : undefined,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
     },
   },

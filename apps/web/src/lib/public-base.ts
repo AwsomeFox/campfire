@@ -97,8 +97,9 @@ export const HAS_SUBPATH: boolean = PUBLIC_BASE !== '/';
 
 /**
  * Join the public base prefix to a path. The result is the absolute,
- * origin-relative URL the browser must fetch for the deployment to work behind
- * a non-stripping proxy. The input is expected to start with `/` (e.g. the
+ * origin-relative URL the browser must fetch under a strip-prefix reverse
+ * proxy (the proxy strips PUBLIC_BASE before forwarding to the server). The
+ * input is expected to start with `/` (e.g. the
  * in-app `/api/v1/...`); a non-slashed input is treated as a router-relative
  * path and joined after a single slash.
  *

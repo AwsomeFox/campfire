@@ -105,7 +105,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
 
-  const res = await fetch(path, {
+  const res = await fetch(joinPublicBase(path), {
     ...init,
     credentials: 'include',
     headers,
@@ -177,14 +177,11 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
 }
 
 export const api = {
-  get: <T>(path: string, init?: RequestInit) => request<T>(joinPublicBase(path), init),
-  post: <T>(path: string, json?: unknown, init?: RequestInit) =>
-    request<T>(joinPublicBase(path), { ...init, method: 'POST', json }),
-  patch: <T>(path: string, json?: unknown, init?: RequestInit) =>
-    request<T>(joinPublicBase(path), { ...init, method: 'PATCH', json }),
-  put: <T>(path: string, json?: unknown, init?: RequestInit) =>
-    request<T>(joinPublicBase(path), { ...init, method: 'PUT', json }),
-  delete: <T>(path: string, init?: RequestInit) => request<T>(joinPublicBase(path), { ...init, method: 'DELETE' }),
+  get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
+  post: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'POST', json }),
+  patch: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PATCH', json }),
+  put: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PUT', json }),
+  delete: <T>(path: string, init?: RequestInit) => request<T>(path, { ...init, method: 'DELETE' }),
 };
 
 /**
