@@ -1,7 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import {
   BACKUP_APP,
-  BACKUP_FORMAT_VERSION,
   BACKUP_KIND,
   DB_ENTRY_V1,
   manifestToInspectView,
@@ -23,18 +22,36 @@ describe('parseBackupManifest (issue #514)', () => {
 
   it('accepts a current-format manifest', () => {
     expect(parseBackupManifest(baseV1)).toMatchObject({
-      version: BACKUP_FORMAT_VERSION,
+      version: 1,
       dbBytes: 12345,
       uploadCount: 2,
       appVersion: '0.14.1',
       schemaVersion: 55,
     });
+    expect(
+      parseBackupManifest({
+        ...baseV1,
+        version: 2,
+        aiKeySource: 'keyfile',
+        aiKeyIncluded: true,
+      }),
+    ).toMatchObject({ version: 2, aiKeySource: 'keyfile', aiKeyIncluded: true });
+  });
+
+  it('rejects format version 2 without envelope posture markers', () => {
+    expect(() => parseBackupManifest({ ...baseV1, version: 2 })).toThrow(BadRequestException);
+    expect(() =>
+      parseBackupManifest({ ...baseV1, version: 2, aiKeyIncluded: true }),
+    ).toThrow(/aiKeySource="keyfile"/);
+    expect(() =>
+      parseBackupManifest({ ...baseV1, version: 2, aiKeySource: 'keyfile' }),
+    ).toThrow(/aiKeyIncluded=true/);
   });
 
   it('migrates a pre-version manifest (format 0) to the current shape', () => {
     const { version: _v, ...withoutVersion } = baseV1;
     expect(parseBackupManifest(withoutVersion)).toMatchObject({
-      version: BACKUP_FORMAT_VERSION,
+      version: 1,
       dbBytes: 12345,
     });
   });
@@ -94,7 +111,7 @@ describe('manifestToInspectView (issue #997)', () => {
   const manifest = {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
-    version: BACKUP_FORMAT_VERSION,
+    version: 1,
     createdAt: '2026-07-20T12:00:00.000Z',
     db: 'db/campfire.db',
     dbBytes: 12345,
@@ -105,7 +122,7 @@ describe('manifestToInspectView (issue #997)', () => {
 
   it('reports sourceFormatVersion distinct from normalized formatVersion', () => {
     const result = manifestToInspectView(manifest, ['a.png'], 0);
-    expect(result.formatVersion).toBe(BACKUP_FORMAT_VERSION);
+    expect(result.formatVersion).toBe(1);
     expect(result.sourceFormatVersion).toBe(0);
   });
 
@@ -113,5 +130,77 @@ describe('manifestToInspectView (issue #997)', () => {
     const result = manifestToInspectView(manifest, [], 1);
     expect(result.formatVersion).toBe(1);
     expect(result.sourceFormatVersion).toBe(1);
+  });
+});
+
+
+// #496 AI credential key posture in the manifest
+describe('AI key posture manifest fields (#496)', () => {
+  const baseV1 = {
+    app: BACKUP_APP,
+    kind: BACKUP_KIND,
+    version: 1,
+    createdAt: '2026-07-20T12:00:00.000Z',
+    db: 'db/campfire.db',
+    dbBytes: 12345,
+    uploadCount: 0,
+  };
+
+  it('carries aiKeySource + aiKeyIncluded + aiCredentialCount when present', () => {
+    const parsed = parseBackupManifest({
+      ...baseV1,
+      aiKeySource: 'keyfile',
+      aiKeyIncluded: true,
+      aiCredentialCount: 3,
+    });
+    expect(parsed.aiKeySource).toBe('keyfile');
+    expect(parsed.aiKeyIncluded).toBe(true);
+    expect(parsed.aiCredentialCount).toBe(3);
+  });
+
+  it('accepts aiKeySource=env (operator-managed key)', () => {
+    const parsed = parseBackupManifest({ ...baseV1, aiKeySource: 'env' });
+    expect(parsed.aiKeySource).toBe('env');
+    // No envelope included is the expected posture for env-managed keys.
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+  });
+
+  it('ignores garbage values in the key-posture fields (backward compat)', () => {
+    const parsed = parseBackupManifest({
+      ...baseV1,
+      aiKeySource: 'garbage',
+      aiKeyIncluded: 'yes-please',
+      aiCredentialCount: -5,
+    });
+    expect(parsed.aiKeySource).toBeUndefined();
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+    expect(parsed.aiCredentialCount).toBeUndefined();
+  });
+
+  it('accepts a manifest without any of the new key-posture fields (older archives)', () => {
+    const parsed = parseBackupManifest(baseV1);
+    expect(parsed.aiKeySource).toBeUndefined();
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+    expect(parsed.aiCredentialCount).toBeUndefined();
+  });
+
+  it('propagates key-posture fields into the inspect view', () => {
+    const manifest = {
+      ...baseV1,
+      aiKeySource: 'keyfile' as const,
+      aiKeyIncluded: true,
+      aiCredentialCount: 7,
+    };
+    const view = manifestToInspectView(manifest, [], 1);
+    expect(view.aiKeySource).toBe('keyfile');
+    expect(view.aiKeyIncluded).toBe(true);
+    expect(view.aiCredentialCount).toBe(7);
+  });
+
+  it('inspect view exposes safe defaults when the manifest omits key-posture', () => {
+    const view = manifestToInspectView(baseV1, [], 1);
+    expect(view.aiKeySource).toBeNull();
+    expect(view.aiKeyIncluded).toBe(false);
+    expect(view.aiCredentialCount).toBeNull();
   });
 });

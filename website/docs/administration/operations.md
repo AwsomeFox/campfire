@@ -27,9 +27,15 @@ server-admin session or API token):
   snapshot** of the database (taken with SQLite `VACUUM INTO`, so it never blocks
   writers and never ships a torn WAL) plus every uploaded file, with a
   `manifest.json`. Safe to run against a live server.
+- **`POST /api/v1/backup/download`** — same archive as the GET endpoint, but accepts
+  an optional `keyPassphrase` in the JSON body (≥12 characters) so the auto-generated
+  `ai-config.key` can be wrapped in an encrypted envelope for credential-portable
+  restores. Passphrases must not be sent in query strings.
 - **`POST /api/v1/backup/restore`** — multipart upload with the archive as field
-  `file` and a field `confirm` set to `RESTORE`. **Destructive**: it validates the
-  archive, then replaces the live database and uploads and re-opens the DB in place.
+  `file` and a field `confirm` set to `RESTORE`. When the archive includes an AI
+  keyfile envelope, also pass `keyPassphrase` with the passphrase used when the
+  backup was created. **Destructive**: it validates the archive, then replaces the
+  live database and uploads and re-opens the DB in place.
   A malformed or foreign archive is rejected (`400`) with the running server left
   untouched, and the whole thing is gated behind server-admin plus the explicit
   `confirm` token so it can't fire by accident.
@@ -53,11 +59,15 @@ Each archive includes a `manifest.json` with:
 **Restore policy:**
 
 - The server accepts any format version it knows how to **migrate** forward to the
-  current layout (today: format `1`, and legacy archives with no `version` field are
-  treated as format `0` and migrated).
+  current layout (today: format `1` for plain archives, format `2` for archives that
+  include a passphrase-encrypted AI keyfile envelope via
+  `POST /api/v1/backup/download` or `BACKUP_KEY_PASSPHRASE`, and legacy archives with
+  no `version` field treated as format `0` and migrated).
 - If `version` is **newer** than this server understands, restore fails with `400`
   **before** the live database or uploads are touched. When the archive includes
   `minCampfireVersion`, the error tells you the minimum Campfire release required.
+  Older Campfire releases that only understand format `1` will reject format-`2`
+  envelope archives rather than silently restoring the DB without its credential key.
 - Format version is independent of DB schema migrations: upgrading Campfire still runs
   in-place migrations on boot after a restore, but you cannot restore a backup whose
   manifest format is from a newer Campfire build until you upgrade the app.

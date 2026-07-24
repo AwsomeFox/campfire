@@ -249,29 +249,44 @@ describe('export (e2e, real cookie sessions)', () => {
     const buf = res.body as Buffer;
     expect(buf.slice(0, 2).toString('hex')).toBe('504b');
 
-    // Round-2 finding #6: mdzip has an encounters/ folder with a per-encounter markdown
-    // file containing name, status, round, and a combatant table.
+    // Round-2 finding #6 / issue #863: mdzip has an encounters/ folder with a
+    // per-encounter markdown file (stable `{stem}__encounter-{id}.md` path)
+    // containing name, status, round, and a combatant table.
     const zip = await JSZip.loadAsync(buf);
-    const encounterFile = zip.file('encounters/ambush-at-the-bridge.md');
-    expect(encounterFile).not.toBeNull();
-    const content = await encounterFile!.async('string');
+    const encounterPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('encounters/') && n.endsWith('.md') && n.includes('Ambush at the Bridge'),
+    );
+    expect(encounterPath).toBeDefined();
+    const content = await zip.file(encounterPath!)!.async('string');
     expect(content).toContain('# Ambush at the Bridge');
+    expect(content).toContain('Typed ID:');
     expect(content).toContain('Status:');
     expect(content).toContain('Round:');
     expect(content).toContain('Bridge Troll');
 
     // Issue #59: session + character markdown carry their DM Secret sections in the dm export.
-    const sessionFile = zip.file('sessions/session-1.md');
-    expect(sessionFile).not.toBeNull();
-    const sessionContent = await sessionFile!.async('string');
+    const sessionPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('sessions/') && n.endsWith('.md') && n.includes('__session-'),
+    );
+    expect(sessionPath).toBeDefined();
+    const sessionContent = await zip.file(sessionPath!)!.async('string');
     expect(sessionContent).toContain('## DM Secret');
     expect(sessionContent).toContain('next week: the betrayal');
 
-    const characterFile = zip.file('characters/cursed-paladin.md');
-    expect(characterFile).not.toBeNull();
-    const characterContent = await characterFile!.async('string');
+    const characterPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('characters/') && n.endsWith('.md') && n.includes('Cursed Paladin'),
+    );
+    expect(characterPath).toBeDefined();
+    const characterContent = await zip.file(characterPath!)!.async('string');
     expect(characterContent).toContain('## DM Secret');
     expect(characterContent).toContain('secretly cursed');
+
+    // Issue #863: versioned archive manifest is present and verifiable.
+    const archiveManifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+    expect(archiveManifest.kind).toBe('campaign-markdown-archive');
+    expect(archiveManifest.secrecyProfile).toBe('dm-full');
+    expect(archiveManifest.modules.encounters.kind).toBe('markdown-folder');
+    expect(archiveManifest.exclusions.some((e: { module: string }) => e.module === 'participantSupportNote')).toBe(true);
 
     // Issue #87: the zip embeds the actual attachment bytes under uploads/ and the
     // exact bytes round-trip (not a dangling reference).

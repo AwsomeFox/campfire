@@ -66,11 +66,13 @@ import {
   CommentUpdate,
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
+  RsvpSetBody,
   RsvpSet,
   GenerateMapParams,
   CoDmDraftTarget,
   CampaignDmRepair,
   ParticipantSupportPreferenceUpsert,
+  RevisionEntityType,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -107,6 +109,7 @@ import { SchedulingService } from '../sessions/scheduling.service';
 import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
+import { RevisionsService } from '../revisions/revisions.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -359,6 +362,7 @@ export class McpToolsService {
     private readonly scheduling: SchedulingService,
     private readonly scribe: ScribeService,
     private readonly users: UsersService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
@@ -1379,6 +1383,30 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
         return this.scheduling.getFeed(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_entity_revisions',
+      'List the prose revision history for an entity (session, quest, npc, location, faction, or note). ' +
+        'Returns prior snapshots ordered newest-first. DM role required for world-building entities; note revisions ' +
+        'are accessible to any campaign member who can read the note.',
+      {
+        entityType: RevisionEntityType.describe('Entity type (session|quest|npc|location|faction|note)'),
+        entityId: Id.describe('Entity id'),
+      },
+      async ({ entityType, entityId }) => {
+        const type = RevisionEntityType.parse(entityType);
+        if (type === 'note') {
+          // Note access mirrors the web path: any member who can read the note sees its history.
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          await this.access.requireMember(user, campaignId);
+        } else {
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          await this.access.requireRole(user, campaignId, 'dm');
+        }
+        return this.revisions.listForEntity(type, entityId as number);
       },
     );
   }
@@ -3113,7 +3141,7 @@ export class McpToolsService {
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map | quest | faction'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
       },
@@ -3392,7 +3420,7 @@ export class McpToolsService {
       'set_rsvp',
       'Any member: set YOUR OWN availability (RSVP) for a scheduled game night — status yes|no|maybe with an optional ' +
         'note. Upserts your single RSVP; notifies the DM(s).',
-      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...RsvpSet.shape },
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...RsvpSetBody.shape },
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
         const validated = RsvpSet.parse(fields);
@@ -3423,6 +3451,52 @@ export class McpToolsService {
       async ({ campaignId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.scheduling.disableFeed(campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'import_ddb_character',
+      'Import a character from a public D&D Beyond sheet (player+ role). Pass either `ddbId` (numeric character id) ' +
+        'or `url` (a D&D Beyond character/share link). The sheet must be set to Public on DDB. Only available for D&D 5e ' +
+        'campaigns — rejected with 400 for other rule systems.',
+      {
+        campaignId: CampaignIdArg,
+        ddbId: z.string().max(200).optional().describe('D&D Beyond numeric character id'),
+        url: z.string().max(500).optional().describe('D&D Beyond character URL (e.g. https://www.dndbeyond.com/characters/12345678)'),
+      },
+      async ({ campaignId, ddbId, url }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.characters.importFromDdb(campaignId as number, { ddbId: ddbId as string | undefined, url: url as string | undefined }, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_entity_revision',
+      'Restore a prior prose revision for an entity (session, quest, npc, location, faction, or note). The current ' +
+        'content is captured as a new revision first, so the restore is itself reversible. DM role required for ' +
+        'world-building entities; notes require authorship.',
+      {
+        entityType: RevisionEntityType.describe('Entity type (session|quest|npc|location|faction|note)'),
+        entityId: Id.describe('Entity id'),
+        revisionId: Id.describe('Revision id to restore'),
+      },
+      async ({ entityType, entityId, revisionId }) => {
+        const type = RevisionEntityType.parse(entityType);
+        if (type === 'note') {
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          const role = await this.access.requireMember(user, campaignId);
+          // Note restore is author-only (mirrors the web path).
+          const noteAccess = await this.revisions.loadNoteAccess(entityId as number);
+          if (noteAccess?.authorUserId !== user.id) throw new ForbiddenException('Only the author may restore this note');
+          return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
+        }
+        const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+        const role = await this.access.requireRole(user, campaignId, 'dm');
+        return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
       },
     );
   }
