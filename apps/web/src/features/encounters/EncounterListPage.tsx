@@ -31,6 +31,7 @@ import {
   ENCOUNTER_NAME_LABEL,
   ENCOUNTER_NAME_PLACEHOLDER,
 } from './postCreateGuidance';
+import { GenerateEncounterWizard } from './GenerateEncounterWizard';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -53,6 +54,7 @@ export default function EncounterListPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
     campaignId: id,
     target: 'encounter',
@@ -90,16 +92,25 @@ export default function EncounterListPage() {
         title="Encounters"
         secondaryActions={secondaryActions}
         primaryAction={
-          canDmWrite && !creating ? (
-            <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
-              + New encounter
-            </Btn>
+          canDmWrite && !creating && !generating ? (
+            <div className="flex gap-2 flex-wrap">
+              <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)}>
+                Generate encounter
+              </Btn>
+              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New encounter
+              </Btn>
+            </div>
           ) : undefined
         }
       />
       {draftDialog}
 
       {error && <ErrorNote message={error} onRetry={load} />}
+
+      {canDmWrite && generating && (
+        <GenerateEncounterWizard campaignId={id} onCancel={() => setGenerating(false)} />
+      )}
 
       {canDmWrite && creating && (
         <NewEncounterForm campaignId={id} onCancel={() => setCreating(false)} />
