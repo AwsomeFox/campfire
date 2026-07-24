@@ -157,6 +157,7 @@ running on 8080 — maps to the container's internal 8080).
 | `BACKUP_SCHEDULE_ENABLED` | *(unset)* | Set to `1` to enable periodic on-disk backups (see **Backup & restore** below). Off by default |
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when `BACKUP_SCHEDULE_ENABLED=1`) |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Where scheduled backup archives are written (only when `BACKUP_SCHEDULE_ENABLED=1`) |
+| `BACKUP_KEY_PASSPHRASE` | *(unset)* | When set (≥12 characters), scheduled backups wrap the auto-generated `ai-config.key` in an encrypted envelope inside the archive (#496). Interactive downloads use `POST /api/v1/backup/download` with the same passphrase in the JSON body. |
 
 `WEB_DIST` and `NODE_ENV` are already baked into the image (`NODE_ENV=production`,
 `WEB_DIST=/app/web-dist`) — you shouldn't need to set either.
@@ -170,6 +171,9 @@ so copying that volume is still the simplest backup. On top of that, Campfire ex
 - **`GET /api/v1/backup`** — downloads a single `.zip` containing a WAL-safe hot snapshot
   of the database (taken with SQLite `VACUUM INTO`, so it never blocks writers or ships a
   torn WAL) plus every uploaded file, with a `manifest.json`.
+- **`POST /api/v1/backup/download`** — same archive as the GET endpoint, but accepts an
+  optional `keyPassphrase` in the JSON body (≥12 characters) to include an encrypted
+  AI credential keyfile envelope (#496). Passphrases must not be sent in query strings.
 - **`POST /api/v1/backup/restore`** (multipart: `file` = the archive, `confirm` = `RESTORE`)
   — **destructive**: validates the archive, then replaces the live database and uploads
   and re-opens the DB in place. Gated hard behind server-admin *and* the explicit

@@ -152,6 +152,10 @@ function countAiCredentialsInSnapshot(snapshotPath: string): number | null {
   try {
     const probe = new Database(snapshotPath, { readonly: true, fileMustExist: true });
     try {
+      const hasTable = probe
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_provider_configs'")
+        .get();
+      if (!hasTable) return 0;
       const row = probe
         .prepare(
           'SELECT COUNT(*) AS n FROM ai_provider_configs WHERE encrypted_api_key IS NOT NULL',
@@ -468,6 +472,16 @@ export class BackupService implements OnApplicationBootstrap {
       const aiCredentialCount = countAiCredentialsInSnapshot(snapshotPath);
       let aiKeyIncluded = false;
       const requestedPassphrase = options?.keyPassphrase?.trim();
+      if (
+        (aiCredentialCount ?? 0) > 0 &&
+        aiKeySource === 'keyfile' &&
+        !keyfilePath &&
+        requestedPassphrase
+      ) {
+        this.logger.warn(
+          'buildBackup: encrypted AI credentials are present in the snapshot but no keyfile was found on disk — envelope omitted.',
+        );
+      }
       if (requestedPassphrase && aiKeySource === 'keyfile' && keyfilePath) {
         // Fail loudly if the passphrase is too short — an unencrypted-in-practice
         // envelope is worse than none (it lures the operator into thinking they
@@ -675,8 +689,8 @@ export class BackupService implements OnApplicationBootstrap {
           if (!envSetOnHost) {
             const keyfilePath = path.join(dataDir, AI_KEYFILE_NAME);
             fs.mkdirSync(path.dirname(keyfilePath), { recursive: true });
-            fs.writeFileSync(keyfilePath, restoredKeyBytes.toString('utf8'));
-            fs.chmodSync(keyfilePath, 0o600);
+            fs.rmSync(keyfilePath, { force: true });
+            fs.writeFileSync(keyfilePath, restoredKeyBytes.toString('utf8'), { mode: 0o600 });
           } else {
             this.logger.warn(
               'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +

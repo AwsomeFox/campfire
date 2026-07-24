@@ -96,6 +96,17 @@ export function encryptKeyfile(keyBytes: Buffer, passphrase: string): Serialized
  *   - wrong passphrase (GCM auth failure)
  *   - tampered ciphertext (GCM auth failure)
  */
+function decodeEnvelopeBase64(value: string, field: string): Buffer {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new Error(`Backup key envelope field "${field}" is not valid base64`);
+  }
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length === 0) {
+    throw new Error(`Backup key envelope field "${field}" is not valid base64`);
+  }
+  return decoded;
+}
+
 export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: string): Buffer {
   if (!envelope || typeof envelope !== 'object') {
     throw new Error('Backup key envelope is missing or malformed');
@@ -117,12 +128,14 @@ export function decryptKeyfile(envelope: SerializedKeyEnvelope, passphrase: stri
   let tag: Buffer;
   let ct: Buffer;
   try {
-    salt = Buffer.from(envelope.salt, 'base64');
-    iv = Buffer.from(envelope.iv, 'base64');
-    tag = Buffer.from(envelope.tag, 'base64');
-    ct = Buffer.from(envelope.ct, 'base64');
-  } catch {
-    throw new Error('Backup key envelope contains malformed base64 fields');
+    salt = decodeEnvelopeBase64(envelope.salt, 'salt');
+    iv = decodeEnvelopeBase64(envelope.iv, 'iv');
+    tag = decodeEnvelopeBase64(envelope.tag, 'tag');
+    ct = decodeEnvelopeBase64(envelope.ct, 'ct');
+  } catch (err) {
+    throw new Error(
+      err instanceof Error ? err.message : 'Backup key envelope contains malformed base64 fields',
+    );
   }
   if (salt.length !== SALT_LEN || iv.length !== IV_LEN || tag.length !== TAG_LEN || ct.length === 0) {
     throw new Error('Backup key envelope has invalid field lengths');
