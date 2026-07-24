@@ -972,9 +972,11 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
 
   return (
     <PageShell campaignId={campaignId}>
-      <main className="lg:col-span-2 space-y-5">
+      <section className="lg:col-span-2 space-y-5" aria-labelledby="quest-create-heading">
         <Card className="space-y-4" data-testid="quest-create-form">
-          <h1 className="text-2xl font-extrabold text-white">{t('quests.newQuestHeading')}</h1>
+          <h1 id="quest-create-heading" className="text-2xl font-extrabold text-white">
+            {t('quests.newQuestHeading')}
+          </h1>
           {error && <ErrorNote message={error} />}
           {saveError && <ErrorNote message={saveError} onRetry={create} />}
           {loading ? (
@@ -1093,7 +1095,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
             </div>
           )}
         </Card>
-      </main>
+      </section>
       <aside className="space-y-5" />
     </PageShell>
   );
