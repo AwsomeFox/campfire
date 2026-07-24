@@ -63,7 +63,19 @@ export class ProactiveService implements OnModuleDestroy {
     private readonly events: CampaignEventsService,
     private readonly driver: AiDriverService,
     private readonly aiDm: AiDmService,
-  ) {}
+  ) {
+    this.aiDm?.registerProactiveSettingsCallback?.((campaignId, settings, seatEnabled) => {
+      if (settings) {
+        if (settings.enabled && seatEnabled !== false) {
+          this.startWatching(campaignId, settings);
+        } else {
+          this.stopWatching(campaignId);
+        }
+      } else if (seatEnabled === false) {
+        this.stopWatching(campaignId);
+      }
+    });
+  }
 
   onModuleDestroy(): void {
     for (const [, state] of this.campaigns) {

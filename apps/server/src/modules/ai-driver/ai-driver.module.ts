@@ -42,7 +42,7 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     AuditModule,
     EventsModule,
     RoleAccessModule,
-    forwardRef(() => AiDmModule),
+    AiDmModule,
     McpModule,
     NotificationsModule,
     AiProviderConfigModule,

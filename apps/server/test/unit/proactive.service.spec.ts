@@ -25,7 +25,9 @@ describe('ProactiveService', () => {
       runTurn: jest.fn().mockResolvedValue({ tokensUsed: 100 }),
     } as any;
 
-    aiDm = {} as any;
+    aiDm = {
+      registerProactiveSettingsCallback: jest.fn(),
+    } as any;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
