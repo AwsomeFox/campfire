@@ -24,8 +24,7 @@ import {
 } from '../../components/formFieldLabels';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
-import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 import {
   ENCOUNTER_NAME_HELP,
@@ -56,8 +55,10 @@ export default function EncounterListPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [draftOpen, setDraftOpen] = useState(false);
-  const draftAvailable = useDraftWithAiAvailable(id);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'encounter',
+  });
 
   const load = useCallback(async () => {
     setError(null);
@@ -83,9 +84,7 @@ export default function EncounterListPage() {
     );
   }
 
-  const secondaryActions: PageHeaderSecondaryAction[] = draftAvailable
-    ? [{ key: 'draft', label: 'Draft with AI', onClick: () => setDraftOpen(true) }]
-    : [];
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAction ? [draftAction] : [];
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
@@ -100,13 +99,7 @@ export default function EncounterListPage() {
           ) : undefined
         }
       />
-      <DraftWithAiButton
-        campaignId={id}
-        target="encounter"
-        showTrigger={false}
-        open={draftOpen}
-        onOpenChange={setDraftOpen}
-      />
+      {draftDialog}
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

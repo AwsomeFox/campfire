@@ -13,8 +13,7 @@ import { AudienceField, audienceToHidden, type AudienceValue } from '../../compo
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
-import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { initials } from '../../lib/avatarText';
 
 export default function NpcListPage() {
@@ -37,8 +36,10 @@ export default function NpcListPage() {
   const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [draftOpen, setDraftOpen] = useState(false);
-  const draftAvailable = useDraftWithAiAvailable(id);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'npc',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,9 +117,7 @@ export default function NpcListPage() {
     );
   }
 
-  const secondaryActions: PageHeaderSecondaryAction[] = draftAvailable
-    ? [{ key: 'draft', label: 'Draft with AI', onClick: () => setDraftOpen(true) }]
-    : [];
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAction ? [draftAction] : [];
 
   return (
     <div data-testid="npc-list-surface" className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
@@ -136,13 +135,7 @@ export default function NpcListPage() {
             ) : undefined
           }
         />
-        <DraftWithAiButton
-          campaignId={id}
-          target="npc"
-          showTrigger={false}
-          open={draftOpen}
-          onOpenChange={setDraftOpen}
-        />
+        {draftDialog}
 
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">

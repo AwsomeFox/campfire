@@ -30,8 +30,7 @@ import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
-import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
@@ -73,12 +72,16 @@ export default function SessionsPage() {
   const role = roleIn(cid);
   const isDm = role === 'dm';
   const announce = useAnnounce();
-  const [draftOpen, setDraftOpen] = useState(false);
-  const draftAvailable = useDraftWithAiAvailable(cid);
 
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: cid,
+    target: 'recap',
+    label: 'Draft a recap with AI',
+    enabled: isDm && tab === 'log',
+  });
 
   // Roving-tabindex tablist — the selected tab holds tabindex 0, the rest -1, so
   // a single Tab keystroke lands in the panel and arrow keys move between tabs
@@ -341,12 +344,8 @@ export default function SessionsPage() {
   if (isDm) {
     secondaryActions.push({ key: 'trash', label: 'Trash', href: `/c/${cid}/trash` });
   }
-  if (isDm && tab === 'log' && draftAvailable) {
-    secondaryActions.push({
-      key: 'draft',
-      label: 'Draft a recap with AI',
-      onClick: () => setDraftOpen(true),
-    });
+  if (draftAction) {
+    secondaryActions.push(draftAction);
   }
 
   return (
@@ -371,14 +370,7 @@ export default function SessionsPage() {
           ) : undefined
         }
       />
-      <DraftWithAiButton
-        campaignId={cid}
-        target="recap"
-        label="Draft a recap with AI"
-        showTrigger={false}
-        open={draftOpen}
-        onOpenChange={setDraftOpen}
-      />
+      {draftDialog}
 
       {/*
         Log/Schedule tablist (issue #706) — was a colour-only segmented control with

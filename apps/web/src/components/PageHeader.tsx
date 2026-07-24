@@ -32,6 +32,10 @@ export type PageHeaderSecondaryAction = {
   href?: string;
   /** Prefer a ghost (secondary) look for the wide inline control. Default true. */
   ghost?: boolean;
+  /** Dialog/popover disclosure wiring when the action opens a modal (e.g. Draft with AI). */
+  ariaHaspopup?: 'dialog' | 'menu' | boolean;
+  ariaExpanded?: boolean;
+  ariaControls?: string;
 };
 
 export type PageHeaderProps = {
@@ -107,18 +111,32 @@ export function PageHeader({
   );
 }
 
+function secondaryAriaProps(action: PageHeaderSecondaryAction) {
+  return {
+    'aria-haspopup': action.ariaHaspopup,
+    'aria-expanded': action.ariaExpanded,
+    'aria-controls': action.ariaControls,
+  };
+}
+
 function SecondaryInline({ action }: { action: PageHeaderSecondaryAction }) {
   const ghost = action.ghost !== false;
   const className = `cf-btn ${ghost ? 'cf-btn-ghost' : ''} cf-page-header__action`.trim();
   if (action.href) {
     return (
-      <Link to={action.href} className={`${className} no-underline`}>
+      <Link to={action.href} className={`${className} no-underline`} {...secondaryAriaProps(action)}>
         {action.label}
       </Link>
     );
   }
   return (
-    <Btn ghost={ghost} type="button" className="cf-page-header__action" onClick={action.onClick}>
+    <Btn
+      ghost={ghost}
+      type="button"
+      className="cf-page-header__action"
+      onClick={action.onClick}
+      {...secondaryAriaProps(action)}
+    >
       {action.label}
     </Btn>
   );
@@ -281,6 +299,7 @@ function OverflowMenuPanel({
               role="menuitem"
               className="cf-page-header__menuitem"
               onClick={onDismissWithoutFocus}
+              {...secondaryAriaProps(action)}
             >
               {action.label}
             </Link>
@@ -296,6 +315,7 @@ function OverflowMenuPanel({
               onDismissWithoutFocus();
               action.onClick?.();
             }}
+            {...secondaryAriaProps(action)}
           >
             {action.label}
           </button>

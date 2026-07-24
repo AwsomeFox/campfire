@@ -11,8 +11,7 @@ import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { LocationStatusLabel } from '../../components/LocationStatusLabel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
-import { useDraftWithAiAvailable } from '../ai-dm/useDraftWithAiAvailable';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 
 function firstLine(body: string): string {
@@ -69,8 +68,10 @@ export default function LocationListPage() {
   const [newParentId, setNewParentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [draftOpen, setDraftOpen] = useState(false);
-  const draftAvailable = useDraftWithAiAvailable(id);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'location',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,11 +93,11 @@ export default function LocationListPage() {
     const actions: PageHeaderSecondaryAction[] = [
       { key: 'npcs', label: 'NPCs →', href: `/c/${id}/npcs` },
     ];
-    if (draftAvailable) {
-      actions.push({ key: 'draft', label: 'Draft with AI', onClick: () => setDraftOpen(true) });
+    if (draftAction) {
+      actions.push(draftAction);
     }
     return actions;
-  }, [draftAvailable, id]);
+  }, [draftAction, id]);
 
   async function createLocation() {
     if (!newName.trim()) return;
@@ -164,13 +165,7 @@ export default function LocationListPage() {
             ) : undefined
           }
         />
-        <DraftWithAiButton
-          campaignId={id}
-          target="location"
-          showTrigger={false}
-          open={draftOpen}
-          onOpenChange={setDraftOpen}
-        />
+        {draftDialog}
 
         {isDm && creating && (
           <div className="cf-inset p-3.5 space-y-2">

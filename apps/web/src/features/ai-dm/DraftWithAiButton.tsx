@@ -87,6 +87,7 @@ export function DraftWithAiButton({
   open: openProp,
   onOpenChange,
   showTrigger = true,
+  dialogId: dialogIdProp,
 }: {
   campaignId: number;
   target: CoDmDraftTarget;
@@ -96,12 +97,15 @@ export function DraftWithAiButton({
   onOpenChange?: (open: boolean) => void;
   /** When false, only the dialog mounts (caller owns the trigger). */
   showTrigger?: boolean;
+  /** Stable id shared with an external PageHeader trigger (issue #707). */
+  dialogId?: string;
 }) {
   const available = useDraftWithAiAvailable(campaignId);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = openProp ?? uncontrolledOpen;
   const setOpen = onOpenChange ?? setUncontrolledOpen;
-  const dialogId = useId();
+  const generatedDialogId = useId();
+  const dialogId = dialogIdProp ?? generatedDialogId;
 
   if (!available) return null;
 
