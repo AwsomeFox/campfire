@@ -11,15 +11,25 @@
  */
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { DiceRoll } from '@campfire/schema';
+import type { DiceRoll, CheckRollResponse } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
 import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
+/** Roll modes a catalog check can be rolled with (advantage/disadvantage only where supported). */
+export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
   roll: (expr: string, label: string) => Promise<DiceRoll | null>;
+  /**
+   * Issue #415: roll a CATALOG check server-side. The server resolves the authoritative
+   * modifier + expression from the rule-system adapter (the client sends only a checkId +
+   * mode + optional dc), so proficiency math is never invented client-side. Returns the full
+   * resolved response (breakdown + persisted roll + optional degree of success).
+   */
+  rollCheck: (characterId: number, checkId: string, mode?: CheckRollMode, dc?: number) => Promise<CheckRollResponse | null>;
   rolling: boolean;
 }
 
@@ -57,5 +67,31 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
     [campaignId, onError, announce, t],
   );
 
-  return { roll, rolling, last, dismiss: () => setLast(null) };
+  const rollCheck = useCallback(
+    async (characterId: number, checkId: string, mode: CheckRollMode = 'flat', dc?: number): Promise<CheckRollResponse | null> => {
+      setRolling(true);
+      onError(null);
+      try {
+        const res = await api.post<CheckRollResponse>(`${API}/characters/${characterId}/checks/roll`, {
+          checkId,
+          mode,
+          ...(dc != null ? { dc } : {}),
+        });
+        setLast(res.roll);
+        rememberLocalDiceAnnouncement(campaignId, res.roll.id);
+        announce(formatDiceRollAnnouncement(res.roll, t), {
+          dedupeKey: `dice-roll:${campaignId}:1:${res.roll.id}:${res.roll.id}`,
+        });
+        return res;
+      } catch (err) {
+        onError(err instanceof ApiError ? err.message : "Couldn't roll the check.");
+        return null;
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, onError, announce, t],
+  );
+
+  return { roll, rollCheck, rolling, last, dismiss: () => setLast(null) };
 }

@@ -48,6 +48,8 @@ import {
   StoryBeatCreate,
   StoryBeatUpdate,
   RollRequest,
+  CheckRollRequest,
+  CheckRequestCreate,
   RulePackInstall,
   RuleEntryType,
   RECAP_TEMPLATE,
@@ -1046,10 +1048,10 @@ export class McpToolsService {
       'generate_encounter',
       'Generate a balanced monster group from the installed compendium to hit a target 5e difficulty band for the ' +
         'party (issue #304) — a first-party, offline, DETERMINISTIC builder (no external data). NON-MUTATING: returns ' +
-        'a read-only suggestion { combatants:[{ruleEntryId,name,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, ' +
+        'a read-only suggestion { combatants:[{ruleEntryId,name,entryType,cr,xp,hpMax,count}], difficulty, totalXp, shape, seed, ' +
         'matchedBand } and persists NOTHING. `difficulty` is the target band (trivial|easy|medium|hard|deadly). Party ' +
         'is inferred from the campaign\'s active PCs unless `party` (explicit PC levels) is passed. Optional filters: ' +
-        'creatureType/environment (substring), minCr/maxCr, packSlug; `shape` (solo|pair|group|horde) and `count` (max ' +
+        'creatureType/environment (substring), minCr/maxCr, packSlug, includeHazards (add traps/environmental dangers); `shape` (solo|pair|group|horde) and `count` (max ' +
         'monsters) bound the group. Reproduce a group by passing back its `seed`; re-roll by changing/omitting it. ' +
         'TO COMMIT: call create_encounter (hidden:true keeps it DM-only prep) then add_combatant once per line with ' +
         'its ruleEntryId + count — those tools honor write-mode (#158)/proposals (#124), so this preview→commit split ' +
@@ -1064,22 +1066,24 @@ export class McpToolsService {
         minCr: z.number().min(0).max(30).optional().describe('Minimum challenge rating (inclusive)'),
         maxCr: z.number().min(0).max(30).optional().describe('Maximum challenge rating (inclusive)'),
         packSlug: z.string().min(1).max(160).optional().describe('Restrict to a single installed rule pack by slug (list_rule_packs)'),
+        includeHazards: z.boolean().optional().describe('Also draw compendium hazards (traps/environmental dangers) as budgeted building blocks alongside monsters; omit for monsters only'),
         shape: EncounterShape.optional().describe('solo (1) | pair (2) | group (3–6) | horde (7+); omit to let the budget pick the count'),
-        count: z.number().int().min(1).max(30).optional().describe('Upper bound on the number of monsters (default 12)'),
+        count: z.number().int().min(1).max(30).optional().describe('Upper bound on the number of monsters/hazards (default 12)'),
         seed: z.number().int().nonnegative().max(4294967295).optional().describe('Deterministic seed — pass a returned seed to reproduce, omit for a fresh group'),
       },
-      async ({ campaignId, difficulty, party, creatureType, environment, minCr, maxCr, packSlug, shape, count, seed }) => {
+      async ({ campaignId, difficulty, party, creatureType, environment, minCr, maxCr, packSlug, includeHazards, shape, count, seed }) => {
         // Read-only preview: membership is enough, so any member or AI can generate + reroll
         // before committing through the write-gated create_encounter/add_combatant tools.
         const role = await this.access.requireMember(user, campaignId as number);
         const filters =
-          creatureType !== undefined || environment !== undefined || minCr !== undefined || maxCr !== undefined || packSlug !== undefined
+          creatureType !== undefined || environment !== undefined || minCr !== undefined || maxCr !== undefined || packSlug !== undefined || includeHazards !== undefined
             ? {
                 creatureType: creatureType as string | undefined,
                 environment: environment as string | undefined,
                 minCr: minCr as number | undefined,
                 maxCr: maxCr as number | undefined,
                 packSlug: packSlug as string | undefined,
+                includeHazards: includeHazards as boolean | undefined,
               }
             : undefined;
         return this.encounters.generateEncounter(
@@ -2904,6 +2908,146 @@ export class McpToolsService {
           success: persisted.total >= dcNum,
           diceLogId: persisted.id,
         };
+      },
+    );
+
+    // #415: list_checks — the adapter-owned roll catalog for a character. Every rollable
+    // check (ability checks, skills incl. unproficient, saves, initiative) with an
+    // authoritative modifier and a transparent breakdown, favorites first. This is the
+    // same list the character sheet and encounter card render.
+    this.tool(
+      server,
+      'list_checks',
+      'List the rollable checks (roll catalog) for a character (issue #415): ability checks, skills (proficient AND ' +
+        'unproficient), saves/defenses, and initiative — each with an authoritative modifier and a transparent ' +
+        'breakdown, favorites (trained/proficient) first. The modifier math is the campaign rule system\'s, so it ' +
+        'matches the character sheet and encounter card exactly. Use a returned `id` with roll_check to roll one.',
+      {
+        characterId: Id.describe('Character id — from list_members, get_party, or list_characters'),
+      },
+      async ({ characterId }) => {
+        const character = await this.characters.getRowOrThrow(characterId as number);
+        await this.access.requireMember(user, character.campaignId);
+        return this.characters.listChecks(characterId as number);
+      },
+    );
+
+    // #415: roll_check — resolve + roll a catalog check server-side. The server computes the
+    // modifier + dice expression from the rule-system adapter (the caller only names a
+    // checkId + mode), rolls, records to the shared dice log with a transparent breakdown,
+    // and returns the outcome (and PF2e degree of success when a DC is given). Members may
+    // call this; the roll is audited and visible in the campaign feed.
+    this.writeTool(
+      server,
+      user,
+      'roll_check',
+      'Roll a check from a character\'s roll catalog (issue #415). Name a `checkId` from list_checks (e.g. ' +
+        '"skill:Athletics", "save:DEX", "ability:STR", "initiative") and an optional roll `mode` and `dc`. The server ' +
+        'resolves the authoritative modifier + dice expression from the campaign rule system (you do NOT send the math), ' +
+        'rolls, records it to the shared dice log with a transparent breakdown label, and returns ' +
+        '{check:{id,label,modifier,breakdown,breakdownText}, mode, roll, degree?}. `degree` (criticalFailure|failure|' +
+        'success|criticalSuccess) is returned only for a system that reports degrees of success (PF2e) with a dc. ' +
+        'advantage/disadvantage apply only where the system supports them. Optionally pass DM consequence text.',
+      {
+        characterId: Id.describe('Character id — from list_members, get_party, or list_characters'),
+        checkId: CheckRollRequest.shape.checkId,
+        mode: CheckRollRequest.shape.mode,
+        dc: CheckRollRequest.shape.dc,
+        consequence: CheckRollRequest.shape.consequence,
+      },
+      async ({ characterId, checkId, mode, dc, consequence }) => {
+        const character = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireMember(user, character.campaignId, { write: true });
+        return this.characters.rollCheck(
+          characterId as number,
+          {
+            checkId: checkId as string,
+            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            dc: dc as number | undefined,
+            consequence: consequence as string | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    // #415: request_check — DM asks selected players to roll a check/save. Creates one pending
+    // request per target character; each targeted player's client is nudged (thin real-time
+    // signal) to read it back and roll once. The check must exist in each target's catalog.
+    this.writeTool(
+      server,
+      user,
+      'request_check',
+      'DM only: request a check/save from one or more characters (issue #415). Name a `checkId` from list_checks ' +
+        '(e.g. "save:DEX", "skill:Perception") and one or more `characterIds`, plus an optional `dc` and `consequence` ' +
+        'text. One pending request is created per character; the targeted player rolls it once (over the app UI or ' +
+        'resolve_check_request), which records the roll to the shared dice log and surfaces your consequence text. ' +
+        'The check must exist in each target character\'s catalog.',
+      {
+        campaignId: CampaignIdArg,
+        characterIds: CheckRequestCreate.shape.characterIds,
+        checkId: CheckRequestCreate.shape.checkId,
+        mode: CheckRequestCreate.shape.mode,
+        dc: CheckRequestCreate.shape.dc,
+        consequence: CheckRequestCreate.shape.consequence,
+        encounterId: CheckRequestCreate.shape.encounterId,
+      },
+      async ({ campaignId, characterIds, checkId, mode, dc, consequence, encounterId }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.characters.requestChecks(
+          campaignId as number,
+          {
+            characterIds: characterIds as number[],
+            checkId: checkId as string,
+            mode: (mode as 'flat' | 'advantage' | 'disadvantage' | undefined) ?? 'flat',
+            dc: dc as number | undefined,
+            consequence: consequence as string | undefined,
+            encounterId: encounterId as number | undefined,
+          },
+          user,
+          role,
+        );
+      },
+    );
+
+    // #415: list_check_requests — the pending/resolved check requests visible to the caller. A DM
+    // sees every request in the campaign; a player sees only requests for a character they own.
+    this.tool(
+      server,
+      'list_check_requests',
+      'List DM-initiated check requests visible to you (issue #415). The DM sees every request in the campaign; a ' +
+        'player sees only requests targeting a character they own. Optional `status` filter (pending|resolved). Use a ' +
+        'returned request id with resolve_check_request to roll it.',
+      {
+        campaignId: CampaignIdArg,
+        status: z.enum(['pending', 'resolved']).optional().describe('Filter by request status'),
+      },
+      async ({ campaignId, status }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        return this.characters.listCheckRequests(campaignId as number, user, role, {
+          status: status as 'pending' | 'resolved' | undefined,
+        });
+      },
+    );
+
+    // #415: resolve_check_request — the targeted player (or the DM) answers a request by rolling
+    // once. Reuses the catalog-roll path (shared dice log + audit + degree) and marks it resolved.
+    this.writeTool(
+      server,
+      user,
+      'resolve_check_request',
+      'Answer a check request by rolling it ONCE (issue #415). The targeted player (owner of the character) or the DM ' +
+        'passes the `requestId` (from list_check_requests); the server rolls the requested check, records it to the ' +
+        'shared dice log with a transparent breakdown, returns {request, result:{check, mode, roll, degree?}}, and ' +
+        'marks the request resolved. A request that was already answered is an error.',
+      {
+        requestId: Id.describe('Check request id — from list_check_requests'),
+      },
+      async ({ requestId }) => {
+        const campaignId = await this.characters.campaignIdForCheckRequest(requestId as number);
+        const role = await this.access.requireMember(user, campaignId, { write: true });
+        return this.characters.resolveCheckRequest(requestId as number, user, role);
       },
     );
 

@@ -1690,6 +1690,13 @@ export class CampaignsService {
             gridScale: realOrNull(e.gridScale),
             gridUnit: typeof e.gridUnit === 'string' ? e.gridUnit : null,
             gridSnap: boolOf(e.gridSnap),
+            // Grid calibration (issue #417) travels with the map so a cloned/imported
+            // encounter keeps its printed-grid alignment. Missing → column defaults.
+            gridOffsetX: realOrNull(e.gridOffsetX) ?? 0,
+            gridOffsetY: realOrNull(e.gridOffsetY) ?? 0,
+            gridCellHeight: realOrNull(e.gridCellHeight),
+            gridRotation: realOrNull(e.gridRotation) ?? 0,
+            gridOpacity: realOrNull(e.gridOpacity) ?? 0.35,
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
             // #754: missing hidden on import → DM-only (same as create default).
             hidden: hiddenOf(e.hidden),

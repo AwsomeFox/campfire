@@ -92,12 +92,43 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(conditions.entries[0].type).toBe('condition');
   });
 
+  it('maps hazards as first-class budgetable entries and excludes adventure publications', async () => {
+    const { entries, skippedCount } = await fetchPf2eSection(fake.baseUrl, 'hazards', silentLogger);
+    // "Story Trap" (Example Adventure Path) is excluded; "Rulebook Trap" — whose source
+    // merely contains the word "adventure" — is a rulebook and must be retained.
+    expect(entries.map((e) => e.name).sort()).toEqual(['Burning Floor', 'Rulebook Trap']);
+    expect(entries.some((e) => e.name === 'Story Trap')).toBe(false);
+    const burningFloor = entries.find((e) => e.name === 'Burning Floor')!;
+    expect(burningFloor.type).toBe('hazard');
+    expect(JSON.parse(burningFloor.dataJson!)).toMatchObject({ level: 3, ac: 20, hp: 32, complexity: 'Simple' });
+    // A rulebook title containing "adventure" is NOT treated as an adventure publication.
+    const rulebookTrap = entries.find((e) => e.name === 'Rulebook Trap')!;
+    expect(rulebookTrap.source).toBe('Pathfinder Book of Adventure');
+    expect(skippedCount).toBe(1); // only the true Adventure Path row is dropped
+  });
+
+  it('maps deities, rituals, planes, curses, and diseases into searchable compendium types', async () => {
+    const sections = await Promise.all(
+      (['deities', 'rituals', 'planes', 'curses', 'diseases'] as const).map((section) =>
+        fetchPf2eSection(fake.baseUrl, section, silentLogger),
+      ),
+    );
+    expect(sections.map((result) => result.entries[0].type)).toEqual([
+      'other',
+      'spell',
+      'section',
+      'condition',
+      'condition',
+    ]);
+  });
+
   it('exposes the section -> rule-entry-type mapping and a complete section list', () => {
     expect(entryTypeForSection('creatures')).toBe('monster');
     expect(entryTypeForSection('ancestries')).toBe('race');
     expect(entryTypeForSection('backgrounds')).toBe('feat');
     expect(entryTypeForSection('vehicles')).toBe('item');
-    expect(ALL_PF2E_SECTIONS).toHaveLength(9);
+    expect(entryTypeForSection('hazards')).toBe('hazard');
+    expect(ALL_PF2E_SECTIONS).toHaveLength(15);
   });
 });
 

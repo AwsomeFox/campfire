@@ -95,6 +95,18 @@ import {
   type OsrSection,
 } from './osr-importer';
 import {
+  ALL_CEPHEUS_SECTIONS,
+  CEPHEUS_DEFAULT_BASE_URL,
+  CEPHEUS_FETCH_CONCURRENCY,
+  CEPHEUS_LICENSE,
+  CEPHEUS_PACK_NAME,
+  CEPHEUS_PACK_SLUG,
+  consoleLogger,
+  createFetchLimiter,
+  fetchCepheusSection,
+  type CepheusSection,
+} from './cepheus-importer';
+import {
   ALL_DATASWORN_SECTIONS,
   DATASWORN_LICENSE,
   DATASWORN_MAX_ENTRIES_PER_SECTION,
@@ -348,19 +360,25 @@ export class RulesService {
    * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
    * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
    * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e and SF2e
-   * accept both 5e-shaped section names and native PF2e/SF2e section keys (e.g., 'creatures',
-   * 'equipment'); 'other' rides the Open5e path for back-compat.
+   * accept only the native PF2e/SF2e section keys in ALL_PF2E_SECTIONS (e.g., 'creatures',
+   * 'equipment') — Open5e-shaped section names are rejected for those sources; 'other' rides
+   * the Open5e path for back-compat.
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
-    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
-    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    pf2e: ALL_PF2E_SECTIONS,
+    sf2e: ALL_PF2E_SECTIONS,
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,
     'open-legend': ALL_OPEN_LEGEND_SECTIONS,
     osr: ALL_OSR_SECTIONS,
+    // Cepheus organizes its content as mdBook "books" (parts), not a per-statblock section
+    // vocabulary. Its section keys aren't in the shared RulePackInstallSection enum, so the
+    // enum-typed `sections` input can never carry one — the importer imports the whole SRD
+    // (like PF2e/SF2e import their full set regardless of the filter). Listed here so a caller
+    // that DOES pass a foreign section (e.g. 'spells') gets a clear 400 naming the real books.
+    cepheus: ALL_CEPHEUS_SECTIONS,
     datasworn: ALL_DATASWORN_SECTIONS,
     other: ALL_OPEN5E_SECTIONS,
   };
@@ -427,6 +445,8 @@ export class RulesService {
         return this.enqueueOpenLegendInstall(input, user);
       case 'osr':
         return this.enqueueOsrInstall(input, user);
+      case 'cepheus':
+        return this.enqueueCepheusInstall(input, user);
       case 'datasworn':
         return this.enqueueDataswornInstall(input, user);
       case 'open5e':
@@ -464,6 +484,8 @@ export class RulesService {
         return this.installFromOpenLegend(input, user, onSectionDone);
       case 'osr':
         return this.installFromOsr(input, user, onSectionDone);
+      case 'cepheus':
+        return this.installFromCepheus(input, user, onSectionDone);
       case 'datasworn':
         return this.installFromDatasworn(input, user, onSectionDone);
       case 'open5e':
@@ -498,10 +520,10 @@ export class RulesService {
    * the `pf2e-srd` pack slug, which the PF2e RuleSystemAdapter is registered against.
    */
   enqueuePf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    // The shared RulePackInstall.sections enum is Open5e-shaped (spells/monsters/…); PF2e
-    // has its own section vocabulary (creatures/equipment/ancestries/…), so a PF2e install
-    // always imports all PF2e sections rather than honouring the 5e-named filter.
-    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('pf2e', sections);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -511,7 +533,10 @@ export class RulesService {
   }
 
   enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('sf2e', sections);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -605,6 +630,23 @@ export class RulesService {
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOsr(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a Cepheus Engine SRD install (issue #406). The importer fetches raw Markdown
+   * from the mdBook and maps each chapter into a `section`-typed rule entry, so it reuses the
+   * same background-job machinery as every other importer. Installs under CEPHEUS_PACK_SLUG.
+   * Cepheus imports the whole SRD (its mdBook "books" are progress groups, not a selectable
+   * per-statblock filter — a foreign `sections` value is rejected 400 before enqueue).
+   */
+  enqueueCepheusInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const job = this.newJob('cepheus', ALL_CEPHEUS_SECTIONS);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromCepheus(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -842,7 +884,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? PF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
@@ -874,7 +918,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
@@ -1124,6 +1170,59 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs the Cepheus Engine SRD rule pack (issue #406), or incrementally adds any
+   * not-yet-present entries if `cepheus-srd` is already installed. Deliberate mirror of
+   * installFromOpen5e — concurrent per-book fetch, per-book progress, the shared persistPack
+   * path (multi-pack coexistence + incremental add + concurrent-install race guard) — but the
+   * importer parses mdBook Markdown into `section`-typed entries instead of JSON statblocks.
+   * The pack carries the OGL v1.0a license and the Cepheus SRD's own attribution/trademark
+   * notice (issue #143 / #734); an oversized chapter is split at headings by the importer so
+   * no entry exceeds the body cap and no rules text is truncated away.
+   */
+  async installFromCepheus(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? CEPHEUS_DEFAULT_BASE_URL;
+    // Cepheus imports the whole SRD; its mdBook "books" are progress groups, not a selectable
+    // per-statblock filter (a foreign `sections` value was already rejected 400 before enqueue).
+    const sections: CepheusSection[] = ALL_CEPHEUS_SECTIONS;
+
+    // One limiter shared across all books bounds the TOTAL in-flight raw-CDN fetches for the
+    // whole install (books are fetched concurrently, so without a shared cap the burst would be
+    // books × chapters). Chapters still complete in a deterministic order within each book.
+    const fetchLimiter = createFetchLimiter(CEPHEUS_FETCH_CONCURRENCY);
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchCepheusSection(baseUrl, s, consoleLogger, fetchLimiter);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Cepheus Engine import returned no entries');
+    }
+
+    return this.persistPack(
+      {
+        slug: CEPHEUS_PACK_SLUG,
+        name: CEPHEUS_PACK_NAME,
+        version: nowIso().slice(0, 10),
+        license: CEPHEUS_LICENSE,
+        sourceUrl: baseUrl,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(${totalSkipped} skipped)`,
+      { refreshExisting: true },
     );
   }
 

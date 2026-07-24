@@ -843,6 +843,14 @@ export const encounters = sqliteTable('encounters', {
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
   aoe: text('aoe'),
+  // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
+  // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.
+  // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForGridCalibration).
+  gridOffsetX: real('grid_offset_x').notNull().default(0),
+  gridOffsetY: real('grid_offset_y').notNull().default(0),
+  gridCellHeight: real('grid_cell_height'),
+  gridRotation: real('grid_rotation').notNull().default(0),
+  gridOpacity: real('grid_opacity').notNull().default(0.35),
   // Entity-level secrecy (issue #262) — see quests.hidden. A hidden encounter's roster +
   // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
@@ -893,6 +901,29 @@ export const notifications = sqliteTable('notifications', {
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
+});
+
+// DM-initiated check requests (issue #415) — one row per (request, target character). A DM
+// asks selected players to roll a check/save with an optional DC + consequence; the targeted
+// player reads their pending row(s) over a permission-checked REST read, rolls once via the
+// existing catalog-roll path, and the row is marked resolved (roll_id links the dice-log roll).
+// Cascades on campaign/character delete so a purge never strands a request.
+export const checkRequests = sqliteTable('check_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE (bootstrap/migration)
+  characterId: integer('character_id').notNull(), // FK->characters ON DELETE CASCADE — the target sheet
+  encounterId: integer('encounter_id'), // optional context link; nullable
+  checkId: text('check_id').notNull(), // stable catalog id, e.g. 'save:DEX'
+  checkLabel: text('check_label').notNull().default(''), // resolved label snapshot ('DEX save')
+  mode: text('mode').notNull().default('flat'), // 'flat' | 'advantage' | 'disadvantage'
+  dc: integer('dc'), // optional difficulty class
+  consequence: text('consequence').notNull().default(''), // DM-authored consequence text
+  status: text('status').notNull().default('pending'), // 'pending' | 'resolved'
+  requestedByUserId: text('requested_by_user_id').notNull(), // RequestUser.id of the DM
+  requestedByName: text('requested_by_name').notNull().default(''),
+  rollId: integer('roll_id'), // dice_rolls.id once resolved; null while pending
+  createdAt: text('created_at').notNull(),
+  resolvedAt: text('resolved_at'),
 });
 
 // Inventory & loot — see modules/inventory. Items belong to the party stash

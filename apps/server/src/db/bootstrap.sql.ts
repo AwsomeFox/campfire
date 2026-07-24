@@ -668,6 +668,11 @@ CREATE TABLE IF NOT EXISTS encounters (
   fog TEXT,
   grid_type TEXT NOT NULL DEFAULT 'square',
   aoe TEXT,
+  grid_offset_x REAL NOT NULL DEFAULT 0,
+  grid_offset_y REAL NOT NULL DEFAULT 0,
+  grid_cell_height REAL,
+  grid_rotation REAL NOT NULL DEFAULT 0,
+  grid_opacity REAL NOT NULL DEFAULT 0.35,
   hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
   created_at TEXT NOT NULL,
@@ -705,6 +710,25 @@ CREATE TABLE IF NOT EXISTS notifications (
   actor_name TEXT NOT NULL DEFAULT '',
   read_at TEXT,
   created_at TEXT NOT NULL
+);
+
+-- Issue #415: DM-initiated check requests (one row per request × target character).
+CREATE TABLE IF NOT EXISTS check_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  encounter_id INTEGER,
+  check_id TEXT NOT NULL,
+  check_label TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'flat',
+  dc INTEGER,
+  consequence TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  requested_by_user_id TEXT NOT NULL,
+  requested_by_name TEXT NOT NULL DEFAULT '',
+  roll_id INTEGER,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS inventory_items (
@@ -961,6 +985,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(enc
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
 CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
+CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_campaign ON inventory_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_items_character ON inventory_items(character_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item ON inventory_qty_idempotency(item_id);

@@ -34,6 +34,8 @@ const ALL_TOOLS = [
   'list_locations',
   'get_character',
   'get_party',
+  'list_checks',
+  'list_check_requests',
   'get_session_recaps',
   'get_session',
   'list_session_shares',
@@ -139,6 +141,9 @@ const ALL_TOOLS = [
   'uninstall_rule_pack',
   'roll_dice',
   'saving_throw',
+  'roll_check',
+  'request_check',
+  'resolve_check_request',
   'create_encounter',
   'update_encounter',
   'reveal_map_region',
@@ -268,7 +273,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(159);
+    expect(tools).toHaveLength(164);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -707,6 +712,94 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(missingCharacter.isError).toBe(true);
     expect(parseResult(missingCharacter)).toMatchObject({ error: { status: 400, code: 'bad_request' } });
+  });
+
+  it('roll catalog (issue #415): list_checks surfaces unproficient skills; roll_check resolves server-side', async () => {
+    const client = await mcpClient(dmToken);
+    const created = parseResult(
+      await client.callTool({
+        name: 'upsert_character',
+        arguments: {
+          campaignId,
+          name: 'MCP Catalog Hero',
+          level: 5,
+          stats: { STR: 14, DEX: 16, CON: 12, INT: 10, WIS: 13, CHA: 8 },
+          saveProficiencies: ['DEX'],
+          skills: { Athletics: 'proficient' },
+        },
+      }),
+    ) as { id: number };
+
+    // list_checks includes EVERY skill, proficient or not, with a transparent breakdown.
+    const checks = parseResult(await client.callTool({ name: 'list_checks', arguments: { characterId: created.id } })) as Array<{
+      id: string;
+      modifier: number;
+      favorite: boolean;
+      category: string;
+    }>;
+    expect(checks.filter((c) => c.category === 'skill')).toHaveLength(18);
+    const acro = checks.find((c) => c.id === 'skill:Acrobatics')!;
+    expect(acro.modifier).toBe(3); // DEX +3, unproficient — still listed + rollable
+    expect(acro.favorite).toBe(false);
+
+    // roll_check resolves the modifier + expression server-side and records the roll.
+    const rolled = parseResult(
+      await client.callTool({ name: 'roll_check', arguments: { characterId: created.id, checkId: 'skill:Acrobatics', dc: 5 } }),
+    ) as { check: { modifier: number; breakdownText: string }; roll: { expr: string; total: number; success?: boolean }; mode: string };
+    expect(rolled.check.modifier).toBe(3);
+    expect(rolled.check.breakdownText).toBe('DEX +3 = +3');
+    expect(rolled.roll.expr).toBe('1d20+3');
+    expect(rolled.mode).toBe('flat');
+    expect(typeof rolled.roll.success).toBe('boolean');
+  });
+
+  it('check requests (issue #415): dm request_check → list_check_requests → resolve_check_request; viewer cannot resolve', async () => {
+    const dmClient = await mcpClient(dmToken);
+    const viewerClient = await mcpClient(viewerToken);
+    const created = parseResult(
+      await dmClient.callTool({
+        name: 'upsert_character',
+        arguments: { campaignId, name: 'MCP Save Target', level: 5, stats: { DEX: 16 }, saveProficiencies: ['DEX'] },
+      }),
+    ) as { id: number };
+
+    // DM requests a DEX save with a DC + consequence.
+    const requested = parseResult(
+      await dmClient.callTool({
+        name: 'request_check',
+        arguments: { campaignId, characterIds: [created.id], checkId: 'save:DEX', dc: 12, consequence: 'The floor gives way.' },
+      }),
+    ) as Array<{ id: number; checkLabel: string; dc: number; consequence: string; status: string }>;
+    expect(requested).toHaveLength(1);
+    expect(requested[0].checkLabel).toBe('DEX save');
+    expect(requested[0].dc).toBe(12);
+    expect(requested[0].status).toBe('pending');
+    const requestId = requested[0].id;
+
+    // It surfaces via list_check_requests for the DM.
+    const list = parseResult(
+      await dmClient.callTool({ name: 'list_check_requests', arguments: { campaignId, status: 'pending' } }),
+    ) as Array<{ id: number }>;
+    expect(list.some((r) => r.id === requestId)).toBe(true);
+
+    // A viewer-scoped principal cannot answer it (not the owner / DM).
+    const denied = await viewerClient.callTool({ name: 'resolve_check_request', arguments: { requestId } });
+    expect(denied.isError).toBe(true);
+
+    // The DM resolves it — reuses the catalog-roll path (shared dice log + breakdown) and the
+    // consequence rides through.
+    const resolved = parseResult(
+      await dmClient.callTool({ name: 'resolve_check_request', arguments: { requestId } }),
+    ) as { request: { status: string; rollId: number; consequence: string }; result: { check: { id: string }; roll: { id: number; dc?: number } } };
+    expect(resolved.request.status).toBe('resolved');
+    expect(resolved.request.consequence).toBe('The floor gives way.');
+    expect(resolved.result.check.id).toBe('save:DEX');
+    expect(resolved.result.roll.dc).toBe(12);
+    expect(resolved.request.rollId).toBe(resolved.result.roll.id);
+
+    // Rolling it twice is rejected.
+    const again = await dmClient.callTool({ name: 'resolve_check_request', arguments: { requestId } });
+    expect(again.isError).toBe(true);
   });
 
   it('scheduling (issue #257): dm schedules a session, viewer RSVPs, viewer cannot cancel', async () => {

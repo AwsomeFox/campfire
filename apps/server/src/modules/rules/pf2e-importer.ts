@@ -54,7 +54,22 @@ const PAGE_RETRY_BACKOFFS_MS = [1_000, 3_000];
 // Campfire's importer "sections" map 1:1 onto an AoN document `type` and a Campfire
 // rule-entry type. Ancestries -> race, backgrounds -> feat (per issue #2's class/race/feat
 // vocabulary; a background is a feat-like package of proficiencies), classes -> class.
-export type Pf2eSection = 'creatures' | 'spells' | 'equipment' | 'feats' | 'ancestries' | 'classes' | 'backgrounds' | 'conditions' | 'vehicles';
+export type Pf2eSection =
+  | 'creatures'
+  | 'spells'
+  | 'equipment'
+  | 'feats'
+  | 'ancestries'
+  | 'classes'
+  | 'backgrounds'
+  | 'conditions'
+  | 'vehicles'
+  | 'hazards'
+  | 'deities'
+  | 'rituals'
+  | 'planes'
+  | 'curses'
+  | 'diseases';
 
 /** AoN `_source.type` value queried for each section. */
 const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
@@ -70,6 +85,12 @@ const SECTION_TO_AON_TYPE: Record<Pf2eSection, string> = {
   backgrounds: 'background',
   conditions: 'condition',
   vehicles: 'vehicle',
+  hazards: 'hazard',
+  deities: 'deity',
+  rituals: 'ritual',
+  planes: 'plane',
+  curses: 'curse',
+  diseases: 'disease',
 };
 
 const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
@@ -82,6 +103,12 @@ const SECTION_TO_ENTRY_TYPE: Record<Pf2eSection, RuleEntryType> = {
   backgrounds: 'feat',
   conditions: 'condition',
   vehicles: 'item',
+  hazards: 'hazard',
+  deities: 'other',
+  rituals: 'spell',
+  planes: 'section',
+  curses: 'condition',
+  diseases: 'condition',
 };
 
 export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
@@ -94,6 +121,12 @@ export const ALL_PF2E_SECTIONS: Pf2eSection[] = [
   'backgrounds',
   'conditions',
   'vehicles',
+  'hazards',
+  'deities',
+  'rituals',
+  'planes',
+  'curses',
+  'diseases',
 ];
 
 export interface ImportedEntry {
@@ -183,6 +216,21 @@ function licenseOf(src: Record<string, unknown>, defaultLicense: string = PF2E_D
 function sourceOf(src: Record<string, unknown>): string {
   if (Array.isArray(src.source)) return asStringArray(src.source).join(', ');
   return asString(src.source);
+}
+
+/**
+ * AoN indexes rules from many publications. Adventure/scenario/story books are not a
+ * rules compendium source for this importer even when an individual row has mechanics:
+ * importing them would cross the product-identity/story-content boundary. Fail closed on
+ * the publication label and retain only rulebooks, setting books, and dedicated rules data.
+ */
+function isAdventureSource(src: Record<string, unknown>): boolean {
+  const source = sourceOf(src);
+  // Match Paizo adventure/scenario *publication-line* patterns rather than a bare
+  // "adventure" substring, which would false-positive on rulebooks whose titles merely
+  // contain the word (e.g. "…Book of Adventure"). We still fail closed on the genuine
+  // product lines: Adventure Path, (Society) Scenario, Bounty, numbered Quest, One-Shot.
+  return /\b(?:adventure path|society scenario|scenario|bounty|one[- ]shot)\b|\bquest\s+#/i.test(source);
 }
 
 function traitsOf(src: Record<string, unknown>): string[] {
@@ -368,6 +416,52 @@ function mapVehicle(src: Record<string, unknown>, defaultLicense?: string): Impo
   };
 }
 
+function mapHazard(src: Record<string, unknown>, defaultLicense?: string): ImportedEntry {
+  const name = asString(src.name);
+  const level = num(src.level);
+  const complexity = asString(src.complexity);
+  const traits = traitsOf(src);
+  return {
+    slug: slugOf(src, name),
+    name,
+    type: 'hazard',
+    summary: truncate([level !== null ? `Level ${level}` : null, complexity, traits.slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    body: bodyOf(src),
+    dataJson: JSON.stringify({
+      level,
+      ac: num(src.ac),
+      hp: num(src.hp),
+      stealth: num(src.stealth),
+      complexity: complexity || null,
+      disable: src.disable ?? null,
+      traits,
+    }),
+    license: licenseOf(src, defaultLicense),
+    source: sourceOf(src),
+  };
+}
+
+function mapReference(
+  type: RuleEntryType,
+  kind: string,
+  src: Record<string, unknown>,
+  defaultLicense?: string,
+): ImportedEntry {
+  const name = asString(src.name);
+  const level = num(src.level) ?? num(src.rank);
+  const traits = traitsOf(src);
+  return {
+    slug: slugOf(src, name),
+    name,
+    type,
+    summary: truncate([level !== null ? `${kind} ${level}` : kind, traits.slice(0, 3).join(', ')].filter(Boolean).join(' · ') || bodyOf(src), 300),
+    body: bodyOf(src),
+    dataJson: JSON.stringify({ kind: kind.toLowerCase(), level, traits }),
+    license: licenseOf(src, defaultLicense),
+    source: sourceOf(src),
+  };
+}
+
 const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, defaultLicense?: string) => ImportedEntry> = {
   creatures: mapCreature,
   spells: mapSpell,
@@ -378,6 +472,12 @@ const SECTION_MAPPER: Record<Pf2eSection, (src: Record<string, unknown>, default
   backgrounds: mapBackground,
   conditions: mapCondition,
   vehicles: mapVehicle,
+  hazards: mapHazard,
+  deities: (src, license) => mapReference('other', 'Deity', src, license),
+  rituals: (src, license) => mapReference('spell', 'Ritual', src, license),
+  planes: (src, license) => mapReference('section', 'Plane', src, license),
+  curses: (src, license) => mapReference('condition', 'Curse', src, license),
+  diseases: (src, license) => mapReference('condition', 'Disease', src, license),
 };
 
 async function fetchWithTimeout(url: string): Promise<Response> {
@@ -510,6 +610,11 @@ export async function fetchPf2eSection(
         // while the q=type:x match works on the lowercased analyzed token — a
         // case-sensitive compare here skipped EVERY row (0-entry imports).
         if (asString((src as Record<string, unknown>).type).toLowerCase() !== aonType.toLowerCase()) {
+          skippedCount += 1;
+          continue;
+        }
+        // Preserve the open-rules boundary: never ingest adventure/scenario/story books.
+        if (isAdventureSource(src as Record<string, unknown>)) {
           skippedCount += 1;
           continue;
         }

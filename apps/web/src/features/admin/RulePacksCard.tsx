@@ -340,7 +340,14 @@ function InstallPanel({
     });
   }
 
-  const canSubmit = !installing && sections.size > 0 && (!requiresUrl || url.trim().length > 0);
+  // Some sources (e.g. Cepheus) import the WHOLE SRD and expose no per-section filter
+  // (meta.sections === []); the server treats a missing `sections` as "all". For those the
+  // Install button must NOT gate on a selection (there's nothing to select) — it stays gated
+  // only on any other required field (a mirror URL). Sources WITH sections still require at
+  // least one checked.
+  const hasSelectableSections = meta.sections.length > 0;
+  const canSubmit =
+    !installing && (!hasSelectableSections || sections.size > 0) && (!requiresUrl || url.trim().length > 0);
 
   async function install() {
     // Guard against double-fire: installs can take a couple of minutes for large
@@ -353,7 +360,10 @@ function InstallPanel({
     try {
       const body: RulePackInstall = {
         source,
-        sections: Array.from(sections),
+        // OMIT `sections` for a whole-SRD import source (no selectable sections) — the server
+        // reads a missing `sections` as "install all" and 400s a foreign/empty section value.
+        // Sources WITH sections still send the selected subset.
+        ...(hasSelectableSections ? { sections: Array.from(sections) } : {}),
         ...(requiresUrl && url.trim() ? { url: url.trim() } : {}),
         ...(source === 'osr' ? { system: osrVariant } : {}),
       };
@@ -425,14 +435,28 @@ function InstallPanel({
         <span className="text-slate-400 font-semibold">Rules:</span> {meta.mechanics}
       </p>
 
-      <div className="flex gap-3 flex-wrap">
-        {meta.sections.map((sec) => (
-          <label key={sec} className="flex items-center gap-1.5 text-sm text-slate-300">
-            <input type="checkbox" checked={sections.has(sec)} onChange={() => toggleSection(sec)} disabled={installing} />
-            {sectionLabel(sec)}
-          </label>
-        ))}
-      </div>
+      {hasSelectableSections ? (
+        <div className="flex gap-3 flex-wrap">
+          {meta.sections.map((sec) => (
+            <label key={sec} className="flex items-center gap-1.5 text-sm text-slate-300">
+              <input
+                type="checkbox"
+                checked={sections.has(sec)}
+                onChange={() => toggleSection(sec)}
+                disabled={installing}
+              />
+              {sectionLabel(sec)}
+            </label>
+          ))}
+        </div>
+      ) : (
+        // Whole-SRD import source (no per-section filter) — show messaging instead of an empty
+        // checkbox row, so the panel stays coherent and the Install button isn't left looking
+        // disabled for no reason.
+        <p className="text-[11px] text-slate-400">
+          This source imports its full SRD as reference sections — there are no sections to pick.
+        </p>
+      )}
 
       {requiresUrl && (
         <label className="flex flex-col gap-1 text-sm text-slate-300">

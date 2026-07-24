@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -40,7 +40,7 @@ import { ruleSystemAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
-import { queryKeys, invalidateCampaignCharacters, invalidateEncounter } from '../../lib/query';
+import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
   inlineCharacterSheetsInteractive,
@@ -53,6 +53,7 @@ import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -76,12 +77,15 @@ import {
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
 import {
-  cellSizePx,
+  calibrationToPx,
   computeContainedRect,
+  DEFAULT_GRID_OPACITY,
   mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
-  snapMapPercent,
+  resolveGridCalibration,
+  snapMapPercentCalibrated,
+  type GridCalibration,
 } from './mapRenderedBounds';
 import {
   deleteConfirmCopy,
@@ -111,7 +115,20 @@ const STATUS_TAG_CLASS: Record<string, string> = {
 };
 
 type EncounterGridPatch = Partial<
-  Pick<EncounterWithCombatants, 'gridSize' | 'gridScale' | 'gridUnit' | 'gridSnap' | 'gridType'>
+  Pick<
+    EncounterWithCombatants,
+    | 'gridSize'
+    | 'gridScale'
+    | 'gridUnit'
+    | 'gridSnap'
+    | 'gridType'
+    // Grid calibration (issue #417) — origin offset, independent cell height, rotation, opacity.
+    | 'gridOffsetX'
+    | 'gridOffsetY'
+    | 'gridCellHeight'
+    | 'gridRotation'
+    | 'gridOpacity'
+  >
 >;
 
 /** Stable serialization for suppressing an equivalent encounter PATCH while it is in flight. */
@@ -699,6 +716,12 @@ export default function RunSessionPage() {
           invalidateCampaignCharacters(queryClient, cid);
           return;
         }
+        // Issue #415: a DM check request landed (or was answered) — refetch the campaign
+        // check-request feed so the targeted player's prompt appears / the DM's panel updates.
+        if (event.type === 'check.requested' || event.type === 'check.resolved') {
+          invalidateCampaignCheckRequests(queryClient, cid);
+          return;
+        }
         if (event.type !== 'encounter.updated' && event.type !== 'encounter.deleted' && event.type !== 'encounter.ping') return;
         if (event.encounterId !== eid) return;
         if (event.type === 'encounter.deleted') {
@@ -718,11 +741,13 @@ export default function RunSessionPage() {
     onReconnect: useCallback(() => {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
+      invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -1188,6 +1213,11 @@ export default function RunSessionPage() {
         />
       )}
 
+      {/* Issue #415: the targeted player's in-page check-request prompt(s). Shown for any viewer
+          who owns a targeted character (a player their PC, or the DM their own PC), so a DM asking
+          the party sees the same one-tap prompt for their own character. */}
+      <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
+
       {isDm && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
@@ -1512,6 +1542,10 @@ export default function RunSessionPage() {
 
       <CombatLog events={events} />
 
+      {/* Issue #415: DM control to request a check/save from a character. DM-only; players see
+          the resulting prompt above via CheckRequestPrompts. */}
+      {isDm && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
+
       <SharedDiceLog campaignId={cid} />
 
       {confirmEnd && (
@@ -1662,6 +1696,18 @@ function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: n
   return size;
 }
 
+/** Round to `digits` decimals (calibration writes stay tidy, not 12-decimal float noise). */
+function roundTo(value: number, digits: number): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+/** Clamp a grid cell dimension (percent of map width) to the schema's [1, 100] range. */
+function clampGridPercent(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(100, value));
+}
+
 /** Normalize two drag corners (percent) into a positive-size {x,y,w,h} rectangle. */
 function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number; w: number; h: number } {
   const x = Math.min(a.x, b.x);
@@ -1669,7 +1715,10 @@ function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number 
   return { x, y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
 }
 
-type MapTool = 'move' | 'measure' | 'reveal' | 'ping';
+type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
+
+/** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
+type CalibrateAnchor = 'origin' | 'cell';
 
 // AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
@@ -1820,6 +1869,7 @@ function BattleMap({
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
     | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'calibrate'; pointerId: number; captureTarget: Element; anchor: CalibrateAnchor; point: MapPoint }
     | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm };
 
   const [uploading, setUploading] = useState(false);
@@ -1837,6 +1887,10 @@ function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Live calibration-anchor drag (issue #417): a local map-percent override for the anchor
+  // being dragged, committed to the encounter (a grid PATCH) on release so the overlay,
+  // snapping, and ruler preview in real time without a server round-trip per pointermove.
+  const [calibrateDrag, setCalibrateDrag] = useState<{ anchor: CalibrateAnchor; x: number; y: number } | null>(null);
   // Natural pixel size of the loaded map image, used to compute its letterboxed
   // (object-contain) rendered rect so the grid overlay can be clipped to it (issue #273b).
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
@@ -1856,6 +1910,8 @@ function BattleMap({
       setAoeDrag(null);
     } else if (kind === 'fog') {
       setRevealCorners(null);
+    } else if (kind === 'calibrate') {
+      setCalibrateDrag(null);
     } else if (kind === 'ping') {
       // Armed ping has no live preview — publish is deferred until a completed tap.
     } else {
@@ -1932,11 +1988,47 @@ function BattleMap({
     () => computeContainedRect({ w: surfaceW, h: surfaceH }, imgNatural),
     [surfaceW, surfaceH, imgNatural],
   );
-  // One cell in rendered pixels — derived from the map width, never the surface (#464).
-  const cellPx = gridOn && mapRect ? cellSizePx(gridSize, mapRect.width) : 0;
+
+  // Grid calibration (issue #417): resolve the persisted grid fields into ONE normalized
+  // transform, then apply the live anchor-drag override so the overlay/snap/ruler preview
+  // as the DM drags. Every consumer below reads geometry through this (and its px form),
+  // and — because it derives purely from encounter state — every viewport renders it the same.
+  const baseCalibration = useMemo(() => resolveGridCalibration(encounter), [encounter]);
+  const calibration = useMemo<GridCalibration | null>(() => {
+    if (!baseCalibration || !calibrateDrag || !mapRect) return baseCalibration;
+    const w = mapRect.width;
+    const originXpx = (baseCalibration.offsetX / 100) * w;
+    const originYpx = (baseCalibration.offsetY / 100) * w;
+    const dragPx = mapPercentToLayerPx({ x: calibrateDrag.x, y: calibrateDrag.y }, mapRect);
+    if (calibrateDrag.anchor === 'origin') {
+      return { ...baseCalibration, offsetX: (dragPx.x / w) * 100, offsetY: (dragPx.y / w) * 100 };
+    }
+    // Cell anchor: inverse-rotate the drag vector into the grid frame so cell w/h stay
+    // correct even when the grid is rotated. Guard a minimum so a collapsed cell can't stick.
+    const rad = (baseCalibration.rotationDeg * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const dx = dragPx.x - originXpx;
+    const dy = dragPx.y - originYpx;
+    const gw = dx * cos + dy * sin;
+    const gh = -dx * sin + dy * cos;
+    return {
+      ...baseCalibration,
+      cellW: Math.max(1, (gw / w) * 100),
+      cellH: Math.max(1, (gh / w) * 100),
+    };
+  }, [baseCalibration, calibrateDrag, mapRect]);
+
+  const calibrationPx = useMemo(
+    () => (calibration && mapRect ? calibrationToPx(calibration, mapRect.width) : null),
+    [calibration, mapRect],
+  );
+  // One cell in rendered pixels — derived from the calibrated cell WIDTH (#464/#417).
+  const cellPx = calibrationPx?.cellWpx ?? 0;
   // Distance readout needs both a cell size (px) and a real-world scale.
   const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
   const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
+  const canCalibrate = gridOn && !!mapRect; // calibration acts on an enabled grid + loaded map
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
@@ -1967,10 +2059,10 @@ function BattleMap({
     return pointerToMapPercent(e.clientX, e.clientY, rect, mapRect, { clamp });
   }
 
-  /** Snap a drop point to the nearest cell centre when the grid + snap are on (issue #40). */
+  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
   function snapPoint(pt: MapPoint): MapPoint {
     if (!mapRect) return pt;
-    return snapMapPercent(pt, cellPx, mapRect, gridOn && encounter.gridSnap);
+    return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
   }
 
   function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
@@ -2055,6 +2147,9 @@ function BattleMap({
     } else if (gesture.kind === 'aoe') {
       gesture.point = pct;
       setAoeDrag({ id: gesture.templateId, ...pct });
+    } else if (gesture.kind === 'calibrate') {
+      gesture.point = pct;
+      setCalibrateDrag({ anchor: gesture.anchor, ...pct });
     } else {
       gesture.end = pct;
       if (gesture.kind === 'measure') setRuler({ start: gesture.start, end: pct });
@@ -2117,6 +2212,36 @@ function BattleMap({
       onSetAoe(aoeTemplates.map((t) => (t.id === gesture.templateId ? { ...t, x: point.x, y: point.y } : t)));
       return;
     }
+    if (gesture.kind === 'calibrate') {
+      // Commit the dragged anchor to the persisted grid (issue #417). Origin → offset;
+      // cell → cell width/height (inverse-rotated into the grid frame so rotation is honored).
+      const point = finalPoint ?? gesture.point;
+      if (baseCalibration && mapRect) {
+        const w = mapRect.width;
+        const dragPx = mapPercentToLayerPx(point, mapRect);
+        if (gesture.anchor === 'origin') {
+          onSetGrid({
+            gridOffsetX: roundTo((dragPx.x / w) * 100, 2),
+            gridOffsetY: roundTo((dragPx.y / w) * 100, 2),
+          });
+        } else {
+          const originXpx = (baseCalibration.offsetX / 100) * w;
+          const originYpx = (baseCalibration.offsetY / 100) * w;
+          const rad = (baseCalibration.rotationDeg * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const dx = dragPx.x - originXpx;
+          const dy = dragPx.y - originYpx;
+          const gw = dx * cos + dy * sin;
+          const gh = -dx * sin + dy * cos;
+          onSetGrid({
+            gridSize: clampGridPercent(roundTo((gw / w) * 100, 2)),
+            gridCellHeight: clampGridPercent(roundTo((gh / w) * 100, 2)),
+          });
+        }
+      }
+      return;
+    }
     if (gesture.kind === 'fog') {
       const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
       // Ignore an accidental micro-drag (a click) — a real reveal has some area.
@@ -2149,6 +2274,19 @@ function BattleMap({
       return;
     }
     cancelActiveGesture(e.pointerId);
+  }
+
+  function onCalibrateAnchorPointerDown(e: ReactPointerEvent<HTMLDivElement>, anchor: CalibrateAnchor) {
+    if (!e.isPrimary || activeGestureRef.current || !isDm || tool !== 'calibrate') return;
+    e.preventDefault();
+    e.stopPropagation();
+    const point = pointerToPercent(e, true);
+    if (!point) return;
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeGestureRef.current = { kind: 'calibrate', pointerId: e.pointerId, captureTarget, anchor, point };
+    setCalibrateDrag({ anchor, ...point });
   }
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
@@ -2208,6 +2346,7 @@ function BattleMap({
     setTool(next);
     setRuler(null);
     setRevealCorners(null);
+    setCalibrateDrag(null);
   }
 
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
@@ -2308,6 +2447,7 @@ function BattleMap({
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {isDm && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {isDm && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
             {isDm && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
@@ -2384,10 +2524,11 @@ function BattleMap({
                 />
                 Grid
               </label>
-              <label className="flex items-center gap-1 text-muted">
-                cell %w
+              <label className="flex items-center gap-1 text-muted" title="How wide one grid cell is, as a percentage of the map's width. Larger = bigger cells.">
+                Cell width %
                 <input
                   type="number"
+                  aria-label="Cell width (percent of map width)"
                   min={1}
                   max={100}
                   step={0.5}
@@ -2397,7 +2538,7 @@ function BattleMap({
                   style={{ width: 60 }}
                 />
               </label>
-              <label className="flex items-center gap-1 text-muted">
+              <label className="flex items-center gap-1 text-muted" title="Real-world size of one cell (with the unit below) — used by the ruler to read out distances.">
                 scale
                 <input
                   type="number"
@@ -2434,6 +2575,110 @@ function BattleMap({
                   <option value="hex">hex</option>
                 </select>
               </label>
+
+              {/* Grid calibration (issue #417) — human-readable alignment controls with a
+                  keyboard/numeric alternative to the draggable anchors, plus help + reset. */}
+              {gridOn && (
+                <div
+                  data-testid="grid-calibration-controls"
+                  className="flex flex-wrap gap-3 items-center"
+                  style={{ flexBasis: '100%', paddingTop: 4, borderTop: '1px solid var(--color-divider)', marginTop: 4 }}
+                >
+                  <p className="text-muted" style={{ flexBasis: '100%', margin: 0, fontSize: 11 }}>
+                    Align the overlay to a map that already has a printed grid: use the{' '}
+                    <strong>Calibrate</strong> tool to drag the anchors, or set these numbers. Origin
+                    moves the grid&rsquo;s top-left corner; cell height differs from width for
+                    non-square cells; rotation matches a skewed print; opacity fades the lines.
+                  </p>
+                  <label className="flex items-center gap-1 text-muted" title="Grid origin, horizontal offset from the map's left edge (percent of map width).">
+                    Origin X %
+                    <input
+                      type="number"
+                      aria-label="Grid origin X offset (percent of map width)"
+                      min={-100}
+                      max={100}
+                      step={0.5}
+                      value={roundTo(encounter.gridOffsetX ?? 0, 2)}
+                      onChange={(e) => onSetGrid({ gridOffsetX: Math.max(-100, Math.min(100, Number(e.target.value) || 0)) })}
+                      style={{ width: 60 }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-muted" title="Grid origin, vertical offset from the map's top edge (percent of map width).">
+                    Origin Y %
+                    <input
+                      type="number"
+                      aria-label="Grid origin Y offset (percent of map width)"
+                      min={-100}
+                      max={100}
+                      step={0.5}
+                      value={roundTo(encounter.gridOffsetY ?? 0, 2)}
+                      onChange={(e) => onSetGrid({ gridOffsetY: Math.max(-100, Math.min(100, Number(e.target.value) || 0)) })}
+                      style={{ width: 60 }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-muted" title="Cell height (percent of map width). Leave blank for square cells equal to the width.">
+                    Cell height %
+                    <input
+                      type="number"
+                      aria-label="Cell height (percent of map width); blank for square"
+                      min={1}
+                      max={100}
+                      step={0.5}
+                      placeholder="square"
+                      value={encounter.gridCellHeight ?? ''}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        onSetGrid({ gridCellHeight: raw === '' ? null : Math.max(1, Math.min(100, Number(raw) || 1)) });
+                      }}
+                      style={{ width: 66 }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-muted" title="Rotate the grid to match a skewed printed grid (degrees, -45 to 45).">
+                    Rotation°
+                    <input
+                      type="number"
+                      aria-label="Grid rotation in degrees"
+                      min={-45}
+                      max={45}
+                      step={0.5}
+                      value={roundTo(encounter.gridRotation ?? 0, 2)}
+                      onChange={(e) => onSetGrid({ gridRotation: Math.max(-45, Math.min(45, Number(e.target.value) || 0)) })}
+                      style={{ width: 60 }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-muted" title="Overlay line opacity (0 = invisible, 100 = solid).">
+                    Opacity %
+                    <input
+                      type="number"
+                      aria-label="Grid overlay opacity (percent)"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={Math.round((encounter.gridOpacity ?? DEFAULT_GRID_OPACITY) * 100)}
+                      onChange={(e) => onSetGrid({ gridOpacity: Math.max(0, Math.min(1, (Number(e.target.value) || 0) / 100)) })}
+                      style={{ width: 60 }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="cf-map-tool"
+                    data-testid="grid-calibration-reset"
+                    title="Reset calibration to a top-left, square, unrotated grid"
+                    onClick={() =>
+                      onSetGrid({
+                        gridOffsetX: 0,
+                        gridOffsetY: 0,
+                        gridCellHeight: null,
+                        gridRotation: 0,
+                        gridOpacity: DEFAULT_GRID_OPACITY,
+                      })
+                    }
+                  >
+                    Reset calibration
+                  </button>
+                </div>
+              )}
+
               <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--color-divider)' }} />
               <label className="flex items-center gap-1">
                 <input
@@ -2508,24 +2753,100 @@ function BattleMap({
                   pointerEvents: 'none',
                 }}
               >
-                {/* Grid overlay (issue #40 / #238) — square CSS grid or pointy-top hex SVG. */}
-                {gridOn && gridType === 'square' && cellPx > 1 && (
-                  <div
+                {/* Grid overlay (issue #40 / #238 / #417) — a calibrated square grid (origin
+                    offset, independent cell w/h, rotation, opacity via an SVG pattern) or a
+                    pointy-top hex SVG. The pattern honours the SAME calibration as snapping +
+                    the ruler, so the overlay a player sees matches the DM's exactly. */}
+                {gridOn && gridType === 'square' && calibrationPx && calibrationPx.cellWpx > 1 && calibrationPx.cellHpx > 1 && (
+                  <svg
+                    data-testid="battle-map-grid"
                     className="absolute inset-0"
-                    style={{
-                      backgroundImage:
-                        `repeating-linear-gradient(to right, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px),` +
-                        `repeating-linear-gradient(to bottom, rgba(148,163,184,.35) 0 1px, transparent 1px ${cellPx}px)`,
-                    }}
-                  />
+                    width={mapRect.width}
+                    height={mapRect.height}
+                    style={{ opacity: calibrationPx.opacity }}
+                  >
+                    <defs>
+                      <pattern
+                        id={`grid-${encounter.id}`}
+                        patternUnits="userSpaceOnUse"
+                        width={calibrationPx.cellWpx}
+                        height={calibrationPx.cellHpx}
+                        patternTransform={`translate(${calibrationPx.originXpx} ${calibrationPx.originYpx}) rotate(${calibrationPx.rotationDeg})`}
+                      >
+                        <path
+                          d={`M ${calibrationPx.cellWpx} 0 L 0 0 0 ${calibrationPx.cellHpx}`}
+                          fill="none"
+                          stroke="rgb(148,163,184)"
+                          strokeWidth={1}
+                        />
+                      </pattern>
+                    </defs>
+                    <rect width={mapRect.width} height={mapRect.height} fill={`url(#grid-${encounter.id})`} />
+                  </svg>
                 )}
                 {gridOn && gridType === 'hex' && hexCells.length > 0 && (
-                  <svg className="absolute inset-0" width={mapRect.width} height={mapRect.height}>
+                  <svg
+                    className="absolute inset-0"
+                    width={mapRect.width}
+                    height={mapRect.height}
+                    style={{ opacity: calibrationPx?.opacity ?? DEFAULT_GRID_OPACITY }}
+                  >
                     {hexCells.map((pts, i) => (
-                      <polygon key={i} points={pts} fill="none" stroke="rgba(148,163,184,.35)" strokeWidth={1} />
+                      <polygon key={i} points={pts} fill="none" stroke="rgb(148,163,184)" strokeWidth={1} />
                     ))}
                   </svg>
                 )}
+
+                {/* Calibration anchors (issue #417) — DM-only, only in the Calibrate tool.
+                    Drag the origin anchor to a corner of the map's printed grid, then drag the
+                    cell anchor to the opposite corner of ONE printed cell. The overlay previews
+                    live off `calibration` (which already folds in the active drag). */}
+                {isDm && tool === 'calibrate' && calibrationPx && (() => {
+                  const rad = calibrationPx.rotationRad;
+                  const cos = Math.cos(rad);
+                  const sin = Math.sin(rad);
+                  const originX = calibrationPx.originXpx;
+                  const originY = calibrationPx.originYpx;
+                  const cellX = originX + calibrationPx.cellWpx * cos - calibrationPx.cellHpx * sin;
+                  const cellY = originY + calibrationPx.cellWpx * sin + calibrationPx.cellHpx * cos;
+                  const anchor = (
+                    key: CalibrateAnchor,
+                    x: number,
+                    y: number,
+                    color: string,
+                    label: string,
+                  ) => (
+                    <div
+                      key={key}
+                      data-testid={`grid-calibrate-anchor-${key}`}
+                      role="button"
+                      aria-label={label}
+                      title={label}
+                      className="absolute -translate-x-1/2 -translate-y-1/2"
+                      style={{
+                        left: x,
+                        top: y,
+                        width: 18,
+                        height: 18,
+                        borderRadius: '50%',
+                        background: color,
+                        border: '2px solid rgba(15,23,42,.9)',
+                        boxShadow: '0 1px 4px rgba(0,0,0,.6)',
+                        pointerEvents: 'auto',
+                        cursor: 'grab',
+                        touchAction: 'none',
+                        zIndex: 9,
+                      }}
+                      onPointerDown={(e) => onCalibrateAnchorPointerDown(e, key)}
+                    />
+                  );
+                  return (
+                    <>
+                      {anchor('origin', originX, originY, 'var(--color-accent)', 'Grid origin anchor — drag to a printed grid corner')}
+                      {anchor('cell', cellX, cellY, 'rgba(239,68,68,.95)', 'Grid cell anchor — drag to one cell away')}
+                    </>
+                  );
+                })()}
 
                 {placed.map((c) => {
                   const isDragging = draggingId === c.id && dragPos != null;
@@ -3735,10 +4056,26 @@ function AddCombatantPanel({
     (async () => {
       setSearching(true);
       try {
-        const params = new URLSearchParams({ type: 'monster', q: debouncedQuery.trim() });
-        if (rulePack) params.set('pack', rulePack);
-        const page = await api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
-        if (!cancelled) setResults(page.items);
+        const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
+        if (rulePack) baseParams.set('pack', rulePack);
+        // Hazards belong to the Compendium add/drag-drop flow only. The NPC tab's picker is
+        // monster-focused and its UI doesn't surface entry type, so keep it to monsters.
+        const types = tab === 'compendium' ? (['monster', 'hazard'] as const) : (['monster'] as const);
+        const pages = await Promise.all(
+          types.map((type) => {
+            const params = new URLSearchParams(baseParams);
+            params.set('type', type);
+            return api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
+          }),
+        );
+        // Merging two independently-sorted result sets (monsters + hazards) would leave the
+        // combined list ungrouped; re-sort by name (id tie-break) so the picker stays stable.
+        if (!cancelled) {
+          const merged = pages
+            .flatMap((page) => page.items)
+            .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
+          setResults(merged);
+        }
       } catch {
         if (!cancelled) setResults([]);
       } finally {
@@ -3804,6 +4141,42 @@ function AddCombatantPanel({
     }
   }
 
+  async function addDroppedRuleEntry(event: DragEvent<HTMLElement>) {
+    event.preventDefault();
+    if (saving) return;
+    let payload: { id?: unknown; name?: unknown; type?: unknown };
+    try {
+      payload = JSON.parse(event.dataTransfer.getData('application/x-campfire-rule-entry'));
+    } catch {
+      // Ignore unrelated/invalid drags; the drop zone accepts only Campfire rule entries.
+      return;
+    }
+    if (
+      typeof payload.id !== 'number' ||
+      typeof payload.name !== 'string' ||
+      (payload.type !== 'monster' && payload.type !== 'hazard')
+    ) return;
+    const droppedType = payload.type;
+    const droppedId = payload.id;
+    setSaving(true);
+    setError(null);
+    try {
+      // Resolve the FULL entry from the rules read path (the drag payload only carries
+      // id/name/type, but RuleEntry requires many more fields — trusting a cast would
+      // mask bugs). Confirm the resolved type still matches what was dragged before adding.
+      const entry = await api.get<RuleEntry>(`${API}/rules/entries/${droppedId}`);
+      if (entry.type !== droppedType) {
+        setError("That compendium entry doesn't match the dragged monster/hazard anymore.");
+        return;
+      }
+      await addFromCompendium(entry);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function addFromParty(character: Character) {
     setSaving(true);
     setError(null);
@@ -3857,8 +4230,20 @@ function AddCombatantPanel({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card
+      className="space-y-3"
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+      onDrop={(event) => void addDroppedRuleEntry(event)}
+    >
       <span className="card-kicker">Add combatant</span>
+      <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
+        Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
+      </p>
       <div className="seg self-start inline-flex">
         {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
@@ -3910,8 +4295,8 @@ function AddCombatantPanel({
       {tab === 'compendium' && (
         <div className="space-y-2">
           <TextInput
-            aria-label="Search monsters in the compendium"
-            placeholder="Search monsters…"
+            aria-label="Search monsters and hazards in the compendium"
+            placeholder="Search monsters and hazards…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
@@ -3956,7 +4341,7 @@ function AddCombatantPanel({
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
                   <span className="tag tag-neutral">
-                    monster
+                    {entry.type}
                   </span>
                 </button>
               ))}

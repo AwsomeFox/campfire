@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt } from '@campfire/schema';
+import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, DdbCharacterImport, ExpectedUpdatedAt, CheckRollRequest, CheckRequestCreate } from '@campfire/schema';
 
 // .strict() applied here at the DTO layer only — see encounters.dto.ts header
 // comment for why the shared @campfire/schema exports themselves stay lenient
@@ -49,3 +49,7 @@ export class LevelUpDto extends createZodDto(LevelUp.strict()) {}
 // DdbCharacterImport is already a strict object wrapped in a `.refine` (a ZodEffects),
 // so unknown keys are rejected without an extra `.strict()` here (which ZodEffects lacks).
 export class DdbCharacterImportDto extends createZodDto(DdbCharacterImport) {}
+// Issue #415: roll a catalog check (skill/save/ability/initiative) server-side.
+export class CheckRollRequestDto extends createZodDto(CheckRollRequest.strict()) {}
+// Issue #415: DM-initiated check request from one or more target characters.
+export class CheckRequestCreateDto extends createZodDto(CheckRequestCreate.strict()) {}

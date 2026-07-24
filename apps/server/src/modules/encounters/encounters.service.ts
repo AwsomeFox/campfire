@@ -108,6 +108,13 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridUnit: row.gridUnit,
     gridSnap: row.gridSnap,
     gridType: (row.gridType as GridType) ?? 'square',
+    // Grid calibration (issue #417). Null-coalesce so rows written before the columns
+    // existed (or a legacy NULL) read as the pre-#417 defaults — top-left square grid.
+    gridOffsetX: row.gridOffsetX ?? 0,
+    gridOffsetY: row.gridOffsetY ?? 0,
+    gridCellHeight: row.gridCellHeight ?? null,
+    gridRotation: row.gridRotation ?? 0,
+    gridOpacity: row.gridOpacity ?? 0.35,
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
@@ -1048,6 +1055,29 @@ export class EncountersService {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
     }
+    // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
+    // nullable (null restores square cells); the others carry non-null defaults. Same
+    // null-safe no-op guard as the fields above so an unchanged write produces no audit/SSE.
+    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) {
+      set.gridOffsetX = input.gridOffsetX;
+      changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${input.gridOffsetX}`);
+    }
+    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) {
+      set.gridOffsetY = input.gridOffsetY;
+      changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${input.gridOffsetY}`);
+    }
+    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) {
+      set.gridCellHeight = input.gridCellHeight;
+      changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${input.gridCellHeight}`);
+    }
+    if (input.gridRotation !== undefined && input.gridRotation !== (encounterRow.gridRotation ?? 0)) {
+      set.gridRotation = input.gridRotation;
+      changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${input.gridRotation}`);
+    }
+    if (input.gridOpacity !== undefined && input.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) {
+      set.gridOpacity = input.gridOpacity;
+      changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${input.gridOpacity}`);
+    }
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
     if (input.fog !== undefined && !isDeepStrictEqual(input.fog, parseFog(encounterRow.fog))) {
       const fog = input.fog === null ? null : toJsonText(input.fog);
@@ -1394,9 +1424,10 @@ export class EncountersService {
   /**
    * Load the compendium monsters a generation may pick from (issue #304), scored for the
    * 5e budget math. Reads rule_entries of type 'monster' (installed packs only — that's all
-   * rule_entries ever contains), maps each statblock via the campaign's RuleSystemAdapter
-   * (#70) to a CR/HP, computes per-monster XP from the #58 CR→XP table, and applies the
-   * optional creature-type / environment / CR-range / pack filters. Never persists.
+   * rule_entries ever contains), and also type 'hazard' when `filters.includeHazards` is set,
+   * maps each statblock via the campaign's RuleSystemAdapter (#70) to a CR/HP, computes
+   * per-monster XP from the #58 CR→XP table, and applies the optional creature-type /
+   * environment / CR-range / pack filters. Never persists.
    */
   private async loadMonsterCandidates(
     adapter: RuleSystemAdapter,
@@ -1411,8 +1442,10 @@ export class EncountersService {
       packId = pack.id;
     }
 
-    const where = packId !== undefined ? and(eq(ruleEntries.type, 'monster'), eq(ruleEntries.packId, packId)) : eq(ruleEntries.type, 'monster');
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
+    const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
+    const where = packId !== undefined ? and(typeWhere, eq(ruleEntries.packId, packId)) : typeWhere;
+    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -1442,7 +1475,14 @@ export class EncountersService {
         if (!envs.some((e) => e.includes(envNeedle))) continue;
       }
 
-      candidates.push({ ruleEntryId: row.id, name: row.name, cr, xp: crToXp(cr), hpMax: adapter.monsterHitPoints(data) });
+      candidates.push({
+        ruleEntryId: row.id,
+        name: row.name,
+        entryType: row.type === 'hazard' ? 'hazard' : 'monster',
+        cr,
+        xp: crToXp(cr),
+        hpMax: adapter.monsterHitPoints(data),
+      });
     }
     return candidates;
   }
@@ -1478,7 +1518,7 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
       targetBand: input.difficulty,
       difficulty: result.difficulty,
       totalXp: result.difficulty.adjustedXp,

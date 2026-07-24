@@ -396,6 +396,12 @@ const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
   'gridUnit',
   'gridSnap',
   'gridType',
+  // Grid calibration (issue #417) — overlay geometry only, same VTT class as the fields above.
+  'gridOffsetX',
+  'gridOffsetY',
+  'gridCellHeight',
+  'gridRotation',
+  'gridOpacity',
   'fog',
   'aoe',
 ]);

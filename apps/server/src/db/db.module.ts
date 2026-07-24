@@ -955,6 +955,29 @@ function migrateEncountersTableForAoeHex(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before grid calibration (issue #417): `encounters` gained
+ * `grid_offset_x` / `grid_offset_y` / `grid_rotation` / `grid_opacity` (NOT NULL with
+ * defaults that reproduce the classic top-left square grid) and the nullable
+ * `grid_cell_height` (null = square cells, same as grid_size). Plain ADD COLUMNs — same
+ * shape as migrateEncountersTableForVtt / migrateEncountersTableForAoeHex above. Existing
+ * encounters backfill to the defaults, so their overlay is byte-for-byte unchanged.
+ */
+function migrateEncountersTableForGridCalibration(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('grid_offset_x')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_x REAL NOT NULL DEFAULT 0');
+  if (!has('grid_offset_y')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_y REAL NOT NULL DEFAULT 0');
+  if (!has('grid_cell_height')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_cell_height REAL');
+  if (!has('grid_rotation')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_rotation REAL NOT NULL DEFAULT 0');
+  if (!has('grid_opacity')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_opacity REAL NOT NULL DEFAULT 0.35');
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -1247,6 +1270,37 @@ function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
     DROP INDEX IF EXISTS idx_ai_dm_usage_history_campaign_created;
     CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
       ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
+  `);
+}
+
+/**
+ * Migration for DBs created before DM-initiated check requests (issue #415): the
+ * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
+ * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
+ * indexes) before BOOTSTRAP_SQL runs. Runs with foreign_keys OFF, so the declared FK
+ * REFERENCES never trips a constraint on a fresh DB where campaigns/characters don't exist yet.
+ */
+function migrateCheckRequestsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS check_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+      encounter_id INTEGER,
+      check_id TEXT NOT NULL,
+      check_label TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'flat',
+      dc INTEGER,
+      consequence TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      requested_by_user_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL DEFAULT '',
+      roll_id INTEGER,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
+    CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
   `);
 }
 
@@ -2121,6 +2175,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0071_ai_dm_usage_history', run: migrateAiDmUsageHistoryTable },
   { name: '0072_combatants_turn_state', run: migrateCombatantsTableForTurnState },
   { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
+  { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
+  { name: '0075_check_requests', run: migrateCheckRequestsTable },
 ];
 
 /**
