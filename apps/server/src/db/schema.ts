@@ -1,4 +1,5 @@
-import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, customType } from 'drizzle-orm/sqlite-core';
+import type { AiDmProactiveSettings } from '@campfire/schema';
 
 /**
  * Drizzle table definitions mirroring @campfire/schema entities.
@@ -1104,6 +1105,7 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   lastTurnAt: text('last_turn_at'),
+  proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

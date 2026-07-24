@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { EventsModule } from '../events/events.module';
 import { RoleAccessModule } from '../membership/role-access.module';
@@ -13,6 +13,7 @@ import { EncountersModule } from '../encounters/encounters.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { ProactiveService } from './proactive.service';
 import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-resolver';
 
 /**
@@ -41,7 +42,7 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     AuditModule,
     EventsModule,
     RoleAccessModule,
-    AiDmModule,
+    forwardRef(() => AiDmModule),
     McpModule,
     NotificationsModule,
     AiProviderConfigModule,
@@ -54,8 +55,9 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
   providers: [
     AiDriverService,
     AiDmStreamService,
+    ProactiveService,
     { provide: AI_PROVIDER_RESOLVER, useClass: ConfigAiProviderResolver },
   ],
-  exports: [AiDriverService, AiDmStreamService],
+  exports: [AiDriverService, AiDmStreamService, ProactiveService],
 })
 export class AiDriverModule {}

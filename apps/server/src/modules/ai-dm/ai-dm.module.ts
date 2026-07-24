@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { SettingsModule } from '../settings/settings.module';
 import { RoleAccessModule } from '../membership/role-access.module';
@@ -9,6 +9,7 @@ import { AiDmController } from './ai-dm.controller';
 import { CoDmService } from './co-dm.service';
 import { CoDmController } from './co-dm.controller';
 import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
+import { AiDriverModule } from '../ai-driver/ai-driver.module';
 
 /**
  * Experimental server-side AI Dungeon Master (issue #28) — isolated module.
@@ -19,7 +20,14 @@ import { AI_DM_PROVIDER, NoopAiDmProvider } from './ai-dm.provider';
  * (useClass/useFactory) — the metering, gating and audit around it are unchanged.
  */
 @Module({
-  imports: [AuditModule, SettingsModule, RoleAccessModule, AiProviderConfigModule, ProposalRecordsModule],
+  imports: [
+    AuditModule,
+    SettingsModule,
+    RoleAccessModule,
+    AiProviderConfigModule,
+    ProposalRecordsModule,
+    forwardRef(() => AiDriverModule),
+  ],
   controllers: [AiDmController, CoDmController],
   providers: [AiDmService, CoDmService, { provide: AI_DM_PROVIDER, useClass: NoopAiDmProvider }],
   // AI_DM_PROVIDER is exported so the scribe (#316) shares the SAME injected provider seam.

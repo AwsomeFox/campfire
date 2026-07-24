@@ -12,6 +12,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { ProactiveService } from './proactive.service';
 import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
@@ -62,6 +63,15 @@ const AiDmGrantTakeoverRequest = z
   })
   .strict();
 class AiDmGrantTakeoverDto extends createZodDto(AiDmGrantTakeoverRequest) {}
+
+/** Manually trigger a proactive DM turn (POST /ai-dm/trigger). */
+const AiDmTriggerRequest = z
+  .object({
+    type: z.enum(['encounterEnded', 'hpCritical', 'objectiveCompleted']).describe('The proactive trigger type.'),
+    prompt: z.string().max(2_000).optional().describe('Optional custom prompt override.'),
+  })
+  .strict();
+class AiDmTriggerDto extends createZodDto(AiDmTriggerRequest) {}
 
 /** Hand the seat back to the AI (POST /ai-dm/handback). */
 const AiDmHandbackRequest = z
@@ -122,6 +132,7 @@ export class AiDriverController {
     private readonly stream: AiDmStreamService,
     private readonly access: CampaignAccessService,
     private readonly events: CampaignEventsService,
+    private readonly proactive: ProactiveService,
   ) {}
 
   @Post('message')
@@ -184,6 +195,19 @@ export class AiDriverController {
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
     return toPublicAiDmSessionState(this.driver.setPaused(id, false));
+  }
+
+  @Post('trigger')
+  @ApiOperation({ summary: 'Manually trigger a proactive DM turn' })
+  @ApiResponse({ status: 202, description: 'Proactive turn initiated.' })
+  @Throttle({ ai: { limit: 5, ttl: 60000 } })
+  async trigger(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Body() body: AiDmTriggerDto,
+  ): Promise<void> {
+    await this.access.requireRole(user, id, 'dm');
+    await this.proactive.manualTrigger(id, body.type, body.prompt);
   }
 
   // ---- Stuck-ladder player levers (#314): available to any player at the table ----

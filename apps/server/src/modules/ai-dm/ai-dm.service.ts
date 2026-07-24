@@ -5,6 +5,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  forwardRef,
 } from '@nestjs/common';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
@@ -17,6 +18,7 @@ import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AI_DM_PROVIDER, type AiDmProvider } from './ai-dm.provider';
+import { ProactiveService } from '../ai-driver/proactive.service';
 
 type AiDmSeatUpdateInput = z.infer<typeof AiDmSeatUpdate>;
 type AiDmTurnRequestInput = z.infer<typeof AiDmTurnRequest>;
@@ -37,6 +39,7 @@ function toDomain(row: typeof aiDmSeats.$inferSelect): AiDmSeat {
     lastTurnAt: row.lastTurnAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    proactiveSettings: row.proactiveSettings as any,
   };
 }
 
@@ -53,6 +56,12 @@ function defaultSeat(campaignId: number): AiDmSeat {
     tokensUsed: 0,
     turnCount: 0,
     lastTurnAt: null,
+    proactiveSettings: {
+      enabled: false,
+      triggers: { encounterEnded: true, hpCritical: true, objectiveCompleted: true },
+      cooldownSeconds: 300,
+      maxProactiveTokensPerHour: 5000,
+    },
     createdAt: ts,
     updatedAt: ts,
   };
@@ -98,6 +107,8 @@ export class AiDmService {
     private readonly settings: SettingsService,
     private readonly providerConfig: AiProviderConfigService,
     @Inject(AI_DM_PROVIDER) private readonly provider: AiDmProvider,
+    @Inject(forwardRef(() => ProactiveService))
+    private readonly proactive: ProactiveService,
   ) {}
 
   /**
@@ -279,6 +290,7 @@ export class AiDmService {
         lastTurnAt: null,
         createdAt: ts,
         updatedAt: ts,
+        proactiveSettings: input.proactiveSettings as any,
       });
     } else {
       await this.db
@@ -289,6 +301,7 @@ export class AiDmService {
           ...(input.model !== undefined ? { model: input.model } : {}),
           ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
           ...(input.tokenBudget !== undefined ? { tokenBudget: input.tokenBudget } : {}),
+          ...(input.proactiveSettings !== undefined ? { proactiveSettings: input.proactiveSettings as any } : {}),
           updatedAt: ts,
         })
         .where(eq(aiDmSeats.campaignId, campaignId));
@@ -303,6 +316,16 @@ export class AiDmService {
       campaignId,
       detail: changed.join(', ') || 'no-op',
     });
+
+    if (input.proactiveSettings) {
+      if (input.proactiveSettings.enabled && (nextEnabled ?? current.enabled) !== false) {
+        this.proactive.startWatching(campaignId, input.proactiveSettings);
+      } else {
+        this.proactive.stopWatching(campaignId);
+      }
+    } else if (nextEnabled === false) {
+       this.proactive.stopWatching(campaignId);
+    }
 
     // Leaving Driver must drop the live in-memory session (status/state/actingDm/vote/stuck).
     // Otherwise a driver→off→driver cycle can strand the seat behind a human_control handback

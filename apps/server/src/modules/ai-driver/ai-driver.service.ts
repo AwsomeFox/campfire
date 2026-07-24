@@ -243,6 +243,7 @@ export interface RunTurnOptions {
   scene?: string;
   maxSteps?: number;
   maxTokens?: number;
+  proactive?: boolean;
 }
 
 /**
@@ -953,6 +954,16 @@ export class AiDriverService {
     };
   }
 
+  /** System-level actor for proactive (non-player-triggered) turns. */
+  systemActor(): RequestUser {
+    return {
+      id: 'system:proactive',
+      username: 'system',
+      displayName: 'Proactive DM',
+      devRole: null,
+    } as unknown as RequestUser;
+  }
+
   /**
    * Run one driver turn for `input` (a player action). Streams narration + executes
    * tool calls in a loop until the model stops, the budget is exhausted, a tool errors,
@@ -1034,13 +1045,18 @@ export class AiDriverService {
 
     const system = await this.assembleSystemPrompt(campaignId, seat);
     // Untrusted-input hardening (#317): fence + neutralize the player message so it reads as
-    // in-world DATA, not instructions. The system prompt's UNTRUSTED_INPUT_PREAMBLE explains the fence.
-    const messages: AiMessage[] = [{ role: 'user', content: wrapUntrustedPlayerInput(input) }];
+    // data, preventing prompt injection. (Skipped for trusted system-generated proactive prompts).
+    const wrappedInput = opts.proactive ? input : wrapUntrustedPlayerInput(input);
+    const messages: AiMessage[] = [{ role: 'user', content: wrappedInput }];
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
     resetDriverTurnCounters(session);
-    this.stream.emit({ type: 'turn.start', campaignId });
+    this.stream.emit({
+      type: 'turn.start',
+      campaignId,
+      ...(opts.proactive ? { trigger: 'proactive' } : {}),
+    });
 
     const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, HARD_MAX_STEPS);
     const perStepCap = clamp(opts.maxTokens ?? DEFAULT_STEP_MAX_TOKENS, 1, 4096);
