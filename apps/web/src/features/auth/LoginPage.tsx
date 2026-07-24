@@ -10,7 +10,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { Me } from '@campfire/schema';
+import { AI_EXTERNAL_PROVIDER_PRIVACY, type Me } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { safeInternalPath } from '../../lib/safeInternalPath';
 import { joinPublicBase } from '../../lib/public-base';
@@ -51,6 +51,9 @@ function FlameMark({ size = 44 }: { size?: number }) {
   );
 }
 
+/** Footer tagline on the login landing pitch (sourced from the privacy manifest). */
+export const LOGIN_FOOTER_TAGLINE = AI_EXTERNAL_PROVIDER_PRIVACY.loginTagline;
+
 /** The value-prop highlights shown on the landing hero. Icons degrade gracefully. */
 export const FEATURES: { icon: string; title: string; body: string }[] = [
   {
@@ -80,8 +83,8 @@ export const FEATURES: { icon: string; title: string; body: string }[] = [
   },
   {
     icon: 'shield',
-    title: 'Self-hosted & private',
-    body: 'Your table, your server, your data. No lock-in — export the whole campaign to JSON or Markdown anytime.',
+    title: AI_EXTERNAL_PROVIDER_PRIVACY.loginFeatureTitle,
+    body: AI_EXTERNAL_PROVIDER_PRIVACY.loginFeatureBody,
   },
 ];
 
@@ -129,7 +132,7 @@ function LandingPitch() {
       </div>
 
       <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-        Open-source and free to self-host · your data never leaves your server.
+        {LOGIN_FOOTER_TAGLINE}
       </p>
     </section>
   );
