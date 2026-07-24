@@ -183,8 +183,8 @@ export default function NpcListPage() {
                     />
                   </span>
                   <div className="flex-1 min-w-0">
-                    <p className="font-bold text-slate-200 text-sm truncate">{npc.name}</p>
-                    {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}
+                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={npc.name} aria-label={`NPC: ${npc.name}`}>{npc.name}</p>
+                    {npc.role && <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={npc.role}>{npc.role}</p>}
                   </div>
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">

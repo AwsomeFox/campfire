@@ -218,14 +218,14 @@ export default function LocationListPage() {
                 {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-bold text-slate-200 text-sm truncate">{loc.name}</p>
+                    <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={loc.name} aria-label={`Location: ${loc.name}`}>{loc.name}</p>
                     <Chip variant={statusVariant(loc.status)}><LocationStatusLabel status={loc.status} /></Chip>
                     {isDm && loc.status === 'unexplored' && (
                       <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
                     )}
                     {isDm && loc.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                   </div>
-                  <p className="text-xs text-slate-400 truncate mt-0.5">{loc.kind || firstLine(loc.body) || ' '}</p>
+                  <p className="text-xs text-slate-400 truncate cf-name-reveal mt-0.5" title={loc.kind || firstLine(loc.body) || undefined} aria-label={loc.kind || firstLine(loc.body) || undefined}>{loc.kind || firstLine(loc.body) || ' '}</p>
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
                   <span className="text-[11px] text-slate-500 shrink-0">

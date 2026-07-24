@@ -41,6 +41,8 @@ export interface MonsterStatblock {
   creatureType: string | null;
   challengeRating: string | null;
   armorClass: string | null;
+  eac?: string | null;
+  kac?: string | null;
   hitPoints: string | null;
   speed: string | null;
   /**
@@ -204,11 +206,15 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
     }
   }
 
+  const mappedAny = mapped as unknown as Record<string, unknown>;
+
   const block: MonsterStatblock = {
     size: toText(mapped.size),
     creatureType: toText(mapped.creatureType),
     challengeRating: formatCr(mapped.challengeRating),
     armorClass: toText(mapped.armorClass),
+    eac: toText(mappedAny.eac),
+    kac: toText(mappedAny.kac),
     hitPoints: toText(mapped.hitPoints),
     speed: formatSpeed(mapped.speed),
     abilities,
@@ -224,6 +230,8 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
     block.creatureType ||
     block.challengeRating ||
     block.armorClass ||
+    block.eac ||
+    block.kac ||
     block.hitPoints ||
     block.speed ||
     block.abilities.length > 0 ||
@@ -360,7 +368,11 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {block.armorClass && <KeyLine label={presentation.defense} value={block.armorClass} />}
+        {block.eac && block.kac ? (
+          <KeyLine label={{ full: 'Armor Class' }} value={`EAC ${block.eac} · KAC ${block.kac}`} />
+        ) : block.armorClass ? (
+          <KeyLine label={presentation.defense} value={block.armorClass} />
+        ) : null}
         {block.hitPoints && <KeyLine label={presentation.hitPoints} value={block.hitPoints} />}
         {block.speed && <KeyLine label={SPEED_LABEL} value={block.speed} />}
       </div>

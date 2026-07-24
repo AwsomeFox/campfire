@@ -71,8 +71,14 @@ CREATE TABLE IF NOT EXISTS characters (
   status TEXT NOT NULL DEFAULT 'active',
   stats TEXT NOT NULL DEFAULT '{}',
   ac INTEGER,
+  eac INTEGER,
+  kac INTEGER,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  sp_current INTEGER NOT NULL DEFAULT 0,
+  sp_max INTEGER NOT NULL DEFAULT 0,
+  rp_current INTEGER NOT NULL DEFAULT 0,
+  rp_max INTEGER NOT NULL DEFAULT 0,
   -- Issue #711: persistent echo of the combat death/temp-HP subsystem. The
   -- encounter tracker has tracked these since issue #57, but the per-fight
   -- write-back only persisted hpCurrent, so a dead PC was resurrected on
@@ -951,6 +957,12 @@ CREATE TABLE IF NOT EXISTS combatants (
   initiative_group TEXT,
   hp_current INTEGER NOT NULL DEFAULT 10,
   hp_max INTEGER NOT NULL DEFAULT 10,
+  sp_current INTEGER NOT NULL DEFAULT 0,
+  sp_max INTEGER NOT NULL DEFAULT 0,
+  rp_current INTEGER NOT NULL DEFAULT 0,
+  rp_max INTEGER NOT NULL DEFAULT 0,
+  eac INTEGER,
+  kac INTEGER,
   hp_temp INTEGER NOT NULL DEFAULT 0,
   death_state TEXT NOT NULL DEFAULT 'none',
   death_save_successes INTEGER NOT NULL DEFAULT 0,
