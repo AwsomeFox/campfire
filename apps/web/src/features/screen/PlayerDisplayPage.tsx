@@ -44,6 +44,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { encounterMapUrl } from '../../components/ImageUpload';
 import { useAuth } from '../../app/auth';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
 import { STATUS_LABEL } from '../characters/status';
 import {
@@ -313,7 +314,9 @@ export default function PlayerDisplayPage() {
     if (!Number.isFinite(cid) || typeof window === 'undefined') return;
     const key = sceneStorageKey(cid);
     const onStorage = (event: StorageEvent) => {
-      if (event.key === key && isSceneId(event.newValue)) setScene(event.newValue);
+      if (event.key !== key) return;
+      if (isSceneId(event.newValue)) setScene(event.newValue);
+      else setScene(DEFAULT_SCENE);
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
@@ -363,7 +366,7 @@ export default function PlayerDisplayPage() {
   }, [view, scene]);
 
   useEffect(() => {
-    if (!rotating) return;
+    if (!rotating || prefersReducedMotion()) return;
     const timer = setInterval(() => setSceneTick((tick) => tick + 1), SCENE_ROTATE_MS);
     return () => clearInterval(timer);
   }, [rotating]);
@@ -1157,9 +1160,12 @@ function IntermissionScene({
 
 function BlackoutScene() {
   return (
-    <div className="cf-blackout" data-testid="cf-scene-blackout-body" aria-hidden="true">
-      <span className="sr-only">Display paused</span>
-    </div>
+    <section
+      className="cf-blackout"
+      data-testid="cf-scene-blackout-body"
+      role="status"
+      aria-label="Display paused"
+    />
   );
 }
 
