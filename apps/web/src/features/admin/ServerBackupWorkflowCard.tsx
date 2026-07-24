@@ -288,6 +288,10 @@ export function ServerBackupWorkflowCard() {
   async function runRestore() {
     if (!pendingFile) return;
     const passphrase = restorePassphrase.trim();
+    if (inspectResult?.aiKeyIncluded && !passphrase) {
+      setRestoreError('This archive includes an encrypted AI keyfile — enter the passphrase used when the backup was created.');
+      return;
+    }
     if (passphrase && passphrase.length < KEY_ENVELOPE_MIN_PASSPHRASE_LEN) {
       setRestoreError(`Passphrase must be at least ${KEY_ENVELOPE_MIN_PASSPHRASE_LEN} characters.`);
       return;
@@ -298,31 +302,43 @@ export function ServerBackupWorkflowCard() {
     setHealthResult(null);
     const controller = new AbortController();
     restoreAbortRef.current = controller;
+    let result: RestoreResult;
     try {
-      const result = await restoreServerBackup({
+      result = await restoreServerBackup({
         file: pendingFile,
         keyPassphrase: passphrase || undefined,
         signal: controller.signal,
       });
-      setRestoreResult(result);
-      setRestoreDialogOpen(false);
-      await clearApiCache();
-      await refresh();
-      setHealthResult(await verifyServerHealth());
-      await loadStatus();
     } catch (err) {
       if (!controller.signal.aborted) {
         setRestoreError(err instanceof ApiError ? err.message : "Couldn't restore that archive.");
       }
-    } finally {
       restoreAbortRef.current = null;
       setRestoreBusy(false);
+      return;
+    }
+    restoreAbortRef.current = null;
+    setRestoreBusy(false);
+    setRestoreResult(result);
+    setRestoreDialogOpen(false);
+    try {
+      await clearApiCache();
+      await refresh();
+      setHealthResult(await verifyServerHealth());
+      await loadStatus();
+    } catch {
+      // Post-restore refresh failed after a successful restore — don't report as restore failure.
     }
   }
 
   const operator = me ? operatorLabel(me.user.displayName, me.user.username) : 'unknown operator';
-  const canRestore = Boolean(pendingFile && inspectResult && !inspectBusy && !restoreBusy);
   const restoreNeedsPassphrase = inspectResult?.aiKeyIncluded === true;
+  const restorePassphraseOk =
+    !restoreNeedsPassphrase ||
+    restorePassphrase.trim().length >= KEY_ENVELOPE_MIN_PASSPHRASE_LEN;
+  const canRestore = Boolean(
+    pendingFile && inspectResult && !inspectBusy && !restoreBusy && restorePassphraseOk,
+  );
 
   return (
     <Card className="server-backup-workflow-card space-y-5">

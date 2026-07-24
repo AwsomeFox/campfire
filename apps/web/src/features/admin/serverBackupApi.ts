@@ -130,8 +130,11 @@ function triggerBrowserDownload(blob: Blob, filename: string): void {
   anchor.href = url;
   anchor.download = filename;
   anchor.rel = 'noopener';
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  // Defer revocation so the browser has reliably started consuming the blob URL.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 export async function downloadServerBackup(options?: {

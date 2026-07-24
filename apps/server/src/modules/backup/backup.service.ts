@@ -475,19 +475,23 @@ export class BackupService implements OnApplicationBootstrap {
     const cadence = await this.readCadence();
     const onDisk: BackupOnDiskEntry[] = [];
     if (fs.existsSync(dir)) {
-      for (const name of fs.readdirSync(dir)) {
-        if (!name.startsWith('campfire-backup-') || !name.endsWith('.zip')) continue;
-        const abs = path.join(dir, name);
-        let stat: fs.Stats;
-        try {
-          stat = fs.statSync(abs);
-        } catch {
-          continue;
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          if (!name.startsWith('campfire-backup-') || !name.endsWith('.zip')) continue;
+          const abs = path.join(dir, name);
+          let stat: fs.Stats;
+          try {
+            stat = fs.statSync(abs);
+          } catch {
+            continue;
+          }
+          if (!stat.isFile()) continue;
+          onDisk.push({ name, bytes: stat.size, mtime: stat.mtime.toISOString() });
         }
-        if (!stat.isFile()) continue;
-        onDisk.push({ name, bytes: stat.size, mtime: stat.mtime.toISOString() });
+        onDisk.sort((a, b) => b.mtime.localeCompare(a.mtime));
+      } catch {
+        // BACKUP_DIR exists but is unreadable or not a directory — degrade to empty listing.
       }
-      onDisk.sort((a, b) => b.mtime.localeCompare(a.mtime));
     }
     return {
       scheduleEnabled,
