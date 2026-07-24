@@ -1,0 +1,424 @@
+{
+  "_id": "starforged",
+  "datasworn_version": "0.0.10",
+  "type": "ruleset",
+  "title": "Ironsworn: Starforged Rulebook",
+  "authors": [
+    {
+      "name": "Shawn Tomkin"
+    }
+  ],
+  "date": "2022-10-01",
+  "url": "https://ironswornrpg.com",
+  "license": "https://creativecommons.org/licenses/by/4.0",
+  "npcs": {
+    "sample_npcs": {
+      "_id": "starforged/collections/npcs/sample_npcs",
+      "type": "npc_collection",
+      "name": "Sample NPCs",
+      "contents": {
+        "chiton": {
+          "_id": "starforged/npcs/sample_npcs/chiton",
+          "type": "npc",
+          "name": "Chiton",
+          "rank": 2,
+          "nature": "Monster",
+          "summary": "Insectoid horde",
+          "features": [
+            "Arachnid monsters with blade-like limbs",
+            "Plated exoskeleton",
+            "Dripping mucus",
+            "Ripping, tearing maw"
+          ],
+          "drives": [
+            "Build and expand the nest",
+            "Feed and protect the queen",
+            "Snuff out intelligent life"
+          ],
+          "tactics": [
+            "Attack with lightning reflexes",
+            "Impale with bladed limbs",
+            "Drag victims back to the nest"
+          ],
+          "variants": {
+            "chiton_drone_pack": {
+              "_id": "starforged/npcs/sample_npcs/chiton/variants/chiton_drone_pack",
+              "name": "Chiton drone pack",
+              "rank": 3,
+              "nature": "Monster",
+              "description": "Chiton drones rarely operate independently. Instead, they hunt and attack in packs under the telepathic control of their queen."
+            },
+            "chiton_queen": {
+              "_id": "starforged/npcs/sample_npcs/chiton/variants/chiton_queen",
+              "name": "Chiton queen",
+              "rank": 4,
+              "nature": "Monster",
+              "description": "The chiton queen is a massive creature with segmented pincers, an armored carapace, and a bulging, egg-carrying abdomen. From the depths of the nest, it commands its drones telepathically. This psychic communication is so powerful it can even breach human consciousness—troubling dreams and waking hallucinations might be the harbinger of a chiton invasion."
+            }
+          },
+          "description": "The chiton are not native to any single planet, and are adaptable to most environments. Some suggest they are an ancient precursor bioweapon seeded across the galaxy. The larva of the telepathic queen can lay dormant for thousands of years, emerging only when its sleep is disturbed by the mental energies of intelligent life. An awoken queen quickly metamorphoses into its adult form and lays its first clutch of eggs. Soon after, newly-hatched drones set out to expand the nest and feed their ravenous progenitor.",
+          "quest_starter": "At a remote facility, researchers are studying a newly-discovered chiton queen larva. The immature queen is held in frozen stasis, but something might have gone wrong. The return of a transport ship ferrying supplies to the researchers is weeks overdue. What is your connection to the facility or to the faction overseeing it?",
+          "_source": {
+            "title": "Ironsworn: Starforged Rulebook",
+            "page": 259,
+            "authors": [
+              {
+                "name": "Shawn Tomkin"
+              }
+            ],
+            "date": "2022-05-06",
+            "url": "https://ironswornrpg.com",
+            "license": "https://creativecommons.org/licenses/by/4.0"
+          }
+        }
+      },
+      "_source": {
+        "title": "Ironsworn: Starforged Rulebook",
+        "page": 259,
+        "authors": [
+          {
+            "name": "Shawn Tomkin"
+          }
+        ],
+        "date": "2022-05-06",
+        "url": "https://ironswornrpg.com",
+        "license": "https://creativecommons.org/licenses/by/4.0"
+      }
+    }
+  },
+  "assets": {
+    "command_vehicle": {
+      "_id": "starforged/collections/assets/command_vehicle",
+      "type": "asset_collection",
+      "name": "Command Vehicle Assets",
+      "contents": {
+        "starship": {
+          "_id": "starforged/assets/command_vehicle/starship",
+          "type": "asset",
+          "name": "Starship",
+          "category": "Command Vehicle",
+          "color": "#9aa3ad",
+          "options": {
+            "name": {
+              "label": "name",
+              "field_type": "text",
+              "value": null
+            }
+          },
+          "count_as_impact": false,
+          "shared": true,
+          "attachments": {
+            "max": null,
+            "assets": [
+              "*/assets/module/*"
+            ]
+          },
+          "abilities": [
+            {
+              "_id": "starforged/assets/command_vehicle/starship/abilities/0",
+              "enabled": true,
+              "text": "Your armed, multipurpose starship is suited for interstellar and atmospheric flight. It can comfortably transport several people, has space for cargo, and can carry and launch support vehicles. When you [Advance](id:starforged/moves/legacy/advance), you may spend experience to equip this vehicle with module assets.",
+              "enhance_moves": [
+                {
+                  "roll_type": "no_roll",
+                  "enhances": [
+                    "starforged/moves/legacy/advance"
+                  ]
+                }
+              ]
+            }
+          ],
+          "controls": {
+            "integrity": {
+              "label": "integrity",
+              "field_type": "condition_meter",
+              "rollable": true,
+              "min": 0,
+              "max": 5,
+              "value": 5,
+              "controls": {
+                "battered": {
+                  "label": "battered",
+                  "field_type": "checkbox",
+                  "value": false,
+                  "is_impact": true,
+                  "disables_asset": false
+                },
+                "cursed": {
+                  "label": "cursed",
+                  "field_type": "checkbox",
+                  "value": false,
+                  "is_impact": true,
+                  "disables_asset": false
+                }
+              },
+              "moves": {
+                "recover": [
+                  "starforged/moves/recover/repair"
+                ],
+                "suffer": [
+                  "starforged/moves/suffer/withstand_damage"
+                ]
+              }
+            }
+          },
+          "_source": {
+            "title": "Ironsworn: Starforged Assets",
+            "authors": [
+              {
+                "name": "Shawn Tomkin"
+              }
+            ],
+            "date": "2022-05-06",
+            "url": "https://ironswornrpg.com",
+            "license": "https://creativecommons.org/licenses/by/4.0"
+          }
+        }
+      },
+      "_source": {
+        "title": "Ironsworn: Starforged Assets",
+        "authors": [
+          {
+            "name": "Shawn Tomkin"
+          }
+        ],
+        "date": "2022-05-06",
+        "url": "https://ironswornrpg.com",
+        "license": "https://creativecommons.org/licenses/by/4.0"
+      }
+    }
+  },
+  "moves": {
+    "session": {
+      "_id": "starforged/collections/moves/session",
+      "type": "move_category",
+      "name": "Session Moves",
+      "contents": {
+        "begin_a_session": {
+          "_id": "starforged/moves/session/begin_a_session",
+          "type": "move",
+          "name": "Begin a Session",
+          "roll_type": "no_roll",
+          "trigger": {
+            "conditions": null,
+            "text": "When you begin a significant session or chapter of play..."
+          },
+          "text": "__When you begin a significant session or chapter of play__, do all of the following.\n\n  * Identify or adjust flagged content and [Set a Flag](id:starforged/moves/session/set_a_flag).\n  * Review or recap what happened last session.\n  * Set the scene by envisioning your character’s current situation and intent.\n\nIn addition, you may spotlight a new danger, opportunity, or insight. This can include a scene hidden from your character’s perspective. If you do, envision a brief vignette (you may roll or choose on the table below for inspiration). Then, all players take +1 momentum as you return to play from the viewpoint of your characters.\n\n{{table:starforged/oracles/moves/begin_a_session}}",
+          "outcomes": null,
+          "oracles": [
+            "starforged/oracles/moves/begin_a_session"
+          ],
+          "_source": {
+            "title": "Ironsworn: Starforged Rulebook",
+            "page": 141,
+            "authors": [
+              {
+                "name": "Shawn Tomkin"
+              }
+            ],
+            "date": "2022-05-06",
+            "url": "https://ironswornrpg.com",
+            "license": "https://creativecommons.org/licenses/by/4.0"
+          }
+        }
+      },
+      "_source": {
+        "title": "Ironsworn: Starforged Rulebook",
+        "page": 141,
+        "authors": [
+          {
+            "name": "Shawn Tomkin"
+          }
+        ],
+        "date": "2022-05-06",
+        "url": "https://ironswornrpg.com",
+        "license": "https://creativecommons.org/licenses/by/4.0"
+      }
+    }
+  },
+  "oracles": {
+    "characters": {
+      "_id": "starforged/collections/oracles/characters",
+      "type": "oracle_collection",
+      "name": "Character Oracles",
+      "oracle_type": "tables",
+      "contents": {
+        "first_look": {
+          "_id": "starforged/oracles/characters/first_look",
+          "type": "oracle_rollable",
+          "name": "First Look",
+          "oracle_type": "table_text",
+          "dice": "1d100",
+          "recommended_rolls": {
+            "min": 1,
+            "max": 2
+          },
+          "column_labels": {
+            "roll": "Roll",
+            "text": "Result"
+          },
+          "rows": [
+            {
+              "min": 1,
+              "max": 3,
+              "text": "Accented",
+              "_i18n": {
+                "text": {
+                  "part_of_speech": "adjective"
+                }
+              }
+            },
+            {
+              "min": 4,
+              "max": 6,
+              "text": "Accompanied",
+              "_i18n": {
+                "text": {
+                  "part_of_speech": "adjective"
+                }
+              }
+            }
+          ],
+          "_source": {
+            "title": "Ironsworn: Starforged Rulebook",
+            "page": 330,
+            "authors": [
+              {
+                "name": "Shawn Tomkin"
+              }
+            ],
+            "date": "2022-05-06",
+            "url": "https://ironswornrpg.com",
+            "license": "https://creativecommons.org/licenses/by/4.0"
+          }
+        }
+      },
+      "collections": {
+        "name": {
+          "_id": "starforged/collections/oracles/characters/name",
+          "type": "oracle_collection",
+          "name": "Names",
+          "oracle_type": "tables",
+          "contents": {
+            "given": {
+              "_id": "starforged/oracles/characters/name/given",
+              "type": "oracle_rollable",
+              "name": "Given Name",
+              "oracle_type": "column_text",
+              "dice": "1d100",
+              "summary": "Given and family names can be used independently as standalone names. In many cases you can reverse the order.",
+              "suggestions": {
+                "oracles": [
+                  "starforged/oracles/characters/name/callsign",
+                  "starforged/oracles/characters/name/family_name"
+                ]
+              },
+              "rows": [
+                {
+                  "min": 1,
+                  "max": 1,
+                  "text": "Akim",
+                  "_i18n": {
+                    "text": {
+                      "part_of_speech": "proper_noun"
+                    }
+                  }
+                },
+                {
+                  "min": 2,
+                  "max": 2,
+                  "text": "Alex",
+                  "_i18n": {
+                    "text": {
+                      "part_of_speech": "proper_noun"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "_source": {
+            "title": "Ironsworn: Starforged Rulebook",
+            "page": 330,
+            "authors": [
+              {
+                "name": "Shawn Tomkin"
+              }
+            ],
+            "date": "2022-05-06",
+            "url": "https://ironswornrpg.com",
+            "license": "https://creativecommons.org/licenses/by/4.0"
+          }
+        }
+      },
+      "_source": {
+        "title": "Ironsworn: Starforged Rulebook",
+        "page": 330,
+        "authors": [
+          {
+            "name": "Shawn Tomkin"
+          }
+        ],
+        "date": "2022-05-06",
+        "url": "https://ironswornrpg.com",
+        "license": "https://creativecommons.org/licenses/by/4.0"
+      }
+    }
+  },
+  "truths": {
+    "cataclysm": {
+      "_id": "starforged/truths/cataclysm",
+      "name": "Cataclysm",
+      "icon": "icons/truths/cataclysm.svg",
+      "dice": "1d100",
+      "options": [
+        {
+          "min": 1,
+          "max": 33,
+          "summary": "The Sun Plague extinguished the stars in our home galaxy.",
+          "description": "The anomaly traveled at incredible speeds, many times faster than light itself, and snuffed out the stars around us before we realized it was coming. Few of us survived as we made our way to this new galaxy. Here in the Forge, the stars are still aflame. We cling to their warmth like weary travelers huddled around a fire.\n\nWe suspect the sun plague was caused by:\n\n{{table:starforged/truths/cataclysm/0}}",
+          "quest_starter": "The galaxy your people left behind is a cold, lightless grave. But a solitary star still glows, a beacon in a vast darkness. How did this star survive the plague? Why do you vow to find the means to travel across the immeasurable gulf to this distant light?",
+          "table": {
+            "oracle_type": "table_text",
+            "dice": "1d100",
+            "rows": [
+              {
+                "min": 1,
+                "max": 25,
+                "text": "Temporal distortions from a supermassive black hole"
+              },
+              {
+                "min": 26,
+                "max": 50,
+                "text": "Sudden dark matter decay"
+              },
+              {
+                "min": 51,
+                "max": 75,
+                "text": "Superweapon run amok"
+              },
+              {
+                "min": 76,
+                "max": 100,
+                "text": "Scientific experiment gone awry"
+              }
+            ]
+          }
+        }
+      ],
+      "your_character": "Do you possess a keepsake or artifact of pre-cataclysm society? What is it? Why is it important to you? If you are all that remains of a people or culture, you might be a [Vestige](id:starforged/assets/path/vestige).",
+      "_source": {
+        "title": "Ironsworn: Starforged Rulebook",
+        "page": 84,
+        "authors": [
+          {
+            "name": "Shawn Tomkin"
+          }
+        ],
+        "date": "2022-05-06",
+        "url": "https://ironswornrpg.com",
+        "license": "https://creativecommons.org/licenses/by/4.0"
+      }
+    }
+  }
+}
