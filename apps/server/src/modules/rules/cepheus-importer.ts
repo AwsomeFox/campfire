@@ -322,11 +322,28 @@ function packPieces(pieces: string[], max: number): string[] {
   return out;
 }
 
-/** Hard-split a single indivisible unit on character boundaries into chunks <= max (lossless). */
+/**
+ * Hard-split a single indivisible unit into chunks of at most `max` UTF-16 units (lossless).
+ * Never splits a surrogate pair: if a chunk boundary would land between a high and low
+ * surrogate (e.g. mid-emoji or a non-BMP glyph in a giant table), the trailing high surrogate
+ * is carried to the next chunk instead, so no invalid UTF-16 / corrupted character is stored.
+ * Chunking by UTF-16 units (not code points) keeps each chunk within the schema's length cap,
+ * which also counts UTF-16 units.
+ */
 function hardChunk(text: string, max: number): string[] {
   const chunks: string[] = [];
-  for (let i = 0; i < text.length; i += max) {
-    chunks.push(text.slice(i, i + max));
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(i + max, text.length);
+    if (end < text.length) {
+      const boundary = text.charCodeAt(end - 1);
+      // A high surrogate at the boundary would be orphaned — move it into the next chunk.
+      if (boundary >= 0xd800 && boundary <= 0xdbff) end -= 1;
+    }
+    // Guard against a pathological max of 1 landing on a lone high surrogate (end === i).
+    if (end <= i) end = Math.min(i + max, text.length);
+    chunks.push(text.slice(i, end));
+    i = end;
   }
   return chunks;
 }
