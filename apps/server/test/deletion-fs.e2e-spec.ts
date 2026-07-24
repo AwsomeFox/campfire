@@ -90,7 +90,10 @@ describe('permanent deletion filesystem cleanup (issue #727, e2e)', () => {
     await request(server).delete(`/api/v1/campaigns/${id}`).set(dm);
     fs.chmodSync(uploadDir, 0o555);
     try {
-      const purge = await request(server).delete(`/api/v1/campaigns/${id}/purge`).set(dm);
+      const purge = await request(server)
+        .delete(`/api/v1/campaigns/${id}/purge`)
+        .set(dm)
+        .send({ confirm: 'PURGE' });
       expect(purge.status).toBe(200);
       expect(purge.body.filesPending).toBe(true);
       expect(fs.existsSync(uploadDir)).toBe(true);

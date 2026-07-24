@@ -602,6 +602,25 @@ export const membershipIntegrityRepairs = sqliteTable('membership_integrity_repa
   createdAt: text('created_at').notNull(),
 });
 
+/**
+ * Server-level purge tombstones (issue #867). Survive the campaign hard-cascade
+ * (no FK to campaigns) so operators can still discover who purged what, when,
+ * and whether the destructive step completed or failed — even after every
+ * campaign-scoped audit row becomes unreachable (memberships gone). Stores a
+ * hash of the campaign name rather than the plaintext title.
+ */
+export const campaignPurgeTombstones = sqliteTable('campaign_purge_tombstones', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  campaignNameHash: text('campaign_name_hash').notNull(),
+  actor: text('actor').notNull(),
+  // 'requested' | 'completed' | 'failed'
+  status: text('status').notNull(),
+  detail: text('detail').notNull().default(''),
+  requestedAt: text('requested_at').notNull(),
+  completedAt: text('completed_at'),
+});
+
 // DM invite links / join codes — see modules/membership/invites.service.ts.
 // `code` is stored PLAINTEXT, unlike session/PAT tokens (which store sha256):
 // an invite code is a shareable capability the DM re-displays and re-copies from

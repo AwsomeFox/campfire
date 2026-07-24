@@ -317,7 +317,9 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
     setError(null);
     setFilesPendingNotice(null);
     try {
-      const outcome = await api.delete<PermanentDeletionResult>(`${API}/campaigns/${c.id}/purge`);
+      const outcome = await api.delete<PermanentDeletionResult>(`${API}/campaigns/${c.id}/purge`, {
+        json: { confirm: 'PURGE' },
+      });
       setTrashed((prev) => prev.filter((x) => x.id !== c.id));
       if (outcome.filesPending) {
         setFilesPendingNotice(

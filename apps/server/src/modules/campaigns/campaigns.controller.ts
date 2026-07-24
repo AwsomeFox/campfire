@@ -18,7 +18,13 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from './campaigns.service';
-import { CampaignCloneDto, CampaignCreateDto, CampaignImportDto, CampaignUpdateDto } from './campaigns.dto';
+import {
+  CampaignCloneDto,
+  CampaignCreateDto,
+  CampaignImportDto,
+  CampaignPurgeDto,
+  CampaignUpdateDto,
+} from './campaigns.dto';
 
 // Express.Multer.File augments the Express namespace via @types/multer; import side-effect only.
 type MulterFile = Express.Multer.File;
@@ -152,25 +158,36 @@ export class CampaignsController {
   @Post(':id/restore')
   @ApiOperation({
     summary: 'Restore a trashed campaign',
-    description: 'dm role required. Clears the trash flag (issue #116) so the campaign returns to normal listings with every child row + upload intact. 404 if it is not actually in the trash.',
+    description:
+      'dm role required. Clears the trash flag (issue #116) so the campaign returns to normal listings with every child row + upload intact. 404 if it is not actually in the trash. ' +
+      'Atomically races purge (issue #867): a concurrent purge that commits first leaves restore as 404.',
   })
   @ApiResponse({ status: 201, description: 'Restored campaign.' })
   async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    // allowArchived: a trashed campaign is not writable in the normal sense; membership is the gate.
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    // allowTrashed: this is one of the three Trash exemptions (issue #867).
+    // allowArchived: writability is not required to clear deletedAt.
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true, allowTrashed: true });
     return this.campaigns.restore(id, user);
   }
 
   @Delete(':id/purge')
   @ApiOperation({
-    summary: 'Permanently purge a campaign',
+    summary: 'Permanently purge a trashed campaign',
     description:
-      'dm role required. The deliberate, IRREVERSIBLE second step (issue #116): hard-cascades every child table AND wipes the campaign\'s on-disk upload directory. Works on a live or already-trashed campaign. This is the ONLY path that destroys data + files.',
+      'dm role required. The deliberate, IRREVERSIBLE second step (issue #116/#867): hard-cascades every child table AND wipes the campaign\'s on-disk upload directory. ' +
+      'Refused unless the campaign is already in the trash (`deletedAt IS NOT NULL`) and the body carries `{ "confirm": "PURGE" }`. ' +
+      'A concurrent restore that clears deletedAt first makes purge 404. Retains a sanitized server-level tombstone + admin audit row.',
   })
   @ApiResponse({ status: 200, description: 'Metadata removed; filesystem erasure verified unless filesPending is true.' })
-  async purge(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    const outcome = await this.campaigns.purge(id, user);
+  @ApiResponse({ status: 400, description: 'Missing/invalid confirmation token.' })
+  @ApiResponse({ status: 404, description: 'Campaign is not in the trash (or was restored concurrently).' })
+  async purge(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: CampaignPurgeDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm', { allowArchived: true, allowTrashed: true });
+    const outcome = await this.campaigns.purge(id, user, body);
     return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }
 

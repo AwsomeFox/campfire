@@ -5,7 +5,6 @@ import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
-import type { CampaignEvent } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -342,10 +341,12 @@ export class AiDriverController {
     // too (otherwise merge keeps the connection alive on keepalive pings after the data
     // stream has ended). Same race-free reasoning as CampaignEventsController: the notifier
     // subscribes to the same Subject the revocation is emitted on, so it fires synchronously.
-    const revoked = this.events.streamFor(id).pipe(
+    // Issue #527 / #867: tear down on membership revocation OR campaign trash.
+    const closed = this.events.streamFor(id).pipe(
       filter(
-        (event): event is Extract<CampaignEvent, { type: 'membership.revoked' }> =>
-          event.type === 'membership.revoked' && event.userId === user.id,
+        (event) =>
+          (event.type === 'membership.revoked' && event.userId === user.id)
+          || event.type === 'campaign.trashed',
       ),
     );
     return merge(
@@ -356,6 +357,6 @@ export class AiDriverController {
         })),
       ),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(revoked));
+    ).pipe(takeUntil(closed));
   }
 }

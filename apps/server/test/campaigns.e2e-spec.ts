@@ -415,7 +415,7 @@ describe('campaign purge cascade (e2e)', () => {
     const uploadDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
     expect(fs.existsSync(uploadDir)).toBe(true); // still on disk after a soft-delete
     // Now the explicit purge runs the real hard-cascade + fs.rm.
-    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/purge`);
+    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/purge`).send({ confirm: 'PURGE' });
     expect(res.status).toBe(200);
   });
 
@@ -580,9 +580,12 @@ describe('campaign soft-delete + trash/restore/purge (e2e, issue #116)', () => {
   it('purge permanently removes the campaign AND wipes its on-disk uploads', async () => {
     const server = ctx.app.getHttpServer();
 
-    // Trash then purge (purge also works on a live campaign, but this mirrors the UI flow).
+    // Trash then purge (issue #867: live purge is refused; confirm token required).
     await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
-    const purge = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+    const purge = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/purge`)
+      .set(dm)
+      .send({ confirm: 'PURGE' });
     expect(purge.status).toBe(200);
 
     // Gone from the trash and the disk directory is removed.

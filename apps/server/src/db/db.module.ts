@@ -2089,6 +2089,26 @@ function migrateInventoryQtyIdempotencyCreatedAtIndex(sqlite: Database.Database)
 }
 
 /**
+ * Issue #867: server-level purge tombstones. NEW table (no ALTER) — CREATE TABLE
+ * IF NOT EXISTS is fully idempotent. No FKs by design: rows must outlive the
+ * campaign hard-cascade they document.
+ */
+function migrateCampaignPurgeTombstones(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_purge_tombstones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      campaign_name_hash TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -2177,6 +2197,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
   { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
   { name: '0075_check_requests', run: migrateCheckRequestsTable },
+  { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
 ];
 
 /**
