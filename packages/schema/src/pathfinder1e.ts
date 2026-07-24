@@ -1,4 +1,4 @@
-import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 /**
@@ -153,9 +153,20 @@ export function pf1eArmorClass(parts: {
  * call site (initiative rolling, statblock mapping, HP resolution, condition chips) routes
  * through it when a campaign selects the PF1e pack — no per-system branching in the combat code.
  */
+/** PF1e presentation — Challenge Rating + Armor Class (ascending AC, like 5e). */
+export const PF1E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge Rating', short: 'CR' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
 export const Pathfinder1eAdapter: RuleSystemAdapter = {
   id: PF1E_ADAPTER_ID,
   label: 'Pathfinder 1e',
+  presentation: PF1E_STATBLOCK_PRESENTATION,
   abilityModifier: pf1eAbilityModifier,
   // PF1e initiative is a d20 roll + DEX modifier (feats like Improved Initiative are per-
   // creature and live in the statblock's stored init, not this base derivation) — same die

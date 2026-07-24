@@ -204,3 +204,86 @@ export function reduceRsvpSave(state: RsvpSaveState, event: RsvpSaveEvent): Rsvp
     }
   }
 }
+
+
+// -------------------- RSVP note (issue #552) --------------------
+//
+// The scheduling API has always accepted an optional per-RSVP note ("30 min
+// late", "can only stay for the first fight"), but the web UI had no input
+// for it. These constants back a compact note editor beside the RSVP
+// segmented control. Server semantics: when a status change omits the note
+// field the existing note is preserved; sending an empty string clears it.
+
+/** Max chars — matches the server RsvpSet.note schema. */
+export const RSVP_NOTE_MAX_LEN = 500;
+
+/** Persistent visible label (never rely on placeholder-only). */
+export const RSVP_NOTE_LABEL = 'RSVP note (optional)';
+
+/** Descriptive help copy shown near the field. */
+export const RSVP_NOTE_HELP =
+  'Share timing or context with the table — e.g. "30 min late" or "can only stay for the first fight". The DM and other members can see this.';
+
+/** Placeholder used inside the input. Visible label is separate. */
+export const RSVP_NOTE_PLACEHOLDER = 'e.g. 30 min late';
+
+/** Button label to save a changed note. */
+export const RSVP_NOTE_SAVE_LABEL = 'Save note';
+
+/** Button label to clear an existing note. */
+export const RSVP_NOTE_CLEAR_LABEL = 'Clear note';
+
+/** aria-live announcement while saving. */
+export const RSVP_NOTE_SAVING_STATUS = 'Saving RSVP note…';
+
+/** aria-live announcement after a successful save. */
+export const RSVP_NOTE_SAVED_ANNOUNCEMENT = 'RSVP note saved.';
+
+/** aria-live announcement after a successful clear. */
+export const RSVP_NOTE_CLEARED_ANNOUNCEMENT = 'RSVP note cleared.';
+
+/** aria-live announcement + inline error on save failure. */
+export const RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT = "Couldn't save your RSVP note.";
+
+/** aria-live announcement when the note exceeds the max length. */
+export function rsvpNoteTooLongMessage(current: number, max: number = RSVP_NOTE_MAX_LEN): string {
+  return `Note is ${current} of ${max} characters — trim to ${max} to save.`;
+}
+
+/**
+ * Pure helper for what to send on a note edit save (#552). The server
+ * preserves the existing note when the field is omitted and clears it when
+ * the value is an empty string — surface both cases so the caller knows
+ * whether to fire the request at all.
+ *
+ * Returns null when the trimmed value equals the persisted value (no-op).
+ */
+export function rsvpNoteSaveRequest(
+  persistedNote: string,
+  draft: string,
+): { note: string } | null {
+  const trimmed = draft.trim();
+  const persistedTrimmed = persistedNote.trim();
+  if (trimmed === persistedTrimmed) {
+    if (trimmed === '' && persistedNote !== '' && draft === '') {
+      return { note: '' };
+    }
+    return null;
+  }
+  return { note: trimmed };
+}
+
+/**
+ * Reconcile a local RSVP-note draft with a server refresh (#552). When the
+ * schedule row changes, always take the authoritative note. Otherwise preserve
+ * in-flight typing only while the draft still matches what we last synced from.
+ */
+export function syncRsvpNoteDraft(
+  draft: string,
+  lastSyncedPersisted: string,
+  nextPersisted: string,
+  scheduleChanged: boolean,
+): string {
+  if (scheduleChanged) return nextPersisted;
+  return draft.trim() === lastSyncedPersisted.trim() ? nextPersisted : draft;
+}

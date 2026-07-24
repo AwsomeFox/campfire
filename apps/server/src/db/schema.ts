@@ -948,6 +948,21 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// AI DM per-turn usage history (issue #1060). One row per metered turn (driver step or
+// co-DM draft or scribe run). Used to power a per-campaign usage-history endpoint and
+// the DM settings sparkline. Written by AiDmService.meterTurn as best-effort — a
+// failure here must never break the metering transaction, so the insert is fire-and-
+// forget with its own try/catch.
+export const aiDmUsageHistory = sqliteTable('ai_dm_usage_history', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  tokensUsed: integer('tokens_used').notNull(),
+  action: text('action').notNull().default(''), // 'ai-dm.driver.turn' | 'ai-dm.scribe' | ...
+  model: text('model').notNull().default(''),
+  actor: text('actor').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+});
+
 // AI provider config storage (issue #310): provider selection + ENCRYPTED API key
 // at two scopes — 'server' (one row, admin default) and 'campaign' (per-campaign
 // override, DM-managed, cascades on campaign delete). `encrypted_api_key` holds an
