@@ -27,7 +27,9 @@ import { projectProposal, projectProposals } from './proposal-projection';
 // run the deterministic generator (#304/#306) from the (seeded) params in the payload —
 // their proposals carry generate params, not a persisted row. `map` is not one of the
 // note-pin EntityTypes (a map is an attachment, not an entity table), so this union is
-// standalone rather than derived from EntityType. Factions (issue #221) stay DM-write-only.
+// standalone rather than derived from EntityType. Factions (issue #1056) are also
+// proposable for Co-DM drafting and are create-only in v1 (direct faction writes remain
+// DM-gated; the proposal queue is the co-DM intermediary).
 export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map';
 
 const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction'];
@@ -235,6 +237,8 @@ export class ProposalRecordsService {
       case 'map':
         return null;
       case 'faction': {
+        // Co-DM faction drafts (#1056) are create-only today, but update proposals
+        // still need a prior-row snapshot when filed (and for non-AI proposers).
         const [row] = await this.db
           .select()
           .from(factions)
