@@ -160,27 +160,57 @@ function authorsOf(src: DataswornSource | null, doc: DataswornDocument): string 
 }
 
 /**
+ * The CC-BY version declared by a license URL (e.g. "4.0" for
+ * `https://creativecommons.org/licenses/by/4.0`), or null when the URL is not a CC-BY license.
+ */
+function ccByVersion(url: string): string | null {
+  const m = url
+    .trim()
+    .toLowerCase()
+    .match(/creativecommons\.org\/licenses\/by\/(\d+(?:\.\d+)?)\/?$/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Normalizes a CC-BY license URL to a human license string WITHOUT mislabeling its version:
+ * exactly 4.0 becomes the canonical DATASWORN_LICENSE string, any OTHER CC-BY version keeps its
+ * own version (so a /by/3.0 file isn't stamped as 4.0), and a non-CC-BY URL is returned as-is.
+ */
+function normalizeCcByLicense(url: string): string {
+  const ver = ccByVersion(url);
+  if (!ver) return url;
+  return ver === '4.0' ? DATASWORN_LICENSE : `Creative Commons Attribution ${ver} (CC-BY-${ver})`;
+}
+
+/**
  * The CC-BY attribution line the license obliges us to display: title + author + license +
  * a link to the license, plus the page when known. Built from the object's own `_source`,
  * falling back to the document's top-level provenance.
  */
-function attributionOf(src: DataswornSource | null, doc: DataswornDocument): string {
+function attributionOf(src: DataswornSource | null, doc: DataswornDocument, licenseUrl: string): string {
   const title = asString(src?.title) || asString(doc.title) || DATASWORN_PACK_NAME;
   const authors = authorsOf(src, doc);
   const page = typeof src?.page === 'number' ? `, p. ${src.page}` : '';
   const by = authors ? ` by ${authors}` : '';
-  return `${title}${by}${page}, licensed under CC BY 4.0 (${DATASWORN_LICENSE_URL}).`;
+  // Reflect the ACTUAL CC-BY version + link so a non-4.0 source isn't credited as 4.0.
+  const ver = ccByVersion(licenseUrl);
+  const licLabel = ver ? `CC BY ${ver}` : 'CC BY 4.0';
+  const licLink = licenseUrl || DATASWORN_LICENSE_URL;
+  return `${title}${by}${page}, licensed under ${licLabel} (${licLink}).`;
 }
 
 function sourceUrlOf(src: DataswornSource | null, doc: DataswornDocument): string {
   return asString(src?.url) || asString(doc.url) || 'https://ironswornrpg.com';
 }
 
-/** The effective license URL for an object — its own `_source.license`, else the document's. */
+/**
+ * The effective license URL for an object — its own `_source.license`, else the ruleset's
+ * document-level license (datasworn objects inherit the ruleset license). No fabricated
+ * fallback to the CC-BY URL: when NEITHER the object nor the document declares a license this
+ * stays empty, so the caller treats it as "unknown" and skips the object rather than assuming
+ * it is open.
+ */
 function licenseUrlOf(src: DataswornSource | null, doc: DataswornDocument): string {
-  // No fallback to the CC-BY URL: a MISSING license must stay empty so the caller treats it
-  // as "unknown" and skips the object, rather than silently assuming CC-BY-4.0 and mislabeling
-  // potentially non-open content as open.
   return asString(src?.license) || asString(doc.license);
 }
 
@@ -196,14 +226,16 @@ function provenanceOf(
 ): { license: string; attribution: string; author: string; sourceUrl: string } | null {
   const src = asRecord(obj._source) as DataswornSource | null;
   const licenseUrl = licenseUrlOf(src, doc);
-  // The datasworn license is a URL; normalize the CC-BY family to the canonical human string.
-  // A URL that isn't recognizably open (e.g. an "All Rights Reserved" future entry) is rejected.
-  const isCcBy = /creativecommons\.org\/licenses\/by\/[\d.]+\/?$/.test(licenseUrl.trim().toLowerCase());
-  const license = isCcBy ? DATASWORN_LICENSE : licenseUrl;
-  if (!isCcBy && !isOpenLicense(license)) return null;
+  // The datasworn license is a URL; normalize the CC-BY family to a human string, preserving
+  // the ACTUAL version (only /by/4.0 maps to the canonical CC-BY-4.0 string). A URL that isn't
+  // a recognized CC-BY version and isn't otherwise open (e.g. "All Rights Reserved", or a
+  // missing license) is rejected so the object is skipped rather than mislabeled.
+  const ccByVer = ccByVersion(licenseUrl);
+  const license = normalizeCcByLicense(licenseUrl);
+  if (ccByVer == null && !isOpenLicense(license)) return null;
   return {
     license,
-    attribution: attributionOf(src, doc),
+    attribution: attributionOf(src, doc, licenseUrl),
     author: authorsOf(src, doc),
     sourceUrl: sourceUrlOf(src, doc),
   };
@@ -684,10 +716,8 @@ export async function fetchDataswornDocument(
   }
   // Honor the license requirement up front: the document must be open-licensed.
   const docLicenseUrl = asString(doc.license);
-  const docLicense = /creativecommons\.org\/licenses\/by\/[\d.]+\/?$/.test(docLicenseUrl.trim().toLowerCase())
-    ? DATASWORN_LICENSE
-    : docLicenseUrl;
-  if (!docLicenseUrl || !isOpenLicense(docLicense)) {
+  const docLicense = normalizeCcByLicense(docLicenseUrl);
+  if (!docLicenseUrl || (ccByVersion(docLicenseUrl) == null && !isOpenLicense(docLicense))) {
     throw new BadRequestException(
       `Datasworn document at ${url} ${
         docLicenseUrl ? `declares a non-open license ("${docLicenseUrl}")` : 'declares no license'
