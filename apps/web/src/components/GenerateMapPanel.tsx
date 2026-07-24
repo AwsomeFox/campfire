@@ -81,6 +81,8 @@ export function GenerateMapPanel({
   const [copied, setCopied] = useState(false);
   // Ignore an in-flight preview whose params are already stale (rapid reroll / edits).
   const previewSeq = useRef(0);
+  // Handle for the transient "Copied" reset, cleared on unmount so it can't setState late.
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Exact params (including the server-resolved seed) that produced the currently-shown
   // preview. "Use this map" replays THESE — never live form state — so editing a control
   // after a preview without re-previewing can't silently attach a different map than shown.
@@ -136,6 +138,12 @@ export function GenerateMapPanel({
   // First preview on mount so the DM immediately sees a candidate map.
   useEffect(() => {
     void runPreview();
+    return () => {
+      // Invalidate any in-flight preview so its resolution can't setState after unmount,
+      // and cancel a pending "Copied" reset for the same reason.
+      previewSeq.current++;
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -173,7 +181,9 @@ export function GenerateMapPanel({
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    // Defer revocation so the browser has reliably started consuming the blob URL before it
+    // is invalidated (revoking immediately can make the download flaky in some browsers).
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 
   async function copySeed() {
@@ -184,7 +194,8 @@ export function GenerateMapPanel({
     try {
       await navigator.clipboard.writeText(preview.seed);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      copiedTimer.current = setTimeout(() => setCopied(false), 1500);
     } catch {
       /* clipboard blocked — the seed is still visible/selectable in the input */
     }
