@@ -11,7 +11,6 @@ import {
   NpcCreate,
   LocationCreate,
   QuestCreate,
-  FactionCreate,
   SessionCreate,
   FactionCreate,
   EncounterGenerate,
@@ -45,8 +44,6 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
-  quest: 'quest',
-  faction: 'faction',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
@@ -376,8 +373,6 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
   map: '{"kind"?: "dungeon"|"cave"|"wilderness", "size"?: "small"|"medium"|"large", "theme"?: string}',
-  quest: '{"title": string (required), "body"?: string (markdown quest description), "reward"?: string, "dmSecret"?: string}',
-  faction: '{"name": string (required), "kind"?: string (guild/cult/government/...), "body"?: string, "goals"?: string, "dmSecret"?: string}',
 };
 
 /** A fresh uint32 seed for the encounter generator. */
