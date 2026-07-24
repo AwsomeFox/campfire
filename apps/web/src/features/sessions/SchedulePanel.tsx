@@ -569,7 +569,7 @@ function ScheduleItem({
                 ? RSVP_NOTE_SAVING_STATUS
                 : noteTooLong
                   ? rsvpNoteTooLongMessage(noteDraftLength)
-                  : noteError ?? ''}
+                  : ''}
             </span>
           </div>
         )}
