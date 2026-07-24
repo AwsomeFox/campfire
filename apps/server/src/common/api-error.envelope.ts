@@ -403,3 +403,8 @@ export function resolveRequestId(inbound?: string): string {
   }
   return randomUUID();
 }
+
+/** Normalize Express's `string | string[]` header value before resolveRequestId(). */
+export function resolveRequestIdFromHeader(header: string | string[] | undefined): string {
+  return resolveRequestId(Array.isArray(header) ? header[0] : header);
+}

@@ -10,7 +10,7 @@ import type { Request, Response } from 'express';
 import {
   ApiErrorEnvelope,
   buildRestEnvelope,
-  resolveRequestId,
+  resolveRequestIdFromHeader,
 } from '../api-error.envelope';
 
 /**
@@ -52,7 +52,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // means an inbound header is preserved end-to-end even if other middleware
     // also reads req.id.
     const requestId =
-      req.requestId ?? resolveRequestId(req.headers['x-request-id'] as string | undefined);
+      req.requestId ?? resolveRequestIdFromHeader(req.headers['x-request-id']);
     req.requestId = requestId;
     res.setHeader('X-Request-Id', requestId);
 

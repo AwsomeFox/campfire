@@ -137,7 +137,7 @@ describe('Issue #682 — REST error envelope (e2e)', () => {
     expect(res.headers['content-type']).toContain('application/problem+json');
   });
 
-  it('400 validation_failed — strict zod body rejects unknown key with structured errors[]', async () => {
+  it('400 bad_request — strict zod body rejects unknown key with structured errors[]', async () => {
     const res = await request(app.getHttpServer())
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set('Authorization', `Bearer ${dmToken}`)
@@ -307,24 +307,12 @@ describe('Issue #682 — OpenAPI error schema publication (e2e)', () => {
     expect(spec.components?.schemas?.ErrorResponse).toBeTruthy();
     expect(spec.components?.schemas?.FieldError).toBeTruthy();
     const errorResponse = spec.components!.schemas!.ErrorResponse as {
-      properties?: { code?: { enum?: string[] } };
+      required?: string[];
+      properties?: { code?: { type?: string; description?: string } };
     };
-    // The enum documents the canonical slug vocabulary an integrator switches on.
-    expect(errorResponse.properties?.code?.enum).toEqual(
-      expect.arrayContaining([
-        'bad_request',
-        'validation_failed',
-        'unauthorized',
-        'forbidden',
-        'not_found',
-        'conflict',
-        'payload_too_large',
-        'too_many_requests',
-        'unprocessable_entity',
-        'internal_error',
-        'error',
-      ]),
-    );
+    expect(errorResponse.required).toContain('requestId');
+    expect(errorResponse.properties?.code?.type).toBe('string');
+    expect(errorResponse.properties?.code?.description).toContain('bad_request');
   });
 
   it('attaches a default ErrorResponse to every operation 4xx/5xx slot', () => {

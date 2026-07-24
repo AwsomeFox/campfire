@@ -36,7 +36,7 @@ export const FIELD_ERROR_SCHEMA = {
 export const ERROR_RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['status', 'code', 'message'],
+  required: ['status', 'code', 'message', 'requestId'],
   properties: {
     type: {
       type: 'string',
@@ -60,22 +60,10 @@ export const ERROR_RESPONSE_SCHEMA = {
       description:
         'Machine-readable slug for the error category. Stable across releases; ' +
         'switch on this rather than `message` (which may evolve). ' +
-        'Values: `bad_request`, `validation_failed`, `unauthorized`, `forbidden`, ' +
-        '`not_found`, `conflict`, `payload_too_large`, `too_many_requests`, ' +
-        '`unprocessable_entity`, `internal_error`, `error`.',
-      enum: [
-        'bad_request',
-        'validation_failed',
-        'unauthorized',
-        'forbidden',
-        'not_found',
-        'conflict',
-        'payload_too_large',
-        'too_many_requests',
-        'unprocessable_entity',
-        'internal_error',
-        'error',
-      ],
+        'Canonical HTTP-derived values: `bad_request`, `validation_failed`, `unauthorized`, ' +
+        '`forbidden`, `not_found`, `conflict`, `payload_too_large`, `too_many_requests`, ' +
+        '`unprocessable_entity`, `internal_error`, `error`. Domain-specific codes ' +
+        '(e.g. `STALE_WRITE`, `COMBATANT_IDENTITY_CONFLICT`) are also valid.',
       example: 'not_found',
     },
     message: {
@@ -158,6 +146,9 @@ export function registerErrorSchemas(document: {
             description: errorDescription(status),
             content: {
               'application/json': {
+                schema: { $ref: `#/components/schemas/${ERROR_RESPONSE_SCHEMA_NAME}` },
+              },
+              'application/problem+json': {
                 schema: { $ref: `#/components/schemas/${ERROR_RESPONSE_SCHEMA_NAME}` },
               },
             },

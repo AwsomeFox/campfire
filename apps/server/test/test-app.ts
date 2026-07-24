@@ -5,7 +5,7 @@ import express from 'express';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
-import { resolveRequestId } from '../src/common/api-error.envelope';
+import { resolveRequestIdFromHeader } from '../src/common/api-error.envelope';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module';
 
@@ -83,7 +83,7 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
   // on every response so e2e suites that assert on the header see the production
   // shape, and the AllExceptionsFilter can reuse the same id on error envelopes.
   app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const requestId = resolveRequestId(req.headers['x-request-id'] as string | undefined);
+    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
     (req as { requestId?: string }).requestId = requestId;
     res.setHeader('X-Request-Id', requestId);
     next();
@@ -138,7 +138,7 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   // Issue #682 — same per-request id middleware + global exception filter as
   // the production wiring (mirrors createTestApp above).
   app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const requestId = resolveRequestId(req.headers['x-request-id'] as string | undefined);
+    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
     (req as { requestId?: string }).requestId = requestId;
     res.setHeader('X-Request-Id', requestId);
     next();

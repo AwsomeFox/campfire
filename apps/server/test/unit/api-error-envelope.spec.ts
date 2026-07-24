@@ -15,6 +15,7 @@ import {
   codeForStatus,
   normalizeError,
   resolveRequestId,
+  resolveRequestIdFromHeader,
 } from '../../src/common/api-error.envelope';
 
 /**
@@ -263,5 +264,9 @@ describe('api-error.envelope — resolveRequestId', () => {
   it('rejects inbound values containing illegal characters', () => {
     const id = resolveRequestId('bad id with spaces');
     expect(id).not.toBe('bad id with spaces');
+  });
+
+  it('uses the first value when the header is an array', () => {
+    expect(resolveRequestIdFromHeader(['abc-123', 'ignored'])).toBe('abc-123');
   });
 });
