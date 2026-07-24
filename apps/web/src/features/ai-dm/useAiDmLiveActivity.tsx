@@ -35,6 +35,10 @@ import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChi
 export interface AiDmEncounterActivity {
   chip: ToolChip;
   at: number;
+  /** Source tool event — toast/announce must key off this, not global `lastToolEvent`. */
+  event: ToolStreamEvent;
+  /** Server-derived encounter the tool mutated, when present (#825). Survives chip re-resolve. */
+  encounterId?: number;
 }
 
 export interface AiDmLiveActivityState {
@@ -47,7 +51,7 @@ export interface AiDmLiveActivityState {
   /** The most recent `tool` event of any resource, for a generic "AI just acted" signal. */
   lastToolEvent: ToolStreamEvent | null;
   lastToolAt: number | null;
-  /** The most recent tool event that touched the encounter/combat resource (chip pre-resolved). */
+  /** The most recent encounter-facing tool event (encounter/combat + party-state grants). */
   encounterActivity: AiDmEncounterActivity | null;
   /**
    * Monotonic count of `tool` events with `proposed: true` — a DM nav badge / dashboard
@@ -105,10 +109,17 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       onEvent: (event: AiDmStreamEvent) => {
         setState((prev) => reduce(prev, event));
         if (event.type === 'tool' && campaignId !== undefined) {
-          invalidateForToolEvent(queryClient, event, { campaignId });
+          // Pass the event's encounterId so invalidation targets the fight that changed (#825).
+          invalidateForToolEvent(queryClient, event, {
+            campaignId,
+            encounterId: event.encounterId,
+          });
         }
       },
       onReconnect: () => {
+        if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
+      },
+      onStreamRecovery: () => {
         if (campaignId !== undefined) invalidateAiDm(queryClient, campaignId);
       },
     },
@@ -130,8 +141,17 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       const at = Date.now();
       const next: AiDmLiveActivityState = { ...prev, lastToolEvent: event, lastToolAt: at };
       if (event.proposed) next.proposalFiledCount = prev.proposalFiledCount + 1;
-      if (toolResource(event.name) === 'encounter') {
-        next.encounterActivity = { chip: resolveToolActivity(event, { campaignId: event.campaignId }), at };
+      const resource = toolResource(event.name);
+      if (resource === 'encounter' || resource === 'party') {
+        next.encounterActivity = {
+          chip: resolveToolActivity(event, {
+            campaignId: event.campaignId,
+            encounterId: event.encounterId,
+          }),
+          at,
+          event,
+          encounterId: event.encounterId,
+        };
       }
       return next;
     }

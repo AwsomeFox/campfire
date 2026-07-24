@@ -9,38 +9,55 @@
  *  - Players/viewers see only revealed maps/images (portraits are omitted — those
  *    live on character cards).
  */
-import { useCallback, useEffect, useState } from 'react';
-import type { Attachment, Role } from '@campfire/schema';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import type { Attachment } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { shareInFlightRef } from '../../lib/shareInFlight';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 
-export function HandoutsCard({
-  campaignId,
-  role,
-}: {
-  campaignId: number;
-  role: Role | null;
-}) {
-  const isDm = role === 'dm';
+export function HandoutsCard({ campaignId }: { campaignId: number }) {
+  const { isDm, canDmWrite } = useCampaignAccess();
   const [items, setItems] = useState<Attachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<number | null>(null);
+  // Concurrent load()/Retry callers share one promise so `await load()` never
+  // resolves before the in-flight attachments fetch settles (#691).
+  const loadInFlight = useRef<Promise<void> | null>(null);
+  // Tracks which campaign the card is currently bound to so a late response
+  // from a previous campaignId cannot overwrite items/error/loading.
+  const activeCampaignIdRef = useRef(campaignId);
 
-  const load = useCallback(async () => {
-    try {
-      const list = await api.get<Attachment[]>(`${API}/campaigns/${campaignId}/attachments`);
-      setItems(list);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
-    }
+  const load = useCallback(() => {
+    return shareInFlightRef(loadInFlight, async () => {
+      const forCampaignId = campaignId;
+      setLoading(true);
+      try {
+        const list = await api.get<Attachment[]>(`${API}/campaigns/${forCampaignId}/attachments`);
+        if (activeCampaignIdRef.current !== forCampaignId) return;
+        setItems(list);
+        setError(null);
+      } catch (err) {
+        if (activeCampaignIdRef.current !== forCampaignId) return;
+        setError(err instanceof ApiError ? err.message : "Couldn't load handouts.");
+      } finally {
+        if (activeCampaignIdRef.current === forCampaignId) {
+          setLoading(false);
+        }
+      }
+    });
   }, [campaignId]);
 
   useEffect(() => {
+    activeCampaignIdRef.current = campaignId;
+    // Drop any prior campaign's shared promise so the new campaign never awaits
+    // (or applies) the wrong in-flight fetch.
+    loadInFlight.current = null;
     void load();
-  }, [load]);
+  }, [load, campaignId]);
 
   async function toggleReveal(a: Attachment) {
     setBusyId(a.id);
@@ -59,7 +76,7 @@ export function HandoutsCard({
   const visible = (items ?? []).filter((a) => (isDm ? true : a.kind !== 'portrait'));
 
   return (
-    <div className="card elev-sm" style={{ padding: 0, overflow: 'hidden' }}>
+    <div className="card elev-sm" data-testid="dashboard-handouts" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px' }}>
         <span className="card-kicker">Handouts</span>
         <div style={{ flex: 1 }} />
@@ -68,7 +85,7 @@ export function HandoutsCard({
 
       {error && (
         <div style={{ padding: '0 14px 8px' }}>
-          <ErrorNote message={error} onRetry={() => setError(null)} />
+          <ErrorNote message={error} pending={loading} onRetry={load} />
         </div>
       )}
 
@@ -102,7 +119,7 @@ export function HandoutsCard({
                     <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
                 </div>
-                {isDm && (
+                {canDmWrite && (
                   <Btn
                     ghost
                     className="!min-h-0 !py-1 text-[11px]"
@@ -116,7 +133,7 @@ export function HandoutsCard({
             ))
           )}
 
-          {isDm && (
+          {canDmWrite && (
             <div style={{ marginTop: 4 }}>
               <ImageUpload
                 campaignId={campaignId}

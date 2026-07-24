@@ -13,10 +13,10 @@ import { Link, useParams } from 'react-router-dom';
 import type { Quest, QuestChanges, QuestListItem } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { PageTitle } from '../../components/PageTitle';
 
 // "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
 // times read consistently across the app.
@@ -67,9 +67,7 @@ export default function QuestListPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [quests, setQuests] = useState<QuestListItem[]>([]);
   const [changes, setChanges] = useState<Map<number, ChangeKind>>(new Map());
@@ -152,10 +150,9 @@ export default function QuestListPage() {
   return (
     <div data-testid="quest-list-surface" className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>{t('quests.title')}</h3>
+        <PageTitle>{t('quests.title')}</PageTitle>
         <div style={{ flex: 1 }} />
-        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
-        {isDm && (
+        {canDmWrite && (
           <Link to={`/c/${cid}/quests/new`} className="btn btn-primary" style={{ fontSize: 13 }}>
             {t('quests.newQuest')}
           </Link>

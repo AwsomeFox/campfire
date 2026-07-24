@@ -16,6 +16,24 @@ type MemberCreateInput = z.infer<typeof MemberCreate>;
 type MemberUpdateInput = z.infer<typeof MemberUpdate>;
 type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
+/**
+ * SQLITE_CONSTRAINT_* on a unique-index race (issue #819 exclusive character seat).
+ * Mirrors the combatants / rules helpers — better-sqlite3 surfaces these codes on
+ * a constraint violation; we only care about UNIQUE here.
+ */
+function isUniqueConstraintError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY';
+}
+
+/** Outcome of resolving an exclusive character seat assignment inside a tx. */
+type CharacterSeatResolution = {
+  characterName: string;
+  /** Prior seat holder user id when a confirmed transfer cleared their link. */
+  previousHolderUserId: number | null;
+  transferred: boolean;
+};
+
 @Injectable()
 export class MembersService {
   constructor(
@@ -126,20 +144,118 @@ export class MembersService {
    * characterId is an FK-shaped field that previously accepted any integer with no
    * existence/campaign check — a nonexistent id, or another campaign's character id,
    * would silently pass through and get denormalized-joined against on listForCampaign.
+   * Returns the character row when present so callers can reuse name/owner without a
+   * second round-trip (issue #819 exclusive-seat checks).
    */
   private validateCharacterRefTx(
     tx: SyncDb,
     characterId: number | null | undefined,
     campaignId: number,
-  ): void {
-    if (characterId == null) return;
+  ): { id: number; name: string; ownerUserId: string | null } | null {
+    if (characterId == null) return null;
     const row = tx
-      .select({ id: characters.id })
+      .select({ id: characters.id, name: characters.name, ownerUserId: characters.ownerUserId })
       .from(characters)
       .where(and(eq(characters.id, characterId), eq(characters.campaignId, campaignId)))
       .limit(1)
       .get();
     if (!row) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+    return row;
+  }
+
+  /**
+   * Issue #819 — exclusive character seat.
+   *
+   * A character may be linked from at most one campaign_members row. Linking it to
+   * a different member (or claiming it while another member owns it via
+   * characters.ownerUserId) requires `confirmTransfer: true`. Without confirmation
+   * the write is rejected with 409 CHARACTER_SEAT_TAKEN so the UI can ask
+   * "Transfer Aria from Alice to Bob?" before committing.
+   *
+   * On a confirmed transfer, the previous seat's characterId is cleared in the
+   * same transaction as the new link (and ownership sync), so the unique index
+   * `idx_campaign_members_character` and the membership pointer stay consistent.
+   */
+  private claimExclusiveCharacterSeatTx(
+    tx: SyncDb,
+    campaignId: number,
+    characterId: number,
+    assigneeUserId: number,
+    confirmTransfer: boolean | undefined,
+    opts?: { excludeMemberId?: number },
+  ): CharacterSeatResolution {
+    const character = this.validateCharacterRefTx(tx, characterId, campaignId);
+    // validateCharacterRefTx only returns null when characterId is null — unreachable here.
+    if (!character) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+
+    const seat = tx
+      .select({
+        id: campaignMembers.id,
+        userId: campaignMembers.userId,
+      })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.characterId, characterId)))
+      .limit(1)
+      .get();
+
+    // Same seat / same assignee — idempotent re-link, no transfer.
+    if (seat && (seat.id === opts?.excludeMemberId || seat.userId === assigneeUserId)) {
+      return { characterName: character.name, previousHolderUserId: null, transferred: false };
+    }
+
+    let holderUserId: number | null = seat?.userId ?? null;
+    const holderMemberId: number | null = seat?.id ?? null;
+
+    // Ownership-only holder: character.ownerUserId points at another principal while
+    // no seat links this character. Overwriting that ownership also needs confirmation.
+    if (holderUserId == null && character.ownerUserId != null && character.ownerUserId !== String(assigneeUserId)) {
+      const ownerNumeric = Number(character.ownerUserId);
+      holderUserId = Number.isInteger(ownerNumeric) && ownerNumeric > 0 ? ownerNumeric : null;
+      if (!confirmTransfer) {
+        throw new ConflictException({
+          code: 'CHARACTER_SEAT_TAKEN',
+          message:
+            `Character "${character.name}" is already owned by another member — ` +
+            'resend with confirmTransfer: true to transfer the exclusive seat and ownership',
+          characterId,
+          holderMemberId: null,
+          holderUserId,
+        });
+      }
+      return {
+        characterName: character.name,
+        previousHolderUserId: holderUserId,
+        transferred: true,
+      };
+    }
+
+    if (holderUserId != null && holderUserId !== assigneeUserId) {
+      if (!confirmTransfer) {
+        throw new ConflictException({
+          code: 'CHARACTER_SEAT_TAKEN',
+          message:
+            `Character "${character.name}" is already assigned to another member — ` +
+            'resend with confirmTransfer: true to transfer the exclusive seat and ownership',
+          characterId,
+          holderMemberId,
+          holderUserId,
+        });
+      }
+      if (holderMemberId != null) {
+        tx
+          .update(campaignMembers)
+          .set({ characterId: null, updatedAt: nowIso() })
+          .where(and(eq(campaignMembers.id, holderMemberId), eq(campaignMembers.campaignId, campaignId)))
+          .run();
+      }
+      return {
+        characterName: character.name,
+        previousHolderUserId: holderUserId,
+        transferred: true,
+      };
+    }
+
+    return { characterName: character.name, previousHolderUserId: null, transferred: false };
   }
 
   /**
@@ -149,6 +265,9 @@ export class MembersService {
    * the character's ownerUserId by hand. Unlinking (or re-linking to another character)
    * clears ownership only when the character is still owned by this member, so an explicit
    * DM reassignment via PATCH /characters/:id is never clobbered.
+   *
+   * Issue #819: the *assignment* of nextCharacterId is gated by
+   * {@link claimExclusiveCharacterSeatTx} so this sync never silently steals a seat.
    */
   private syncCharacterOwnershipTx(
     tx: SyncDb,
@@ -175,34 +294,100 @@ export class MembersService {
     }
   }
 
+  /** Best-effort notify + SSE after a character seat/ownership change (issue #819). */
+  private async publishCharacterSeatChange(
+    campaignId: number,
+    characterId: number,
+    characterName: string,
+    actor: RequestUser,
+    assigneeUserId: number,
+    previousHolderUserId: number | null,
+    transferred: boolean,
+  ): Promise<void> {
+    // Permission-bearing sheet change — clients refetch via character.updated.
+    this.events.emit({
+      type: 'character.updated',
+      campaignId,
+      characterId,
+      userId: actor.id,
+    });
+
+    if (transferred && previousHolderUserId != null) {
+      await this.notifications.notifyUser(previousHolderUserId, campaignId, actor, {
+        type: 'character_reassigned',
+        title: `${characterName} was transferred to another player`,
+        body: 'You no longer own this character sheet or its encounter controls.',
+        entityType: 'character',
+        entityId: characterId,
+        actorName: actor.name,
+      });
+    }
+    await this.notifications.notifyUser(assigneeUserId, campaignId, actor, {
+      type: 'character_reassigned',
+      title: transferred
+        ? `${characterName} was transferred to you`
+        : `${characterName} was linked to you`,
+      body: 'You can edit this character sheet and use its encounter controls.',
+      entityType: 'character',
+      entityId: characterId,
+      actorName: actor.name,
+    });
+  }
+
   async create(campaignId: number, input: MemberCreateInput, actor: RequestUser): Promise<CampaignMember> {
     const ts = nowIso();
-    const row = this.db.transaction((tx) => {
-      this.assignableUserTx(tx, input.userId);
-      const existing = tx
-        .select({ id: campaignMembers.id })
-        .from(campaignMembers)
-        .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.userId)))
-        .limit(1)
-        .get();
-      if (existing) throw new ConflictException('User is already a member of this campaign');
-      this.validateCharacterRefTx(tx, input.characterId, campaignId);
+    let seatResolution: CharacterSeatResolution | null = null;
+    let row: typeof campaignMembers.$inferSelect;
+    try {
+      row = this.db.transaction((tx) => {
+        this.assignableUserTx(tx, input.userId);
+        const existing = tx
+          .select({ id: campaignMembers.id })
+          .from(campaignMembers)
+          .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, input.userId)))
+          .limit(1)
+          .get();
+        if (existing) throw new ConflictException('User is already a member of this campaign');
 
-      const inserted = tx
-        .insert(campaignMembers)
-        .values({
-          campaignId,
-          userId: input.userId,
-          role: input.role,
-          characterId: input.characterId ?? null,
-          createdAt: ts,
-          updatedAt: ts,
-        })
-        .returning()
-        .get();
-      this.syncCharacterOwnershipTx(tx, input.userId, null, input.characterId ?? null, ts);
-      return inserted;
-    });
+        if (input.characterId != null) {
+          seatResolution = this.claimExclusiveCharacterSeatTx(
+            tx,
+            campaignId,
+            input.characterId,
+            input.userId,
+            input.confirmTransfer,
+          );
+        } else {
+          this.validateCharacterRefTx(tx, input.characterId, campaignId);
+        }
+
+        const inserted = tx
+          .insert(campaignMembers)
+          .values({
+            campaignId,
+            userId: input.userId,
+            role: input.role,
+            characterId: input.characterId ?? null,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .get();
+        this.syncCharacterOwnershipTx(tx, input.userId, null, input.characterId ?? null, ts);
+        return inserted;
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err) && input.characterId != null) {
+        throw new ConflictException({
+          code: 'CHARACTER_SEAT_TAKEN',
+          message:
+            `Character ${input.characterId} is already assigned to another member — ` +
+            'resend with confirmTransfer: true to transfer the exclusive seat and ownership',
+          characterId: input.characterId,
+        });
+      }
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(actor),
@@ -228,6 +413,19 @@ export class MembersService {
       actorName: actor.name,
     });
 
+    if (input.characterId != null && seatResolution) {
+      const resolved: CharacterSeatResolution = seatResolution;
+      await this.publishCharacterSeatChange(
+        campaignId,
+        input.characterId,
+        resolved.characterName,
+        actor,
+        input.userId,
+        resolved.previousHolderUserId,
+        resolved.transferred,
+      );
+    }
+
     const [full] = await this.listForCampaign(campaignId).then((all) => all.filter((m) => m.id === row.id));
     return full;
   }
@@ -239,42 +437,75 @@ export class MembersService {
     if (input.characterId !== undefined) update.characterId = input.characterId;
 
     // Re-read the member, count usable DMs, validate references, mutate the role,
-    // and sync character ownership inside one synchronous SQLite transaction.
-    // Concurrent REST/MCP/account-lifecycle changes therefore serialize at the
-    // same invariant (#654 + #849).
-    this.db.transaction((tx) => {
-      const row = tx
-        .select({ member: campaignMembers, disabled: users.disabled })
-        .from(campaignMembers)
-        .innerJoin(users, eq(campaignMembers.userId, users.id))
-        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
-        .limit(1)
-        .get();
-      if (!row) throw new NotFoundException(`Member ${memberId} not found`);
+    // claim/transfer an exclusive character seat, and sync ownership inside one
+    // synchronous SQLite transaction. Concurrent REST/MCP/account-lifecycle
+    // changes therefore serialize at the same invariant (#654 + #849 + #819).
+    let seatResolution: CharacterSeatResolution | null = null;
+    let assigneeUserId: number | null = null;
+    let previousCharacterId: number | null = null;
+    let priorRole: CampaignMember['role'] | null = null;
+    try {
+      this.db.transaction((tx) => {
+        const row = tx
+          .select({ member: campaignMembers, disabled: users.disabled })
+          .from(campaignMembers)
+          .innerJoin(users, eq(campaignMembers.userId, users.id))
+          .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+          .limit(1)
+          .get();
+        if (!row) throw new NotFoundException(`Member ${memberId} not found`);
 
-      const promotingDisabledDm = input.role === 'dm' && row.member.role !== 'dm' && row.disabled;
-      if (promotingDisabledDm) {
-        throw new BadRequestException(`User ${row.member.userId} is disabled and cannot be assigned as dm`);
+        assigneeUserId = row.member.userId;
+        previousCharacterId = row.member.characterId;
+        priorRole = row.member.role as CampaignMember['role'];
+
+        const promotingDisabledDm = input.role === 'dm' && row.member.role !== 'dm' && row.disabled;
+        if (promotingDisabledDm) {
+          throw new BadRequestException(`User ${row.member.userId} is disabled and cannot be assigned as dm`);
+        }
+
+        const demotingUsableDm =
+          input.role !== undefined && input.role !== 'dm' && row.member.role === 'dm' && !row.disabled;
+        if (demotingUsableDm && this.usableDmCountTx(tx, campaignId) <= 1) {
+          throw new ConflictException('Cannot demote the last dm of this campaign');
+        }
+
+        // Preserve the established error precedence: last-DM conflict before an
+        // invalid / contested character link in a combined patch (reviewed in #654).
+        if (input.characterId != null) {
+          seatResolution = this.claimExclusiveCharacterSeatTx(
+            tx,
+            campaignId,
+            input.characterId,
+            row.member.userId,
+            input.confirmTransfer,
+            { excludeMemberId: memberId },
+          );
+        } else {
+          this.validateCharacterRefTx(tx, input.characterId, campaignId);
+        }
+
+        tx.update(campaignMembers)
+          .set(update)
+          .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
+          .run();
+
+        if (input.characterId !== undefined && row.member.characterId !== input.characterId) {
+          this.syncCharacterOwnershipTx(tx, row.member.userId, row.member.characterId, input.characterId, ts);
+        }
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err) && input.characterId != null) {
+        throw new ConflictException({
+          code: 'CHARACTER_SEAT_TAKEN',
+          message:
+            `Character ${input.characterId} is already assigned to another member — ` +
+            'resend with confirmTransfer: true to transfer the exclusive seat and ownership',
+          characterId: input.characterId,
+        });
       }
-
-      const demotingUsableDm =
-        input.role !== undefined && input.role !== 'dm' && row.member.role === 'dm' && !row.disabled;
-      if (demotingUsableDm && this.usableDmCountTx(tx, campaignId) <= 1) {
-        throw new ConflictException('Cannot demote the last dm of this campaign');
-      }
-
-      // Preserve the established error precedence: last-DM conflict before an
-      // invalid character link in a combined patch (reviewed in #654).
-      this.validateCharacterRefTx(tx, input.characterId, campaignId);
-      tx.update(campaignMembers)
-        .set(update)
-        .where(and(eq(campaignMembers.id, memberId), eq(campaignMembers.campaignId, campaignId)))
-        .run();
-
-      if (input.characterId !== undefined && row.member.characterId !== input.characterId) {
-        this.syncCharacterOwnershipTx(tx, row.member.userId, row.member.characterId, input.characterId, ts);
-      }
-    });
+      throw err;
+    }
 
     await this.audit.log({
       actor: auditActor(actor),
@@ -286,9 +517,64 @@ export class MembersService {
       detail: JSON.stringify(input),
     });
 
+    if (
+      input.characterId != null &&
+      seatResolution &&
+      assigneeUserId != null &&
+      previousCharacterId !== input.characterId
+    ) {
+      const resolved: CharacterSeatResolution = seatResolution;
+      await this.publishCharacterSeatChange(
+        campaignId,
+        input.characterId,
+        resolved.characterName,
+        actor,
+        assigneeUserId,
+        resolved.previousHolderUserId,
+        resolved.transferred,
+      );
+    } else if (
+      input.characterId !== undefined &&
+      input.characterId !== previousCharacterId &&
+      (previousCharacterId != null || input.characterId != null)
+    ) {
+      // Unlink or self-only reassignment still invalidates permission state.
+      const changedId = input.characterId ?? previousCharacterId;
+      if (changedId != null) {
+        this.events.emit({
+          type: 'character.updated',
+          campaignId,
+          characterId: changedId,
+          userId: actor.id,
+        });
+        if (previousCharacterId != null && input.characterId != null && previousCharacterId !== input.characterId) {
+          this.events.emit({
+            type: 'character.updated',
+            campaignId,
+            characterId: previousCharacterId,
+            userId: actor.id,
+          });
+        }
+      }
+    }
+
     const all = await this.listForCampaign(campaignId);
     const updated = all.find((m) => m.id === memberId);
     if (!updated) throw new NotFoundException(`Member ${memberId} not found`);
+
+    // Issue #437: publish role changes so the affected member's open browsers can
+    // invalidate cached /me memberships immediately (promote → DM nav; demote →
+    // drop forbidden controls) without a reload. Character-link-only patches stay quiet.
+    if (input.role !== undefined && priorRole != null && updated.role !== priorRole) {
+      this.events.emit({
+        type: 'membership.updated',
+        campaignId,
+        userId: String(updated.userId),
+        memberId: updated.id,
+        role: updated.role,
+      });
+    }
+
     return updated;
   }
 

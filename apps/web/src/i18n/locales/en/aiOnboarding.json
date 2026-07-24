@@ -66,7 +66,7 @@
     },
     "transparency": {
       "title": "What the AI sees and does",
-      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. The two modes have different authority. Co-DM asks: it only drafts proposals, and a human DM must approve every one before anything changes — the AI never writes to canon directly. Driver acts: the AI holds the DM seat and runs the session itself — narrating, rolling dice, applying HP and conditions, and resolving live play within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for DM review. In Driver mode the DM and the table can pause the AI or take the seat back at any time from the Table page."
+      "body": "The AI DM is given this campaign's summary and its session-zero charter — never any other campaign's data. If you configure an external AI provider, that context is sent to the endpoint you chose; see the AI privacy notice in provider settings for the full list and retention terms. The two modes have different authority. Co-DM asks: it only drafts proposals, and a human DM must approve every one before anything changes — the AI never writes to canon directly. Driver acts: the AI holds the DM seat and runs the session itself — narrating, rolling dice, applying HP and conditions, and resolving live play within the budget you set. Canon edits (new NPCs, quests, locations) still become proposals for DM review. In Driver mode the DM and the table can pause the AI or take the seat back at any time from the Table page."
     },
     "gate": {
       "openFix": "Fix this",

@@ -1,6 +1,7 @@
 import request from 'supertest';
 import type { Database } from 'better-sqlite3';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { APP_VERSION } from '../src/common/build-metadata';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 
 describe('healthz (e2e)', () => {
@@ -17,13 +18,13 @@ describe('healthz (e2e)', () => {
   it('GET /healthz -> {ok:true, version} with no auth', async () => {
     const res = await request(ctx.app.getHttpServer()).get('/healthz');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, version: expect.any(String) });
+    expect(res.body).toEqual({ ok: true, version: APP_VERSION });
   });
 
   it('GET /readyz -> {ok:true, version} with no auth while the DB answers', async () => {
     const res = await request(ctx.app.getHttpServer()).get('/readyz');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, version: expect.any(String) });
+    expect(res.body).toEqual({ ok: true, version: APP_VERSION });
   });
 
   // Issue #52: /healthz is liveness-only, so with a broken DB the process must
@@ -40,10 +41,10 @@ describe('healthz (e2e)', () => {
 
     const ready = await request(ctx.app.getHttpServer()).get('/readyz');
     expect(ready.status).toBe(503);
-    expect(ready.body).toEqual({ ok: false, version: expect.any(String), error: 'database unavailable' });
+    expect(ready.body).toEqual({ ok: false, version: APP_VERSION, error: 'database unavailable' });
 
     const live = await request(ctx.app.getHttpServer()).get('/healthz');
     expect(live.status).toBe(200);
-    expect(live.body).toEqual({ ok: true, version: expect.any(String) });
+    expect(live.body).toEqual({ ok: true, version: APP_VERSION });
   });
 });

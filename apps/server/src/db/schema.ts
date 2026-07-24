@@ -17,7 +17,17 @@ export const campaigns = sqliteTable('campaigns', {
   // When true, only the DM may award XP / level up characters (issue #270). Added in
   // older DBs via migrateCampaignsTableForDmControlsProgression() — see db/db.module.ts.
   dmControlsProgression: integer('dm_controls_progression', { mode: 'boolean' }).notNull().default(false),
+  // Issue #413: turn-advancement controls. dmControlsTurns keeps advancement DM-only;
+  // requireDmTurnConfirmation stages a player end-turn for DM approval. Added by migration
+  // on older DBs — see db/db.module.ts migrateCampaignsTableForTurnControls().
+  dmControlsTurns: integer('dm_controls_turns', { mode: 'boolean' }).notNull().default(false),
+  requireDmTurnConfirmation: integer('require_dm_turn_confirmation', { mode: 'boolean' }).notNull().default(false),
   publicRecapSharingEnabled: integer('public_recap_sharing_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #857: when false, public invite preview/accept/join all 404 with the
+  // uniform inactive message. Archive/trash auto-clears this; restore/unarchive
+  // does NOT flip it back — deliberate reactivation via the invites policy
+  // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
+  publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -40,6 +50,13 @@ export const campaigns = sqliteTable('campaigns', {
   // via the storage console; enforced on attachment upload. Nullable in older DBs
   // pre-migration; see db/db.module.ts ALTER TABLE note.
   storageQuotaBytes: integer('storage_quota_bytes'),
+  // The single authoritative live encounter for this campaign (issue #744). A campaign
+  // may have at most one 'running' fight — Start/Reopen set this pointer inside the
+  // same transaction that flips status to 'running', and End clears it. Dashboard /
+  // Player Display / AI Table read this (falling back to a 'running' scan for back-compat)
+  // instead of picking an arbitrary first result. Nullable in older DBs pre-migration;
+  // see db/db.module.ts migrateCampaignsTableForActiveEncounter().
+  activeEncounterId: integer('active_encounter_id'),
   // Soft-delete / trash timestamp (issue #116). NULL => live; an ISO timestamp => the
   // campaign is trashed: excluded from normal listings while its rows + on-disk uploads
   // survive for a grace period, restorable until an explicit purge. Migrated via
@@ -404,6 +421,12 @@ export const comments = sqliteTable('comments', {
   authorName: text('author_name').notNull().default(''),
   body: text('body').notNull(),
   inCharacter: integer('in_character', { mode: 'boolean' }).notNull().default(false),
+  // Immutable creation-time character attribution (issue #787). character_id is
+  // deliberately a soft reference: deleting/trashed characters must not erase or
+  // rewrite historical dialogue. The copied name/avatar remain display-authoritative.
+  characterId: integer('character_id'),
+  characterName: text('character_name'),
+  characterAvatarUrl: text('character_avatar_url'),
   // Soft delete / tombstone (issue #503). NULL = live; an ISO timestamp means the
   // comment is tombstoned (body redacted in API responses, replies preserved).
   // Nullable/absent in older DBs pre-migration; see db/db.module.ts migrateCommentsTableForSoftDelete().
@@ -436,12 +459,24 @@ export const comments = sqliteTable('comments', {
 export const entityRevisions = sqliteTable('entity_revisions', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   campaignId: integer('campaign_id').notNull(),
-  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location'
+  entityType: text('entity_type').notNull(), // 'session' | 'quest' | 'npc' | 'location' | 'faction' | 'note'
   entityId: integer('entity_id').notNull(),
-  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body }
+  snapshot: text('snapshot').notNull().default('{}'), // JSON: { recap } | { body } — prose OF THIS VERSION
+  // Version author (issue #813). Empty when authorship_known=0 (legacy rows).
   authorUserId: text('author_user_id').notNull().default(''),
   authorName: text('author_name').notNull().default(''),
-  createdAt: text('created_at').notNull(),
+  authorSource: text('author_source').notNull().default('human'), // 'human' | 'ai' | 'tool'
+  authorSourceDetail: text('author_source_detail').notNull().default(''),
+  createdAt: text('created_at').notNull().default(''), // authored-at; '' when unknown (legacy)
+  // Replacing actor/time — null replaced_at marks the current tip (still live).
+  replacedByUserId: text('replaced_by_user_id').notNull().default(''),
+  replacedByName: text('replaced_by_name').notNull().default(''),
+  replacedBySource: text('replaced_by_source').notNull().default('human'),
+  replacedBySourceDetail: text('replaced_by_source_detail').notNull().default(''),
+  replacedAt: text('replaced_at'),
+  restoredFromRevisionId: integer('restored_from_revision_id'),
+  // 0 for pre-#813 rows: UI must label "Replaced by …" rather than invent authorship.
+  authorshipKnown: integer('authorship_known', { mode: 'boolean' }).notNull().default(true),
 });
 
 export const auditLog = sqliteTable('audit_log', {
@@ -567,6 +602,25 @@ export const membershipIntegrityRepairs = sqliteTable('membership_integrity_repa
   createdAt: text('created_at').notNull(),
 });
 
+/**
+ * Server-level purge tombstones (issue #867). Survive the campaign hard-cascade
+ * (no FK to campaigns) so operators can still discover who purged what, when,
+ * and whether the destructive step completed or failed — even after every
+ * campaign-scoped audit row becomes unreachable (memberships gone). Stores a
+ * hash of the campaign name rather than the plaintext title.
+ */
+export const campaignPurgeTombstones = sqliteTable('campaign_purge_tombstones', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  campaignNameHash: text('campaign_name_hash').notNull(),
+  actor: text('actor').notNull(),
+  // 'requested' | 'completed' | 'failed'
+  status: text('status').notNull(),
+  detail: text('detail').notNull().default(''),
+  requestedAt: text('requested_at').notNull(),
+  completedAt: text('completed_at'),
+});
+
 // DM invite links / join codes — see modules/membership/invites.service.ts.
 // `code` is stored PLAINTEXT, unlike session/PAT tokens (which store sha256):
 // an invite code is a shareable capability the DM re-displays and re-copies from
@@ -688,6 +742,25 @@ export const oauthAccessTokens = sqliteTable('oauth_access_tokens', {
   createdAt: text('created_at').notNull(),
 });
 
+/** Persistent rule-pack import jobs (issue #737). */
+export const importJobs = sqliteTable('import_jobs', {
+  id: text('id').primaryKey(),
+  source: text('source').notNull(),
+  sourceHash: text('source_hash').notNull().default(''),
+  input: text('input').notNull().default('{}'),
+  status: text('status').notNull().default('queued'),
+  progress: text('progress').notNull().default('{}'),
+  cursor: text('cursor'),
+  actorId: text('actor_id').notNull().default(''),
+  startedAt: text('started_at'),
+  updatedAt: text('updated_at').notNull(),
+  completedAt: text('completed_at'),
+  outcome: text('outcome'),
+  errors: text('errors').notNull().default('[]'),
+  createdAt: text('created_at').notNull(),
+});
+
+
 export const rulePacks = sqliteTable('rule_packs', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   slug: text('slug').notNull().unique(),
@@ -768,6 +841,12 @@ export const attachments = sqliteTable('attachments', {
   // New map/image uploads default hidden; portraits default visible. Migrated via
   // migrateAttachmentsTableForHidden().
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Publication state for the filesystem/SQLite recovery protocol (issue #728).
+  // A reserved row counts against quota but is never returned by attachment reads.
+  // It becomes committed only after the final file has been renamed into place and
+  // both the staged bytes and containing directory have been fsynced. Existing rows
+  // are backfilled committed by migrateAttachmentsTableForPublicationState().
+  state: text('state').notNull().default('committed'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -802,6 +881,14 @@ export const encounters = sqliteTable('encounters', {
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
   aoe: text('aoe'),
+  // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
+  // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.
+  // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForGridCalibration).
+  gridOffsetX: real('grid_offset_x').notNull().default(0),
+  gridOffsetY: real('grid_offset_y').notNull().default(0),
+  gridCellHeight: real('grid_cell_height'),
+  gridRotation: real('grid_rotation').notNull().default(0),
+  gridOpacity: real('grid_opacity').notNull().default(0.35),
   // Entity-level secrecy (issue #262) — see quests.hidden. A hidden encounter's roster +
   // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
@@ -846,9 +933,121 @@ export const notifications = sqliteTable('notifications', {
   body: text('body').notNull().default(''),
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
+  commentId: integer('comment_id'), // optional comment focus inside the entity thread (#446)
+  // Issue #820: optional JSON blob (ScheduleNotificationData for session_scheduled).
+  data: text('data'),
   actorName: text('actor_name').notNull().default(''),
   readAt: text('read_at'),
   createdAt: text('created_at').notNull(),
+});
+
+// Issue #789 — per-user, per-campaign, per-category notification mode
+// ('immediate' | 'digest' | 'muted'). Absent row => the category default
+// (immediate). One row per (user, campaign, category); consulted during fan-out.
+export const notificationPreferences = sqliteTable(
+  'notification_preferences',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(), // recipient users.id (FK->users ON DELETE CASCADE in DDL)
+    campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE in DDL
+    category: text('category').notNull(), // NotificationCategory in @campfire/schema
+    mode: text('mode').notNull().default('immediate'), // NotificationDeliveryMode
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    userCampaignCategory: uniqueIndex('idx_notification_prefs_user_campaign_category').on(
+      t.userId,
+      t.campaignId,
+      t.category,
+    ),
+  }),
+);
+
+// Issue #789 — per-user, per-campaign quiet-hours window (local minutes-of-day in
+// `timezone`). Absent row => quiet hours disabled. Suppresses only non-critical
+// IMMEDIATE notifications, which are deferred then flushed once the window passes.
+export const notificationQuietHours = sqliteTable(
+  'notification_quiet_hours',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(),
+    campaignId: integer('campaign_id').notNull(),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+    startMinute: integer('start_minute').notNull().default(1320),
+    endMinute: integer('end_minute').notNull().default(420),
+    timezone: text('timezone').notNull().default('UTC'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    userCampaign: uniqueIndex('idx_notification_quiet_hours_user_campaign').on(t.userId, t.campaignId),
+  }),
+);
+
+// Issue #789 — deferred notification store. Rows land here instead of
+// `notifications` when the recipient's category mode is 'digest', or when an
+// 'immediate' notification arrives inside their quiet-hours window
+// (reason distinguishes the two). NotificationsService.flushDigests() drains
+// eligible rows into real notifications on the digest cadence.
+export const notificationDigestQueue = sqliteTable('notification_digest_queue', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  type: text('type').notNull(),
+  title: text('title').notNull(),
+  body: text('body').notNull().default(''),
+  entityType: text('entity_type'),
+  entityId: integer('entity_id'),
+  commentId: integer('comment_id'),
+  data: text('data'),
+  actorName: text('actor_name').notNull().default(''),
+  reason: text('reason').notNull().default('digest'), // 'digest' | 'quiet_hours'
+  createdAt: text('created_at').notNull(),
+});
+
+// Issue #789 — dedup ledger for scheduled-session reminders and unanswered-RSVP
+// nudges. One row per (schedule, user, kind) guarantees a reminder/nudge is sent
+// at most once, so a reschedule or a retried sweep never double-sends.
+export const notificationReminders = sqliteTable(
+  'notification_reminders',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    scheduledSessionId: integer('scheduled_session_id').notNull(),
+    userId: integer('user_id').notNull(),
+    kind: text('kind').notNull(), // 'session_reminder' | 'rsvp_nudge'
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    sessionUserKind: uniqueIndex('idx_notification_reminders_session_user_kind').on(
+      t.scheduledSessionId,
+      t.userId,
+      t.kind,
+    ),
+  }),
+);
+
+// DM-initiated check requests (issue #415) — one row per (request, target character). A DM
+// asks selected players to roll a check/save with an optional DC + consequence; the targeted
+// player reads their pending row(s) over a permission-checked REST read, rolls once via the
+// existing catalog-roll path, and the row is marked resolved (roll_id links the dice-log roll).
+// Cascades on campaign/character delete so a purge never strands a request.
+export const checkRequests = sqliteTable('check_requests', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE (bootstrap/migration)
+  characterId: integer('character_id').notNull(), // FK->characters ON DELETE CASCADE — the target sheet
+  encounterId: integer('encounter_id'), // optional context link; nullable
+  checkId: text('check_id').notNull(), // stable catalog id, e.g. 'save:DEX'
+  checkLabel: text('check_label').notNull().default(''), // resolved label snapshot ('DEX save')
+  mode: text('mode').notNull().default('flat'), // 'flat' | 'advantage' | 'disadvantage'
+  dc: integer('dc'), // optional difficulty class
+  consequence: text('consequence').notNull().default(''), // DM-authored consequence text
+  status: text('status').notNull().default('pending'), // 'pending' | 'resolved'
+  requestedByUserId: text('requested_by_user_id').notNull(), // RequestUser.id of the DM
+  requestedByName: text('requested_by_name').notNull().default(''),
+  rollId: integer('roll_id'), // dice_rolls.id once resolved; null while pending
+  createdAt: text('created_at').notNull(),
+  resolvedAt: text('resolved_at'),
 });
 
 // Inventory & loot — see modules/inventory. Items belong to the party stash
@@ -865,6 +1064,20 @@ export const inventoryItems = sqliteTable('inventory_items', {
   iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// Issue #782: per-action idempotency for inventory quantity writes. A client-generated
+// key records the committed item JSON so a lost-response retry returns the same
+// result without re-applying a qtyDelta. Fingerprint binds the key to one operation
+// (qty + accompanying mutable fields) — reuse with a different payload is a 409.
+// Rows are pruned opportunistically on write once past the TTL window (created_at).
+export const inventoryQtyIdempotency = sqliteTable('inventory_qty_idempotency', {
+  key: text('key').primaryKey(),
+  itemId: integer('item_id').notNull(),
+  userId: text('user_id').notNull(),
+  fingerprint: text('fingerprint').notNull(),
+  responseJson: text('response_json').notNull(),
+  createdAt: text('created_at').notNull(),
 });
 
 // Party treasury — one coin-totals row per campaign, created lazily on first read/write.
@@ -893,6 +1106,21 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   lastTurnAt: text('last_turn_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+});
+
+// AI DM per-turn usage history (issue #1060). One row per metered turn (driver step or
+// co-DM draft or scribe run). Used to power a per-campaign usage-history endpoint and
+// the DM settings sparkline. Written by AiDmService.meterTurn as best-effort — a
+// failure here must never break the metering transaction, so the insert is fire-and-
+// forget with its own try/catch.
+export const aiDmUsageHistory = sqliteTable('ai_dm_usage_history', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  tokensUsed: integer('tokens_used').notNull(),
+  action: text('action').notNull().default(''), // 'ai-dm.driver.turn' | 'ai-dm.scribe' | ...
+  model: text('model').notNull().default(''),
+  actor: text('actor').notNull().default(''),
+  createdAt: text('created_at').notNull(),
 });
 
 // AI provider config storage (issue #310): provider selection + ENCRYPTED API key
@@ -955,6 +1183,9 @@ export const combatants = sqliteTable('combatants', {
   name: text('name').notNull(),
   initiative: integer('initiative'), // null until rolled
   initMod: integer('init_mod').notNull().default(0),
+  // OSR group-initiative side label (issue #765). Combatants on the same side share one
+  // d6 roll in group-mode systems. Nullable; added by migration on older DBs.
+  initiativeGroup: text('initiative_group'),
   hpCurrent: integer('hp_current').notNull().default(10),
   hpMax: integer('hp_max').notNull().default(10),
   // Temp HP + death-save subsystem (issue #57). Added by migration on older DBs;
@@ -974,14 +1205,44 @@ export const combatants = sqliteTable('combatants', {
   // Token footprint size category (issue #40, phase 2). NOT NULL DEFAULT 'medium'; added by
   // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTokenSize.
   tokenSize: text('token_size').notNull().default('medium'),
+  // Issue #466: character.updatedAt at the last acknowledged sheet↔combatant HP sync
+  // (create/add seed, live mirror, /end write-back, or reopen resync decision). Used as
+  // the compare-and-set token so a re-end cannot silently overwrite intervening sheet HP.
+  // Nullable for legacy rows; first sync after upgrade stamps it.
+  sheetSyncedUpdatedAt: text('sheet_synced_updated_at'),
+  // Issue #413: current-turn workspace state as a JSON CombatantTurnState blob (per-turn
+  // action-economy usage, movement, concentration, delay/ready) and structured active
+  // effects as a JSON ActiveEffect[] blob (duration + save timing). Nullable; added by
+  // migration on older DBs — see db/db.module.ts migrateCombatantsTableForTurnState().
+  // null = defaults (EMPTY_TURN_STATE / []).
+  turnState: text('turn_state'),
+  activeEffects: text('active_effects'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row
 // per meaningful combat mutation (damage/heal, condition add/remove, death, turn/round),
 // written by EncountersService so the run view can show a scrollable history that
 // survives reload. actor/target are denormalized combatant NAMES (nullable) so the log
-// renders even after a combatant is removed; `detail` never carries a monster's exact HP
-// total (only the delta), so listing the log to a non-DM can't leak issue #43's redaction.
+// renders even after a combatant is removed; actor_id/target_id are stable combatant
+// ids for role-aware projection (issue #869). `detail` never carries a monster's exact
+// HP total (only the delta) and must not embed combatant names that could bypass
+// actor/target redaction for hidden NPCs.
+// Durable retry queue for upload paths that survived metadata deletion (issue #727).
+// No FKs: campaign rows may already be purged while bytes remain on disk.
+export const fsDeletionQueue = sqliteTable('fs_deletion_queue', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  relPath: text('rel_path').notNull().unique(),
+  kind: text('kind').notNull(), // 'file' | 'directory'
+  scope: text('scope').notNull(), // 'attachment' | 'campaign_purge'
+  campaignId: integer('campaign_id'),
+  entityId: integer('entity_id'),
+  status: text('status').notNull().default('pending'), // 'held' | 'pending' | 'failed'
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error').notNull().default(''),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
 export const encounterEvents = sqliteTable('encounter_events', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   encounterId: integer('encounter_id').notNull(),
@@ -989,6 +1250,8 @@ export const encounterEvents = sqliteTable('encounter_events', {
   type: text('type').notNull(), // EncounterEventType in @campfire/schema
   actor: text('actor'),
   target: text('target'),
+  actorId: integer('actor_id'),
+  targetId: integer('target_id'),
   detail: text('detail').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });

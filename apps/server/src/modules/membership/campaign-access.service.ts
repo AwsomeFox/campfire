@@ -1,10 +1,32 @@
-import { ForbiddenException, Inject, Injectable } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
 import type { Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns } from '../../db/schema';
 import { roleAtLeast, type RequestUser } from '../../common/user.types';
 import { RoleResolver } from './role-resolver.service';
+
+export type CampaignAccessOpts = {
+  /**
+   * Member-level WRITE endpoints (notes, inbox, dice rolls, …) opt in so archived
+   * (paused/completed) campaigns reject them. Trashed campaigns are rejected for
+   * every non-exempt path regardless of this flag (issue #867).
+   */
+  write?: boolean;
+  /**
+   * Role-gated READS and campaign-management writes that must still work on an
+   * archived campaign (un-archive PATCH, soft-delete, invite list for archive
+   * confirmations). Does NOT exempt trashed campaigns — use `allowTrashed`.
+   */
+  allowArchived?: boolean;
+  /**
+   * Issue #867: only authorized Trash restore / purge may pass this. Normal
+   * reads, writes, streams, MCP, and AI paths must omit it so a trashed
+   * campaign is indistinguishable from missing for former members (404) and
+   * from a never-joined id for everyone else (403).
+   */
+  allowTrashed?: boolean;
+};
 
 /**
  * Thin convenience wrapper around RoleResolver for domain services: resolve
@@ -28,6 +50,11 @@ import { RoleResolver } from './role-resolver.service';
  *    reads for every list/get). Member-level writes — notes, inbox items,
  *    `?proposed=true` proposal submissions, attachment deletes, dice rolls —
  *    opt in with `{ write: true }`.
+ *
+ * TRASH BOUNDARY (issue #867): `deletedAt` is part of the same authoritative
+ * lifecycle gate. A trashed campaign rejects normal reads/writes/streams/
+ * integrations with no existence leak; only Trash list + restore + purge
+ * (via `{ allowTrashed: true }`) may proceed.
  */
 @Injectable()
 export class CampaignAccessService {
@@ -41,17 +68,45 @@ export class CampaignAccessService {
   }
 
   /**
-   * 403 if the campaign is paused/completed (archived => read-only). A missing
-   * campaign row is NOT an error here — the caller's own 404 path (getOrThrow /
-   * FK checks) stays the source of truth for existence.
+   * Authoritative lifecycle snapshot for a campaign: `status` + `deletedAt`.
+   * A missing row returns null — callers keep their own 404 path for existence.
    */
-  async assertWritable(campaignId: number): Promise<void> {
+  async getLifecycle(
+    campaignId: number,
+  ): Promise<{ status: string; deletedAt: string | null } | null> {
     const [row] = await this.db
-      .select({ status: campaigns.status })
+      .select({ status: campaigns.status, deletedAt: campaigns.deletedAt })
       .from(campaigns)
       .where(eq(campaigns.id, campaignId))
       .limit(1);
-    if (row && row.status !== 'active') {
+    return row ?? null;
+  }
+
+  /**
+   * Issue #867: reject missing/trashed campaigns before membership/token binding.
+   * Unlike assertLifecycleAccess this does not distinguish member vs outsider — both
+   * get the same 404 so trashed ids cannot be probed through binding endpoints.
+   */
+  async assertCampaignActive(campaignId: number): Promise<void> {
+    const row = await this.getLifecycle(campaignId);
+    if (!row || row.deletedAt != null) {
+      throw new NotFoundException('Campaign not found');
+    }
+  }
+
+  /**
+   * 403 if the campaign is paused/completed (archived => read-only). A missing
+   * campaign row is NOT an error here — the caller's own 404 path (getOrThrow /
+   * FK checks) stays the source of truth for existence. A trashed campaign is
+   * 404 (issue #867) so write helpers never quietly mutate a frozen row.
+   */
+  async assertWritable(campaignId: number): Promise<void> {
+    const row = await this.getLifecycle(campaignId);
+    if (!row) return;
+    if (row.deletedAt != null) {
+      throw new NotFoundException('Campaign not found');
+    }
+    if (row.status !== 'active') {
       throw new ForbiddenException(
         `Campaign is ${row.status} (read-only) — set its status back to 'active' to make changes`,
       );
@@ -59,12 +114,31 @@ export class CampaignAccessService {
   }
 
   /**
+   * Apply the trash / archive lifecycle gate after membership is known.
+   * Trashed + non-member → same 403 as a missing/foreign id (no existence leak).
+   * Trashed + member → 404, matching GET /campaigns/:id.
+   */
+  private async assertLifecycleAccess(
+    campaignId: number,
+    role: Role | null,
+    opts?: CampaignAccessOpts,
+  ): Promise<void> {
+    const row = await this.getLifecycle(campaignId);
+    if (row?.deletedAt != null && !opts?.allowTrashed) {
+      if (!role) throw new ForbiddenException('Not a member of this campaign');
+      throw new NotFoundException('Campaign not found');
+    }
+  }
+
+  /**
    * 403 if the user is not a member of this campaign at all. Pass
    * `{ write: true }` on member-level WRITE endpoints so archived
-   * (paused/completed) campaigns reject them.
+   * (paused/completed) campaigns reject them. Trashed campaigns are rejected
+   * unless `{ allowTrashed: true }` (issue #867).
    */
-  async requireMember(user: RequestUser, campaignId: number, opts?: { write?: boolean }): Promise<Role> {
+  async requireMember(user: RequestUser, campaignId: number, opts?: CampaignAccessOpts): Promise<Role> {
     const role = await this.roleResolver.effectiveRole(user, campaignId);
+    await this.assertLifecycleAccess(campaignId, role, opts);
     if (!role) throw new ForbiddenException('Not a member of this campaign');
     if (opts?.write) await this.assertWritable(campaignId);
     return role;
@@ -74,14 +148,19 @@ export class CampaignAccessService {
    * 403 if the user is not at least `min` in this campaign (also covers
    * non-membership), or — by default — if the campaign is archived. Role-gated
    * READS (and campaign un-archive/delete) pass `{ allowArchived: true }`.
+   * Trash restore/purge pass `{ allowTrashed: true }` (issue #867).
    */
   async requireRole(
     user: RequestUser,
     campaignId: number,
     min: Role,
-    opts?: { allowArchived?: boolean },
+    opts?: CampaignAccessOpts,
   ): Promise<Role> {
-    const role = await this.requireMember(user, campaignId);
+    const role = await this.requireMember(user, campaignId, {
+      allowTrashed: opts?.allowTrashed,
+      // writability is handled below via allowArchived — don't double-assert
+      // through requireMember's write path.
+    });
     if (!roleAtLeast(role, min)) {
       throw new ForbiddenException(`Requires role: ${min}`);
     }

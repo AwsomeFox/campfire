@@ -11,17 +11,33 @@ import { nowIso } from '../../common/time';
  *    this is what makes the DM "type" live to every player at the table.
  *  - `narration.message` is the fully-aggregated narration for one step (so a client
  *    that missed deltas, or a late joiner, still gets the whole line).
- *  - `tool` is an id-only signal that the AI invoked a Campfire tool (name + whether
- *    it errored + whether it was routed to the proposal queue) — clients refetch the
- *    affected resource through the normal permission-checked REST reads, exactly like
- *    the encounter SSE channel, so nothing DM-only can leak through the stream.
+ *  - `tool` is a thin signal that the AI invoked a Campfire tool (name + whether it
+ *    errored + whether it was routed to the proposal queue + optional resource identity
+ *    such as `encounterId` for encounter mutations, #825) — clients refetch the affected
+ *    resource through the normal permission-checked REST reads, exactly like the encounter
+ *    SSE channel. `encounterHidden` is an INTERNAL projection hint stripped before the
+ *    frame hits the wire; non-DMs never receive a hidden encounter's id.
  *  - `turn.start` / `turn.end` bracket a turn with its stop reason + budget snapshot.
  */
 export type AiDmStreamEvent =
   | { type: 'turn.start'; campaignId: number; at: string }
   | { type: 'narration.delta'; campaignId: number; text: string; at: string }
   | { type: 'narration.message'; campaignId: number; text: string; at: string }
-  | { type: 'tool'; campaignId: number; name: string; isError: boolean; proposed: boolean; at: string }
+  | {
+      type: 'tool';
+      campaignId: number;
+      name: string;
+      isError: boolean;
+      proposed: boolean;
+      /** Encounter the tool mutated, when derived server-side from validated args/results (#825). */
+      encounterId?: number;
+      /**
+       * INTERNAL only — whether that encounter is DM-prep hidden. Stripped by
+       * `projectAiDmToolEventForRole` before SSE delivery; never sent to clients.
+       */
+      encounterHidden?: boolean;
+      at: string;
+    }
   | {
       type: 'turn.end';
       campaignId: number;
@@ -34,7 +50,8 @@ export type AiDmStreamEvent =
   // Stuck ladder (#314). `stuck` fires when detection trips (repeated tool errors, budget
   // exhaustion, max-steps-without-progress, empty narration, a loop, or a raised dispute) and
   // moves the seat to `awaiting_players`; `recovered` fires when a lever gets it running again;
-  // `state` announces any other session-state transition (pause, human takeover, handback);
+  // `state` announces any other session-state transition (pause, human takeover, handback, and
+  // Driver-mode teardown when the seat leaves Driver — #1071);
   // `vote` and `takeover` narrate the player levers. All are thin signals — clients refetch
   // GET /ai-dm/session for the authoritative state, exactly like the `tool` signal.
   | { type: 'stuck'; campaignId: number; reason: string; detail: string; state: string; levers: string[]; at: string }

@@ -28,6 +28,7 @@ const expected = {
   timeline: '/c/7/timeline?event=11#entity-timeline-11',
   item: '/c/7/inventory?item=11#entity-item-11',
   note: '/c/7/notes?note=11#entity-note-11',
+  inbox: '/c/7/inbox?inbox=11#entity-inbox-11',
   arc: '/c/7/storylines?arc=11#entity-arc-11',
   beat: '/c/7/storylines?beat=11#entity-beat-11',
 } as const;
@@ -114,22 +115,64 @@ test.describe('source adapters', () => {
     expect(proposalTargetHref(campaignId, { entityType: 'map', entityId: 11 } as never)).toBeNull();
   });
 
-  test('notifications open session, quest, note, proposal, schedule, and AI destinations', () => {
+  test('notifications route every type to its exact destination (issue #446)', () => {
     const base = {
       id: 1, userId: 2, campaignId, title: 'Notice', body: '', actorName: '', readAt: null,
-      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null,
+      createdAt: '2026-07-22T00:00:00.000Z', entityType: null, entityId: null, commentId: null, data: null,
     } satisfies Omit<Notification, 'type'>;
     const href = (type: Notification['type'], patch: Partial<Notification> = {}) =>
       notificationHref({ ...base, type, ...patch } as Notification);
 
-    expect(href('recap_posted', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
-    expect(href('note_shared', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('comment_reply', { entityType: 'session', entityId: 11 })).toBe(expected.session);
-    expect(href('proposal_submitted')).toBe('/c/7/proposals');
+    // Schedule/RSVP → Schedule tab (+ exact card when entityId is a schedule row).
     expect(href('session_scheduled')).toBe('/c/7/sessions?tab=schedule');
+    expect(href('session_rsvp')).toBe('/c/7/sessions?tab=schedule');
+    expect(href('session_scheduled', { entityId: 11 })).toBe(expected.scheduled_session);
+    expect(href('session_rsvp', { entityId: 11 })).toBe(expected.scheduled_session);
+    // Legacy log-session playedAt ping must NOT open the session log.
+    expect(href('session_scheduled', { entityType: 'session', entityId: 11 })).toBe(
+      '/c/7/sessions?tab=schedule',
+    );
+    // Issue #820: cancelled nights route to a stable cancelled-event detail.
+    expect(href('session_scheduled', {
+      entityId: 11,
+      data: {
+        kind: 'schedule',
+        scheduleId: 11,
+        scheduledAt: '2026-07-22T00:00:00.000Z',
+        durationMinutes: 240,
+        changeType: 'cancelled',
+        changedFields: [],
+        label: 'Game night',
+      },
+    })).toBe('/c/7/sessions?tab=schedule&cancelled=11#cancelled-schedule-11');
+
+    // Quest detail route (not an ignored ?quest= query).
+    expect(href('quest_updated', { entityType: 'quest', entityId: 11 })).toBe(expected.quest);
+    expect(href('quest_updated')).toBe('/c/7/quests');
+
+    // Comment replies: parent entity + optional comment focus (session and non-session).
+    expect(href('comment_reply', { entityType: 'session', entityId: 11, commentId: 19 })).toBe(
+      '/c/7/sessions?session=11&comment=19#entity-comment-19',
+    );
+    expect(href('comment_reply', { entityType: 'quest', entityId: 11, commentId: 19 })).toBe(
+      '/c/7/quests/11?comment=19#entity-comment-19',
+    );
+    expect(href('comment_reply', { entityType: 'npc', entityId: 11 })).toBe(expected.npc);
+    expect(href('comment_reply')).toBe('/c/7');
+
+    expect(href('recap_posted', { entityType: 'session', entityId: 11 })).toBe(expected.session);
+    expect(href('note_shared', { entityType: 'session', entityId: 11 })).toBe(expected.session);
+    expect(href('note_reply')).toBe('/c/7/notes');
+    expect(href('note_shared')).toBe('/c/7/notes');
+    expect(href('proposal_submitted')).toBe('/c/7/proposals');
+    expect(href('proposal_resolved')).toBe('/c/7/proposals');
+    expect(href('inbox_submitted')).toBe('/c/7/inbox');
+    expect(href('inbox_submitted', { entityId: 11 })).toBe(expected.inbox);
     expect(href('ai_dm_alert')).toBe('/c/7/table');
     expect(href('added_to_campaign')).toBe('/c/7');
+    expect(href('character_reassigned', { entityType: 'character', entityId: 11 })).toBe(expected.character);
+    expect(href('recap_share_enabled')).toBe('/c/7');
+    expect(href('recap_share_extended')).toBe('/c/7');
   });
 });
 

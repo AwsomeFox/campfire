@@ -14,7 +14,16 @@
  * Live: refetches on encounter SSE events (issue #4) for snappy combat, plus a
  * slow poll to catch location/quest/party edits that don't emit an event.
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   CampaignSummary,
@@ -22,24 +31,93 @@ import type {
   EncounterWithCombatants,
   HpBand,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
-import { useCampaignEvents } from '../../lib/useCampaignEvents';
-import { useAnnounce } from '../../components/Announcer';
+import { api, API } from '../../lib/api';
+import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
+import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
+import {
+  fingerprintDedupeParts,
+  formatGroupedAnnouncement,
+  formatGroupedCombatantAnnouncement,
+  useAnnounce,
+} from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
+import { encounterMapUrl } from '../../components/ImageUpload';
 import { useAuth } from '../../app/auth';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
+import { STATUS_LABEL } from '../characters/status';
 import {
   safeCombatants,
   safeLocation,
   safeNpcs,
   safeParty,
   safeQuests,
+  type SafeCharacter,
   type SafeCombatant,
+  type SafeNpc,
+  type SafeQuest,
 } from './playerSafe';
+import {
+  PlayerDisplayLoadSequencer,
+  playerDisplaySyncMessage,
+  playerDisplaySyncState,
+  projectionAfterLoadFailure,
+  runPlayerDisplayLoad,
+  type PlayerDisplayFetchers,
+  type PlayerDisplayProjection,
+} from './playerDisplayLoad';
 import { useWakeLock } from './useWakeLock';
+import {
+  DEFAULT_SCENE,
+  initiativeWindow,
+  isSceneId,
+  nextActorIndex,
+  pageCount as pageCountFor,
+  readStoredScene,
+  rotateWindow,
+  SCENE_IDS,
+  SCENE_LABEL,
+  sceneStorageKey,
+  writeStoredScene,
+  hiddenCount,
+  type SceneId,
+} from './playerDisplayScene';
 
-const POLL_MS = 12_000;
+/** Fixed-aspect stage budgets. Chosen so a full page comfortably fits the 16:9
+ * safe area from 720p up to 4K without a scrollbar; overflow past these paginates
+ * (issue #823) rather than falling below the fold. */
+const INIT_PAGE_SIZE = 8;
+const PARTY_PAGE_SIZE = 8;
+const QUEST_PAGE_SIZE = 4;
+const NPC_PAGE_SIZE = 6;
+const MAX_ROW_CONDITIONS = 4;
+/** Auto-rotate cadence for paged scenes. A producer can also step pages by hand. */
+const SCENE_ROTATE_MS = 8_000;
+
+type StageAspect = '16:9' | '4:3';
+const ASPECT_RATIO: Record<StageAspect, { w: number; h: number }> = {
+  '16:9': { w: 16, h: 9 },
+  '4:3': { w: 4, h: 3 },
+};
+
+/** Party/quest/status edits have no SSE. Keep Cast aligned with PartyPage's
+ * visible-tab poll cadence (see PartyPage / usePollWhileVisible) so retirement
+ * and death land promptly without a steeper custom interval (issue #824). */
+const POLL_MS = 5_000;
+
+const NO_PARTICIPATING_IDS: number[] | null = null;
+
+function participatingIdsFromEncounter(
+  encounter: EncounterWithCombatants | null,
+): number[] | null {
+  if (!encounter || encounter.status !== 'running') return NO_PARTICIPATING_IDS;
+  const ids: number[] = [];
+  for (const c of encounter.combatants) {
+    if (c.kind === 'character' && c.characterId != null) ids.push(c.characterId);
+  }
+  return ids;
+}
 const CONTROLS_HIDE_MS = 3_500;
 
 const HP_BAND_LABEL: Record<HpBand, string> = {
@@ -90,12 +168,21 @@ function fullscreenFailure(action: 'enter' | 'exit', error: unknown): string {
   return `Fullscreen couldn't start${detail}. Keep this tab active, allow fullscreen for this site, then try again.`;
 }
 
+const displayFetchers: PlayerDisplayFetchers = {
+  getSummary: (campaignId, signal) =>
+    api.get<CampaignSummary>(`${API}/campaigns/${campaignId}/summary`, { signal }),
+  getRunningEncounters: (campaignId, signal) =>
+    api.get<Encounter[]>(`${API}/campaigns/${campaignId}/encounters?status=running`, { signal }),
+  getEncounter: (encounterId, signal) =>
+    api.get<EncounterWithCombatants>(`${API}/encounters/${encounterId}`, { signal }),
+};
+
 export default function PlayerDisplayPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const navigate = useNavigate();
   const announce = useAnnounce();
-  const { roleIn } = useAuth();
+  const { roleIn, staleIdentity } = useAuth();
   const role = roleIn(cid);
 
   // Minimal AI-DM narration ticker (#344 point 5 — optional/cuttable, kept lightweight).
@@ -105,63 +192,187 @@ export default function PlayerDisplayPage() {
   // never both mounted in the same tab — this never creates a second live connection.
   const liveActivity = useAiDmLiveActivityState(Number.isFinite(cid) ? cid : undefined);
 
-  const [summary, setSummary] = useState<CampaignSummary | null>(null);
-  const [encounter, setEncounter] = useState<EncounterWithCombatants | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Key projection/failure by campaignId so a client-side :campaignId swap cannot
+  // flash the prior campaign's (secret-free but still wrong) cast state.
+  const [projection, setProjection] = useState<PlayerDisplayProjection | null>(null);
+  const projectionRef = useRef(projection);
+  projectionRef.current = projection;
+  const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
+  const [displayStale, setDisplayStale] = useState(false);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const [loading, setLoading] = useState(true);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [fullscreenSupported, setFullscreenSupported] = useState(fullscreenAvailable);
   const [isFullscreen, setIsFullscreen] = useState(fullscreenActive);
   const [fullscreenPending, setFullscreenPending] = useState(false);
   const [fullscreenNotice, setFullscreenNotice] = useState<FullscreenNotice | null>(null);
+  /** Producer opt-in: show dead/retired/inactive PCs under Party with status labels (#824). */
+  const [includeAlumni, setIncludeAlumni] = useState(false);
+  /** Active broadcast scene (issue #823) — the DM cockpit selects it; the public
+   * stage follows. Seeded from a prior selection so a reload/second tab lands on
+   * the same scene. */
+  const [scene, setScene] = useState<SceneId>(() =>
+    Number.isFinite(cid) ? readStoredScene(cid) ?? DEFAULT_SCENE : DEFAULT_SCENE,
+  );
+  const [aspect, setAspect] = useState<StageAspect>('16:9');
+  /** Monotonic paging/rotation cursor. A timer advances it for large lists; the
+   * cockpit's page buttons step it by hand. Kept as plain state so tests can drive
+   * paging deterministically. */
+  const [sceneTick, setSceneTick] = useState(0);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
+
+  const summary = projection?.campaignId === cid ? projection.summary : null;
+  const encounter = projection?.campaignId === cid ? projection.encounter : null;
+  const error = failure?.campaignId === cid ? failure.message : null;
 
   // Wake lock: keep the screen awake while fullscreen/presentation is active (#826).
   const wakeLock = useWakeLock(isFullscreen);
 
   const load = useCallback(async () => {
     if (!Number.isFinite(cid)) return;
-    try {
-      const data = await api.get<CampaignSummary>(`${API}/campaigns/${cid}/summary`);
-      setSummary(data);
-      setError(null);
-      // Find the live encounter (if any) and pull its combatants for the initiative rail.
-      try {
-        const running = await api.get<Encounter[]>(`${API}/campaigns/${cid}/encounters?status=running`);
-        const live = running[0];
-        if (live) {
-          const full = await api.get<EncounterWithCombatants>(`${API}/encounters/${live.id}`);
-          setEncounter(full);
-        } else {
-          setEncounter(null);
-        }
-      } catch {
-        setEncounter(null);
-      }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the display.");
-    } finally {
+    const hadProjection = projectionRef.current?.campaignId === cid;
+    const result = await runPlayerDisplayLoad(loadSequencerRef.current, cid, displayFetchers, {
+      hadProjection,
+    });
+    if (result.kind === 'ignored') return;
+    if (result.kind === 'ok') {
+      setProjection(result.projection);
+      setFailure((current) => (current?.campaignId === cid ? null : current));
+      setDisplayStale(false);
       setLoading(false);
+      return;
     }
+    // Transient blip with last-known paint: keep the rail, surface stale/reconnect.
+    if (result.keepLastKnown) {
+      setDisplayStale(true);
+      setLoading(false);
+      return;
+    }
+    // Persistent failure (404/403/…): drop the initiative rail. When this load
+    // already fetched a summary, keep the cast painted and surface a rail-scoped
+    // error — do not wipe the whole Player Display to a full-screen failure.
+    setProjection((current) =>
+      projectionAfterLoadFailure(current, cid, {
+        keepLastKnown: false,
+        summary: result.summary,
+      }),
+    );
+    setFailure({ campaignId: cid, message: result.message });
+    setDisplayStale(false);
+    setLoading(false);
   }, [cid]);
 
   useEffect(() => {
-    if (Number.isFinite(cid)) void load();
+    const sequencer = loadSequencerRef.current;
+    if (!Number.isFinite(cid)) {
+      setLoading(false);
+      // Teardown-only invalidation: React runs this cleanup before the next
+      // effect on cid change, so a single bump covers unmount and campaign swap.
+      return () => {
+        sequencer.invalidate();
+      };
+    }
+    // Prior effect cleanup already aborted in-flight work for the old cid.
+    // Reset sync chrome, then begin a fresh load for this identity.
+    setEventStatus('connecting');
+    setDisplayStale(false);
+    setLoading(true);
+    setIncludeAlumni(false);
+    void load();
+    return () => {
+      sequencer.invalidate();
+    };
   }, [cid, load]);
 
   // Slow poll — catches location/quest/party edits (no SSE event) without hammering.
-  useEffect(() => {
-    if (!Number.isFinite(cid)) return;
-    const handle = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(handle);
-  }, [cid, load]);
+  // Pauses while the cast tab is hidden; refetches immediately on becoming visible
+  // so a status change made in another tab lands promptly when Cast is watched again.
+  usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
+  // Poll + SSE share the same sequencer, so overlapping bursts cannot reorder commits.
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
     onEvent: useCallback(() => void load(), [load]),
     onReconnect: useCallback(() => void load(), [load]),
+    onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
+    onStreamRecovery: useCallback(() => void load(), [load]),
   });
+
+  // Re-seed the active scene when the campaign changes so a client-side :campaignId
+  // swap does not carry the prior campaign's scene onto a different table.
+  useEffect(() => {
+    if (Number.isFinite(cid)) setScene(readStoredScene(cid) ?? DEFAULT_SCENE);
+  }, [cid]);
+
+  // Cross-tab producer control: a private DM cockpit tab writes the scene to
+  // localStorage; a separate public display tab (mirrored TV / OBS source on the
+  // same origin) follows via the standard `storage` event. Same-tab selection
+  // just updates React state below — the write does not echo back to its own tab.
+  useEffect(() => {
+    if (!Number.isFinite(cid) || typeof window === 'undefined') return;
+    const key = sceneStorageKey(cid);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== key) return;
+      if (isSceneId(event.newValue)) setScene(event.newValue);
+      else setScene(DEFAULT_SCENE);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [cid]);
+
+  // A fresh scene starts on its anchor page (current actor for Initiative).
+  useEffect(() => {
+    setSceneTick(0);
+  }, [scene]);
+
+  const selectScene = useCallback(
+    (next: SceneId) => {
+      setScene(next);
+      if (Number.isFinite(cid)) writeStoredScene(cid, next);
+    },
+    [cid],
+  );
+
+  // Player-safe scene projection — derived once so the stage render and the
+  // auto-rotate decision below agree on what is on screen (issue #823).
+  const view = useMemo(() => {
+    if (!summary) return null;
+    const location = safeLocation(summary.currentLocation);
+    // During a live fight, prefer PCs seated as combatants over the full active
+    // roster (issue #824); monster-only fights fall back to active-only.
+    const participatingCharacterIds = participatingIdsFromEncounter(encounter);
+    const party = safeParty(summary.characters, { includeAlumni, participatingCharacterIds });
+    const quests = safeQuests(summary.quests);
+    const npcs = safeNpcs(summary.npcs);
+    const combatants = encounter ? safeCombatants(encounter.combatants) : [];
+    const currentId =
+      encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
+    const currentIndex = currentId != null ? combatants.findIndex((c) => c.id === currentId) : -1;
+    const nextIndex = nextActorIndex(combatants.length, currentIndex);
+    return { location, party, quests, npcs, combatants, currentId, currentIndex, nextIndex };
+  }, [summary, encounter, includeAlumni]);
+
+  // A scene auto-rotates only when its content spills past a single stage page —
+  // then the timer surfaces the off-screen rows instead of clipping them.
+  const rotating = useMemo(() => {
+    if (!view) return false;
+    if (scene === 'initiative') return pageCountFor(view.combatants.length, INIT_PAGE_SIZE) > 1;
+    if (scene === 'party') return view.party.length > PARTY_PAGE_SIZE;
+    if (scene === 'quests')
+      return view.quests.length > QUEST_PAGE_SIZE || view.npcs.length > NPC_PAGE_SIZE;
+    return false;
+  }, [view, scene]);
+
+  useEffect(() => {
+    if (!rotating || prefersReducedMotion()) return;
+    const timer = setInterval(() => setSceneTick((tick) => tick + 1), SCENE_ROTATE_MS);
+    return () => clearInterval(timer);
+  }, [rotating]);
+
+  const syncState = playerDisplaySyncState({ staleIdentity, displayStale, eventStatus });
+  const syncMessage = summary ? playerDisplaySyncMessage(syncState) : null;
 
   // The ARIA live region is a single node mounted at the app root (Announcer),
   // so it survives client-side navigation. The DM's run-session tracker announces
@@ -198,29 +409,42 @@ export default function PlayerDisplayPage() {
     const prev = prevAnnounceRef.current;
 
     if (prev) {
+      const parts: string[] = [];
       if (turnKey !== prev.turnKey) {
         if (encounter.status === 'running') {
           const current = safe.find((c) => c.id === currentId);
-          announce(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
+          parts.push(`Round ${encounter.round}${current ? ` — ${current.name}'s turn` : ''}`);
         } else if (encounter.status === 'ended') {
-          announce('Encounter ended');
+          parts.push('Encounter ended');
         }
       }
+      const combatantUpdates: string[] = [];
       for (const c of safe) {
         const before = prev.hp.get(c.id);
         const now = hp.get(c.id);
         if (before == null || now == null || now === '' || before === now) continue;
         if (c.hpBand != null) {
           // Monster — band label only, never the exact numbers.
-          announce(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
+          combatantUpdates.push(`${c.name}: ${HP_BAND_LABEL[c.hpBand]}`);
         } else if (c.hpCurrent != null && c.hpMax != null) {
           // Character — exact HP is shared table info.
-          announce(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
+          combatantUpdates.push(`${c.name}: ${c.hpCurrent} of ${c.hpMax} hit points`);
         }
+      }
+      const combatantMessage = formatGroupedCombatantAnnouncement(combatantUpdates);
+      if (combatantMessage) parts.push(combatantMessage);
+      // One atomic announce keeps turn + bulk HP/condition updates from racing
+      // the shared live region; dedupeKey suppresses identical reconnect refetches.
+      // Fingerprint + count keep the key bounded (avoid joining full update text).
+      const message = formatGroupedAnnouncement(parts);
+      if (message) {
+        announce(message, {
+          dedupeKey: `screen:${cid}:${encounter.id}:${turnKey}:${combatantUpdates.length}:${fingerprintDedupeParts(combatantUpdates)}`,
+        });
       }
     }
     prevAnnounceRef.current = { hp, turnKey };
-  }, [encounter, announce]);
+  }, [cid, encounter, announce]);
 
   // Fullscreen can end without this control being used (Escape, browser chrome,
   // or another caller), so the browser events — not the request promise — own
@@ -304,6 +528,9 @@ export default function PlayerDisplayPage() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
+      // Drop inert synchronously so this same Tab keystroke can land on Exit /
+      // Fullscreen before React re-renders visibility (issue #595).
+      controlsRef.current?.removeAttribute('inert');
       ping(event);
       if (event.key !== 'Escape' || event.defaultPrevented || event.repeat) return;
 
@@ -382,12 +609,22 @@ export default function PlayerDisplayPage() {
     ? fullscreenNotice
     : ({ kind: 'info', message: FULLSCREEN_UNSUPPORTED } satisfies FullscreenNotice);
   const keepControlsVisible = controlsVisible || displayedFullscreenNotice != null;
+  // Auto-hidden controls must leave the sequential focus / a11y tree until a
+  // keyboard or pointer reveal — opacity alone left Exit/Fullscreen tabbable
+  // while invisible (issue #595). Fullscreen notices force visibility so
+  // recovery guidance stays reachable.
+  useLayoutEffect(() => {
+    const node = controlsRef.current;
+    if (!node) return;
+    if (keepControlsVisible) node.removeAttribute('inert');
+    else node.setAttribute('inert', '');
+  }, [keepControlsVisible]);
   const exitPath = Number.isFinite(cid) ? `/c/${cid}` : '/';
   const operatorControls = (
     <div
       ref={controlsRef}
       className="cf-screen-control-stack"
-      style={{ opacity: keepControlsVisible ? 1 : 0, pointerEvents: keepControlsVisible ? 'auto' : 'none' }}
+      data-visible={keepControlsVisible ? 'true' : 'false'}
     >
       <div className="cf-screen-controls">
         <button
@@ -399,6 +636,16 @@ export default function PlayerDisplayPage() {
         >
           <span aria-hidden="true">✕</span> Exit
         </button>
+        {role === 'dm' && scene === 'party' && (
+          <label className="cf-screen-alumni-toggle" title="Show dead, retired, and inactive PCs on the Party scene">
+            <input
+              type="checkbox"
+              checked={includeAlumni}
+              onChange={(event) => setIncludeAlumni(event.target.checked)}
+            />
+            <span>Include alumni / inactive</span>
+          </label>
+        )}
         <button
           type="button"
           className="btn btn-ghost"
@@ -412,6 +659,64 @@ export default function PlayerDisplayPage() {
           <span aria-hidden="true">⛶</span> {isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
         </button>
       </div>
+      {role === 'dm' && (
+        <div className="cf-cockpit" data-testid="cf-cockpit">
+          <div className="cf-scene-picker" role="group" aria-label="Broadcast scene" data-testid="cf-scene-picker">
+            {SCENE_IDS.map((id) => (
+              <button
+                key={id}
+                type="button"
+                className={`btn btn-ghost cf-scene-btn${scene === id ? ' active' : ''}`}
+                data-testid={`cf-scene-btn-${id}`}
+                aria-pressed={scene === id}
+                onClick={() => selectScene(id)}
+              >
+                {SCENE_LABEL[id]}
+              </button>
+            ))}
+          </div>
+          <div className="cf-cockpit-row">
+            <div className="cf-aspect-toggle" role="group" aria-label="Stage aspect ratio">
+              {(['16:9', '4:3'] as const).map((ratio) => (
+                <button
+                  key={ratio}
+                  type="button"
+                  className={`btn btn-ghost cf-aspect-btn${aspect === ratio ? ' active' : ''}`}
+                  data-testid={`cf-aspect-btn-${ratio === '16:9' ? '16-9' : '4-3'}`}
+                  aria-pressed={aspect === ratio}
+                  onClick={() => setAspect(ratio)}
+                >
+                  {ratio}
+                </button>
+              ))}
+            </div>
+            {rotating && (
+              <div className="cf-page-controls" role="group" aria-label="Page through off-screen entries">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  data-testid="cf-scene-prev-page"
+                  onClick={() => setSceneTick((tick) => tick - 1)}
+                  title="Show the previous set"
+                  aria-label="Previous page"
+                >
+                  <span aria-hidden="true">‹</span> Prev
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  data-testid="cf-scene-next-page"
+                  onClick={() => setSceneTick((tick) => tick + 1)}
+                  title="Show the next set"
+                  aria-label="Next page"
+                >
+                  Next <span aria-hidden="true">›</span>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {displayedFullscreenNotice && (
         <p
           id="cf-screen-fullscreen-notice"
@@ -466,157 +771,432 @@ export default function PlayerDisplayPage() {
       true,
     );
   }
-  if (!summary) return null;
+  if (!summary || !view) return null;
 
-  const location = safeLocation(summary.currentLocation);
-  const party = safeParty(summary.characters);
-  const quests = safeQuests(summary.quests);
-  const npcs = safeNpcs(summary.npcs);
-  const combatants = encounter ? safeCombatants(encounter.combatants) : [];
-  const currentId =
-    encounter && encounter.status === 'running' ? encounter.currentCombatantId ?? null : null;
-  return renderScreen(
-    <>
-      {/* Header: campaign + where the party is */}
-      <header className="cf-screen-head">
-        <h1>{summary.campaign.name}</h1>
-        <div className="cf-screen-chips">
-          {location ? (
-            <span className="cf-chip cf-chip-accent">
-              {location.isCurrent ? <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" /> : null}
-              {location.name}
-              {location.kind ? <span className="cf-chip-sub"> · {location.kind}</span> : null}
-            </span>
-          ) : (
-            <span className="cf-chip">Location unset</span>
-          )}
-          <span className="cf-chip">Session {summary.campaign.sessionCount}</span>
-        </div>
-        {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
-          <p className="cf-ai-ticker"><GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />{liveActivity.lastNarration}</p>
-        )}
-      </header>
+  const { location, party, quests, npcs, combatants, currentId, currentIndex, nextIndex } = view;
+  const isRunning = encounter?.status === 'running';
+  const currentActor = currentIndex >= 0 ? combatants[currentIndex] ?? null : null;
+  const nextActor = nextIndex >= 0 ? combatants[nextIndex] ?? null : null;
+  const mapUrl =
+    encounter?.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
+  const ratio = ASPECT_RATIO[aspect];
+  const stageStyle = {
+    '--cf-ar-w': String(ratio.w),
+    '--cf-ar-h': String(ratio.h),
+  } as CSSProperties;
 
-      <div className="cf-screen-grid">
-        {/* Initiative rail takes the stage while combat is live */}
-        {encounter && combatants.length > 0 && (
-          <section className="cf-panel cf-panel-wide">
-            <div className="cf-panel-head">
-              <h2>Initiative</h2>
-              <span className="cf-chip cf-chip-accent">
-                {encounter.name} · Round {encounter.round}
-              </span>
-            </div>
-            <ol className="cf-init-list">
-              {combatants.map((c) => (
-                <InitiativeRow key={c.id} combatant={c} isCurrent={c.id === currentId} />
-              ))}
-            </ol>
-          </section>
-        )}
-
-        {/* Party */}
-        <section className="cf-panel">
-          <div className="cf-panel-head">
-            <h2>Party</h2>
-          </div>
-          {party.length === 0 ? (
-            <p className="cf-empty">No characters yet.</p>
-          ) : (
-            <div className="cf-party">
-              {party.map((c) => {
-                const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
-                const tone = pct <= 25 ? 'crit' : pct <= 50 ? 'low' : '';
-                return (
-                  <div key={c.id} className="cf-party-card">
-                    <div className="cf-party-top">
-                      <span className="cf-party-name">{c.name}</span>
-                      {c.ac != null && <span className="cf-chip cf-chip-sm">AC {c.ac}</span>}
-                    </div>
-                    <div className="cf-party-sub">
-                      {[c.species, c.className && `${c.className} ${c.level}`].filter(Boolean).join(' · ') ||
-                        `Level ${c.level}`}
-                    </div>
-                    <div className="cf-hp-row">
-                      <div className={`cf-hp ${tone}`}>
-                        <div style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="cf-hp-num">
-                        {c.hpCurrent}/{c.hpMax}
-                      </span>
-                    </div>
-                    {c.conditions.length > 0 && (
-                      <div className="cf-conds">
-                        {c.conditions.map((cond) => (
-                          <span key={cond} className="cf-cond">
-                            {cond}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-
-        {/* Quests */}
-        <section className="cf-panel">
-          <div className="cf-panel-head">
-            <h2>Quests</h2>
-          </div>
-          {quests.length === 0 ? (
-            <p className="cf-empty">No active quests.</p>
-          ) : (
-            <div className="cf-quests">
-              {quests.map((q) => (
-                <div key={q.id} className="cf-quest">
-                  <div className="cf-quest-top">
-                    <span className="cf-quest-title">{q.title}</span>
-                    <QuestStatusBadge status={q.status} className="cf-chip-sm" iconSize={14} />
-                  </div>
-                  {q.objectives.length > 0 && (
-                    <ul className="cf-objs">
-                      {q.objectives.map((o) => (
-                        <li key={o.id} className={o.done ? 'done' : ''}>
-                          <span className="cf-obj-mark">{o.done ? '✓' : '○'}</span>
-                          {o.text}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* NPCs (revealed only) */}
-        {npcs.length > 0 && (
-          <section className="cf-panel">
-            <div className="cf-panel-head">
-              <h2>Faces you know</h2>
-            </div>
-            <div className="cf-npcs">
-              {npcs.map((n) => (
-                <div key={n.id} className="cf-npc">
-                  <span className="cf-npc-name">{n.name}</span>
-                  {n.role && <span className="cf-npc-role">{n.role}</span>}
-                  <NpcDispositionBadge disposition={n.disposition} className="cf-chip-sm cf-npc-disposition" iconSize={14} />
-                </div>
-              ))}
-            </div>
-          </section>
+  // Persistent status band — encounter/round/current+next actor stay put across
+  // every scene swap (issue #823). Kept OUTSIDE the swappable scene body.
+  const statusBand = (
+    <header className="cf-status-band" data-testid="cf-status-band">
+      <div className="cf-status-lead">
+        <h1 className="cf-status-campaign" title={summary.campaign.name}>
+          {summary.campaign.name}
+        </h1>
+        {location ? (
+          <span className="cf-chip cf-chip-accent cf-status-location">
+            {location.isCurrent ? (
+              <GameIcon slug="position-marker" size={14} className="inline align-text-bottom mr-1" />
+            ) : null}
+            <span className="cf-clamp-1">{location.name}</span>
+          </span>
+        ) : (
+          <span className="cf-chip">Location unset</span>
         )}
       </div>
-    </>,
+      <div className="cf-status-combat" data-testid="cf-status-combat">
+        {isRunning ? (
+          <>
+            <span className="cf-status-enc cf-clamp-1" data-testid="cf-status-encounter" title={encounter.name}>
+              {encounter.name}
+            </span>
+            <span className="cf-status-round" data-testid="cf-status-round">
+              Round {encounter.round}
+            </span>
+            <span className="cf-status-turn" data-testid="cf-status-current">
+              <span className="cf-status-turn-label">Now</span>
+              <span className="cf-status-turn-name cf-clamp-1">{currentActor?.name ?? '—'}</span>
+            </span>
+            <span className="cf-status-turn cf-status-next" data-testid="cf-status-next">
+              <span className="cf-status-turn-label">Next</span>
+              <span className="cf-status-turn-name cf-clamp-1">{nextActor?.name ?? '—'}</span>
+            </span>
+          </>
+        ) : (
+          <span className="cf-status-idle" data-testid="cf-status-idle">
+            No live encounter
+          </span>
+        )}
+      </div>
+      {syncMessage && (
+        <p
+          role="status"
+          aria-live="polite"
+          className={`cf-screen-sync ${syncState === 'offline' ? 'offline' : ''}`}
+        >
+          {syncMessage}
+        </p>
+      )}
+      {liveActivity.mode === 'driver' && liveActivity.lastNarration && (
+        <p className="cf-ai-ticker">
+          <GameIcon slug="robot-golem" size={14} className="inline align-text-bottom mr-1" />
+          <span className="cf-clamp-2">{liveActivity.lastNarration}</span>
+        </p>
+      )}
+    </header>
+  );
+
+  let sceneContent: ReactNode;
+  switch (scene) {
+    case 'map':
+      sceneContent = <MapScene mapUrl={mapUrl} locationName={location?.name ?? null} />;
+      break;
+    case 'party':
+      sceneContent = <PartyScene party={party} includeAlumni={includeAlumni} tick={sceneTick} />;
+      break;
+    case 'quests':
+      sceneContent = <QuestsScene quests={quests} npcs={npcs} tick={sceneTick} />;
+      break;
+    case 'intermission':
+      sceneContent = (
+        <IntermissionScene campaignName={summary.campaign.name} locationName={location?.name ?? null} />
+      );
+      break;
+    case 'blackout':
+      sceneContent = <BlackoutScene />;
+      break;
+    case 'initiative':
+    default:
+      sceneContent = (
+        <InitiativeScene
+          combatants={combatants}
+          currentId={currentId}
+          currentIndex={currentIndex}
+          tick={sceneTick}
+          railError={error}
+          onRetry={() => void load()}
+        />
+      );
+      break;
+  }
+
+  return renderScreen(
+    <div className="cf-stage-wrap">
+      <div
+        className="cf-stage"
+        data-testid="cf-stage"
+        data-scene={scene}
+        data-aspect={aspect}
+        style={stageStyle}
+      >
+        {scene !== 'blackout' && statusBand}
+        <div className="cf-scene-body" data-testid={`cf-scene-${scene}`} data-scene={scene}>
+          {sceneContent}
+        </div>
+      </div>
+    </div>,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scenes. Each fills the fixed stage body (flex column, overflow hidden). Long
+// lists paginate/rotate via playerDisplayScene so nothing falls below the fold.
+
+function SceneEmpty({ icon, title, subtitle }: { icon: string; title: string; subtitle?: string }) {
+  return (
+    <div className="cf-scene-empty" role="status">
+      <GameIcon slug={icon} size={72} reserveSpace />
+      <p className="cf-scene-empty-title">{title}</p>
+      {subtitle && <p className="cf-scene-empty-sub">{subtitle}</p>}
+    </div>
+  );
+}
+
+function MapScene({ mapUrl, locationName }: { mapUrl: string | null; locationName: string | null }) {
+  return (
+    <section className="cf-scene cf-scene-map" data-testid="cf-scene-map-body" aria-label="Map">
+      {mapUrl ? (
+        <img className="cf-map-img" src={mapUrl} alt={locationName ? `Map of ${locationName}` : 'Battle map'} />
+      ) : (
+        <SceneEmpty
+          icon="treasure-map"
+          title={locationName ?? 'No map to display'}
+          subtitle="Upload a battle map to the live encounter to project it here."
+        />
+      )}
+    </section>
+  );
+}
+
+function InitiativeScene({
+  combatants,
+  currentId,
+  currentIndex,
+  tick,
+  railError,
+  onRetry,
+}: {
+  combatants: SafeCombatant[];
+  currentId: number | null;
+  currentIndex: number;
+  tick: number;
+  railError: string | null;
+  onRetry: () => void;
+}) {
+  if (combatants.length === 0) {
+    return (
+      <section className="cf-scene cf-scene-initiative" aria-label="Initiative">
+        <h2 className="cf-scene-title">Initiative</h2>
+        {railError ? (
+          <>
+            <p className="cf-scene-empty-title" role="alert">
+              {railError}
+            </p>
+            <button className="btn btn-primary cf-rail-retry" onClick={onRetry}>
+              Retry
+            </button>
+          </>
+        ) : (
+          <SceneEmpty icon="crossed-swords" title="No combat in progress" subtitle="Start an encounter to show the turn order." />
+        )}
+      </section>
+    );
+  }
+
+  const win = initiativeWindow(combatants.length, INIT_PAGE_SIZE, currentIndex, tick);
+  const page = combatants.slice(win.start, win.end);
+  return (
+    <section className="cf-scene cf-scene-initiative" aria-label="Initiative">
+      <h2 className="cf-scene-title">
+        Initiative
+        {win.pageCount > 1 && (
+          <span className="cf-scene-pageflag" data-testid="cf-init-page">
+            Turns {win.start + 1}–{win.end} of {combatants.length}
+          </span>
+        )}
+      </h2>
+      <ol className="cf-init-list">
+        {page.map((c) => (
+          <InitiativeRow key={c.id} combatant={c} isCurrent={c.id === currentId} tick={tick} />
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function PartyScene({
+  party,
+  includeAlumni,
+  tick,
+}: {
+  party: SafeCharacter[];
+  includeAlumni: boolean;
+  tick: number;
+}) {
+  const page = rotateWindow(party, PARTY_PAGE_SIZE, tick);
+  const overflow = hiddenCount(party.length, PARTY_PAGE_SIZE);
+  return (
+    <section className="cf-scene cf-scene-party" aria-label="Party">
+      <h2 className="cf-scene-title">
+        Party
+        {overflow > 0 && (
+          <span className="cf-scene-pageflag" data-testid="cf-party-page">
+            Showing {page.length} of {party.length}
+          </span>
+        )}
+      </h2>
+      {party.length === 0 ? (
+        <SceneEmpty
+          icon="backpack"
+          title={includeAlumni ? 'No characters yet.' : 'No active party members.'}
+        />
+      ) : (
+        <div className="cf-party">
+          {page.map((c) => {
+            const pct = c.hpMax > 0 ? Math.max(0, Math.min(100, (c.hpCurrent / c.hpMax) * 100)) : 0;
+            const tone = pct <= 25 ? 'crit' : pct <= 50 ? 'low' : '';
+            const isActive = c.status === 'active';
+            return (
+              <div
+                key={c.id}
+                className={`cf-party-card${isActive ? '' : ' alumni'}`}
+                data-character-status={c.status}
+              >
+                <div className="cf-party-top">
+                  <span className="cf-party-name">
+                    <span className="cf-clamp-1" title={c.name}>
+                      {c.name}
+                    </span>
+                    {!isActive && (
+                      <span className="cf-chip cf-chip-sm cf-party-status">{STATUS_LABEL[c.status]}</span>
+                    )}
+                  </span>
+                  {c.ac != null && <span className="cf-chip cf-chip-sm">AC {c.ac}</span>}
+                </div>
+                <div className="cf-party-sub">
+                  {[c.species, c.className && `${c.className} ${c.level}`].filter(Boolean).join(' · ') ||
+                    `Level ${c.level}`}
+                </div>
+                <div className="cf-hp-row">
+                  <div className={`cf-hp ${tone}`}>
+                    <div style={{ width: `${pct}%` }} />
+                  </div>
+                  <span className="cf-hp-num">
+                    {c.hpCurrent}/{c.hpMax}
+                  </span>
+                </div>
+                <ConditionChips conditions={c.conditions} tick={tick} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function QuestsScene({
+  quests,
+  npcs,
+  tick,
+}: {
+  quests: SafeQuest[];
+  npcs: SafeNpc[];
+  tick: number;
+}) {
+  const questPage = rotateWindow(quests, QUEST_PAGE_SIZE, tick);
+  const questOverflow = hiddenCount(quests.length, QUEST_PAGE_SIZE);
+  const npcPage = rotateWindow(npcs, NPC_PAGE_SIZE, tick);
+  const npcOverflow = hiddenCount(npcs.length, NPC_PAGE_SIZE);
+  return (
+    <section className="cf-scene cf-scene-quests" aria-label="Quests">
+      <h2 className="cf-scene-title">
+        Quests
+        {questOverflow > 0 && (
+          <span className="cf-scene-pageflag" data-testid="cf-quests-page">
+            Showing {questPage.length} of {quests.length}
+          </span>
+        )}
+      </h2>
+      {quests.length === 0 ? (
+        <SceneEmpty icon="scroll-quill" title="No active quests." />
+      ) : (
+        <div className="cf-quests">
+          {questPage.map((q) => {
+            // Objectives rotate through a bounded window so a long list never hides
+            // an item for good — it just takes turns on screen (issue #823).
+            const objPage = rotateWindow(q.objectives, 4, tick);
+            return (
+              <div key={q.id} className="cf-quest">
+                <div className="cf-quest-top">
+                  <span className="cf-quest-title cf-clamp-1" title={q.title}>
+                    {q.title}
+                  </span>
+                  <QuestStatusBadge status={q.status} className="cf-chip-sm" iconSize={14} />
+                </div>
+                {q.objectives.length > 0 && (
+                  <ul className="cf-objs">
+                    {objPage.map((o) => (
+                      <li key={o.id} className={o.done ? 'done' : ''}>
+                        <span className="cf-obj-mark">{o.done ? '✓' : '○'}</span>
+                        <span className="cf-obj-text cf-clamp-2">{o.text}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {npcs.length > 0 && (
+        <>
+          <h3 className="cf-npc-head">
+            Faces you know
+            {npcOverflow > 0 && (
+              <span className="cf-scene-pageflag" data-testid="cf-npcs-page">
+                {' '}
+                Showing {npcPage.length} of {npcs.length}
+              </span>
+            )}
+          </h3>
+          <div className="cf-npcs">
+            {npcPage.map((n) => (
+              <div key={n.id} className="cf-npc">
+                <span className="cf-npc-name cf-clamp-1" title={n.name}>
+                  {n.name}
+                </span>
+                {n.role && <span className="cf-npc-role cf-clamp-1">{n.role}</span>}
+                <NpcDispositionBadge
+                  disposition={n.disposition}
+                  className="cf-chip-sm cf-npc-disposition"
+                  iconSize={14}
+                />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function IntermissionScene({
+  campaignName,
+  locationName,
+}: {
+  campaignName: string;
+  locationName: string | null;
+}) {
+  return (
+    <section className="cf-scene cf-scene-intermission cf-intermission" aria-label="Intermission">
+      <GameIcon slug="campfire" size={96} reserveSpace />
+      <h2>We'll be right back</h2>
+      <p>{campaignName}</p>
+      {locationName && <p className="cf-intermission-loc">{locationName}</p>}
+    </section>
+  );
+}
+
+function BlackoutScene() {
+  return (
+    <section
+      className="cf-blackout"
+      data-testid="cf-scene-blackout-body"
+      role="status"
+      aria-label="Display paused"
+    />
+  );
+}
+
+/** Conditions clamp to a rotating window with a "+N" count so none is lost. */
+function ConditionChips({ conditions, tick }: { conditions: string[]; tick: number }) {
+  if (conditions.length === 0) return null;
+  const shown = rotateWindow(conditions, MAX_ROW_CONDITIONS, tick);
+  const extra = hiddenCount(conditions.length, MAX_ROW_CONDITIONS);
+  return (
+    <div className="cf-conds">
+      {shown.map((cond) => (
+        <span key={cond} className="cf-cond" title={cond}>
+          {cond}
+        </span>
+      ))}
+      {extra > 0 && <span className="cf-cond-more">+{extra}</span>}
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
 
-function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isCurrent: boolean }) {
+function InitiativeRow({
+  combatant,
+  isCurrent,
+  tick,
+}: {
+  combatant: SafeCombatant;
+  isCurrent: boolean;
+  tick: number;
+}) {
   // Non-character combatants (monsters AND DM-controlled NPCs) show a coarse HP band,
   // not exact numbers — safeCombatant redacts both, so treat both the same here.
   const isMonster = combatant.kind !== 'character';
@@ -633,18 +1213,12 @@ function InitiativeRow({ combatant, isCurrent }: { combatant: SafeCombatant; isC
       <span className="cf-init-num">{combatant.initiative ?? '–'}</span>
       <div className="cf-init-main">
         <div className="cf-init-name">
-          {combatant.name}
+          <span className="cf-clamp-1" title={combatant.name}>
+            {combatant.name}
+          </span>
           <span className={`cf-chip cf-chip-sm ${isMonster ? '' : 'cf-chip-accent'}`}>{combatant.kind === 'npc' ? 'NPC' : combatant.kind}</span>
         </div>
-        {combatant.conditions.length > 0 && (
-          <div className="cf-conds">
-            {combatant.conditions.map((cond) => (
-              <span key={cond} className="cf-cond">
-                {cond}
-              </span>
-            ))}
-          </div>
-        )}
+        <ConditionChips conditions={combatant.conditions} tick={tick} />
       </div>
       <div className="cf-init-hp">
         {isMonster ? (
@@ -703,31 +1277,110 @@ function CenteredMessage({
   );
 }
 
-// Scoped, TV-legible styling. Uses clamp() so it scales from a laptop preview up
-// to a living-room screen. Colors come from the shared Nocturne tokens.
+// Cast is a FIXED broadcast stage (issue #823), not a scrolling document. The
+// root fills the viewport with overflow hidden; a letterboxed, aspect-locked
+// .cf-stage is a size container, so scene typography/spacing use cqh/cqw and
+// scale identically at 720p, 1080p, 4K, and 200% zoom. Colors come from the
+// shared Nocturne tokens.
 const SCREEN_CSS = `
 .cf-screen {
-  min-height: 100vh;
-  background: radial-gradient(120% 120% at 50% -10%, #1c1f31 0%, var(--color-bg) 60%);
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+  background: #000;
   color: var(--color-text);
-  padding: clamp(16px, 3vw, 48px);
   font-family: var(--font-body);
 }
-.cf-screen.centered { padding: 0; }
+.cf-screen.centered { display: flex; align-items: center; justify-content: center; }
+
+/* Operator control stack (issue #595 wiring preserved verbatim). */
 .cf-screen-control-stack {
   position: fixed;
   top: 14px;
   right: 14px;
-  width: min(420px, calc(100vw - 28px));
+  width: min(460px, calc(100vw - 28px));
   z-index: 20;
+  opacity: 1;
+  pointer-events: auto;
   transition: opacity 0.4s ease;
+}
+/* Hide only when idle AND focus is not inside — :focus-within keeps a keyboard
+   reveal painted even before React flips data-visible (issue #595). */
+.cf-screen-control-stack[data-visible="false"]:not(:focus-within) {
+  opacity: 0;
+  pointer-events: none;
 }
 .cf-screen-controls {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
+.cf-screen-alumni-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 94%, transparent);
+  color: var(--color-neutral-200);
+  padding: 7px 12px;
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  user-select: none;
+}
+.cf-screen-alumni-toggle input {
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+/* Strong focus ring for cast controls at high zoom / shared-TV distances. */
+.cf-screen-controls .btn:focus-visible {
+  outline: 3px solid var(--color-accent-2, var(--color-accent));
+  outline-offset: 4px;
+}
+
+/* DM cockpit — the private scene picker + paging controls (issue #823). Lives in
+   the auto-hiding control stack, so it never burns into the public broadcast. */
+.cf-cockpit {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+.cf-scene-picker,
+.cf-cockpit-row,
+.cf-aspect-toggle,
+.cf-page-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+}
+.cf-cockpit-row { gap: 10px; }
+.cf-cockpit .btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  line-height: 1.2;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  color: var(--color-neutral-200);
+}
+.cf-scene-btn.active,
+.cf-aspect-btn.active {
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  color: var(--color-accent-2);
+}
+.cf-cockpit .btn:focus-visible {
+  outline: 3px solid var(--color-accent-2, var(--color-accent));
+  outline-offset: 3px;
+}
+
 .cf-screen-fullscreen-notice {
   margin: 8px 0 0 auto;
   width: fit-content;
@@ -758,80 +1411,175 @@ const SCREEN_CSS = `
   line-height: 1.4;
   box-shadow: 0 8px 24px color-mix(in srgb, #000 38%, transparent);
 }
-.cf-screen-head { margin-bottom: clamp(16px, 2.4vw, 32px); }
-.cf-screen-head h1 {
-  margin: 0 0 10px;
+
+/* Fixed-aspect letterboxed stage. */
+.cf-stage-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+.cf-stage {
+  --cf-ar-w: 16;
+  --cf-ar-h: 9;
+  position: relative;
+  aspect-ratio: var(--cf-ar-w, 16) / var(--cf-ar-h, 9);
+  width: min(100vw, calc(100vh * var(--cf-ar-w, 16) / var(--cf-ar-h, 9)));
+  height: min(100vh, calc(100vw * var(--cf-ar-h, 9) / var(--cf-ar-w, 16)));
+  container-type: size;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2cqh;
+  /* Safe-area budget so nothing crowds a TV's overscan edge. */
+  padding: 4cqh 4cqw;
+  background: radial-gradient(120% 120% at 50% -10%, #1c1f31 0%, var(--color-bg) 60%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #fff 5%, transparent);
+}
+
+/* Clamp helpers — ellipsis (single line) / line clamp (multi-line). Paired with
+   paging/rotation so clamped content is never lost, just taking turns. */
+.cf-clamp-1 {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.cf-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Persistent status band (kept across every scene). */
+.cf-status-band { flex: none; display: flex; flex-direction: column; gap: 1cqh; }
+.cf-status-lead { display: flex; align-items: baseline; gap: 2cqw; flex-wrap: wrap; min-width: 0; }
+.cf-status-campaign {
+  margin: 0;
   font-family: var(--font-heading);
   font-weight: 800;
   color: #fff;
-  font-size: clamp(28px, 4.5vw, 64px);
+  font-size: 5cqh;
   line-height: 1.05;
+  max-width: 68cqw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.cf-screen-chips { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.cf-status-location { max-width: 30cqw; }
+.cf-status-combat {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2.4cqw;
+  font-size: 2.7cqh;
+  color: var(--color-neutral-200);
+}
+.cf-status-enc { font-weight: 700; color: var(--color-accent-2); max-width: 30cqw; }
+.cf-status-round { font-weight: 600; }
+.cf-status-turn { display: inline-flex; align-items: baseline; gap: 0.8cqw; min-width: 0; }
+.cf-status-turn-label {
+  font-size: 1.9cqh;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-neutral-400);
+}
+.cf-status-turn-name { font-weight: 700; color: #fff; max-width: 24cqw; }
+.cf-status-next .cf-status-turn-label { color: var(--color-neutral-500); }
+.cf-status-next .cf-status-turn-name { color: var(--color-neutral-200); }
+.cf-status-idle { color: var(--color-neutral-400); font-size: 2.5cqh; }
+
 .cf-chip {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--color-divider);
   border-radius: 999px;
-  padding: 6px 14px;
-  font-size: clamp(13px, 1.2vw, 18px);
+  padding: 0.5cqh 1.4cqw;
+  font-size: 2cqh;
   white-space: nowrap;
+  max-width: 100%;
 }
-.cf-chip-sm { padding: 3px 9px; font-size: clamp(10px, 0.9vw, 13px); text-transform: capitalize; }
+.cf-chip-sm { padding: 0.3cqh 1cqw; font-size: 1.7cqh; text-transform: capitalize; }
 .cf-chip-accent {
   border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
   background: color-mix(in srgb, var(--color-accent) 16%, transparent);
   color: var(--color-accent-2);
 }
-.cf-chip-sub { opacity: 0.7; }
+.cf-screen-sync {
+  margin: 1cqh 0 0;
+  width: fit-content;
+  max-width: 60cqw;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  color: var(--color-neutral-200);
+  padding: 0.8cqh 1.4cqw;
+  font-size: 2cqh;
+  line-height: 1.35;
+}
+.cf-screen-sync.offline {
+  border-color: color-mix(in srgb, var(--color-danger, #e5735b) 45%, transparent);
+}
 .cf-ai-ticker {
-  margin: 10px 0 0;
-  font-size: clamp(13px, 1.3vw, 18px);
+  margin: 1cqh 0 0;
+  font-size: 2.2cqh;
   color: var(--color-accent-2, var(--color-accent));
   opacity: 0.9;
-  max-width: 70ch;
+  max-width: 90cqw;
 }
-.cf-screen-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
-  gap: clamp(14px, 1.8vw, 26px);
-  align-items: start;
-}
-.cf-panel {
-  background: color-mix(in srgb, var(--color-surface) 82%, transparent);
-  border: 1px solid var(--color-divider);
-  border-radius: var(--radius-lg);
-  padding: clamp(14px, 1.6vw, 26px);
-}
-.cf-panel-wide { grid-column: 1 / -1; }
-.cf-panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-  flex-wrap: wrap;
-}
-.cf-panel-head h2 {
-  margin: 0;
+
+/* Scene body — fills remaining stage, never scrolls. */
+.cf-scene-body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.cf-scene { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.cf-scene-title {
+  margin: 0 0 1.6cqh;
   font-family: var(--font-heading);
   font-weight: 700;
   color: #fff;
-  font-size: clamp(18px, 2vw, 30px);
+  font-size: 3.4cqh;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2cqw;
 }
-.cf-empty { color: var(--color-neutral-500); font-size: clamp(14px, 1.2vw, 18px); margin: 4px 0 0; }
+.cf-scene-pageflag {
+  font-size: 2cqh;
+  color: var(--color-neutral-400);
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.cf-scene-empty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5cqh;
+  color: var(--color-neutral-400);
+  text-align: center;
+}
+.cf-scene-empty-title { margin: 0; font-size: 3.2cqh; font-weight: 700; color: var(--color-text); }
+.cf-scene-empty-sub { margin: 0; font-size: 2.2cqh; color: var(--color-neutral-500); max-width: 60cqw; }
+.cf-rail-retry { margin-top: 1.5cqh; align-self: center; }
 
 /* Initiative */
-.cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cf-init-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1.2cqh; flex: 1 1 auto; min-height: 0; }
 .cf-init {
   display: flex;
   align-items: center;
-  gap: clamp(10px, 1.2vw, 18px);
-  padding: clamp(9px, 1vw, 15px) clamp(12px, 1.2vw, 18px);
+  gap: 2cqw;
+  padding: 1.2cqh 2cqw;
   border-radius: var(--radius-md);
-  border-left: 3px solid transparent;
+  border-left: 0.5cqh solid transparent;
   background: color-mix(in srgb, var(--color-bg) 40%, transparent);
 }
 .cf-init.current {
@@ -841,11 +1589,11 @@ const SCREEN_CSS = `
 }
 .cf-init-num {
   flex: none;
-  width: clamp(38px, 3.4vw, 56px);
+  width: 6cqw;
   text-align: center;
   font-family: var(--font-heading);
   font-weight: 800;
-  font-size: clamp(20px, 2.4vw, 36px);
+  font-size: 4cqh;
   color: var(--color-accent-2);
 }
 .cf-init.current .cf-init-num { color: var(--color-accent); }
@@ -853,68 +1601,114 @@ const SCREEN_CSS = `
 .cf-init-name {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 1.5cqw;
   font-weight: 600;
   color: #fff;
-  font-size: clamp(16px, 1.7vw, 26px);
+  font-size: 3cqh;
+  min-width: 0;
 }
-.cf-init-hp { flex: none; width: clamp(120px, 14vw, 220px); text-align: right; }
+.cf-init-name .cf-clamp-1 { max-width: 34cqw; }
+.cf-init-hp { flex: none; width: 22cqw; text-align: right; }
 
 /* HP bars (shared look with the app's cf-hp) */
 .cf-hp {
-  height: 10px;
+  height: 1.4cqh;
   border-radius: 999px;
   background: color-mix(in srgb, var(--color-text) 12%, transparent);
   overflow: hidden;
-  margin-top: 5px;
+  margin-top: 0.6cqh;
 }
 .cf-hp > div { height: 100%; background: #5bd18b; border-radius: 999px; transition: width 0.4s ease; }
 .cf-hp.low > div { background: #e5c15b; }
 .cf-hp.crit > div { background: #e5735b; }
-.cf-hp-num { font-size: clamp(13px, 1.3vw, 20px); font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
-.cf-hp-row { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.cf-hp-num { font-size: 2.3cqh; font-variant-numeric: tabular-nums; color: var(--color-neutral-300); }
+.cf-hp-row { display: flex; align-items: center; gap: 1.5cqw; margin-top: 0.8cqh; }
 .cf-hp-row .cf-hp { flex: 1; margin-top: 0; }
 
 /* Party */
-.cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 12px; }
-.cf-party-card { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 12px 14px; }
-.cf-party-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.cf-party-name { font-weight: 700; color: #fff; font-size: clamp(15px, 1.5vw, 22px); }
-.cf-party-sub { color: var(--color-neutral-400); font-size: clamp(12px, 1.1vw, 16px); margin-top: 2px; text-transform: capitalize; }
+.cf-party { display: grid; grid-template-columns: repeat(auto-fill, minmax(24cqw, 1fr)); gap: 1.5cqw; align-content: start; overflow: hidden; }
+.cf-party-card { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1.4cqh 1.6cqw; min-width: 0; }
+.cf-party-card.alumni { opacity: 0.62; }
+.cf-party-top { display: flex; align-items: center; justify-content: space-between; gap: 1cqw; }
+.cf-party-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 1cqw;
+  font-weight: 700;
+  color: #fff;
+  font-size: 2.6cqh;
+  min-width: 0;
+}
+.cf-party-name .cf-clamp-1 { max-width: 15cqw; }
+.cf-party-status {
+  text-transform: none;
+  color: var(--color-neutral-300);
+  border-color: color-mix(in srgb, var(--color-neutral-400) 45%, transparent);
+}
+.cf-party-sub { color: var(--color-neutral-400); font-size: 2cqh; margin-top: 0.4cqh; text-transform: capitalize; }
 
 /* Conditions */
-.cf-conds { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.cf-conds { display: flex; flex-wrap: wrap; gap: 0.6cqw; margin-top: 0.8cqh; align-items: center; }
 .cf-cond {
   border: 1px solid var(--color-divider);
   border-radius: 999px;
-  padding: 2px 9px;
-  font-size: clamp(10px, 0.95vw, 13px);
+  padding: 0.3cqh 1cqw;
+  font-size: 1.8cqh;
   color: var(--color-accent-2);
+  max-width: 20cqw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+.cf-cond-more { color: var(--color-neutral-400); font-size: 1.8cqh; }
 
 /* Quests */
-.cf-quests { display: flex; flex-direction: column; gap: 14px; }
-.cf-quest-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.cf-quest-title { font-weight: 700; color: #fff; font-size: clamp(15px, 1.5vw, 22px); }
-.cf-objs { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.cf-quests { display: flex; flex-direction: column; gap: 1.5cqh; overflow: hidden; }
+.cf-quest-top { display: flex; align-items: center; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
+.cf-quest-title { font-weight: 700; color: #fff; font-size: 2.8cqh; max-width: 70cqw; }
+.cf-objs { list-style: none; margin: 0.8cqh 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.6cqh; }
 .cf-objs li {
   display: flex;
-  gap: 9px;
+  gap: 1.2cqw;
   align-items: baseline;
   color: var(--color-neutral-200);
-  font-size: clamp(13px, 1.2vw, 18px);
+  font-size: 2.2cqh;
+  min-width: 0;
 }
 .cf-objs li.done { color: var(--color-neutral-500); text-decoration: line-through; }
 .cf-obj-mark { color: var(--color-accent); flex: none; }
+.cf-obj-text { min-width: 0; }
 .cf-objs li.done .cf-obj-mark { color: var(--color-neutral-600); }
 
 /* NPCs */
-.cf-npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 10px; }
-.cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 10px 13px; }
-.cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: clamp(14px, 1.3vw, 19px); }
-.cf-npc-role { color: var(--color-neutral-400); font-size: clamp(12px, 1.1vw, 15px); }
-.cf-npc-disposition { margin-top: 8px; }
+.cf-npc-head {
+  margin: 2cqh 0 1cqh;
+  font-family: var(--font-heading);
+  font-weight: 700;
+  color: #fff;
+  font-size: 2.6cqh;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.cf-npcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(22cqw, 1fr)); gap: 1.2cqw; }
+.cf-npc { border: 1px solid var(--color-divider); border-radius: var(--radius-md); padding: 1cqh 1.3cqw; min-width: 0; }
+.cf-npc-name { display: block; font-weight: 600; color: #fff; font-size: 2.3cqh; }
+.cf-npc-role { display: block; color: var(--color-neutral-400); font-size: 1.9cqh; }
+.cf-npc-disposition { margin-top: 0.8cqh; }
+
+/* Map */
+.cf-scene-map { align-items: center; justify-content: center; }
+.cf-map-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: var(--radius-md); }
+
+/* Intermission */
+.cf-intermission { align-items: center; justify-content: center; text-align: center; gap: 2cqh; color: var(--color-neutral-300); }
+.cf-intermission h2 { margin: 0; font-family: var(--font-heading); font-size: 6cqh; color: #fff; }
+.cf-intermission p { margin: 0; font-size: 3cqh; }
+.cf-intermission-loc { font-size: 2.4cqh; color: var(--color-neutral-400); }
+
+/* Blackout */
+.cf-blackout { position: absolute; inset: 0; background: #000; }
+
 @media (prefers-reduced-motion: reduce) {
   .cf-screen-control-stack,
   .cf-hp > div {

@@ -6,7 +6,7 @@ import {
   PF1E_PACK_NAME,
   type Pf1eImportLogger,
 } from '../../src/modules/rules/pathfinder1e-importer';
-import { PF1E_PACK_SLUG } from '@campfire/schema';
+import { Pathfinder1eAdapter, PF1E_PACK_SLUG } from '@campfire/schema';
 import {
   startFakePathfinder1e,
   startFakePathfinder1eMultiSource,
@@ -39,7 +39,7 @@ describe('pathfinder1e-importer — section mapping', () => {
     await fake.close();
   });
 
-  it('maps a real Goblin statblock (ascending AC, CR fraction, saves, ability scores)', async () => {
+  it('maps a real Goblin statblock (ascending AC, CR fraction, saves, ability scores, native Init)', async () => {
     const { entries } = await fetchPathfinder1eSection(fake.baseUrl, 'monsters', recordingLogger());
     expect(entries).toHaveLength(2);
     const goblin = entries.find((e) => e.name === 'Goblin')!;
@@ -51,9 +51,22 @@ describe('pathfinder1e-importer — section mapping', () => {
     expect(data.armorClass).toBe(16); // ascending AC preserved
     expect(data.challengeRating).toBe('1/3');
     expect(data.hitPoints).toBe(6);
+    expect(data.initiative).toBe(6); // native Init (DEX+2 + Improved Initiative +4) — issue #764
     expect(data.saves).toEqual({ fort: 3, ref: 3, will: -1 });
     expect(data.abilityScores).toEqual({ str: 11, dex: 15, con: 12, int: 10, wis: 9, cha: 6 });
     expect(goblin.summary).toContain('CR 1/3');
+  });
+
+  it('maps Owlbear native Init (+1) and keeps both fixtures usable by the PF1e adapter (#764)', async () => {
+    const { entries } = await fetchPathfinder1eSection(fake.baseUrl, 'monsters', recordingLogger());
+    const goblin = JSON.parse(entries.find((e) => e.name === 'Goblin')!.dataJson!);
+    const owlbear = JSON.parse(entries.find((e) => e.name === 'Owlbear')!.dataJson!);
+    expect(owlbear.initiative).toBe(1);
+    // Encounter path: adapter.mapStatblock(dataJson).abilityScores → initiativeModifier
+    expect(Pathfinder1eAdapter.initiativeModifier(Pathfinder1eAdapter.mapStatblock(goblin).abilityScores)).toBe(6);
+    expect(Pathfinder1eAdapter.initiativeModifier(Pathfinder1eAdapter.mapStatblock(owlbear).abilityScores)).toBe(1);
+    // Characters (no native Init) still derive from DEX — same function, different input shape.
+    expect(Pathfinder1eAdapter.initiativeModifier({ STR: 10, DEX: 14, CON: 12 })).toBe(2);
   });
 
   it('maps a spell with per-class levels and school, and follows pagination to page 2', async () => {

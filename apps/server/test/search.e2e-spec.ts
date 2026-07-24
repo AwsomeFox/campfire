@@ -42,7 +42,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/npcs`)
         .set(dm)
-        .send({ name: 'Vexley the Innkeeper', body: 'Owes the party 50 gold.', dmSecret: 'Vex is a spy for the crown.' })
+        .send({ name: 'Vexley the Innkeeper', body: 'Owes the party 50 gold.', dmSecret: 'Vex is a spy for the crown.', hidden: false })
     ).body.id;
 
     // A hidden NPC that mentions the same query in its (visible-to-DM) name.
@@ -57,7 +57,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/quests`)
         .set(dm)
-        .send({ title: 'Find the Vex ledger', body: 'Recover the innkeeper debt records.' })
+        .send({ title: 'Find the Vex ledger', body: 'Recover the innkeeper debt records.', hidden: false })
     ).body.id;
 
     hiddenQuestId = (
@@ -104,7 +104,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/factions`)
         .set(dm)
-        .send({ name: 'The Vex Cartel', kind: 'guild', body: 'A smuggling ring.' })
+        .send({ name: 'The Vex Cartel', kind: 'guild', body: 'A smuggling ring.', hidden: false })
     ).body.id;
 
     // A visible + a hidden timeline event, both matching "Vex".
@@ -112,7 +112,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/timeline`)
         .set(dm)
-        .send({ title: 'The Vex Uprising', inWorldDate: 'Year 90 DR', body: 'The cartel rose to power.' })
+        .send({ title: 'The Vex Uprising', inWorldDate: 'Year 90 DR', body: 'The cartel rose to power.', hidden: false })
     ).body.id;
     hiddenEventId = (
       await request(server)
@@ -170,6 +170,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
           questId: visibleQuestId,
           locationId: visibleLocationId,
           sessionId,
+          hidden: false,
         })
     ).body.id;
     hiddenEncounterId = (
@@ -194,7 +195,7 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
       await request(server)
         .post(`/api/v1/campaigns/${campaignId}/encounters`)
         .set(dm)
-        .send({ name: 'Dawn Patrol', questId: secretLinkedQuestId, locationId: secretLinkedLocationId })
+        .send({ name: 'Dawn Patrol', questId: secretLinkedQuestId, locationId: secretLinkedLocationId, hidden: false })
     ).body.id;
 
     scheduledSessionId = (
@@ -387,6 +388,51 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(res.body.results).toEqual([]);
   });
 
+  it('matches multilingual titles with NFKC + fixed-locale fold (issue #624)', async () => {
+    const server = ctx.app.getHttpServer();
+    const strasseId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Straße Guard', body: 'Watches the east gate.' })
+    ).body.id;
+    const cafeId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        // #754: player-visible so the player-scoped CAFÉ search below can match it.
+        .send({ name: 'Café Müller', body: 'Sells tea.', hidden: false })
+    ).body.id;
+    const istanbulId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'İstanbul Courier', body: 'Runs messages.' })
+    ).body.id;
+
+    const strasseRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('strasse')}`)
+      .set(dm);
+    expect(strasseRes.status).toBe(200);
+    const strasseHit = (strasseRes.body.results as Result[]).find((r) => r.type === 'npc' && r.id === strasseId);
+    expect(strasseHit).toBeTruthy();
+    // Original spelling preserved in title/snippet — not the folded form.
+    expect(strasseHit!.title).toBe('Straße Guard');
+    expect(strasseHit!.title).toContain('ß');
+
+    const cafeRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('CAFÉ')}`)
+      .set(player);
+    expect(cafeRes.body.results.some((r: Result) => r.type === 'npc' && r.id === cafeId && r.title === 'Café Müller')).toBe(true);
+
+    const istanbulRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('istanbul')}`)
+      .set(dm);
+    expect(istanbulRes.body.results.some((r: Result) => r.type === 'npc' && r.id === istanbulId && r.title === 'İstanbul Courier')).toBe(
+      true,
+    );
+  });
+
   it('name/title matches rank ahead of body matches', async () => {
     const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/search?q=Vex`).set(dm);
     const results: Result[] = res.body.results;
@@ -475,7 +521,7 @@ describe('campaign search role boundaries (e2e, real cookie sessions, issue #843
     expect((await dmAgent.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: users.viewer, role: 'viewer' })).status).toBe(201);
 
     visibleEncounterId = (
-      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Public Orchard Skirmish' })
+      await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Public Orchard Skirmish', hidden: false })
     ).body.id;
     hiddenEncounterId = (
       await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Orchard Dragon', hidden: true })

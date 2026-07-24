@@ -1,15 +1,37 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
-import { CharacterCreate, CharacterUpdate, HpPatch, ConditionsPatch, SpellSlotPatch, XpPatch, XpAward, LevelUp, normalizeStats, ruleSystemAdapter, ddbImportSupported } from '@campfire/schema';
-import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel } from '@campfire/schema';
+import {
+  CharacterCreate,
+  CharacterUpdate,
+  HpPatch,
+  ConditionsPatch,
+  SpellSlotPatch,
+  XpPatch,
+  XpAward,
+  LevelUp,
+  normalizeStats,
+  ruleSystemAdapter,
+  ddbImportSupported,
+  // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
+  checkCatalogForAdapter,
+  findCheckInCatalog,
+  checkRollExpr,
+  formatCheckBreakdown,
+  sortCheckCatalog,
+  pf2eDegreeOfSuccess,
+} from '@campfire/schema';
+import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
+import { rollDice } from '../../common/dice';
+import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { auditLog, campaigns, characters, combatants, encounters } from '../../db/schema';
+import { auditLog, campaigns, characters, checkRequests, combatants, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -97,7 +119,17 @@ export class CharactersService {
     // headline failure: a stale full-snapshot save can no longer silently clobber a
     // fresher edit (a live HP/level change, a DM-secret edit) from another tab/device.
     private readonly revisions: RevisionsService,
+    // Thin SSE invalidation for run-session inline character cards (issue #421).
+    private readonly events: CampaignEventsService,
+    // Persistence for the shared dice log (issue #415): a catalog check roll lands in the
+    // same feed as a manual /roll, so DM and players see one authoritative result.
+    private readonly rolls: RollsService,
   ) {}
+
+  /** Issue #421: id-only sheet invalidation so encounter clients refetch without an encounterId. */
+  private emitCharacterUpdated(campaignId: number, characterId: number, userId: string): void {
+    this.events.emit({ type: 'character.updated', campaignId, characterId, userId });
+  }
 
   async listForCampaign(campaignId: number, role: Role): Promise<Character[]> {
     const rows = await this.db.select().from(characters).where(and(eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)));
@@ -140,6 +172,256 @@ export class CharactersService {
   }
 
   /**
+   * Issue #415: the roll catalog for a character — every rollable check (ability checks,
+   * skills incl. unproficient, saves, initiative) with an authoritative modifier and a
+   * transparent breakdown, sourced from the campaign's RuleSystemAdapter. Favorites first.
+   * The catalog reads only public sheet numbers (level/stats/saves/skills), so no dmSecret
+   * redaction is needed — it never touches the secret field.
+   */
+  async listChecks(id: number): Promise<RollCheckDefinition[]> {
+    const row = await this.getRowOrThrow(id);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    return sortCheckCatalog(checkCatalogForAdapter(adapter, toDomain(row)));
+  }
+
+  /**
+   * Issue #415: resolve and roll a catalog check server-side. The SERVER computes the
+   * modifier + dice expression from the adapter catalog (the client only names a checkId and
+   * a roll mode), rolls with the shared crypto roller, records the result to the campaign
+   * dice log with a transparent breakdown label, and — for a system that reports degrees of
+   * success (PF2e) with a DC — returns the degree. This is the same authoritative math the
+   * character sheet and encounter card render, so no surface can drift.
+   */
+  async rollCheck(id: number, input: CheckRollRequest, user: RequestUser, role: Role): Promise<CheckRollResponse> {
+    const row = await this.getRowOrThrow(id);
+    const adapter = await this.adapterForCampaign(row.campaignId);
+    const character = toDomain(row);
+    const def = findCheckInCatalog(adapter, character, input.checkId);
+    if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${id}`);
+
+    const mode = input.mode ?? 'flat';
+    const expr = checkRollExpr(def, mode);
+    const result = rollDice(expr);
+    const breakdownText = formatCheckBreakdown(def);
+    // The dice-log label carries the label + transparent breakdown, so the shared feed and
+    // the combat log show how the number was reached without any hidden-data leak. When a DM
+    // attached consequence text (issue #415), it rides on the persisted label too — not just
+    // the audit detail — so the shared dice log shows the stakes, matching the documented
+    // "recorded with the roll" contract. Public copy only (no hidden-data leak).
+    result.label =
+      `${character.name} · ${def.label} (${breakdownText})` + (input.consequence ? ` — ${input.consequence}` : '');
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = result.total >= input.dc;
+    }
+    const persisted = await this.rolls.record(row.campaignId, result, user);
+
+    // Degrees of success: PF2e steps a nat-20 up / nat-1 down. The natural die face is the
+    // kept d20 (advantage/disadvantage) or the sole d20 of a flat roll.
+    let degree: CheckRollResponse['degree'];
+    if (def.supportsDegrees && typeof input.dc === 'number') {
+      const naturalRoll = result.kept?.[0] ?? result.rolls[0];
+      degree = pf2eDegreeOfSuccess(result.total, input.dc, naturalRoll);
+    }
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: 'character',
+      entityId: id,
+      campaignId: row.campaignId,
+      detail:
+        `${result.label}: ${result.expr} = ${result.total}` +
+        (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'}${degree ? `, ${degree}` : ''})` : '') +
+        (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+    });
+
+    return {
+      check: {
+        id: def.id,
+        label: def.label,
+        category: def.category,
+        ability: def.ability,
+        proficiency: def.proficiency,
+        modifier: def.modifier,
+        breakdown: def.breakdown.map((b) => ({ label: b.label, value: b.value })),
+        breakdownText,
+        ...(def.incomplete ? { incomplete: true } : {}),
+      },
+      mode,
+      roll: persisted,
+      ...(degree ? { degree } : {}),
+    };
+  }
+
+  // ---------- DM-initiated check requests (issue #415) ----------
+  // The interactive "DM asks selected players to roll a check/save" loop. A DM creates one
+  // request per target character; the targeted player reads their pending request(s) over a
+  // permission-checked REST read, rolls ONCE via the same rollCheck() path (dice log + audit +
+  // breakdown/degree), and the row is marked resolved. The SSE ticks stay thin (ids only).
+
+  private toCheckRequestDomain(row: typeof checkRequests.$inferSelect, characterName: string): CheckRequest {
+    return {
+      id: row.id,
+      campaignId: row.campaignId,
+      characterId: row.characterId,
+      characterName,
+      encounterId: row.encounterId ?? null,
+      checkId: row.checkId,
+      checkLabel: row.checkLabel,
+      mode: row.mode as CheckRequest['mode'],
+      dc: row.dc ?? null,
+      consequence: row.consequence ? row.consequence : null,
+      status: row.status as CheckRequest['status'],
+      requestedByUserId: row.requestedByUserId,
+      requestedByName: row.requestedByName,
+      rollId: row.rollId ?? null,
+      createdAt: row.createdAt,
+      resolvedAt: row.resolvedAt ?? null,
+    };
+  }
+
+  /**
+   * DM asks one or more target characters to roll `checkId` (issue #415). Validates the check
+   * exists in EACH target's adapter-owned catalog (so a request can never name a check the sheet
+   * can't roll), persists one row per character, and emits a thin `check.requested` tick per row
+   * so each targeted player's client refetches and shows the prompt. Controller gates this to dm.
+   */
+  async requestChecks(campaignId: number, input: CheckRequestCreate, user: RequestUser, role: Role): Promise<CheckRequest[]> {
+    const adapter = await this.adapterForCampaign(campaignId);
+    const mode = input.mode ?? 'flat';
+    const ts = nowIso();
+    const created: CheckRequest[] = [];
+    for (const characterId of input.characterIds) {
+      const charRow = await this.getRowOrThrow(characterId);
+      if (charRow.campaignId !== campaignId) {
+        throw new BadRequestException(`Character ${characterId} is not in campaign ${campaignId}`);
+      }
+      const def = findCheckInCatalog(adapter, toDomain(charRow), input.checkId);
+      if (!def) throw new NotFoundException(`No rollable check "${input.checkId}" for character ${characterId}`);
+      const [row] = await this.db
+        .insert(checkRequests)
+        .values({
+          campaignId,
+          characterId,
+          encounterId: input.encounterId ?? null,
+          checkId: input.checkId,
+          checkLabel: def.label,
+          mode,
+          dc: input.dc ?? null,
+          consequence: input.consequence ?? '',
+          status: 'pending',
+          requestedByUserId: user.id,
+          requestedByName: user.name ?? '',
+          rollId: null,
+          createdAt: ts,
+          resolvedAt: null,
+        })
+        .returning();
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'check.request',
+        entityType: 'character',
+        entityId: characterId,
+        campaignId,
+        detail:
+          `Requested ${def.label}` +
+          (input.dc != null ? ` vs DC ${input.dc}` : '') +
+          (input.consequence ? ` — consequence: ${input.consequence}` : ''),
+      });
+      this.events.emit({ type: 'check.requested', campaignId, requestId: row.id, characterId, userId: user.id });
+      created.push(this.toCheckRequestDomain(row, charRow.name));
+    }
+    return created;
+  }
+
+  /**
+   * List check requests visible to the caller (issue #415). The DM sees every request in the
+   * campaign; a non-DM sees only requests targeting a character they OWN (the targeted player).
+   * Optional `status` filter ('pending' | 'resolved'). Newest first.
+   */
+  async listCheckRequests(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    opts: { status?: CheckRequest['status'] } = {},
+  ): Promise<CheckRequest[]> {
+    // Visibility is pushed into the WHERE clause rather than filtered in memory (issue #415):
+    // the DM sees every request in the campaign; a non-DM sees only requests targeting a
+    // character they OWN. This scales with the caller's slice, not the whole campaign.
+    const conditions = [eq(checkRequests.campaignId, campaignId)];
+    if (opts.status) conditions.push(eq(checkRequests.status, opts.status));
+    if (role !== 'dm') conditions.push(eq(characters.ownerUserId, user.id));
+    const rows = await this.db
+      .select({ req: checkRequests, characterName: characters.name })
+      .from(checkRequests)
+      .innerJoin(characters, eq(checkRequests.characterId, characters.id))
+      .where(and(...conditions))
+      .orderBy(desc(checkRequests.id));
+    return rows.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
+  }
+
+  private async getCheckRequestRowOrThrow(id: number) {
+    const [row] = await this.db.select().from(checkRequests).where(eq(checkRequests.id, id)).limit(1);
+    if (!row) throw new NotFoundException(`Check request ${id} not found`);
+    return row;
+  }
+
+  /** The campaign a check request belongs to — so the controller can gate membership before resolving. */
+  async campaignIdForCheckRequest(id: number): Promise<number> {
+    const row = await this.getCheckRequestRowOrThrow(id);
+    return row.campaignId;
+  }
+
+  /**
+   * The targeted player (owner of the character) — or the DM — answers a pending check request
+   * by rolling ONCE (issue #415). Reuses rollCheck() so the roll lands in the shared dice log
+   * with a transparent breakdown, is audited, and returns the degree of success where the
+   * system reports it. The DM's consequence text + DC ride through to the roll. The request is
+   * then marked resolved (idempotency: a second attempt on a resolved row is a 400), and a thin
+   * `check.resolved` tick lets the DM's client drop the pending row.
+   */
+  async resolveCheckRequest(id: number, user: RequestUser, role: Role): Promise<CheckRequestResolution> {
+    const req = await this.getCheckRequestRowOrThrow(id);
+    const charRow = await this.getRowOrThrow(req.characterId);
+    // dm-or-owner may answer — same gate as writing the sheet.
+    this.assertCanWrite(charRow, user, role);
+    // Atomically CLAIM the request (pending -> resolved) BEFORE rolling so the "roll once"
+    // invariant survives a race (DM + player double-click, retries): the conditional UPDATE
+    // flips the row only if it is still pending, and exactly one racing caller gets a returned
+    // row. A caller that loses the race (or a repeat on an already-answered row) gets a 400.
+    const [claimed] = await this.db
+      .update(checkRequests)
+      .set({ status: 'resolved', resolvedAt: nowIso() })
+      .where(and(eq(checkRequests.id, id), eq(checkRequests.status, 'pending')))
+      .returning();
+    if (!claimed) {
+      throw new BadRequestException('This check request has already been answered');
+    }
+    // The claim guarantees this rolls at most once; link the resulting roll id back onto the row.
+    const result = await this.rollCheck(
+      req.characterId,
+      {
+        checkId: req.checkId,
+        mode: (req.mode as CheckRollRequest['mode']) ?? 'flat',
+        ...(req.dc != null ? { dc: req.dc } : {}),
+        ...(req.consequence ? { consequence: req.consequence } : {}),
+      },
+      user,
+      role,
+    );
+    const [updated] = await this.db
+      .update(checkRequests)
+      .set({ rollId: result.roll.id })
+      .where(eq(checkRequests.id, id))
+      .returning();
+    this.events.emit({ type: 'check.resolved', campaignId: req.campaignId, requestId: id, characterId: req.characterId, userId: user.id });
+    return { request: this.toCheckRequestDomain(updated, charRow.name), result };
+  }
+
+  /**
    * When a campaign has `dmControlsProgression` enabled (issue #270), XP awards and
    * level-ups are DM-only — a non-DM (even a character's owning player) is rejected.
    * When the flag is off (the default), this is a no-op and any owner may self-progress,
@@ -167,20 +449,113 @@ export class CharactersService {
    * untouched (their combatant rows are a historical snapshot). hpCurrent is clamped
    * to the combatant's (possibly just-raised) hpMax, matching every other HP path.
    */
-  private async syncActiveCombatants(characterId: number, hpCurrent: number, hpMax?: number): Promise<void> {
+  private async syncActiveCombatants(
+    characterId: number,
+    hpCurrent: number,
+    hpMax?: number,
+    opts?: { campaignId?: number },
+  ): Promise<void> {
     const rows = await this.db
-      .select({ combatant: combatants })
+      .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
       .from(combatants)
       .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
       .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
 
-    for (const { combatant } of rows) {
+    const touchedEncounterIds = new Set<number>();
+    let campaignId = opts?.campaignId;
+    // Issue #466: when the sheet mirrors into a live combatant, stamp the sheet's
+    // current updatedAt as the CAS token so a later re-end knows this sync.
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
       const nextMax = hpMax ?? combatant.hpMax;
       const nextCurrent = clampHpCurrent(hpCurrent, nextMax);
       await this.db
         .update(combatants)
-        .set({ hpCurrent: nextCurrent, hpMax: nextMax })
+        .set({
+          hpCurrent: nextCurrent,
+          hpMax: nextMax,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
         .where(eq(combatants.id, combatant.id));
+      touchedEncounterIds.add(encounterId);
+      campaignId ??= encCampaignId;
+    }
+    // Sheet HP mirrored into a live fight — push encounter.updated so trackers refresh
+    // without waiting for the poll (pairs with character.updated for the inline card).
+    if (campaignId != null) {
+      for (const encounterId of touchedEncounterIds) {
+        this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
+      }
+    }
+  }
+
+  /**
+   * Emit `encounter.updated` only while the encounter is still player-visible, so a
+   * sheet HP/condition sync into a HIDDEN live encounter cannot leak that encounter's
+   * existence onto the shared campaign SSE stream (#754). Mirrors
+   * EncountersService.emitEncounterEvent's re-read-at-emit visibility gate, applied at
+   * this producer too so every encounter-event path shares the same posture.
+   */
+  private emitEncounterUpdatedIfVisible(campaignId: number, encounterId: number): void {
+    const current = this.db
+      .select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(eq(encounters.id, encounterId))
+      .get();
+    // Fail closed (#754): if the row can't be read (e.g. deleted concurrently) treat
+    // it as not-visible and skip — an "unknown" encounter must not re-introduce an
+    // existence leak, and the signal is useless once the row is gone.
+    if (!current || Boolean(current.hidden)) return;
+    this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+  }
+
+  /**
+   * Mirror a character's conditions into linked combatants in still-live encounters
+   * (issue #486). Pair of EncountersService's combatant→sheet write-through: a sheet
+   * `set_character_conditions` / patchConditions / PATCH conditions must show up on
+   * the run-session tracker. Ended encounters keep their historical snapshot.
+   * Overwrites the combatant's conditions array wholesale (last sheet write wins);
+   * see EncountersService.updateCombatant for the full overlap-window contract.
+   */
+  private async syncActiveCombatantConditions(
+    characterId: number,
+    conditionsJson: string,
+    opts?: { campaignId?: number },
+  ): Promise<void> {
+    const rows = await this.db
+      .select({ combatant: combatants, campaignId: encounters.campaignId, encounterId: encounters.id })
+      .from(combatants)
+      .innerJoin(encounters, eq(combatants.encounterId, encounters.id))
+      .where(and(eq(combatants.characterId, characterId), ne(encounters.status, 'ended')));
+
+    const touchedEncounterIds = new Set<number>();
+    let campaignId = opts?.campaignId;
+    const [sheetMeta] = await this.db
+      .select({ updatedAt: characters.updatedAt })
+      .from(characters)
+      .where(eq(characters.id, characterId))
+      .limit(1);
+    const sheetSyncedUpdatedAt = sheetMeta?.updatedAt;
+    for (const { combatant, campaignId: encCampaignId, encounterId } of rows) {
+      await this.db
+        .update(combatants)
+        .set({
+          conditions: conditionsJson,
+          ...(sheetSyncedUpdatedAt != null ? { sheetSyncedUpdatedAt } : {}),
+        })
+        .where(eq(combatants.id, combatant.id));
+      touchedEncounterIds.add(encounterId);
+      campaignId ??= encCampaignId;
+    }
+    if (campaignId != null) {
+      for (const encounterId of touchedEncounterIds) {
+        this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
+      }
     }
   }
 
@@ -287,6 +662,7 @@ export class CharactersService {
       entityId: row.id,
       campaignId,
     });
+    this.emitCharacterUpdated(campaignId, row.id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -373,7 +749,11 @@ export class CharactersService {
     // Mirror HP/hpMax edits (e.g. a mid-session level-up) into any live encounter's
     // combatant row (issue #50).
     if (input.hpCurrent !== undefined || input.hpMax !== undefined) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
+    }
+    // Issue #486: PATCH conditions must also land on the live tracker.
+    if (input.conditions !== undefined) {
+      await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
     }
 
     await this.audit.log({
@@ -384,6 +764,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -407,6 +788,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: 'soft-delete (trashed)',
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
   }
 
   /** Restore a trashed character (issue #116) — clears `deleted_at`. dm/owner gate; 404 if not trashed. */
@@ -427,6 +809,7 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -476,7 +859,7 @@ export class CharactersService {
 
     // The transaction has committed before linked combatants are synchronized. Use the
     // exact row returned by that commit so the mirror and response agree.
-    await this.syncActiveCombatants(id, row.hpCurrent);
+    await this.syncActiveCombatants(id, row.hpCurrent, undefined, { campaignId: row.campaignId });
 
     await this.audit.log({
       actor: auditActor(user),
@@ -487,6 +870,7 @@ export class CharactersService {
       campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(row.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -531,6 +915,7 @@ export class CharactersService {
       campaignId: row.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(row.campaignId, id, user.id);
     return toDomain(row);
   }
 
@@ -615,6 +1000,9 @@ export class CharactersService {
 
       return changed.map(toDomain);
     });
+    for (const character of updated) {
+      this.emitCharacterUpdated(campaignId, character.id, user.id);
+    }
     return updated;
   }
 
@@ -655,7 +1043,7 @@ export class CharactersService {
 
     // A mid-session level-up that raises hpMax should reflect on the combat tracker too (issue #50).
     if (input.hpMax !== undefined) {
-      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax);
+      await this.syncActiveCombatants(id, row.hpCurrent, row.hpMax, { campaignId: existing.campaignId });
     }
 
     await this.audit.log({
@@ -667,6 +1055,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify({ level: row.level, ...(input.hpMax !== undefined ? { hpMax: input.hpMax } : {}) }),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
   }
 
@@ -684,6 +1073,10 @@ export class CharactersService {
       .where(eq(characters.id, id))
       .returning();
 
+    // Issue #486: sheet → live combatant so the run-session tracker shows Poisoned
+    // the moment it is applied on the sheet (or via MCP set_character_conditions).
+    await this.syncActiveCombatantConditions(id, row.conditions, { campaignId: existing.campaignId });
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -693,6 +1086,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return redactSecret(toDomain(row), role);
   }
 
@@ -724,6 +1118,7 @@ export class CharactersService {
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
     });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);
   }
 }

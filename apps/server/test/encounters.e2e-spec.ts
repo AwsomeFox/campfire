@@ -71,7 +71,7 @@ describe('encounters (e2e)', () => {
 
   it('create auto-adds the party with DEX-derived initMod', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Goblin Ambush' });
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Goblin Ambush', hidden: false });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('preparing');
     expect(res.body.round).toBe(0);
@@ -86,9 +86,46 @@ describe('encounters (e2e)', () => {
     expect(aria.initiative).toBeNull();
   });
 
+  // Issue #491: PF2e initiative is Perception = WIS mod + trained proficiency (level+2),
+  // not the bare 5e-style WIS (or DEX) modifier. A level-5 WIS 16 PC with no stored
+  // Perception must seed initMod = +3 + (5+2) = +10 so roll_initiative matches a by-hand roll.
+  it('PF2e create seeds character initMod with WIS + trained proficiency (issue #491)', async () => {
+    const server = ctx.app.getHttpServer();
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = new Date().toISOString();
+    // Campaign create requires an installed pack slug (validateRuleSystem).
+    await db
+      .insert(rulePacks)
+      .values({ slug: 'pf2e-srd', name: 'PF2e SRD', version: '1', license: '', sourceUrl: '', installedAt: ts, entryCount: 0 })
+      .onConflictDoNothing();
+
+    const camp = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'PF2e Init Campaign', ruleSystem: 'pf2e-srd' });
+    expect(camp.status).toBe(201);
+
+    const hero = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/characters`)
+      .set(dm)
+      .send({ name: 'Scout', stats: { WIS: 16, DEX: 20 }, level: 5, hpCurrent: 40, hpMax: 40 });
+    expect(hero.status).toBe(201);
+
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${camp.body.id}/encounters`)
+      .set(dm)
+      .send({ name: 'Forest Ambush' });
+    expect(res.status).toBe(201);
+    expect(res.body.combatants).toHaveLength(1);
+    const scout = res.body.combatants[0];
+    expect(scout.characterId).toBe(hero.body.id);
+    // DEX 20 must NOT win (that would be 5e); Perception is Wisdom-based.
+    expect(scout.initMod).toBe(10);
+  });
+
   it('player without dm role cannot create an encounter', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope' });
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope', hidden: false });
     expect(res.status).toBe(403);
   });
 
@@ -128,7 +165,7 @@ describe('encounters (e2e)', () => {
 
     it('only active characters are auto-added; dead/retired are skipped', async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight', hidden: false });
       expect(res.status).toBe(201);
       const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
       expect(charIds).toContain(activeId);
@@ -144,7 +181,7 @@ describe('encounters (e2e)', () => {
       expect(patch.status).toBe(200);
       expect(patch.body.status).toBe('active');
 
-      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'Second Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'Second Fight', hidden: false });
       expect(res.status).toBe(201);
       const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
       expect(charIds).toContain(activeId);
@@ -162,7 +199,7 @@ describe('encounters (e2e)', () => {
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'The Big Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'The Big Fight', hidden: false });
       encounterId = res.body.id;
       ariaCombatantId = res.body.combatants[0].id;
     });
@@ -298,6 +335,53 @@ describe('encounters (e2e)', () => {
       expect(res.body.hpCurrent).toBe(15);
     });
 
+    // Issue #495: players may only add conditions from the active rule vocabulary;
+    // arbitrary free-text ("god_mode") must 400. MCP update_combatant shares this path.
+    it('owning player cannot inject an arbitrary free-text condition (issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ addConditions: ['god_mode'] });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toMatch(/god_mode|vocabulary|Unknown condition/i);
+
+      const after = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const aria = (after.body.combatants as Array<{ id: number; conditions: string[] }>).find(
+        (c) => c.id === ariaCombatantId,
+      )!;
+      expect(aria.conditions).not.toContain('god_mode');
+    });
+
+    it('owning player may add an adapter vocabulary condition (case-insensitive, issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ addConditions: ['prone'] });
+      expect(res.status).toBe(200);
+      expect(res.body.conditions).toContain('prone');
+      // Clean up so later assertions in this suite are not surprised by leftover conditions.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(player)
+        .send({ removeConditions: ['prone'] });
+    });
+
+    it('DM may mint a custom condition label outside the vocabulary (issue #495)', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ addConditions: ['hexed_by_patron'] });
+      expect(res.status).toBe(200);
+      expect(res.body.conditions).toContain('hexed_by_patron');
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`)
+        .set(dm)
+        .send({ removeConditions: ['hexed_by_patron'] });
+    });
+
     // Strict-validation (task P1 item 3): CombatantUpdateDto is now .strict() at
     // the DTO layer — an unknown/misnamed key like `hpCurrent` (the real column
     // name; CombatantUpdate's actual field is `hpDelta`/`hpSet`) previously
@@ -404,7 +488,7 @@ describe('encounters (e2e)', () => {
       const server = ctx.app.getHttpServer();
 
       // A second, unrelated encounter in the same campaign.
-      const otherEncRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrelated Fight' });
+      const otherEncRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrelated Fight', hidden: false });
       const otherEncounterId = otherEncRes.body.id;
 
       // ariaCombatantId belongs to `encounterId`, not `otherEncounterId`.
@@ -452,7 +536,7 @@ describe('encounters (e2e)', () => {
       // `encounterId` is currently 'running' at this point in the suite (started earlier) —
       // exercise the guard against a fresh 'preparing' encounter instead.
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Not Started Yet' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Not Started Yet', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/next-turn`).set(dm);
@@ -461,7 +545,7 @@ describe('encounters (e2e)', () => {
 
     it('/end on a non-running (preparing) encounter is rejected 400', async () => {
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Never Started' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Never Started', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/end`).set(dm);
@@ -495,7 +579,7 @@ describe('encounters (e2e)', () => {
 
     it('/reopen on a non-ended (preparing) encounter is rejected 400', async () => {
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Still Preparing' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Still Preparing', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/reopen`).set(dm);
@@ -545,7 +629,7 @@ describe('encounters (e2e)', () => {
 
       // Fresh, self-contained encounter: create (auto-adds the party), start it (which
       // seeds a combat-log 'turn' event), so both child tables have rows to orphan.
-      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Cleanup Test' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Cleanup Test', hidden: false });
       expect(encRes.status).toBe(201);
       const encId = encRes.body.id;
       await request(server).post(`/api/v1/encounters/${encId}/roll-initiative`).set(dm);
@@ -586,7 +670,7 @@ describe('encounters (e2e)', () => {
         .send({ name: 'Lyra', stats: { dex: 18, wis: 15 }, hpCurrent: 24, hpMax: 24 });
       expect(charRes.status).toBe(201);
 
-      const encRes = await request(server).post(`/api/v1/campaigns/${lcCampaignId}/encounters`).set(dm).send({ name: 'Initiative Check' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${lcCampaignId}/encounters`).set(dm).send({ name: 'Initiative Check', hidden: false });
       expect(encRes.status).toBe(201);
       expect(encRes.body.combatants).toHaveLength(1);
       const lyra = encRes.body.combatants[0];
@@ -617,7 +701,7 @@ describe('encounters (e2e)', () => {
       heroCharacterId = charRes.body.id;
 
       // Create → roll initiative → start → end, leaving one character combatant behind.
-      const encRes = await request(server).post(`/api/v1/campaigns/${endedCampaignId}/encounters`).set(dm).send({ name: 'Last Stand' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${endedCampaignId}/encounters`).set(dm).send({ name: 'Last Stand', hidden: false });
       endedEncounterId = encRes.body.id;
       heroCombatantId = encRes.body.combatants[0].id;
 
@@ -705,7 +789,7 @@ describe('encounters (e2e)', () => {
       const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer);
       expect(listRes.status).toBe(200);
 
-      const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer).send({ name: 'Nope' });
+      const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer).send({ name: 'Nope', hidden: false });
       expect(createRes.status).toBe(403);
     });
   });
@@ -776,7 +860,7 @@ describe('encounters (e2e)', () => {
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Combat Log Campaign' });
       logCampaignId = campRes.body.id;
 
-      const encRes = await request(server).post(`/api/v1/campaigns/${logCampaignId}/encounters`).set(dm).send({ name: 'Logged Fight' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${logCampaignId}/encounters`).set(dm).send({ name: 'Logged Fight', hidden: false });
       logEncounterId = encRes.body.id;
 
       const add = await request(server)
@@ -902,6 +986,187 @@ describe('encounters (e2e)', () => {
   });
 
   // ------------------------------------------------------------------
+  // Combat-log damage attribution (issue #620)
+  // ------------------------------------------------------------------
+  describe('combat-log damage attribution (issue #620)', () => {
+    let actorCampId: number;
+    let actorEncounterId: number;
+    let emberId: number;
+    let goblinId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      // A fresh campaign with NO party characters, so the only combatants are the two
+      // we add explicitly — Ember (the attacker) and Goblin (the target). With no
+      // party auto-add, the current-turn pointer after /start is deterministic: it
+      // points at whichever of the two sorts first by initiative. We set Ember's
+      // initiative high so the current turn is Ember's, exercising the
+      // current-combatant fallback path; the explicit-actorId path is covered in
+      // its own test below with a different shape.
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Actor Campaign' });
+      actorCampId = campRes.body.id;
+
+      const encRes = await request(server).post(`/api/v1/campaigns/${actorCampId}/encounters`).set(dm).send({ name: 'Attributed Fight', hidden: false });
+      actorEncounterId = encRes.body.id;
+
+      const addEmber = await request(server)
+        .post(`/api/v1/encounters/${actorEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Ember', hpMax: 30, initMod: 5 });
+      expect(addEmber.status).toBe(201);
+      emberId = addEmber.body.id;
+
+      const addGoblin = await request(server)
+        .post(`/api/v1/encounters/${actorEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin', hpMax: 7, initMod: -1 });
+      expect(addGoblin.status).toBe(201);
+      goblinId = addGoblin.body.id;
+
+      // Pin Ember's initiative above Goblin's so Ember is the current-turn combatant
+      // once combat starts (the default-actor fallback).
+      await request(server).patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`).set(dm).send({ initiative: 18 });
+      await request(server).patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`).set(dm).send({ initiative: 6 });
+
+      const start = await request(server).post(`/api/v1/encounters/${actorEncounterId}/start`).set(dm);
+      expect(start.status).toBe(201);
+    });
+
+    it('records the current-turn combatant as the actor of a damage event', async () => {
+      const server = ctx.app.getHttpServer();
+      // Ember is the current-turn combatant; damaging Goblin attributes the hit to Ember.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -4 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage',
+      );
+      expect(damage.length).toBeGreaterThanOrEqual(1);
+      const last = damage[damage.length - 1];
+      expect(last.actor).toBe('Ember');
+      expect(last.target).toBe('Goblin');
+      expect(last.detail).toContain('4');
+      // Issue #43 safety still holds: no exact resulting HP leaks into the log.
+      expect(last.detail).not.toContain('3');
+    });
+
+    it('accepts an explicit actorId that overrides the current-turn combatant', async () => {
+      const server = ctx.app.getHttpServer();
+      // Even though Ember is the current turn, the caller names Goblin as the attacker
+      // (e.g. friendly fire / a reaction). The log entry should attribute to Goblin.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`)
+        .set(dm)
+        .send({ hpDelta: -2, actorId: goblinId });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Ember',
+      );
+      expect(damage).toHaveLength(1);
+      expect(damage[0].actor).toBe('Goblin');
+    });
+
+    it('records the actor on a heal event too', async () => {
+      const server = ctx.app.getHttpServer();
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: 3 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const heal = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter((e) => e.type === 'heal');
+      expect(heal.length).toBeGreaterThanOrEqual(1);
+      expect(heal[heal.length - 1].actor).toBe('Ember');
+      expect(heal[heal.length - 1].target).toBe('Goblin');
+    });
+
+    it('drops the actor when the attacker is the target itself (no "Ember: took 4 damage")', async () => {
+      const server = ctx.app.getHttpServer();
+      // Self-damage: the current turn is Ember, and Ember is also the target. The actor
+      // must collapse to null so the log keeps its established "Ember took 4 damage"
+      // phrasing instead of the awkward "Ember: took 4 damage" the attributed form
+      // would produce when actor and target are the same name.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${emberId}`)
+        .set(dm)
+        .send({ hpDelta: -4 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const selfDamage = (res.body as Array<{ type: string; actor: string | null; target: string | null }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Ember' && e.actor !== 'Goblin',
+      );
+      expect(selfDamage.length).toBeGreaterThanOrEqual(1);
+      expect(selfDamage[selfDamage.length - 1].actor).toBeNull();
+      expect(selfDamage[selfDamage.length - 1].target).toBe('Ember');
+    });
+
+    it('honors actorId: null as an explicit opt-out of current-turn attribution', async () => {
+      const server = ctx.app.getHttpServer();
+      // Ember is the current-turn combatant, so an omitted actorId would attribute to
+      // Ember. Passing null must suppress attribution entirely (tri-state contract).
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -1, actorId: null });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Goblin' && e.detail.includes('1'),
+      );
+      expect(damage.length).toBeGreaterThanOrEqual(1);
+      expect(damage[damage.length - 1].actor).toBeNull();
+    });
+
+    it('ignores an actorId that does not reference a combatant in this encounter', async () => {
+      const server = ctx.app.getHttpServer();
+      // A stale client sends an actorId that doesn't belong to any combatant here. The
+      // server falls back to the current-turn combatant (Ember) rather than 400ing or
+      // polluting the log with a phantom name.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpDelta: -1, actorId: 999_999 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const damage = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'damage' && e.target === 'Goblin',
+      );
+      // Most recent Goblin-targeted damage should attribute to the current turn (Ember),
+      // proving the bogus actorId was dropped, not stored verbatim.
+      expect(damage[damage.length - 1].actor).toBe('Ember');
+    });
+
+    it('attributes a death event to the attacker when one is known', async () => {
+      const server = ctx.app.getHttpServer();
+      // Drop Goblin to 0 HP on Ember's turn — the death event should name Ember as actor.
+      const patch = await request(server)
+        .patch(`/api/v1/encounters/${actorEncounterId}/combatants/${goblinId}`)
+        .set(dm)
+        .send({ hpSet: 0 });
+      expect(patch.status).toBe(200);
+
+      const res = await request(server).get(`/api/v1/encounters/${actorEncounterId}/events`).set(dm);
+      const death = (res.body as Array<{ type: string; actor: string | null; target: string | null; detail: string }>).filter(
+        (e) => e.type === 'death',
+      );
+      expect(death).toHaveLength(1);
+      expect(death[0].actor).toBe('Ember');
+      expect(death[0].target).toBe('Goblin');
+      expect(death[0].detail).toContain('0 HP');
+    });
+  });
+
+  // ------------------------------------------------------------------
   // Combatant statblock exposure (issue #56)
   // ------------------------------------------------------------------
   describe('combatant statblock exposure (issue #56)', () => {
@@ -935,7 +1200,7 @@ describe('encounters (e2e)', () => {
 
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Statblock Campaign' });
       const sbCampaignId = campRes.body.id;
-      const encRes = await request(server).post(`/api/v1/campaigns/${sbCampaignId}/encounters`).set(dm).send({ name: 'SB Fight' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${sbCampaignId}/encounters`).set(dm).send({ name: 'SB Fight', hidden: false });
       const sbEncounterId = encRes.body.id;
 
       // Adding by ruleEntryId stores the link on the combatant (as the tracker relies on).
@@ -976,7 +1241,7 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Encounter Campaign' })).body.id;
     encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads', hidden: false })
     ).body.id;
   });
 
@@ -1088,7 +1353,7 @@ describe('encounters (e2e, real cookie sessions — non-member access)', () => {
     const createRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Private Encounter Campaign' });
     campaignId = createRes.body.id;
 
-    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Fight' });
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Fight', hidden: false });
     encounterId = encRes.body.id;
   });
 
@@ -1112,7 +1377,7 @@ describe('encounters (e2e, real cookie sessions — non-member access)', () => {
   });
 
   it('non-member gets 403 creating an encounter', async () => {
-    const res = await outsiderAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Nope' });
+    const res = await outsiderAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Nope', hidden: false });
     expect(res.status).toBe(403);
   });
 });
@@ -1139,7 +1404,7 @@ describe('encounters — issue #51: character uniqueness guard (e2e)', () => {
       await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 })
     ).body.id;
     // create auto-adds the whole party (Aria) as a combatant.
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -1194,7 +1459,7 @@ describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Pointer' })).body.id;
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
 
@@ -1280,7 +1545,7 @@ describe('encounters — issue #528: removeCombatant increments round on turn wr
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Round Wrap' })).body.id;
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight', hidden: false });
     encounterId = encRes.body.id;
 
     c1Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C1', hpMax: 10 })).body.id;
@@ -1336,7 +1601,7 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Reinforcements' })).body.id;
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ initiative: 12 });
@@ -1416,7 +1681,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('a fully-rolled roster is a no-op: rolledCount=0, no audit entry, no SSE broadcast', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'All Rolled' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'All Rolled', hidden: false })
     ).body.id;
     // One party combatant; fill it once with a real roll.
     const first = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1453,7 +1718,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('a partial roster rolls only the missing ones and returns the count', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Partial' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Partial', hidden: false })
     ).body.id;
     const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const partyId = (getRes.body.combatants as CombatantShape[])[0].id;
@@ -1482,7 +1747,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('reinforcements added mid-fight roll to a non-zero count, then a fully-rolled re-roll is a no-op', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reinforce' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reinforce', hidden: false })
     ).body.id;
     // Roll the initial roster, then start so the fight is running.
     const initial = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1519,7 +1784,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
     // A fresh campaign with no party members, so the encounter starts truly empty.
     const emptyCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Encounter Campaign' })).body.id;
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${emptyCampaignId}/encounters`).set(dm).send({ name: 'Empty' })
+      await request(server).post(`/api/v1/campaigns/${emptyCampaignId}/encounters`).set(dm).send({ name: 'Empty', hidden: false })
     ).body.id;
     const auditsBefore = await countInitiativeAudits(encounterId);
     const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1528,6 +1793,97 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
     expect((res.body.combatants as CombatantShape[]).length).toBe(0);
     const auditsAfter = await countInitiativeAudits(encounterId);
     expect(auditsAfter).toBe(auditsBefore);
+  });
+});
+
+describe('encounters — issue #469: reject Start when there are zero combatants (e2e)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('starting a truly empty encounter (no party, never added) is rejected 400 and stays preparing', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Roster Campaign' })).body.id;
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'No Combatants', hidden: false })
+    ).body.id;
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+
+    // The encounter must not have been silently flipped to running.
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.status).toBe('preparing');
+    expect(getRes.body.currentCombatantId).toBeNull();
+  });
+
+  it('a campaign whose only characters are dead/retired auto-adds nobody, so Start is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'All Defeated Campaign' })).body.id;
+    // Issue #115: encounter auto-add only picks up ACTIVE characters — dead/retired PCs
+    // are skipped, so an all-defeated party still yields a zero-combatant encounter.
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Fallen Aria', status: 'dead' });
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Retired Boro', status: 'retired' });
+
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Nobody Left', hidden: false })
+    ).body.id;
+    const getBeforeStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect((getBeforeStart.body.combatants as CombatantShape[]).length).toBe(0);
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+  });
+
+  it('removing every combatant after auto-add empties the roster and Start is rejected 400', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Removed Roster Campaign' })).body.id;
+    await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
+
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Emptied Out', hidden: false })
+    ).body.id;
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    const combatants = getRes.body.combatants as CombatantShape[];
+    expect(combatants.length).toBeGreaterThan(0);
+
+    // Roll initiative first so the only remaining guard, once combatants are removed,
+    // is the zero-combatant check (not the initiative check).
+    await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    for (const c of combatants) {
+      const del = await request(server).delete(`/api/v1/encounters/${encounterId}/combatants/${c.id}`).set(dm);
+      expect(del.status).toBe(200);
+    }
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/no combatants/i);
+  });
+
+  it('two concurrent Start attempts on a zero-combatant encounter both 400 (no partial/racy running state)', async () => {
+    const server = ctx.app.getHttpServer();
+    const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Concurrent Empty Start Campaign' })).body.id;
+    const encounterId = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Race', hidden: false })
+    ).body.id;
+
+    const [a, b] = await Promise.all([
+      request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm),
+      request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm),
+    ]);
+    expect(a.status).toBe(400);
+    expect(b.status).toBe(400);
+
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(getRes.body.status).toBe('preparing');
   });
 });
 
@@ -1545,7 +1901,7 @@ describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', 
     charId = (
       await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 30, hpMax: 30 })
     ).body.id;
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     combatantId = encRes.body.combatants[0].id;
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ initiative: 10 });
@@ -1625,7 +1981,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
       .send({ name: 'Aria', hpCurrent: 20, hpMax: 30, ownerUserId: 'dev:p-1' });
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
 
@@ -1637,7 +1993,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
 
     // An NPC combatant at 20/100 -> 20% -> 'critical'. NPCs are DM-controlled, so their
     // exact HP must be redacted to a band for non-DM viewers exactly like a monster's.
-    const npcEntityId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Captain Vex' })).body.id;
+    const npcEntityId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Captain Vex', hidden: false })).body.id;
     npcCombatantId = (
       await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId: npcEntityId, hpMax: 100 })
     ).body.id;
@@ -1793,7 +2149,7 @@ describe('encounters — issue #86: concurrent HP updates are not lost (e2e)', (
         .set(dm)
         .send({ name: 'Aria', hpCurrent: 100, hpMax: 100, ownerUserId: 'dev:p-1' })
     ).body.id;
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
   });
@@ -1874,19 +2230,18 @@ describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () 
   let campaignId: number;
   let encounterId: number;
   let heroCombatantId: number; // character, owned by p-1
-  let heroCharacterId: number;
 
   beforeAll(async () => {
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'HP Model' })).body.id;
-    heroCharacterId = (
-      await request(server)
-        .post(`/api/v1/campaigns/${campaignId}/characters`)
-        .set(dm)
-        .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
-    ).body.id;
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril' });
+    // Auto-add (issue #115) picks this character up as a combatant once the
+    // encounter below is created — we only need the combatant id, not this id.
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril', hidden: false });
     encounterId = encRes.body.id;
     heroCombatantId = encRes.body.combatants[0].id;
   });
@@ -2017,7 +2372,7 @@ describe('encounters — issue #114: count add + rename (e2e)', () => {
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Goblin Horde' })).body.id;
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -2121,7 +2476,7 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
     ).body.id;
 
     // create auto-adds the party (Aria) as a combatant.
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Fight', hidden: false });
     encounterId = encRes.body.id;
     charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
 
@@ -2165,14 +2520,18 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
     expect(getRes.body.mapAttachmentId).toBe(mapAttachmentId);
   });
 
-  // Issue #259: the battle map stays hidden (DM-only) as a handout — attaching it does NOT
-  // reveal it — but the fogged encounter canvas can still load it (the file route's
-  // encounter-map exception). (Dev-auth `player` resolves to admin/dm, so it always gets
-  // 200 here; the real non-DM-member secrecy is exercised in attachments.e2e-spec.ts.)
-  it('attaching a map keeps it hidden but the encounter canvas can still load it', async () => {
+  // Issue #259/#463: attaching does not reveal a hidden map as a raw handout. The
+  // canvas loads it only through the role-aware encounter endpoint; with fog off,
+  // that endpoint may return the complete image without making its source URL public.
+  it('attaching a map keeps its raw URL hidden while the scoped encounter canvas can load it', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).get(`/api/v1/attachments/${mapAttachmentId}/file`).set(player);
-    expect(res.status).toBe(200);
+    const raw = await request(server).get(`/api/v1/attachments/${mapAttachmentId}/file`).set(player);
+    expect(raw.status).toBe(404);
+
+    const safe = await request(server).get(`/api/v1/encounters/${encounterId}/map`).set(player);
+    expect(safe.status).toBe(200);
+    expect(safe.headers['x-campfire-map-view']).toBe('fully-revealed');
+    expect(Buffer.compare(safe.body, BATTLE_MAP_PNG)).toBe(0);
   });
 
   it('rejects an attachment id that does not exist in this campaign (400)', async () => {
@@ -2347,7 +2706,7 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
         .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
     ).body.id;
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grid Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grid Fight', hidden: false });
     encounterId = encRes.body.id;
     charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
     monsterCombatantId = (
@@ -2398,6 +2757,53 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.body.gridSize).toBeNull();
     // other grid fields are independent — scale/unit are untouched.
     expect(res.body.gridScale).toBe(5);
+  });
+
+  it('grid calibration (issue #417): defaults are the pre-#417 top-left square grid', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.gridOffsetX).toBe(0);
+    expect(res.body.gridOffsetY).toBe(0);
+    expect(res.body.gridCellHeight).toBeNull();
+    expect(res.body.gridRotation).toBe(0);
+    expect(res.body.gridOpacity).toBeCloseTo(0.35, 5);
+  });
+
+  it('grid calibration (issue #417): offset/cellHeight/rotation/opacity round-trip and persist', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ gridOffsetX: 3.5, gridOffsetY: -2.25, gridCellHeight: 11, gridRotation: 12.5, gridOpacity: 0.6 });
+    expect(res.status).toBe(200);
+    expect(res.body.gridOffsetX).toBeCloseTo(3.5, 5);
+    expect(res.body.gridOffsetY).toBeCloseTo(-2.25, 5);
+    expect(res.body.gridCellHeight).toBe(11);
+    expect(res.body.gridRotation).toBeCloseTo(12.5, 5);
+    expect(res.body.gridOpacity).toBeCloseTo(0.6, 5);
+
+    // A player sees the same persisted calibration (same transform, every viewport).
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(getRes.body.gridOffsetX).toBeCloseTo(3.5, 5);
+    expect(getRes.body.gridCellHeight).toBe(11);
+
+    // gridCellHeight: null restores square cells.
+    const cleared = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridCellHeight: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.gridCellHeight).toBeNull();
+  });
+
+  it('grid calibration (issue #417): out-of-range rotation/opacity are rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridRotation: 90 })).status).toBe(400);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridOpacity: 2 })).status).toBe(400);
+  });
+
+  it('grid calibration (issue #417): a player cannot calibrate (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ gridOffsetX: 10 });
+    expect(res.status).toBe(403);
   });
 
   it('a bad gridScale (0 / negative) is rejected (400)', async () => {
@@ -2475,9 +2881,82 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       // Monster at (10,10) is outside the revealed rectangle — position withheld server-side.
       expect(monster.tokenX).toBeNull();
       expect(monster.tokenY).toBeNull();
+      // Issue #418: fog-hidden (not truly unplaced) so the client can avoid a false Unplaced tray.
+      expect(monster.tokenHiddenByFog).toBe(true);
       // PC at (80,80) is inside the revealed rectangle — position visible.
       expect(pc.tokenX).toBe(80);
       expect(pc.tokenY).toBe(80);
+      expect(pc.tokenHiddenByFog).toBe(false);
+    });
+
+    it('issue #418: owned / allied / enemy tokens crossing fog get tokenHiddenByFog without leaking coords', async () => {
+      const server = ctx.app.getHttpServer();
+      // Second PC (allied) owned by another player — place it in the dark with the monster.
+      const allyCharacterId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/characters`)
+          .set(dm)
+          .send({ name: 'Borin', hpCurrent: 18, hpMax: 18, ownerUserId: 'dev:p-2' })
+      ).body.id;
+      const allyCombatantId = (
+        await request(server)
+          .post(`/api/v1/encounters/${encounterId}/combatants`)
+          .set(dm)
+          .send({ kind: 'character', characterId: allyCharacterId })
+      ).body.id;
+      // Reveal only a small corner that covers none of the tokens; place owned PC in fog too.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 5, h: 5 }] } });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${charCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 80, tokenY: 80 });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${allyCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 40, tokenY: 40 });
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterCombatantId}`)
+        .set(dm)
+        .send({ tokenX: 10, tokenY: 10 });
+
+      const playerView = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(playerView.status).toBe(200);
+      const owned = playerView.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      const allied = playerView.body.combatants.find((c: CombatantShape) => c.id === allyCombatantId);
+      const enemy = playerView.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+
+      for (const c of [owned, allied, enemy]) {
+        expect(c.tokenX).toBeNull();
+        expect(c.tokenY).toBeNull();
+        expect(c.tokenHiddenByFog).toBe(true);
+      }
+
+      // Reveal the owned PC's corner — it transitions to real coords; others stay fog-hidden.
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] } });
+      const afterReveal = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      const ownedAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      const alliedAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === allyCombatantId);
+      const enemyAfter = afterReveal.body.combatants.find((c: CombatantShape) => c.id === monsterCombatantId);
+
+      expect(ownedAfter.tokenX).toBe(80);
+      expect(ownedAfter.tokenY).toBe(80);
+      expect(ownedAfter.tokenHiddenByFog).toBe(false);
+      expect(alliedAfter.tokenHiddenByFog).toBe(true);
+      expect(alliedAfter.tokenX).toBeNull();
+      expect(enemyAfter.tokenHiddenByFog).toBe(true);
+      expect(enemyAfter.tokenX).toBeNull();
+
+      // DM still sees every real coordinate (no false Unplaced on the DM client either).
+      const dmView = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const dmOwned = dmView.body.combatants.find((c: CombatantShape) => c.id === charCombatantId);
+      expect(dmOwned.tokenX).toBe(80);
+      expect(dmOwned.tokenHiddenByFog).toBe(false);
     });
 
     it('reveal_map_region-style reveal (via PATCH) lights the monster corner for players', async () => {
@@ -2546,7 +3025,7 @@ describe('encounters — issue #865: semantic PATCH no-ops (real DB)', () => {
   it('returns the encounter without touching updatedAt, audit, or SSE for a semantic no-op', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Stable Grid' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Stable Grid', hidden: false })
     ).body.id;
     const patch = {
       name: 'Stable Grid',
@@ -2601,7 +3080,7 @@ describe('encounters — issue #865: semantic PATCH no-ops (real DB)', () => {
   it('allows exactly one meaningful default PATCH when two clients race', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Two-client Grid' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Two-client Grid', hidden: false })
     ).body.id;
     expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridSize: 8 })).status).toBe(200);
 
@@ -2644,7 +3123,7 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'VTT238 Campaign' })).body.id;
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hexy Fight' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hexy Fight', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -2795,7 +3274,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it('update edits the name and re-attaches / clears links', async () => {
     const server = ctx.app.getHttpServer();
-    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loose fight' });
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loose fight', hidden: false });
     const id = created.body.id;
     expect(created.body.locationId).toBeNull();
 
@@ -2819,9 +3298,38 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const server = ctx.app.getHttpServer();
     const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other' });
     const otherLoc = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/locations`).set(dm).send({ name: 'Elsewhere' });
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X', hidden: false });
     const res = await request(server).patch(`/api/v1/encounters/${enc.body.id}`).set(dm).send({ locationId: otherLoc.body.id });
     expect(res.status).toBe(404);
+  });
+
+  // Issue #864: CREATE must apply the same campaign-scope check PATCH already had —
+  // a foreign/missing location, quest, or session link 404s with zero partial rows.
+  it('create rejects foreign location/quest/session links with 404 and writes nothing (issue #864)', async () => {
+    const server = ctx.app.getHttpServer();
+    const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Create Links' });
+    const otherLoc = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/locations`).set(dm).send({ name: 'Elsewhere' });
+    const otherQuest = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/quests`).set(dm).send({ title: 'Foreign' });
+    const otherSession = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/sessions`).set(dm).send({ title: 'Foreign Session' });
+
+    const before = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+    expect(before.status).toBe(200);
+    const beforeCount = before.body.length;
+
+    for (const body of [
+      { name: 'Bad loc', locationId: otherLoc.body.id },
+      { name: 'Bad quest', questId: otherQuest.body.id },
+      { name: 'Bad session', sessionId: otherSession.body.id },
+      { name: 'Mixed', locationId, questId: otherQuest.body.id, sessionId },
+    ]) {
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send(body);
+      expect(res.status).toBe(404);
+      // Non-enumerating: message names the kind, not whether the id exists elsewhere.
+      expect(String(res.body.message ?? res.body.error ?? '')).toMatch(/not found/i);
+    }
+
+    const after = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
+    expect(after.body.length).toBe(beforeCount);
   });
 
   it('get_campaign_summary (REST) now includes an encounters digest', async () => {
@@ -2840,11 +3348,53 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(digest.questId).toBe(questId);
     expect(digest.combatantCount).toBe(4); // the four auto-added PCs
     expect(digest.downCount).toBe(0);
+    expect(digest.monstersDefeated).toBe(0); // no monsters in this fight
+  });
+
+  // Issue #625: the campaign-summary down tally used to sum EVERY combatant at 0 HP /
+  // dead — including dead monsters — so 5 dropped goblins + 1 fallen PC read as "6 down."
+  // downCount must now count only PCs/NPCs who fell, with monsters reported separately
+  // in monstersDefeated.
+  it('digest downCount excludes dead monsters and reports them via monstersDefeated (issue #625)', async () => {
+    const server = ctx.app.getHttpServer();
+    const enc = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Goblin ambush' });
+
+    // Add two CR-10 ogres (the seeded statblock) — auto-added PCs make up the party.
+    const mon1 = await request(server)
+      .post(`/api/v1/encounters/${enc.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    expect(mon1.status).toBe(201);
+    const mon2 = await request(server)
+      .post(`/api/v1/encounters/${enc.body.id}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', ruleEntryId: cr10EntryId });
+    expect(mon2.status).toBe(201);
+
+    // Drop both ogres to 0 HP (defeated) and drop ONE of the four PCs to 0 HP (fallen).
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${mon1.body.id}`).set(dm).send({ hpSet: 0 });
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${mon2.body.id}`).set(dm).send({ hpSet: 0 });
+    const pcList = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+    const firstPc = pcList.body.combatants.find((c: { kind: string }) => c.kind === 'character');
+    expect(firstPc).toBeDefined();
+    await request(server).patch(`/api/v1/encounters/${enc.body.id}/combatants/${firstPc.id}`).set(dm).send({ hpSet: 0 });
+
+    const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(dm);
+    expect(summary.status).toBe(200);
+    const digest = summary.body.encounters.find((e: { id: number }) => e.id === enc.body.id);
+    expect(digest).toBeDefined();
+    expect(digest.combatantCount).toBe(6); // 4 PCs + 2 ogres
+    // The fix: only the one fallen PC is counted, not the two dead ogres.
+    expect(digest.downCount).toBe(1);
+    expect(digest.monstersDefeated).toBe(2);
   });
 
   it("a note can pin to entityType 'encounter'", async () => {
     const server = ctx.app.getHttpServer();
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Noted fight' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Noted fight', hidden: false });
     const note = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .set(dm)
@@ -2857,7 +3407,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it('difficulty band computes correctly for a known party + monster set', async () => {
     const server = ctx.app.getHttpServer();
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ogre fight' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ogre fight', hidden: false });
     // Add the CR-10 ogre (5900 XP). Party = 4 level-5 PCs -> deadly threshold 4*1100=4400.
     // One monster -> ×1 multiplier -> adjusted 5900 >= 4400 -> deadly.
     const add = await request(server)
@@ -2876,6 +3426,8 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(diff.body.multiplier).toBe(1);
     expect(diff.body.adjustedXp).toBe(5900);
     expect(diff.body.band).toBe('deadly');
+    expect(diff.body.status).toBe('ok');
+    expect(diff.body.label).toBe('Deadly');
   });
 
   // Issue #304: first-party encounter generator. Reuses the 4×L5 party + CR-10 ogre above,
@@ -2976,6 +3528,141 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     });
   });
 
+  // Issue #412: preview-and-tune wizard. Reuses the 4×L5 party + CR-2 goblin + CR-10 ogre above.
+  describe('encounter preview / tune / idempotent commit (issue #412)', () => {
+    let previewGoblinId: number;
+
+    beforeAll(async () => {
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const ts = new Date().toISOString();
+      const [pack] = await db
+        .insert(rulePacks)
+        .values({ slug: 'preview-pack', name: 'Preview Pack', version: '1', license: 'OGL', sourceUrl: '', installedAt: ts, entryCount: 1 })
+        .returning();
+      const [goblin] = await db
+        .insert(ruleEntries)
+        .values({
+          packId: pack.id,
+          slug: 'preview-goblin',
+          name: 'Preview Goblin',
+          type: 'monster',
+          summary: 'CR 2',
+          body: '',
+          dataJson: JSON.stringify({ challengeRating: 2, hitPoints: 22, armor_class: 15, type: 'humanoid', actions: [{ name: 'Scimitar', desc: 'Melee attack.' }], dexterity_save: 4 }),
+          createdAt: ts,
+          updatedAt: ts,
+        })
+        .returning();
+      previewGoblinId = goblin.id;
+    });
+
+    it('returns a roster with per-creature inspection, a difficulty explanation, and warnings', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 42, filters: { maxCr: 3 } });
+      expect(res.status).toBe(200);
+      expect(res.body.roster.length).toBeGreaterThan(0);
+      const slot = res.body.roster[0];
+      expect(typeof slot.slotId).toBe('string');
+      expect(slot.inspection).toBeDefined();
+      expect(slot.inspection).toHaveProperty('armorClass');
+      expect(slot.inspection).toHaveProperty('actions');
+      // Explanation is more than a color band.
+      expect(res.body.explanation.headline.length).toBeGreaterThan(0);
+      expect(Array.isArray(res.body.explanation.detail)).toBe(true);
+      expect(Array.isArray(res.body.warnings)).toBe(true);
+      // The plan round-trips.
+      expect(res.body.plan[0].slotId).toBe(slot.slotId);
+    });
+
+    it('tunes deterministically: reroll one slot is reproducible and pin survives reroll-all', async () => {
+      const server = ctx.app.getHttpServer();
+      const base = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: 7 });
+      expect(base.status).toBe(200);
+      const plan = base.body.plan;
+      const slotId = plan[0].slotId;
+
+      const a = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'reroll-slot', slotId, seed: 321 } });
+      const b = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'reroll-slot', slotId, seed: 321 } });
+      expect(a.body.plan).toEqual(b.body.plan);
+
+      const pinned = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: base.body.seed, roster: plan, tune: { op: 'pin', slotId, pinned: true } });
+      const afterAll = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'hard', seed: pinned.body.seed, roster: pinned.body.plan, tune: { op: 'reroll-all', seed: 9999 } });
+      const survivor = afterAll.body.plan.find((s: { slotId: string }) => s.slotId === slotId);
+      expect(survivor).toBeDefined();
+      expect(survivor.ruleEntryId).toBe(pinned.body.plan[0].ruleEntryId);
+      expect(survivor.count).toBe(pinned.body.plan[0].count);
+    });
+
+    it('commits a tuned roster atomically and is idempotent by key', async () => {
+      const server = ctx.app.getHttpServer();
+      const preview = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(dm)
+        .send({ difficulty: 'medium', seed: 11, filters: { maxCr: 3 } });
+      expect(preview.status).toBe(200);
+      const key = `commit-${Date.now()}`;
+      const body = { idempotencyKey: key, name: 'Tuned Ambush', targetBand: 'medium', roster: preview.body.plan, source: 'wizard' };
+
+      const first = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/commit`).set(dm).send(body);
+      expect(first.status).toBe(201);
+      expect(first.body.idempotent).toBe(false);
+      expect(first.body.encounter.name).toBe('Tuned Ambush');
+      expect(first.body.encounter.status).toBe('preparing');
+      expect(first.body.encounter.hidden).toBe(true);
+      const monsters = (first.body.encounter.combatants as Array<{ kind: string }>).filter((c) => c.kind === 'monster');
+      expect(monsters.length).toBeGreaterThan(0);
+      const encounterId = first.body.encounter.id;
+
+      // Retry with the same key -> same encounter, no duplicate combatants.
+      const second = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters/commit`).set(dm).send(body);
+      expect(second.status).toBe(201);
+      expect(second.body.idempotent).toBe(true);
+      expect(second.body.encounter.id).toBe(encounterId);
+      expect(second.body.encounter.combatants.length).toBe(first.body.encounter.combatants.length);
+    });
+
+    it('a non-DM may preview but not commit', async () => {
+      const server = ctx.app.getHttpServer();
+      const preview = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/preview`)
+        .set(player)
+        .send({ difficulty: 'easy', seed: 3 });
+      expect(preview.status).toBe(200);
+      const commit = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/commit`)
+        .set(player)
+        .send({ idempotencyKey: 'nope', roster: preview.body.plan.length ? preview.body.plan : [{ slotId: 's1', ruleEntryId: previewGoblinId, count: 1, pinned: false, seed: 1 }] });
+      expect(commit.status).toBe(403);
+    });
+
+    it('rejects a commit that references a non-existent rule entry', async () => {
+      const server = ctx.app.getHttpServer();
+      const commit = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters/commit`)
+        .set(dm)
+        .send({ idempotencyKey: `bad-${Date.now()}`, roster: [{ slotId: 's1', ruleEntryId: 99999999, count: 1, pinned: false, seed: 1 }] });
+      expect(commit.status).toBe(400);
+    });
+  });
+
   // Issue #262: a DM's prepared, not-yet-sprung fight must not leak its combatant roster or
   // computed 5e difficulty to players. hidden gates the encounter WHOLESALE for a non-DM.
   describe('hidden encounter secrecy (issue #262)', () => {
@@ -3056,6 +3743,195 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       const diff = await request(server).get(`/api/v1/encounters/${id}/difficulty`).set(player);
       expect(diff.status).toBe(200);
       expect(diff.body.monsterCount).toBe(1);
+    });
+
+    it('a player/viewer events + ping of a hidden encounter are denied (404); the DM can list events (issue #869)', async () => {
+      const server = ctx.app.getHttpServer();
+      const id = await createHidden();
+
+      const dmEvents = await request(server).get(`/api/v1/encounters/${id}/events`).set(dm);
+      expect(dmEvents.status).toBe(200);
+      expect(Array.isArray(dmEvents.body)).toBe(true);
+
+      for (const who of [player, viewer]) {
+        expect((await request(server).get(`/api/v1/encounters/${id}/events`).set(who)).status).toBe(404);
+        expect(
+          (await request(server).post(`/api/v1/encounters/${id}/ping`).set(who).send({ x: 40, y: 60 })).status,
+        ).toBe(404);
+      }
+
+      // DM may still ping a hidden prep fight (they can see it).
+      const dmPing = await request(server).post(`/api/v1/encounters/${id}/ping`).set(dm).send({ x: 40, y: 60 });
+      expect(dmPing.status).toBe(201);
+
+      // Reveal restores events parity with roster/difficulty.
+      await request(server).patch(`/api/v1/encounters/${id}`).set(dm).send({ hidden: false });
+      expect((await request(server).get(`/api/v1/encounters/${id}/events`).set(player)).status).toBe(200);
+    });
+  });
+
+  // Issue #869: combat-log projection must mask hidden NPC identities (and name-bearing
+  // detail) for non-DMs, keep stable combatant ids, and unmask after reveal. Covers the
+  // damage/heal/condition/death/turn/roll families plus a reconnect-style re-list.
+  describe('combat-log event secrecy for hidden NPCs (issue #869)', () => {
+    let secrecyCampId: number;
+    let secrecyEncounterId: number;
+    let traitorCombatantId: number;
+    let ariaCombatantIdLocal: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Event Secrecy Camp' });
+      secrecyCampId = campRes.body.id;
+
+      // Party PC so we have a non-hidden actor for attributed damage.
+      const charRes = await request(server)
+        .post(`/api/v1/campaigns/${secrecyCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Aria', hpMax: 30 });
+      expect(charRes.status).toBe(201);
+
+      const npcId = (
+        await request(server)
+          .post(`/api/v1/campaigns/${secrecyCampId}/npcs`)
+          .set(dm)
+          .send({ name: 'The Traitor', hidden: true })
+      ).body.id as number;
+
+      const encRes = await request(server)
+        .post(`/api/v1/campaigns/${secrecyCampId}/encounters`)
+        .set(dm)
+        // #754: encounters are private-by-default now; this suite asserts players
+        // can VIEW the encounter's events (with hidden NPC names masked), so it
+        // must be created explicitly player-visible.
+        .send({ name: 'Traitor Fight', hidden: false });
+      secrecyEncounterId = encRes.body.id;
+
+      const traitorAdd = await request(server)
+        .post(`/api/v1/encounters/${secrecyEncounterId}/combatants`)
+        .set(dm)
+        .send({ kind: 'npc', npcId, name: 'The Traitor', hpMax: 40 });
+      expect(traitorAdd.status).toBe(201);
+      traitorCombatantId = traitorAdd.body.id;
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ initiative: 10 });
+
+      // Find the auto-added Aria combatant (or add if the campaign create didn't).
+      const roster = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}`).set(dm);
+      const aria = (roster.body.combatants as Array<{ id: number; name: string; kind: string }>).find(
+        (c) => c.name === 'Aria',
+      );
+      if (aria) {
+        ariaCombatantIdLocal = aria.id;
+      } else {
+        const add = await request(server)
+          .post(`/api/v1/encounters/${secrecyEncounterId}/combatants`)
+          .set(dm)
+          .send({ kind: 'character', characterId: charRes.body.id });
+        expect(add.status).toBe(201);
+        ariaCombatantIdLocal = add.body.id;
+      }
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${ariaCombatantIdLocal}`)
+        .set(dm)
+        .send({ initiative: 20 });
+
+      // DEV_AUTH headers short-circuit RoleResolver (player/viewer/dm) without a
+      // campaign_members row — same pattern as the issue #43 redaction suite above.
+
+      const start = await request(server).post(`/api/v1/encounters/${secrecyEncounterId}/start`).set(dm);
+      expect(start.status).toBe(201);
+
+      // Produce one of each name-bearing event family against the hidden NPC.
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpDelta: -5, actorId: ariaCombatantIdLocal });
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ addConditions: ['Poisoned'] });
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpDelta: 2, actorId: null });
+      await request(server).post(`/api/v1/encounters/${secrecyEncounterId}/next-turn`).set(dm);
+      await request(server)
+        .patch(`/api/v1/encounters/${secrecyEncounterId}/combatants/${traitorCombatantId}`)
+        .set(dm)
+        .send({ hpSet: 0, actorId: ariaCombatantIdLocal });
+    });
+
+    it('DM sees raw NPC names + stable combatant ids on every event type', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(dm);
+      expect(res.status).toBe(200);
+      const body = res.body as Array<{
+        type: string;
+        actor: string | null;
+        target: string | null;
+        actorId: number | null;
+        targetId: number | null;
+        detail: string;
+      }>;
+      const types = new Set(body.map((e) => e.type));
+      for (const t of ['turn', 'damage', 'condition', 'heal', 'death'] as const) {
+        expect(types.has(t)).toBe(true);
+      }
+      const againstTraitor = body.filter((e) => e.targetId === traitorCombatantId);
+      expect(againstTraitor.length).toBeGreaterThan(0);
+      for (const e of againstTraitor) {
+        expect(e.target).toBe('The Traitor');
+        expect(e.detail).not.toMatch(/Traitor/); // name-free detail
+      }
+      const opening = body.find((e) => e.type === 'turn' && e.detail === 'Combat started');
+      expect(opening).toBeTruthy();
+      expect(opening!.actorId).toBeTruthy();
+    });
+
+    it('non-DM list masks hidden NPC identity across event types; detail cannot bypass', async () => {
+      const server = ctx.app.getHttpServer();
+      for (const who of [player, viewer]) {
+        const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(who);
+        expect(res.status).toBe(200);
+        const raw = JSON.stringify(res.body);
+        expect(raw).not.toMatch(/Traitor/);
+        const body = res.body as Array<{
+          type: string;
+          actor: string | null;
+          target: string | null;
+          actorId: number | null;
+          targetId: number | null;
+          detail: string;
+        }>;
+        const againstTraitor = body.filter((e) => e.targetId === traitorCombatantId);
+        expect(againstTraitor.length).toBeGreaterThan(0);
+        for (const e of againstTraitor) {
+          expect(e.target).toBe('Unknown combatant');
+          expect(e.detail).not.toMatch(/Traitor/i);
+        }
+        // Stable ids remain for roster correlation / client projection.
+        expect(againstTraitor.some((e) => e.targetId === traitorCombatantId)).toBe(true);
+      }
+    });
+
+    it('revealing the NPC unmasks historical events on reconnect/poll-style re-list', async () => {
+      const server = ctx.app.getHttpServer();
+      const npcList = await request(server).get(`/api/v1/campaigns/${secrecyCampId}/npcs`).set(dm);
+      const traitorNpc = (npcList.body as Array<{ id: number; name: string }>).find((n) => n.name === 'The Traitor')!;
+      const revealed = await request(server).patch(`/api/v1/npcs/${traitorNpc.id}`).set(dm).send({ hidden: false });
+      expect(revealed.status).toBe(200);
+
+      // Re-list (poll / SSE-driven refetch) sees current projection with real names.
+      const res = await request(server).get(`/api/v1/encounters/${secrecyEncounterId}/events`).set(player);
+      expect(res.status).toBe(200);
+      const againstTraitor = (res.body as Array<{ target: string | null; targetId: number | null }>).filter(
+        (e) => e.targetId === traitorCombatantId,
+      );
+      expect(againstTraitor.length).toBeGreaterThan(0);
+      expect(againstTraitor.every((e) => e.target === 'The Traitor')).toBe(true);
     });
   });
 
@@ -3182,7 +4058,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       // End the running encounter so we can reopen to preparing-like state, then make a
       // fresh preparing encounter to prove roll-initiative still fills cleared nulls.
       await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
-      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Clear Initiative 2' });
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Clear Initiative 2', hidden: false });
       const enc2 = res.body.id;
       const m = await request(server)
         .post(`/api/v1/encounters/${enc2}/combatants`)
@@ -3218,6 +4094,164 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
         .set(player)
         .send({ initiative: null });
       expect(denied.status).toBe(403);
+    });
+  });
+
+  // Issue #744: a campaign may have at most one authoritative live ('running') fight.
+  // Start/Reopen are transactional and reject with 409 when another fight is already live,
+  // carrying the winner's id + name + deep link. End clears the campaign's
+  // activeEncounterId so the next fight may start. Dashboard / Player Display / AI Table
+  // read the active pointer (falling back to a status scan) instead of picking an
+  // arbitrary first result.
+  describe('one authoritative live fight (issue #744)', () => {
+    // Build a preparing encounter with all combatants' initiative set, ready to start.
+    // Creating an encounter auto-adds the campaign's party (Aria) with null initiative, so
+    // /roll-initiative is what actually makes every combatant start-eligible.
+    async function makePreparedEncounter(name: string): Promise<number> {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name });
+      expect(created.status).toBe(201);
+      const id = created.body.id as number;
+      const m = await request(server)
+        .post(`/api/v1/encounters/${id}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: `${name} foe`, hpMax: 10 });
+      expect(m.status).toBe(201);
+      const roll = await request(server).post(`/api/v1/encounters/${id}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+      return id;
+    }
+
+    async function startEncounter(id: number): Promise<request.Response> {
+      return request(server()).post(`/api/v1/encounters/${id}/start`).set(dm);
+    }
+
+    function server() {
+      return ctx.app.getHttpServer();
+    }
+
+    it('starting a second encounter while one is already running is rejected 409 with the winner name + deep link', async () => {
+      const first = await makePreparedEncounter('Live Fight A');
+      const second = await makePreparedEncounter('Live Fight B');
+
+      const ok = await startEncounter(first);
+      expect(ok.status).toBe(201);
+
+      const conflict = await startEncounter(second);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('ENCOUNTER_ALREADY_RUNNING');
+      expect(conflict.body.encounterId).toBe(first);
+      expect(conflict.body.encounterName).toBe('Live Fight A');
+      expect(conflict.body.deepLink).toBe(`/c/${campaignId}/encounters/${first}`);
+
+      // The loser stayed 'preparing' — its status flip was atomic with the assertion.
+      const loserGet = await request(server()).get(`/api/v1/encounters/${second}`).set(dm);
+      expect(loserGet.body.status).toBe('preparing');
+
+      // Clean up: end the winner so subsequent tests start fresh.
+      await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+    });
+
+    it('reopening an ended encounter while another is running is rejected 409', async () => {
+      const first = await makePreparedEncounter('Reopen Winner');
+      const second = await makePreparedEncounter('Reopen Loser');
+
+      // Start + end `second` so it is eligible to reopen.
+      await startEncounter(second);
+      await request(server()).post(`/api/v1/encounters/${second}/end`).set(dm);
+
+      // Now start `first` — it becomes the authoritative live fight.
+      const ok = await startEncounter(first);
+      expect(ok.status).toBe(201);
+
+      // Reopening `second` must fail: `first` is live.
+      const conflict = await request(server()).post(`/api/v1/encounters/${second}/reopen`).set(dm);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('ENCOUNTER_ALREADY_RUNNING');
+      expect(conflict.body.encounterId).toBe(first);
+
+      // The loser stayed 'ended'.
+      const loserGet = await request(server()).get(`/api/v1/encounters/${second}`).set(dm);
+      expect(loserGet.body.status).toBe('ended');
+
+      await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+    });
+
+    it('ending the active encounter clears the pointer, allowing a new fight to start', async () => {
+      const first = await makePreparedEncounter('End Then Start 1');
+      const second = await makePreparedEncounter('End Then Start 2');
+
+      await startEncounter(first);
+      const endRes = await request(server()).post(`/api/v1/encounters/${first}/end`).set(dm);
+      expect(endRes.status).toBe(201);
+
+      // After ending, the second encounter may start without a 409.
+      const ok = await startEncounter(second);
+      expect(ok.status).toBe(201);
+      expect(ok.body.status).toBe('running');
+
+      await request(server()).post(`/api/v1/encounters/${second}/end`).set(dm);
+    });
+
+    it('GET /campaigns/:id/encounters?status=running surfaces the authoritative fight first', async () => {
+      const live = await makePreparedEncounter('Authoritative Surfacing');
+      await startEncounter(live);
+
+      const list = await request(server()).get(`/api/v1/campaigns/${campaignId}/encounters?status=running`).set(dm);
+      expect(list.status).toBe(200);
+      const running = list.body as Array<{ id: number }>;
+      expect(running.length).toBe(1);
+      expect(running[0].id).toBe(live);
+
+      await request(server()).post(`/api/v1/encounters/${live}/end`).set(dm);
+    });
+
+    it('a hidden encounter can still be the authoritative live fight and is the 409 winner by name', async () => {
+      const server = ctx.app.getHttpServer();
+      // Hidden prep encounter that the DM starts — it becomes the authoritative fight.
+      const hiddenCreated = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret Ambush', hidden: true });
+      expect(hiddenCreated.status).toBe(201);
+      const hiddenId = hiddenCreated.body.id as number;
+      await request(server)
+        .post(`/api/v1/encounters/${hiddenId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Ambusher', hpMax: 8 });
+      // Roll initiative for every combatant (the auto-added party + the monster) so /start is eligible.
+      const roll = await request(server).post(`/api/v1/encounters/${hiddenId}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+
+      const started = await request(server).post(`/api/v1/encounters/${hiddenId}/start`).set(dm);
+      expect(started.status).toBe(201);
+
+      // A second (revealed) encounter cannot start while the hidden one is live.
+      const revealed = await makePreparedEncounter('Revealed Rival');
+      const conflict = await startEncounter(revealed);
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.encounterName).toBe('Secret Ambush');
+
+      // And the hidden fight is still hidden from a player's running list (issue #262 holds).
+      const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters?status=running`).set(player);
+      expect(playerList.body.some((e: { id: number }) => e.id === hiddenId)).toBe(false);
+
+      await request(server).post(`/api/v1/encounters/${hiddenId}/end`).set(dm);
+    });
+
+    it('deleting the active encounter clears the pointer so a new fight may start', async () => {
+      const live = await makePreparedEncounter('Delete Active');
+      await startEncounter(live);
+
+      const del = await request(server()).delete(`/api/v1/encounters/${live}`).set(dm);
+      expect(del.status).toBe(200);
+
+      // Pointer is cleared by remove(); a new encounter starts cleanly.
+      const next = await makePreparedEncounter('After Delete');
+      const ok = await startEncounter(next);
+      expect(ok.status).toBe(201);
+
+      await request(server()).post(`/api/v1/encounters/${next}/end`).set(dm);
     });
   });
 });

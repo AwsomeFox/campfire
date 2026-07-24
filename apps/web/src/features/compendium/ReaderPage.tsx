@@ -18,7 +18,13 @@ import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { PageTitle } from '../../components/PageTitle';
+import {
+  COMPENDIUM_SOURCE_COPIED_LABEL,
+  COMPENDIUM_SOURCE_COPY_LABEL,
+  resolveCompendiumSource,
+} from './compendiumProvenance';
 
 export default function ReaderPage() {
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
@@ -29,8 +35,7 @@ export default function ReaderPage() {
   const ruleSystem = useCampaign(Number.isFinite(id) ? id : undefined)?.ruleSystem ?? null;
   // Only the DM (of this campaign) may set an entry's icon override (issue #305) — the
   // PATCH is server-side gated to admin/DM too; this just hides the control for players.
-  const { roleIn } = useAuth();
-  const isDm = Number.isFinite(id) && roleIn(id) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [pack, setPack] = useState<RulePack | null>(null);
@@ -95,7 +100,7 @@ export default function ReaderPage() {
         <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => navigate(`/c/${id}/compendium`)}>
           ← Compendium
         </button>
-        <h3 style={{ margin: 0, fontSize: 17 }}>Reader</h3>
+        {!entry && <PageTitle style={{ margin: 0, fontSize: 17 }}>Reader</PageTitle>}
         {pack && (
           <span className="tag tag-accent-2" style={{ fontSize: 9.5 }}>
             {pack.name}{pack.license ? ` · ${pack.license}` : ''}
@@ -122,9 +127,9 @@ export default function ReaderPage() {
             >
               <GameIcon slug={ruleEntryIconSlug(entry)} size={30} />
             </span>
-            <h3 style={{ margin: 0, fontFamily: 'var(--font-heading)' }}>{entry.name}</h3>
+            <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
-            {isDm && (
+            {isDm && canDmWrite && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={savingIcon} onClick={() => setPickingIcon(true)}>
                   {savingIcon ? 'Saving…' : entry.iconSlug ? 'Change icon' : 'Set icon'}
@@ -147,28 +152,97 @@ export default function ReaderPage() {
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
           ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={4} />
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={2} />
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}
-          <p className="text-muted" style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}>
+          <div
+            className="text-muted"
+            style={{ margin: 0, fontSize: 11, borderTop: '1px solid var(--color-divider)', paddingTop: 12 }}
+          >
             {/* Per-entry provenance (issue #734): credit the entry under its OWN license
                 rather than the pack's — a pack may mix OGL/ORC/CC entries, and the reader
                 previously labelled every entry with the pack license. The entry's effective
                 license falls back to the pack's only when the entry didn't carry one
                 (older imports, or a uniformly-licensed pack). Attribution/author are shown
                 when the source data recorded the credit line the licence obliges. */}
-            From {entry.source || pack?.name || 'the installed rule system'}
-            {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
-            {entry.author ? ` · by ${entry.author}` : ''}
-            {(entry.license || pack?.license) ? ` · ${entry.license || pack?.license}` : ''}
-            {entry.attribution ? `. ${entry.attribution}` : ''}.
-          </p>
+            <p style={{ margin: 0 }}>
+              From {entry.source || pack?.name || 'the installed rule system'}
+              {entry.source && pack?.name && entry.source !== pack.name ? ` (${pack.name})` : ''}
+              {entry.author ? ` · by ${entry.author}` : ''}
+              {(entry.license || pack?.license) ? ` · ${entry.license || pack?.license}` : ''}
+              {entry.attribution ? `. ${entry.attribution}` : ''}.
+            </p>
+            {/* Actionable source URL (issue #740): labeled http(s) link + copy, or an
+                honest "Source unavailable" — never dead text that implies traceability. */}
+            <CompendiumSourceRow entrySourceUrl={entry.sourceUrl} packSourceUrl={pack?.sourceUrl} />
+          </div>
         </div>
       )}
       {pickingIcon && entry && (
         <IconPicker value={entry.iconSlug} onSelect={saveIcon} onClose={() => setPickingIcon(false)} />
       )}
     </div>
+  );
+}
+
+/**
+ * Source provenance row (issue #740). Renders a labeled external link when the
+ * stored URL is a safe http(s) value, distinguishes entry-specific deep links
+ * from the pack/API homepage, and offers copy-link. Missing/malformed/non-http
+ * values say "Source unavailable" instead of implying a working upstream.
+ */
+function CompendiumSourceRow({
+  entrySourceUrl,
+  packSourceUrl,
+}: {
+  entrySourceUrl?: string | null;
+  packSourceUrl?: string | null;
+}) {
+  const source = resolveCompendiumSource({ entrySourceUrl, packSourceUrl });
+  const [copied, setCopied] = useState(false);
+
+  if (source.unavailable) {
+    return <p style={{ margin: '6px 0 0' }}>{source.label}</p>;
+  }
+
+  // Capture narrowed fields so the copy closure keeps `string` (TS does not
+  // carry early-return narrowing into nested function declarations).
+  const href = source.href;
+  const label = source.label;
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — the href is still selectable via the link */
+    }
+  }
+
+  return (
+    <p style={{ margin: '6px 0 0' }}>
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer nofollow"
+        className="underline"
+        style={{ color: 'inherit' }}
+        title={href}
+      >
+        {label} ↗
+      </a>
+      {' · '}
+      <button
+        type="button"
+        onClick={copyLink}
+        title="Copy source URL"
+        className="underline"
+        style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer', color: 'inherit' }}
+      >
+        {copied ? COMPENDIUM_SOURCE_COPIED_LABEL : COMPENDIUM_SOURCE_COPY_LABEL}
+      </button>
+    </p>
   );
 }

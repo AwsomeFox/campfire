@@ -25,7 +25,6 @@ import { expect, test } from '@playwright/test';
 import { decideAuthOutcome, type MeFetchOutcome } from '../../src/app/authDecision';
 import {
   clearApiCache,
-  clearMeSnapshot,
   persistMeSnapshot,
   readMeSnapshot,
   sameDataIdentity,

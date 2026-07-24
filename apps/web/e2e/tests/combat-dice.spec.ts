@@ -1,5 +1,5 @@
 import { test, expect, request } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 import { CREDS } from '../global-setup';
 
 /**
@@ -47,7 +47,16 @@ test.describe('encounter dice — apply rolled damage', () => {
       expect(character.id).toBeTruthy();
       characterId = character.id;
       // A fresh encounter auto-adds the active character; add a monster the player can't edit.
-      const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill' } })).json();
+      // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
+      // encounter is RUNNING and must stay running for the combat-tracker suite, so end
+      // it before this drill starts and reopen it in the finally block below (/reopen
+      // preserves round/turnIndex — the seed fight is still at Round 1 with its seeded
+      // initiatives intact).
+      const live = await (await dm.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`)).json();
+      for (const e of live as { id: number }[]) {
+        await dm.post(`/api/v1/encounters/${e.id}/end`);
+      }
+      const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
       encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
       await dm.post(`/api/v1/encounters/${enc.id}/start`);
@@ -68,10 +77,23 @@ test.describe('encounter dice — apply rolled damage', () => {
       // Apply → HP drops, the combat log records the damage, and the bar dismisses.
       await applyBar.getByRole('button', { name: 'Brixi Applybar' }).click();
       await expect(applyBar).toHaveCount(0);
-      await expect(page.getByText(/Brixi Applybar took \d+ damage/i)).toBeVisible();
+      // Issue #620: the damage may be attributed to the current-turn combatant (rendered
+      // as "X to Brixi Applybar: took N damage") when Brixi didn't win initiative, or
+      // unattributed ("Brixi Applybar took N damage") when she did. Accept either form.
+      // Scope to the combat log so the sr-only live region ("Target: Brixi Applybar.
+      // Outcome: took N damage.") does not create a strict-mode double match.
+      await expect(page.getByRole('log', { name: 'Combat log' }).getByText(/Brixi Applybar.*took \d+ damage/i)).toBeVisible();
     } finally {
-      if (encounterId != null) await dm.delete(`/api/v1/encounters/${encounterId}`);
+      // End before delete so a failed DELETE cannot leave a RUNNING fight that
+      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+      if (encounterId != null) {
+        await dm.post(`/api/v1/encounters/${encounterId}/end`).catch(() => undefined);
+        await dm.delete(`/api/v1/encounters/${encounterId}`);
+      }
       if (characterId != null) await dm.delete(`/api/v1/characters/${characterId}`);
+      // Issue #744: the seeded "Ambush" encounter was ended above so the drill could
+      // start; restore it so the combat-tracker suite finds it RUNNING again.
+      await restoreSeedEncounter();
       // Dispose the API contexts so they don't leak across the worker.
       await playerCtx.dispose();
       await dm.dispose();

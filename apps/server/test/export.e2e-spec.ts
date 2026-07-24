@@ -3,6 +3,9 @@ import path from 'node:path';
 import request from 'supertest';
 import JSZip from 'jszip';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { auditLog } from '../src/db/schema';
+import { AuditService, computeCampaignAuditExportTruncated } from '../src/modules/audit/audit.service';
 
 // Minimal valid 1x1 PNG (smallest possible real PNG payload) — matches the fixture
 // used in attachments.e2e-spec.ts.
@@ -20,6 +23,7 @@ describe('export (e2e, real cookie sessions)', () => {
   let mapAttachmentId: number;
   let portraitAttachmentId: number;
   let portraitCharacterId: number;
+  let playerCharacterId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -83,6 +87,18 @@ describe('export (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'Portrait Hero', portraitUrl: `/api/v1/attachments/${portraitAttachmentId}/file` });
     portraitCharacterId = portraitCharRes.body.id;
+
+    const playerCharacter = await playerAgent
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .send({ name: 'Player Voice', portraitUrl: 'https://images.example.test/player-voice.png' });
+    playerCharacterId = playerCharacter.body.id;
+    await playerAgent.post(`/api/v1/campaigns/${campaignId}/comments`).send({
+      entityType: 'campaign',
+      entityId: campaignId,
+      body: 'A line worth keeping.',
+      inCharacter: true,
+      characterId: playerCharacterId,
+    });
   });
 
   afterAll(async () => {
@@ -94,6 +110,9 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.json"/);
+    // Issue #730: campaign exports must never be storeable by HTTP / PWA caches.
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     expect(res.body.campaign.name).toBe('Export Campaign!');
     expect(res.body.quests[0].dmSecret).toBe('the vault code is 1234');
@@ -115,7 +134,30 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.body.characters[0].dmSecret).toBe('secretly cursed');
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);
+    expect(res.body.auditMeta).toEqual(
+      expect.objectContaining({
+        total: expect.any(Number),
+        exported: expect.any(Number),
+        truncated: expect.any(Number),
+        cutoff: expect.objectContaining({
+          snapshotMaxId: expect.any(Number),
+          capturedAt: expect.any(String),
+        }),
+      }),
+    );
+    expect(res.body.auditMeta.exported).toBe(res.body.audit.length);
+    expect(typeof res.body.auditNote).toBe('string');
     expect(Array.isArray(res.body.proposals)).toBe(true);
+    expect(res.body.comments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          body: 'A line worth keeping.',
+          characterId: playerCharacterId,
+          characterName: 'Player Voice',
+          characterAvatarUrl: 'https://images.example.test/player-voice.png',
+        }),
+      ]),
+    );
 
     // Round-2 finding #6: encounters (with their combatants) are present in the export.
     expect(Array.isArray(res.body.encounters)).toBe(true);
@@ -165,10 +207,13 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/json/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-member-.*\.json"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
 
     // Their own character + note are present.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'My Own Hero')).toBe(true);
     expect(res.body.notes.some((n: { body: string }) => n.body === 'my secret plan')).toBe(true);
+    expect(res.body.comments.some((c: { body: string }) => c.body === 'A line worth keeping.')).toBe(true);
 
     // The DM's dmSecret-bearing character ("Cursed Paladin") is NOT in the player's export.
     expect(res.body.characters.some((c: { name: string }) => c.name === 'Cursed Paladin')).toBe(false);
@@ -198,33 +243,50 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/application\/zip/);
     expect(res.headers['content-disposition']).toMatch(/attachment; filename="campfire-export-campaign-\d{4}-\d{2}-\d{2}\.zip"/);
+    expect(String(res.headers['cache-control'])).toMatch(/no-store/i);
+    expect(String(res.headers['cache-control'])).toMatch(/private/i);
     // zip file magic number
     const buf = res.body as Buffer;
     expect(buf.slice(0, 2).toString('hex')).toBe('504b');
 
-    // Round-2 finding #6: mdzip has an encounters/ folder with a per-encounter markdown
-    // file containing name, status, round, and a combatant table.
+    // Round-2 finding #6 / issue #863: mdzip has an encounters/ folder with a
+    // per-encounter markdown file (stable `{stem}__encounter-{id}.md` path)
+    // containing name, status, round, and a combatant table.
     const zip = await JSZip.loadAsync(buf);
-    const encounterFile = zip.file('encounters/ambush-at-the-bridge.md');
-    expect(encounterFile).not.toBeNull();
-    const content = await encounterFile!.async('string');
+    const encounterPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('encounters/') && n.endsWith('.md') && n.includes('Ambush at the Bridge'),
+    );
+    expect(encounterPath).toBeDefined();
+    const content = await zip.file(encounterPath!)!.async('string');
     expect(content).toContain('# Ambush at the Bridge');
+    expect(content).toContain('Typed ID:');
     expect(content).toContain('Status:');
     expect(content).toContain('Round:');
     expect(content).toContain('Bridge Troll');
 
     // Issue #59: session + character markdown carry their DM Secret sections in the dm export.
-    const sessionFile = zip.file('sessions/session-1.md');
-    expect(sessionFile).not.toBeNull();
-    const sessionContent = await sessionFile!.async('string');
+    const sessionPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('sessions/') && n.endsWith('.md') && n.includes('__session-'),
+    );
+    expect(sessionPath).toBeDefined();
+    const sessionContent = await zip.file(sessionPath!)!.async('string');
     expect(sessionContent).toContain('## DM Secret');
     expect(sessionContent).toContain('next week: the betrayal');
 
-    const characterFile = zip.file('characters/cursed-paladin.md');
-    expect(characterFile).not.toBeNull();
-    const characterContent = await characterFile!.async('string');
+    const characterPath = Object.keys(zip.files).find(
+      (n) => n.startsWith('characters/') && n.endsWith('.md') && n.includes('Cursed Paladin'),
+    );
+    expect(characterPath).toBeDefined();
+    const characterContent = await zip.file(characterPath!)!.async('string');
     expect(characterContent).toContain('## DM Secret');
     expect(characterContent).toContain('secretly cursed');
+
+    // Issue #863: versioned archive manifest is present and verifiable.
+    const archiveManifest = JSON.parse(await zip.file('archive-manifest.json')!.async('string'));
+    expect(archiveManifest.kind).toBe('campaign-markdown-archive');
+    expect(archiveManifest.secrecyProfile).toBe('dm-full');
+    expect(archiveManifest.modules.encounters.kind).toBe('markdown-folder');
+    expect(archiveManifest.exclusions.some((e: { module: string }) => e.module === 'participantSupportNote')).toBe(true);
 
     // Issue #87: the zip embeds the actual attachment bytes under uploads/ and the
     // exact bytes round-trip (not a dangling reference).
@@ -245,6 +307,137 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(manifest).toContain('# Attachments');
     expect(manifest).toContain('campaign map');
     expect(manifest).toContain('portrait: Portrait Hero');
+  });
+});
+
+// Issue #731: campaign export must not silently cap audit history at 500 rows.
+describe('export audit history — full snapshot + metadata (e2e, #731)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let db: DrizzleDb;
+  let audit: AuditService;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+    audit = ctx.app.get(AuditService);
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'audit-export-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Audit Export Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function seedAuditRows(count: number, detailPrefix: string, targetCampaignId = campaignId): Promise<void> {
+    const base = new Date().toISOString();
+    const batch: (typeof auditLog.$inferInsert)[] = [];
+    for (let i = 0; i < count; i++) {
+      batch.push({
+        campaignId: targetCampaignId,
+        actor: 'export-dm',
+        actorRole: 'dm',
+        action: 'test.export.seed',
+        detail: `${detailPrefix}-${i}`,
+        createdAt: base,
+      });
+    }
+    // Chunk inserts so SQLite stays responsive in CI.
+    const chunk = 100;
+    for (let i = 0; i < batch.length; i += chunk) {
+      await db.insert(auditLog).values(batch.slice(i, i + chunk));
+    }
+  }
+
+  it('exports every retained row when history exceeds 500 (auditMeta matches counts)', async () => {
+    const extra = 520;
+    await seedAuditRows(extra, 'bulk');
+
+    const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    expect(res.status).toBe(200);
+
+    expect(res.body.audit.length).toBeGreaterThanOrEqual(extra);
+    expect(res.body.auditMeta.exported).toBe(res.body.audit.length);
+    expect(res.body.auditMeta.total).toBe(res.body.auditMeta.exported);
+    expect(res.body.auditMeta.truncated).toBe(0);
+    expect(res.body.auditMeta.cutoff.snapshotMaxId).toBeGreaterThan(0);
+    expect(res.body.auditMeta.cutoff.oldestExportedCreatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(res.body.auditNote).toMatch(/portability export/i);
+    expect(res.body.auditNote).toMatch(/backup/i);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/export/);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/audit/);
+  });
+
+  it('concurrent audit inserts during export surface in auditMeta.truncated', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Audit Export Concurrent' });
+    const concurrentCampaignId = campRes.body.id;
+    const concurrentExtra = 505;
+    const base = new Date().toISOString();
+    const batch: (typeof auditLog.$inferInsert)[] = [];
+    for (let i = 0; i < concurrentExtra; i++) {
+      batch.push({
+        campaignId: concurrentCampaignId,
+        actor: 'export-dm',
+        actorRole: 'dm',
+        action: 'test.export.concurrent',
+        detail: `concurrent-${i}`,
+        createdAt: base,
+      });
+    }
+    for (let i = 0; i < batch.length; i += 100) {
+      await db.insert(auditLog).values(batch.slice(i, i + 100));
+    }
+
+    let postSnapshotInsertsDone = false;
+    // listForCampaignExport counts post-snapshot rows via countForCampaignAbove —
+    // inject race inserts there so truncated reflects concurrent appends (#731).
+    const realCountAbove = audit.countForCampaignAbove.bind(audit);
+    const countSpy = jest.spyOn(audit, 'countForCampaignAbove').mockImplementation(async (targetCampaignId, minId) => {
+      if (targetCampaignId === concurrentCampaignId && !postSnapshotInsertsDone) {
+        postSnapshotInsertsDone = true;
+        for (let i = 0; i < 20; i++) {
+          await audit.log({
+            actor: 'export-dm',
+            actorRole: 'dm',
+            action: 'test.export.race',
+            campaignId: concurrentCampaignId,
+            detail: `race-${i}`,
+          });
+        }
+      }
+      return realCountAbove(targetCampaignId, minId);
+    });
+
+    let exportRes: request.Response;
+    try {
+      exportRes = await dmAgent.get(`/api/v1/campaigns/${concurrentCampaignId}/export?format=json`);
+    } finally {
+      countSpy.mockRestore();
+    }
+
+    expect(exportRes.status).toBe(200);
+    expect(exportRes.body.auditMeta.exported).toBeGreaterThanOrEqual(concurrentExtra);
+    expect(exportRes.body.auditMeta.exported).toBe(exportRes.body.audit.length);
+
+    const snapshotMaxId = exportRes.body.auditMeta.cutoff.snapshotMaxId as number;
+    const postSnapshotCount = await audit.countForCampaignAbove(concurrentCampaignId, snapshotMaxId);
+    expect(exportRes.body.auditMeta.total).toBe(exportRes.body.auditMeta.exported);
+    expect(exportRes.body.auditMeta.truncated).toBe(
+      computeCampaignAuditExportTruncated(
+        exportRes.body.auditMeta.total,
+        exportRes.body.auditMeta.exported,
+        postSnapshotCount,
+      ),
+    );
+    expect(exportRes.body.auditMeta.truncated).toBe(postSnapshotCount);
+    expect(postSnapshotInsertsDone).toBe(true);
+    expect(postSnapshotCount).toBeGreaterThanOrEqual(20);
   });
 });
 

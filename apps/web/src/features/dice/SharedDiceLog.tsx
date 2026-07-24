@@ -10,42 +10,31 @@
  * refresh. When the SSE event stream lands (issue #4) the poll can be swapped for
  * a push without touching the rendering below.
  */
-import { useCallback, useEffect, useId, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError, getWithHeaders } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { useCampaignAccessFor } from '../../app/CampaignAccessContext';
 import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
 import { canonicalizeDiceExpr } from '../../lib/i18nNumbers';
+import { d20Flavor, d20TotalClasses } from '../../lib/d20Flavor';
+import {
+  advanceDiceRollAnnouncements,
+  DICE_LOG_LIVE_REGION,
+  formatDiceRollAnnouncementBatch,
+  type DiceRollAnnouncementCursor,
+} from './diceLogAccessibility';
+import {
+  clearLocalDiceAnnouncements,
+  rememberLocalDiceAnnouncement,
+  takeLocalDiceAnnouncements,
+} from './localDiceAnnouncements';
 
 const POLL_MS = 5000;
-
-// Flavor a d20 roll for the crit flourish (issue #67): a natural 20 gets a gold
-// total + sparkle, a natural 1 a muted-rose shudder. Only meaningful for a single
-// d20 (the classic to-hit / save die); everything else is a plain roll. For a compound
-// expression (issue #536) we read the d20 term's kept dice from `terms[]` so a dropped
-// d20 or a coincidental face value on another die can't fake a crit/fumble.
-function rollFlavor(r: DiceRoll): 'crit' | 'fumble' | null {
-  if (!/d20(?!\d)/i.test(r.expr)) return null;
-  let dice: number[];
-  if (r.terms) {
-    dice = [];
-    for (const t of r.terms) {
-      if (!/^1?d20(?!\d)/i.test(t.term)) continue;
-      const termDice = t.kept && t.kept.length > 0 ? t.kept : t.rolls;
-      if (termDice) dice.push(...termDice);
-    }
-    if (dice.length === 0) return null;
-  } else {
-    dice = r.rolls;
-  }
-  if (dice.includes(20)) return 'crit';
-  if (dice.includes(1)) return 'fumble';
-  return null;
-}
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -59,6 +48,7 @@ function timeAgo(iso: string): string {
 
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
   const { t } = useTranslation();
+  const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [rolling, setRolling] = useState(false);
@@ -74,10 +64,64 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
   const exprId = useId();
+  const rollAnnouncementRef = useRef<{
+    campaignId: number;
+    cursor: DiceRollAnnouncementCursor;
+  } | null>(null);
+  /** Which campaign the in-memory `rolls` array came from (guards campaign switches). */
+  const rollsCampaignIdRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    rollAnnouncementRef.current = null;
+    rollsCampaignIdRef.current = null;
+    setRolls([]);
+    setRetention(undefined);
+    setJustRolledId(null);
+    setError(null);
+    // Clear the *previous* campaign on switch/unmount (cleanup runs with that id).
+    return () => {
+      clearLocalDiceAnnouncements(campaignId);
+    };
+  }, [campaignId]);
+
+  // Remote (and local) rolls share one ID cursor so poll refetches never double-speak.
+  // Skip the pre-fetch empty render — otherwise the first poll would announce full history.
+  // A null cursor establishes the silent baseline; never pass a non-null seed on first
+  // load or every hydrated id would be treated as "appended" (orchestrator / #590).
+  useEffect(() => {
+    if (rollsCampaignIdRef.current !== campaignId) return;
+
+    const previous = rollAnnouncementRef.current;
+    const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+
+    const localIds = takeLocalDiceAnnouncements(campaignId);
+    if (cursor === null) {
+      const baseline = advanceDiceRollAnnouncements(rolls, null);
+      for (const id of localIds) baseline.cursor.seenRollIds.add(id);
+      rollAnnouncementRef.current = { campaignId, cursor: baseline.cursor };
+      return;
+    }
+
+    const merged: DiceRollAnnouncementCursor = {
+      seenRollIds: new Set([...cursor.seenRollIds, ...localIds]),
+    };
+    const advanced = advanceDiceRollAnnouncements(rolls, merged);
+    rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+
+    const message = formatDiceRollAnnouncementBatch(advanced.appendedRolls, t);
+    if (!message) return;
+    const appended = advanced.appendedRolls;
+    const firstId = appended[0]!.id;
+    const lastId = appended[appended.length - 1]!.id;
+    announce(message, {
+      dedupeKey: `dice-roll:${campaignId}:${appended.length}:${firstId}:${lastId}`,
+    });
+  }, [rolls, campaignId, announce, t]);
 
   const load = useCallback(async () => {
     try {
       const { data, headers } = await getWithHeaders<DiceRoll[]>(`${API}/campaigns/${campaignId}/rolls?limit=${limit}`);
+      rollsCampaignIdRef.current = campaignId;
       setRolls(data);
       // Retention is disclosed per-response so it tracks the server's current
       // policy (incl. the "unlimited" keep-all mode) without a separate call.
@@ -119,27 +163,24 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       setError(null);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
+        const batch = formatDiceRollAnnouncementBatch([result], t);
+        if (batch) {
+          rememberLocalDiceAnnouncement(campaignId, result.id);
+          announce(batch, {
+            dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+          });
+        }
         // Prepend own roll immediately (dedupe by id — the next poll returns it too).
-        setRolls((prev) => [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit));
+        setRolls((prev) => {
+          rollsCampaignIdRef.current = campaignId;
+          const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
+          const previous = rollAnnouncementRef.current;
+          const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+          const advanced = advanceDiceRollAnnouncements(next, cursor);
+          rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+          return next;
+        });
         setJustRolledId(result.id); // triggers the tumble/crit/fumble animation (issue #67)
-        // Announce the result — the roll feed is otherwise visual-only (issue #93),
-        // calling out kept dice, DC success/fail, and a natural 20 / natural 1.
-        const flavor = rollFlavor(result);
-        const flourish = flavor === 'crit' ? t('dice.flourishCrit') : flavor === 'fumble' ? t('dice.flourishFumble') : '';
-        const keptSaid = result.kept ? t('dice.announceKept', { kept: result.kept.join(', ') }) : '';
-        const checkSaid =
-          result.dc != null ? (result.success ? t('dice.announceSuccess', { dc: result.dc }) : t('dice.announceFail', { dc: result.dc })) : '';
-        announce(
-          t('dice.announceRoll', {
-            label: result.label ? `${result.label} ` : '',
-            expr: result.expr,
-            total: result.total,
-            rolls: result.rolls.join(', '),
-            kept: keptSaid,
-            check: checkSaid,
-            flourish,
-          }),
-        );
         return result;
       } catch (err) {
         const message = err instanceof ApiError ? err.message : t('dice.rollError');
@@ -150,7 +191,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         setRolling(false);
       }
     },
-    [campaignId, limit, announce],
+    [campaignId, limit, announce, t],
   );
 
   async function rollFromInput(e: FormEvent) {
@@ -161,45 +202,51 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   return (
     <Card className="space-y-2.5">
       <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
-      <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
-      <details className="dice-advanced">
-        <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
-          {t('dice.advancedSummary')}
-        </summary>
-        <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
-          <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
-            <label htmlFor={exprId}>{t('dice.expression')}</label>
-            <TextInput
-              id={exprId}
-              aria-label={t('dice.diceExpressionLabel')}
-              placeholder={t('dice.exprPlaceholder')}
-              value={expr}
-              onChange={(e) => setExpr(e.target.value)}
-            />
-          </div>
-          <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
-            {rolling ? t('dice.rolling') : t('dice.roll')}
-          </Btn>
-        </form>
-      </details>
-      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
-      {rolls.length === 0 ? (
-        <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
-          {compact
-            ? t('dice.emptyCompact')
-            : t('dice.emptyFull')}
-        </p>
+      {canMemberWrite ? (
+        <>
+          <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
+          <details className="dice-advanced">
+            <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+              {t('dice.advancedSummary')}
+            </summary>
+            <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
+              <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
+                <label htmlFor={exprId}>{t('dice.expression')}</label>
+                <TextInput
+                  id={exprId}
+                  aria-label={t('dice.diceExpressionLabel')}
+                  placeholder={t('dice.exprPlaceholder')}
+                  value={expr}
+                  onChange={(e) => setExpr(e.target.value)}
+                />
+              </div>
+              <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
+                {rolling ? t('dice.rolling') : t('dice.roll')}
+              </Btn>
+            </form>
+          </details>
+        </>
       ) : (
-        <div className="flex flex-col gap-1">
-          {rolls.map((r) => {
-            const flavor = rollFlavor(r);
+        <p className="text-muted m-0" style={{ fontSize: 11.5 }}>
+          Dice rolling is disabled while this campaign is archived (read-only).
+        </p>
+      )}
+      {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
+      <div
+        {...DICE_LOG_LIVE_REGION}
+        aria-label={compact ? t('dice.dice') : t('dice.diceLogFeedLabel')}
+        data-testid="shared-dice-log"
+        className="flex flex-col gap-1"
+      >
+        {rolls.length === 0 ? (
+          <p className="text-muted" style={{ fontSize: 11.5, margin: 0 }}>
+            {compact ? t('dice.emptyCompact') : t('dice.emptyFull')}
+          </p>
+        ) : (
+          rolls.map((r) => {
+            const flavor = d20Flavor(r);
             const fresh = r.id === justRolledId;
-            const totalClass = [
-              flavor === 'crit' ? 'cf-roll-crit' : flavor === 'fumble' ? 'cf-roll-fumble' : '',
-              fresh ? 'cf-anim-roll' : '',
-              fresh && flavor === 'crit' ? 'cf-anim-crit' : '',
-              fresh && flavor === 'fumble' ? 'cf-anim-fumble' : '',
-            ].filter(Boolean).join(' ');
+            const totalClass = d20TotalClasses(flavor, fresh);
             return (
             <div
               key={r.id}
@@ -251,9 +298,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               </span>
             </div>
             );
-          })}
-        </div>
-      )}
+          })
+        )}
+      </div>
       {/* #614: disclose the durable retention policy honestly. Hidden on the
           compact dashboard widget (no room) and until the first fetch resolves
           `retention`; null means "keep everything", a number is the cap. */}

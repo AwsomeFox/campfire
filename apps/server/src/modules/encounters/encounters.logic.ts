@@ -1,5 +1,96 @@
-import { Dnd5eAdapter } from '@campfire/schema';
-import type { Combatant, CombatantKind, DeathState, DifficultyBand, EncounterDifficulty, EncounterShape, EncounterStatus, HpBand } from '@campfire/schema';
+import {
+  Dnd5eAdapter,
+  computeDnd5eEncounterDifficulty,
+  crToXp,
+  encounterMultiplier,
+  parseCr,
+  xpThresholdsForLevel,
+} from '@campfire/schema';
+import type {
+  ActionEconomySlot,
+  ActiveEffect,
+  Combatant,
+  CombatantKind,
+  CombatantTurnState,
+  DeathState,
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterEvent,
+  EncounterShape,
+  EncounterStatus,
+  EncounterWarning,
+  HpBand,
+  TurnPrompt,
+} from '@campfire/schema';
+
+/** Re-export difficulty primitives so existing unit-test imports keep working. */
+export { parseCr, crToXp, xpThresholdsForLevel, encounterMultiplier };
+
+/** Display label for a combatant whose linked NPC is currently hidden from non-DMs (#374/#869). */
+export const UNKNOWN_COMBATANT_LABEL = 'Unknown combatant';
+
+/** Minimal combatant shape needed to project combat-log secrecy (issue #869). */
+export type EncounterEventRedactionCombatant = {
+  id: number;
+  name: string;
+  npcId: number | null;
+};
+
+/**
+ * Role-aware combat-log projection (issue #869).
+ *
+ * Policy: historical events reveal names after the entity is revealed — redaction
+ * uses the CURRENT hidden-NPC set, not the secrecy at write time. Stable
+ * `actorId`/`targetId` drive the mask when present; denormalized actor/target
+ * strings and any name-bearing `detail` prose are scrubbed as a backstop for
+ * legacy rows (and for turn lines written before detail was name-free).
+ *
+ * Combatant ids themselves stay on the event so clients can correlate with the
+ * initiative roster (which already shows the masked token under the same id).
+ */
+export function redactEncounterEventsForViewer(
+  events: EncounterEvent[],
+  combatants: EncounterEventRedactionCombatant[],
+  hiddenNpcIds: ReadonlySet<number>,
+): EncounterEvent[] {
+  if (events.length === 0 || hiddenNpcIds.size === 0) return events;
+
+  const hiddenCombatantIds = new Set<number>();
+  const hiddenNames = new Set<string>();
+  for (const c of combatants) {
+    if (c.npcId !== null && hiddenNpcIds.has(c.npcId)) {
+      hiddenCombatantIds.add(c.id);
+      if (c.name) hiddenNames.add(c.name);
+    }
+  }
+  if (hiddenCombatantIds.size === 0 && hiddenNames.size === 0) return events;
+
+  return events.map((ev) => {
+    const actorHidden =
+      (ev.actorId != null && hiddenCombatantIds.has(ev.actorId)) ||
+      (ev.actor != null && hiddenNames.has(ev.actor));
+    const targetHidden =
+      (ev.targetId != null && hiddenCombatantIds.has(ev.targetId)) ||
+      (ev.target != null && hiddenNames.has(ev.target));
+
+    let detail = ev.detail;
+    if (hiddenNames.size > 0 && detail) {
+      for (const name of hiddenNames) {
+        if (name && detail.includes(name)) {
+          detail = detail.split(name).join(UNKNOWN_COMBATANT_LABEL);
+        }
+      }
+    }
+
+    if (!actorHidden && !targetHidden && detail === ev.detail) return ev;
+    return {
+      ...ev,
+      actor: actorHidden ? UNKNOWN_COMBATANT_LABEL : ev.actor,
+      target: targetHidden ? UNKNOWN_COMBATANT_LABEL : ev.target,
+      detail,
+    };
+  });
+}
 
 /**
  * Pure combat-order / HP-band math for encounters, extracted from
@@ -18,175 +109,23 @@ export function abilityMod(score: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// 5e encounter difficulty / XP-budget estimation (issue #58).
+// 5e encounter difficulty / XP-budget estimation (issues #58 + #429).
 //
-// DMs used to build encounters blind — EncounterCreate was {name} only and the CR
-// carried on compendium monsters (rule_entries.dataJson.challengeRating) plus the PC
-// levels on character sheets were never combined. These pure functions do the standard
-// 5e DMG math: monster CR -> XP, PC level -> XP thresholds, an encounter multiplier for
-// the number of monsters, and a resulting Easy/Medium/Hard/Deadly band. No DB, no
-// `this` — unit-testable in isolation (encounters-logic.spec.ts).
+// Math, labels, assumptions, and support status live on the RuleSystemAdapter /
+// @campfire/schema encounter-difficulty module. This thin wrapper keeps the
+// generator + legacy unit-test call shape (`partyLevels, monsterCrs`).
 // ---------------------------------------------------------------------------
-
-/** Standard 5e DMG XP-by-CR table. Keys are CR as a number (fractional CRs use 0.125/0.25/0.5). */
-const XP_BY_CR: Record<string, number> = {
-  '0': 10,
-  '0.125': 25,
-  '0.25': 50,
-  '0.5': 100,
-  '1': 200,
-  '2': 450,
-  '3': 700,
-  '4': 1100,
-  '5': 1800,
-  '6': 2300,
-  '7': 2900,
-  '8': 3900,
-  '9': 5000,
-  '10': 5900,
-  '11': 7200,
-  '12': 8400,
-  '13': 10000,
-  '14': 11500,
-  '15': 13000,
-  '16': 15000,
-  '17': 18000,
-  '18': 20000,
-  '19': 22000,
-  '20': 25000,
-  '21': 33000,
-  '22': 41000,
-  '23': 50000,
-  '24': 62000,
-  '25': 75000,
-  '26': 90000,
-  '27': 105000,
-  '28': 120000,
-  '29': 135000,
-  '30': 155000,
-};
-
-/** Per-character-level XP thresholds (5e DMG "XP Thresholds by Character Level"). */
-const XP_THRESHOLDS_BY_LEVEL: Record<number, { easy: number; medium: number; hard: number; deadly: number }> = {
-  1: { easy: 25, medium: 50, hard: 75, deadly: 100 },
-  2: { easy: 50, medium: 100, hard: 150, deadly: 200 },
-  3: { easy: 75, medium: 150, hard: 225, deadly: 400 },
-  4: { easy: 125, medium: 250, hard: 375, deadly: 500 },
-  5: { easy: 250, medium: 500, hard: 750, deadly: 1100 },
-  6: { easy: 300, medium: 600, hard: 900, deadly: 1400 },
-  7: { easy: 350, medium: 750, hard: 1100, deadly: 1700 },
-  8: { easy: 450, medium: 900, hard: 1300, deadly: 2100 },
-  9: { easy: 550, medium: 1100, hard: 1600, deadly: 2400 },
-  10: { easy: 600, medium: 1200, hard: 1900, deadly: 2800 },
-  11: { easy: 800, medium: 1600, hard: 2400, deadly: 3600 },
-  12: { easy: 1000, medium: 2000, hard: 3000, deadly: 4500 },
-  13: { easy: 1100, medium: 2200, hard: 3400, deadly: 5100 },
-  14: { easy: 1250, medium: 2500, hard: 3800, deadly: 5700 },
-  15: { easy: 1400, medium: 2800, hard: 4300, deadly: 6400 },
-  16: { easy: 1600, medium: 3200, hard: 4800, deadly: 7200 },
-  17: { easy: 2000, medium: 3900, hard: 5900, deadly: 8800 },
-  18: { easy: 2100, medium: 4200, hard: 6300, deadly: 9500 },
-  19: { easy: 2400, medium: 4900, hard: 7300, deadly: 10900 },
-  20: { easy: 2800, medium: 5700, hard: 8500, deadly: 12700 },
-};
-
-/**
- * Parse a monster's challenge rating into a numeric CR. Handles the number form the
- * open5e importer stores (e.g. 0.25, 5) and the string forms it can also carry
- * ("1/4", "1/8", "5"). Returns null for an unparseable / missing CR so the caller
- * can simply skip that monster rather than mis-score it.
- */
-export function parseCr(cr: unknown): number | null {
-  if (typeof cr === 'number' && Number.isFinite(cr)) return cr;
-  if (typeof cr !== 'string') return null;
-  const s = cr.trim();
-  if (!s) return null;
-  if (s.includes('/')) {
-    const [num, den] = s.split('/');
-    const n = Number(num);
-    const d = Number(den);
-    if (Number.isFinite(n) && Number.isFinite(d) && d !== 0) return n / d;
-    return null;
-  }
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Monster CR -> XP via the 5e table. Snaps fractional CRs to the nearest table key; null CR -> 0 XP. */
-export function crToXp(cr: number | null): number {
-  if (cr === null) return 0;
-  // Exact table hit (covers 0, 0.125, 0.25, 0.5, and every integer 1..30).
-  const direct = XP_BY_CR[String(cr)];
-  if (direct !== undefined) return direct;
-  // Fractional CR that isn't a table key: clamp into range, then round to the nearest
-  // integer CR (fractional keys below 1 are handled by the direct hits above).
-  const clamped = Math.max(0, Math.min(30, cr));
-  const rounded = Math.round(clamped);
-  return XP_BY_CR[String(rounded)] ?? 0;
-}
-
-/** XP thresholds for one PC level (clamped to the 1..20 table). */
-export function xpThresholdsForLevel(level: number): { easy: number; medium: number; hard: number; deadly: number } {
-  const clamped = Math.max(1, Math.min(20, Math.floor(level)));
-  return XP_THRESHOLDS_BY_LEVEL[clamped];
-}
-
-/**
- * 5e "encounter multiplier" for the number of monsters — a larger group is more
- * dangerous than its raw XP sum (action economy). 1 -> ×1, 2 -> ×1.5, 3–6 -> ×2,
- * 7–10 -> ×2.5, 11–14 -> ×3, 15+ -> ×4.
- */
-export function encounterMultiplier(monsterCount: number): number {
-  if (monsterCount <= 0) return 0;
-  if (monsterCount === 1) return 1;
-  if (monsterCount === 2) return 1.5;
-  if (monsterCount <= 6) return 2;
-  if (monsterCount <= 10) return 2.5;
-  if (monsterCount <= 14) return 3;
-  return 4;
-}
 
 /**
  * Compute an encounter's 5e difficulty band from the party's PC levels and the
- * combatant monsters' CRs. Sums each PC's per-level XP thresholds into a party budget,
- * sums monster XP and applies the number-of-monsters multiplier, then buckets the
- * adjusted monster XP against the party thresholds. Below the Easy threshold is
- * `trivial`; an empty party (no PC levels) reports `trivial` with zeroed thresholds.
+ * combatant monsters' CRs. Delegates to the adapter-owned 5e estimator so
+ * zero-data fights surface as `unknown` rather than a misleading Trivial band.
  */
 export function computeEncounterDifficulty(partyLevels: number[], monsterCrs: (number | null)[]): EncounterDifficulty {
-  const thresholds = { easy: 0, medium: 0, hard: 0, deadly: 0 };
-  for (const level of partyLevels) {
-    const t = xpThresholdsForLevel(level);
-    thresholds.easy += t.easy;
-    thresholds.medium += t.medium;
-    thresholds.hard += t.hard;
-    thresholds.deadly += t.deadly;
-  }
-
-  const totalMonsterXp = monsterCrs.reduce<number>((sum, cr) => sum + crToXp(cr), 0);
-  const monsterCount = monsterCrs.length;
-  const multiplier = encounterMultiplier(monsterCount);
-  const adjustedXp = Math.round(totalMonsterXp * multiplier);
-
-  let band: DifficultyBand = 'trivial';
-  if (partyLevels.length > 0 && adjustedXp > 0) {
-    if (adjustedXp >= thresholds.deadly) band = 'deadly';
-    else if (adjustedXp >= thresholds.hard) band = 'hard';
-    else if (adjustedXp >= thresholds.medium) band = 'medium';
-    else if (adjustedXp >= thresholds.easy) band = 'easy';
-    else band = 'trivial';
-  }
-
-  return {
-    band,
-    thresholds,
-    partySize: partyLevels.length,
+  return computeDnd5eEncounterDifficulty({
     partyLevels,
-    monsterCount,
-    totalMonsterXp,
-    multiplier,
-    adjustedXp,
-  };
+    monsterChallengeRatings: monsterCrs,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +144,7 @@ export function computeEncounterDifficulty(partyLevels: number[], monsterCrs: (n
 export interface GeneratorCandidate {
   ruleEntryId: number;
   name: string;
+  entryType?: 'monster' | 'hazard';
   cr: number | null;
   xp: number;
   hpMax: number | null;
@@ -290,6 +230,12 @@ function bandDistance(a: DifficultyBand, b: DifficultyBand): number {
   return Math.abs(BAND_ORDER.indexOf(a) - BAND_ORDER.indexOf(b));
 }
 
+/** Generator picks always produce a concrete band; treat a null band as maximally far. */
+function bandDistanceOrMax(a: DifficultyBand | null, b: DifficultyBand): number {
+  if (a === null) return BAND_ORDER.length;
+  return bandDistance(a, b);
+}
+
 /**
  * Assemble a monster group hitting `targetBand` for `partyLevels` from `candidates`
  * (issue #304). Deterministic given `seed`.
@@ -341,7 +287,7 @@ export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGrou
           matchedBand: true,
         };
       }
-      const score = bandDistance(difficulty.band, targetBand);
+      const score = bandDistanceOrMax(difficulty.band, targetBand);
       const xpGap = Math.abs(difficulty.adjustedXp - targetXp);
       if (best === null || score < best.score || (score === best.score && xpGap < best.xpGap)) {
         best = { pick: { ...m, count: n }, difficulty, score, xpGap };
@@ -360,22 +306,44 @@ export function generateEncounterGroup(opts: GenerateGroupOptions): GenerateGrou
 }
 
 /**
+ * Optional ruleset tiebreak for equal *non-null* initiative totals (issue #611).
+ * Adapters supply `RuleSystemAdapter.initiativeTiebreak`; when omitted, falls back to
+ * `sortOrder` ascending (legacy insertion-order behavior).
+ *
+ * Unrolled combatants (`initiative === null`) always keep `sortOrder` order — adapter
+ * DEX tiebreak must not reshuffle combatants that have not rolled yet.
+ */
+export type InitiativeTiebreak = (
+  a: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+  b: Pick<Combatant, 'initMod' | 'sortOrder' | 'id'>,
+) => number;
+
+/**
  * Order combatants for display.
  * - `running`: initiative desc, nulls last (a just-added combatant with no
- *   initiative sinks to the bottom), tie-broken by sortOrder asc.
+ *   initiative sinks to the bottom); equal *non-null* totals use `tiebreak` when
+ *   provided (per-adapter DEX-desc / preserved-roll-order — issue #611), else
+ *   sortOrder asc. Null/null pairs always use sortOrder (never adapter DEX).
  * - otherwise (preparing/ended): plain sortOrder asc.
  * Returns a new array; the input is never mutated.
  */
-export function sortCombatants(rows: Combatant[], status: EncounterStatus): Combatant[] {
+export function sortCombatants(
+  rows: Combatant[],
+  status: EncounterStatus,
+  tiebreak?: InitiativeTiebreak,
+): Combatant[] {
   if (status !== 'running') {
     return [...rows].sort((a, b) => a.sortOrder - b.sortOrder);
   }
+  const breakTie: InitiativeTiebreak = tiebreak ?? ((a, b) => a.sortOrder - b.sortOrder);
   return [...rows].sort((a, b) => {
+    // Unrolled combatants: preserve insertion order even when an adapter tiebreak
+    // is supplied (do not sort by initMod/DEX before initiative is rolled).
     if (a.initiative === null && b.initiative === null) return a.sortOrder - b.sortOrder;
     if (a.initiative === null) return 1;
     if (b.initiative === null) return -1;
     if (a.initiative !== b.initiative) return b.initiative - a.initiative;
-    return a.sortOrder - b.sortOrder;
+    return breakTie(a, b);
   });
 }
 
@@ -573,4 +541,592 @@ export function applyCombatantHp(state: CombatantHpState, patch: CombatantHpPatc
     }
   }
   return { hpCurrent, hpTemp, deathState, deathSaveSuccesses: succ, deathSaveFailures: fail };
+}
+
+// ---------------------------------------------------------------------------
+// Current-turn workspace pure logic (issue #413).
+//
+// These functions are the deterministic heart of the turn workspace: reversing the
+// turn pointer for undo, resetting a combatant's per-turn action economy when its turn
+// starts, ticking timed effects down when its turn ends, and deriving the start/end-of-turn
+// prompts a player and DM should resolve. No `this`, no DB, no side effects — unit-tested in
+// encounters-logic.spec.ts and reused inside the service's serialized advancement transaction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Reverse of {@link advanceTurn} (issue #413, undo advance). Steps the pointer BACKWARD over
+ * `sorted` from `currentCombatantId` to the previous combatant, unwrapping to the last
+ * combatant and decrementing `round` when stepping back past the top. `round` never drops
+ * below 1 (a running encounter is always at least round 1), so undo at the very first turn is
+ * a no-op on round. A missing/unset pointer restarts at the top of the current round.
+ */
+export function retreatTurn(
+  sorted: Combatant[],
+  currentCombatantId: number | null,
+  round: number,
+): NextTurnState {
+  const count = sorted.length;
+  if (count === 0) {
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: null };
+  }
+  const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
+  // Unset/last-removed pointer: restart at the top of the current round (mirrors advanceTurn).
+  if (currentIdx < 0) {
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: sorted[0].id };
+  }
+  let prevIdx = currentIdx - 1;
+  let prevRound = round;
+  if (prevIdx < 0) {
+    prevIdx = count - 1;
+    prevRound = Math.max(1, round - 1);
+  }
+  return { turnIndex: prevIdx, round: prevRound, currentCombatantId: sorted[prevIdx].id };
+}
+
+/**
+ * Reset a combatant's per-turn action economy at the START of its own turn (issue #413).
+ * Slots that reset at 'turn' AND those that reset at 'round' both refresh here (a 5e reaction
+ * resets "at the start of your turn"), so `used` is cleared for every slot and movement is
+ * zeroed. Concentration PERSISTS across turns (it only breaks on failed saves / incapacitation,
+ * handled elsewhere). `delaying`/`readied` clear because the combatant is now taking its turn.
+ * Returns a new turn-state; the input is not mutated.
+ */
+export function resetTurnStateForStart(turnState: CombatantTurnState): CombatantTurnState {
+  return {
+    used: {},
+    movementUsedFt: 0,
+    concentration: turnState.concentration,
+    delaying: false,
+    readied: null,
+  };
+}
+
+/** One expired/ticked effect surfaced from {@link tickEffectsAtTurnEnd} for combat-log lines. */
+export interface EffectTickResult {
+  kept: ActiveEffect[];
+  expired: ActiveEffect[];
+}
+
+/**
+ * Tick a combatant's timed effects down at the END of its turn (issue #413). Effects with a
+ * finite `roundsRemaining` decrement by one; those reaching 0 are moved to `expired` (dropped
+ * from the roster) so the service can log an 'effect' expiry line. Indefinite effects
+ * (roundsRemaining === null) are kept untouched. Returns new arrays; the input is not mutated.
+ */
+export function tickEffectsAtTurnEnd(effects: ActiveEffect[]): EffectTickResult {
+  const kept: ActiveEffect[] = [];
+  const expired: ActiveEffect[] = [];
+  for (const e of effects) {
+    if (e.roundsRemaining === null) {
+      kept.push(e);
+      continue;
+    }
+    const remaining = e.roundsRemaining - 1;
+    if (remaining <= 0) {
+      expired.push(e);
+    } else {
+      kept.push({ ...e, roundsRemaining: remaining });
+    }
+  }
+  return { kept, expired };
+}
+
+/** Minimal combatant slice the prompt derivation reads (avoids importing the full domain type). */
+export interface TurnPromptCombatant {
+  id: number;
+  name: string;
+  kind: CombatantKind;
+  deathState: DeathState;
+  activeEffects: ActiveEffect[];
+  turnState: CombatantTurnState;
+}
+
+/**
+ * Derive the START-of-turn prompts for a combatant (issue #413): a death save for a dying PC,
+ * an ongoing-damage tick, a regeneration heal, and any start-of-turn repeat save. Pure and
+ * name-safe (message never embeds another combatant's hidden identity). Ongoing HP ticks are
+ * surfaced as prompts (not auto-applied) so the DM/owner stays in control of the roll/amount.
+ */
+export function deriveStartTurnPrompts(c: TurnPromptCombatant): TurnPrompt[] {
+  const prompts: TurnPrompt[] = [];
+  if (c.kind === 'character' && (c.deathState === 'dying' || c.deathState === 'stable')) {
+    prompts.push({
+      id: `death-save:${c.id}`,
+      kind: 'death-save',
+      timing: 'start',
+      combatantId: c.id,
+      combatantName: c.name,
+      message:
+        c.deathState === 'stable'
+          ? 'Stable at 0 HP — no death save needed unless it takes damage.'
+          : 'Down at 0 HP — roll a death saving throw.',
+      effectId: null,
+    });
+  }
+  for (const e of c.activeEffects) {
+    if (e.timing !== 'start-of-turn') continue;
+    if (e.kind === 'ongoing-damage') {
+      prompts.push({
+        id: `ongoing:${c.id}:${e.id}`,
+        kind: 'ongoing-damage',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: e.amount != null ? `Take ${e.amount} ongoing damage from ${e.name}.` : `Resolve ongoing damage from ${e.name}.`,
+        effectId: e.id,
+      });
+    } else if (e.kind === 'regeneration') {
+      prompts.push({
+        id: `regen:${c.id}:${e.id}`,
+        kind: 'regeneration',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: e.amount != null ? `Regain ${e.amount} HP from ${e.name}.` : `Resolve regeneration from ${e.name}.`,
+        effectId: e.id,
+      });
+    }
+    if (e.saveAbility) {
+      prompts.push({
+        id: `repeat-save:start:${c.id}:${e.id}`,
+        kind: 'repeat-save',
+        timing: 'start',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name}.`,
+        effectId: e.id,
+      });
+    }
+  }
+  return prompts;
+}
+
+/**
+ * Derive the END-of-turn prompts for a combatant (issue #413): effects that expire this turn,
+ * end-of-turn repeat saves and HP ticks, and unresolved actions (an action-economy slot with
+ * remaining uses). `slots` is the campaign adapter's action-economy model so "unresolved
+ * action" reflects the real system (5e Action, PF2e's three actions, …), never a 5e constant.
+ */
+export function deriveEndTurnPrompts(c: TurnPromptCombatant, slots: readonly ActionEconomySlot[]): TurnPrompt[] {
+  const prompts: TurnPrompt[] = [];
+  for (const e of c.activeEffects) {
+    if (e.roundsRemaining !== null && e.roundsRemaining <= 1) {
+      prompts.push({
+        id: `expiring:${c.id}:${e.id}`,
+        kind: 'expiring-effect',
+        timing: 'end',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `${e.name} expires at the end of this turn.`,
+        effectId: e.id,
+      });
+    }
+    if (e.timing === 'end-of-turn') {
+      if (e.kind === 'ongoing-damage') {
+        prompts.push({
+          id: `ongoing:end:${c.id}:${e.id}`,
+          kind: 'ongoing-damage',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: e.amount != null ? `Take ${e.amount} ongoing damage from ${e.name}.` : `Resolve ongoing damage from ${e.name}.`,
+          effectId: e.id,
+        });
+      } else if (e.kind === 'regeneration') {
+        prompts.push({
+          id: `regen:end:${c.id}:${e.id}`,
+          kind: 'regeneration',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: e.amount != null ? `Regain ${e.amount} HP from ${e.name}.` : `Resolve regeneration from ${e.name}.`,
+          effectId: e.id,
+        });
+      }
+      if (e.saveAbility) {
+        prompts.push({
+          id: `repeat-save:end:${c.id}:${e.id}`,
+          kind: 'repeat-save',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name} (save ends).`,
+          effectId: e.id,
+        });
+      }
+    }
+  }
+  // Unresolved PRIMARY action: only the first action-kind slot (5e "Action", PF2e "Actions")
+  // raises an end-of-turn prompt when it still has uses left. Leaving a bonus action or a
+  // reaction unspent is normal play, so those never nag.
+  const primaryAction = slots.find((s) => s.kind === 'action');
+  if (primaryAction) {
+    const used = c.turnState.used[primaryAction.key] ?? 0;
+    if (used < primaryAction.max) {
+      prompts.push({
+        id: `unresolved:${c.id}:${primaryAction.key}`,
+        kind: 'unresolved-action',
+        timing: 'end',
+        combatantId: c.id,
+        combatantName: c.name,
+        message: `${primaryAction.label} not yet used (${primaryAction.max - used} of ${primaryAction.max} remaining).`,
+        effectId: null,
+      });
+    }
+  }
+  return prompts;
+}
+
+// ---------------------------------------------------------------------------
+// Interactive multi-slot roster build + deterministic tune (issue #412).
+//
+// The #304 generator produces a single homogeneous line. The preview-and-tune wizard needs
+// a multi-slot roster the DM can reroll/swap/pin one slot at a time, reproducibly. These pure
+// functions generalize the generator: a "slot" is a stack of identical creatures, and each
+// (re)generation fills ONE slot against the difficulty contributed by the OTHER slots — reusing
+// the exact #58 math (computeEncounterDifficulty) over the whole roster so the number-of-monsters
+// multiplier is always honoured. Deterministic given the slot seeds; no DB, no `this`.
+// ---------------------------------------------------------------------------
+
+/** One roster slot's persistent plan — the round-trippable state a tune operation mutates. */
+export interface RosterSlotPlan {
+  slotId: string;
+  ruleEntryId: number;
+  count: number;
+  pinned: boolean;
+  seed: number;
+}
+
+/** A deterministic tuning operation applied to a roster plan (issue #412). */
+export type RosterTuneOp =
+  | { op: 'reroll-all'; seed?: number }
+  | { op: 'reroll-slot'; slotId: string; seed?: number }
+  | { op: 'swap-slot'; slotId: string; ruleEntryId: number }
+  | { op: 'adjust-count'; slotId: string; count: number }
+  | { op: 'pin'; slotId: string; pinned: boolean }
+  | { op: 'add-slot'; seed?: number }
+  | { op: 'remove-slot'; slotId: string };
+
+export interface BuildRosterOptions {
+  partyLevels: number[];
+  targetBand: DifficultyBand;
+  candidates: GeneratorCandidate[];
+  maxCount: number;
+  shape?: EncounterShape;
+  seed: number;
+  /** Existing plan being tuned; omit for a fresh generation. */
+  plan?: RosterSlotPlan[];
+  tune?: RosterTuneOp;
+}
+
+export interface BuildRosterResult {
+  plan: RosterSlotPlan[];
+  picks: GeneratorPick[];
+  difficulty: EncounterDifficulty;
+  shape: EncounterShape;
+  seed: number;
+  matchedBand: boolean;
+}
+
+/** Deterministic next seed from a prior one (LCG step) — used when a reroll omits an explicit seed. */
+function deriveSeed(prev: number, salt = 0): number {
+  return (Math.imul(prev ^ salt, 1664525) + 1013904223) >>> 0;
+}
+
+/** Flatten a plan into the per-copy CR list the #58 math consumes (missing candidate -> null CR). */
+function crsForPlan(plan: RosterSlotPlan[], byId: Map<number, GeneratorCandidate>): (number | null)[] {
+  const crs: (number | null)[] = [];
+  for (const s of plan) {
+    const cand = byId.get(s.ruleEntryId);
+    for (let i = 0; i < s.count; i++) crs.push(cand ? cand.cr : null);
+  }
+  return crs;
+}
+
+/** Total number of creatures across a plan. */
+function totalCopies(plan: RosterSlotPlan[]): number {
+  return plan.reduce((n, s) => n + s.count, 0);
+}
+
+/**
+ * Pick the best {candidate, count} to fill ONE slot, given the CRs already contributed by the
+ * other slots (`fixedCrs`). Reuses computeEncounterDifficulty over the COMBINED roster so the
+ * group-size multiplier is applied to the whole fight, not per slot. Deterministic by `seed`:
+ * the first (in seeded order) combination whose whole-roster band equals the target wins; else
+ * the closest by band distance then by adjusted-XP gap to the target threshold. Returns null
+ * when there are no usable candidates or no room left (maxSlotCount <= 0).
+ */
+function fillSlot(
+  fixedCrs: (number | null)[],
+  partyLevels: number[],
+  targetBand: DifficultyBand,
+  usable: GeneratorCandidate[],
+  maxSlotCount: number,
+  shape: EncounterShape | undefined,
+  seed: number,
+): GeneratorPick | null {
+  if (usable.length === 0 || maxSlotCount < 1) return null;
+  const rng = mulberry32(seed);
+  const [rawMin, rawMax] = shapeCountRange(shape, maxSlotCount);
+  const countMin = Math.max(1, Math.min(rawMin, maxSlotCount));
+  const countMax = Math.max(countMin, Math.min(rawMax, maxSlotCount));
+  const thresholds = computeEncounterDifficulty(partyLevels, []).thresholds;
+  const targetXp =
+    targetBand === 'trivial'
+      ? Math.max(1, Math.floor(thresholds.easy / 2))
+      : thresholds[targetBand as 'easy' | 'medium' | 'hard' | 'deadly'];
+
+  const shuffled = seededShuffle(usable, rng);
+  let best: { pick: GeneratorPick; score: number; xpGap: number } | null = null;
+  for (const m of shuffled) {
+    for (let n = countMin; n <= countMax; n++) {
+      const crs = [...fixedCrs, ...Array.from({ length: n }, () => m.cr)];
+      const difficulty = computeEncounterDifficulty(partyLevels, crs);
+      if (difficulty.band === targetBand) {
+        return { ...m, count: n };
+      }
+      const score = bandDistanceOrMax(difficulty.band, targetBand);
+      const xpGap = Math.abs(difficulty.adjustedXp - targetXp);
+      if (best === null || score < best.score || (score === best.score && xpGap < best.xpGap)) {
+        best = { pick: { ...m, count: n }, score, xpGap };
+      }
+    }
+  }
+  return best ? best.pick : null;
+}
+
+/** Next free `s<N>` slot id for a plan. */
+function nextSlotId(plan: RosterSlotPlan[]): string {
+  let max = 0;
+  for (const s of plan) {
+    const m = /^s(\d+)$/.exec(s.slotId);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `s${max + 1}`;
+}
+
+/** CRs contributed by every slot EXCEPT the one at `exceptIndex`. */
+function fixedCrsExcept(plan: RosterSlotPlan[], exceptIndex: number, byId: Map<number, GeneratorCandidate>): (number | null)[] {
+  return crsForPlan(
+    plan.filter((_, i) => i !== exceptIndex),
+    byId,
+  );
+}
+
+/**
+ * Build or tune a multi-slot encounter roster (issue #412). With no `plan`/`tune` it freshly
+ * generates a single primary slot (identical to the #304 generator). With a `tune` op it applies
+ * the deterministic operation to the supplied plan. Always returns the normalized plan (to
+ * round-trip), the resolved picks, and the whole-roster #58 difficulty.
+ */
+export function buildEncounterRoster(opts: BuildRosterOptions): BuildRosterResult {
+  const { partyLevels, targetBand, candidates, maxCount, shape } = opts;
+  const byId = new Map<number, GeneratorCandidate>(candidates.map((c) => [c.ruleEntryId, c]));
+  const usable = candidates.filter((c) => c.xp > 0);
+  let masterSeed = opts.seed >>> 0;
+  let plan: RosterSlotPlan[] = (opts.plan ?? []).map((s) => ({ ...s }));
+
+  const finalize = (): BuildRosterResult => {
+    // Drop slots whose creature no longer resolves AND that carry no count, keep others so the
+    // missing-statblock warning can surface. Recompute picks + difficulty over the whole roster.
+    const picks: GeneratorPick[] = plan.map((s) => {
+      const cand = byId.get(s.ruleEntryId);
+      return cand
+        ? { ...cand, count: s.count }
+        : { ruleEntryId: s.ruleEntryId, name: '', entryType: 'monster' as const, cr: null, xp: 0, hpMax: null, count: s.count };
+    });
+    const difficulty = computeEncounterDifficulty(partyLevels, crsForPlan(plan, byId));
+    const count = totalCopies(plan);
+    return {
+      plan,
+      picks,
+      difficulty,
+      shape: shape ?? shapeForCount(count),
+      seed: masterSeed,
+      matchedBand: difficulty.band === targetBand,
+    };
+  };
+
+  // Fresh generation: no existing plan and no tune op -> assemble the primary slot.
+  if (!opts.tune && (!opts.plan || opts.plan.length === 0)) {
+    const pick = fillSlot([], partyLevels, targetBand, usable, maxCount, shape, masterSeed);
+    plan = pick ? [{ slotId: 's1', ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: masterSeed }] : [];
+    return finalize();
+  }
+
+  const tune = opts.tune;
+  if (!tune) return finalize();
+
+  switch (tune.op) {
+    case 'reroll-all': {
+      const newSeed = (tune.seed ?? deriveSeed(masterSeed, 0x9e3779b9)) >>> 0;
+      masterSeed = newSeed;
+      const rebuilt: RosterSlotPlan[] = [];
+      // Keep pinned slots verbatim; refill each non-pinned slot against the pinned + already
+      // refilled context so the whole roster converges on the target band.
+      const pinned = plan.filter((s) => s.pinned);
+      let idx = 0;
+      for (const s of plan) {
+        if (s.pinned) {
+          rebuilt.push({ ...s });
+          continue;
+        }
+        const fixed = crsForPlan([...pinned, ...rebuilt.filter((r) => !r.pinned)], byId);
+        const used = totalCopies([...pinned, ...rebuilt.filter((r) => !r.pinned)]);
+        const slotSeed = deriveSeed(newSeed, idx + 1);
+        const pick = fillSlot(fixed, partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+        if (pick) rebuilt.push({ slotId: s.slotId, ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: slotSeed });
+        idx++;
+      }
+      plan = rebuilt;
+      break;
+    }
+    case 'reroll-slot': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0 && !plan[i].pinned) {
+        const slotSeed = (tune.seed ?? deriveSeed(plan[i].seed, i + 1)) >>> 0;
+        const used = totalCopies(plan) - plan[i].count;
+        const pick = fillSlot(fixedCrsExcept(plan, i, byId), partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+        if (pick) plan[i] = { ...plan[i], ruleEntryId: pick.ruleEntryId, count: pick.count, seed: slotSeed };
+      }
+      break;
+    }
+    case 'swap-slot': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0 && byId.has(tune.ruleEntryId)) {
+        const used = totalCopies(plan) - plan[i].count;
+        const count = Math.max(1, Math.min(plan[i].count, Math.max(1, maxCount - used)));
+        plan[i] = { ...plan[i], ruleEntryId: tune.ruleEntryId, count };
+      }
+      break;
+    }
+    case 'adjust-count': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0) {
+        const used = totalCopies(plan) - plan[i].count;
+        plan[i] = { ...plan[i], count: Math.max(1, Math.min(tune.count, Math.max(1, maxCount - used))) };
+      }
+      break;
+    }
+    case 'pin': {
+      const i = plan.findIndex((s) => s.slotId === tune.slotId);
+      if (i >= 0) plan[i] = { ...plan[i], pinned: tune.pinned };
+      break;
+    }
+    case 'add-slot': {
+      const slotSeed = (tune.seed ?? deriveSeed(masterSeed, plan.length + 1)) >>> 0;
+      const used = totalCopies(plan);
+      const pick = fillSlot(crsForPlan(plan, byId), partyLevels, targetBand, usable, Math.max(1, maxCount - used), shape, slotSeed);
+      if (pick) plan.push({ slotId: nextSlotId(plan), ruleEntryId: pick.ruleEntryId, count: pick.count, pinned: false, seed: slotSeed });
+      break;
+    }
+    case 'remove-slot': {
+      plan = plan.filter((s) => s.slotId !== tune.slotId);
+      break;
+    }
+  }
+  return finalize();
+}
+
+/**
+ * Derive the actionable roster warnings a preview surfaces (issue #412): role duplication,
+ * action-economy imbalance, missing statblocks, unsupported-system math, an unknown budget, a
+ * swingy fight, an empty roster, and a best-effort band miss. Pure over the resolved picks +
+ * party + already-computed difficulty; adds no new math. Ordered most-severe-ish first.
+ */
+export function deriveEncounterRosterWarnings(
+  picks: GeneratorPick[],
+  partyLevels: number[],
+  difficulty: EncounterDifficulty,
+  matchedBand: boolean,
+  targetBand: DifficultyBand,
+): EncounterWarning[] {
+  const warnings: EncounterWarning[] = [];
+  const monsterCount = picks.reduce((n, p) => n + p.count, 0);
+  const partySize = partyLevels.length;
+
+  if (picks.length === 0) {
+    warnings.push({ code: 'empty-roster', severity: 'warn', message: 'No creatures selected yet — add or reroll a slot to build the encounter.' });
+  }
+
+  if (difficulty.status === 'unsupported') {
+    warnings.push({
+      code: 'unsupported-system',
+      severity: 'warn',
+      message: difficulty.warnings[0] ?? 'This rule system has no built-in encounter budget, so difficulty cannot be estimated.',
+    });
+  } else if (difficulty.status === 'unknown') {
+    warnings.push({
+      code: 'difficulty-unknown',
+      severity: 'warn',
+      message: 'The selected creatures have no CR/XP, so the difficulty cannot be scored — add ratings to their statblocks.',
+    });
+  }
+
+  // Missing statblock: a picked creature with no resolvable HP or CR.
+  const missing = picks.filter((p) => p.hpMax === null || p.cr === null);
+  if (missing.length > 0) {
+    const names = missing.map((p) => p.name || `#${p.ruleEntryId}`).slice(0, 5).join(', ');
+    warnings.push({
+      code: 'missing-statblock',
+      severity: 'warn',
+      message: `${missing.length} creature${missing.length === 1 ? '' : 's'} lack HP/CR data (${names}) — HP or difficulty may be incomplete.`,
+    });
+  }
+
+  // Role duplication: the same statblock across two or more distinct slots.
+  const idCounts = new Map<number, number>();
+  for (const p of picks) idCounts.set(p.ruleEntryId, (idCounts.get(p.ruleEntryId) ?? 0) + 1);
+  const dupes = [...idCounts.entries()].filter(([, n]) => n > 1);
+  if (dupes.length > 0) {
+    warnings.push({
+      code: 'role-duplication',
+      severity: 'info',
+      message: 'The same statblock fills more than one slot — consider swapping one for variety in roles/tactics.',
+    });
+  }
+
+  // Action economy: a lone monster against a full party, or a swarm that badly outnumbers it.
+  if (partySize > 0 && monsterCount > 0) {
+    if (monsterCount === 1 && partySize >= 3) {
+      warnings.push({
+        code: 'action-economy',
+        severity: 'info',
+        message: `A single monster takes one turn per round against ${partySize} PCs — it may be focus-fired down before acting much. Add minions or legendary actions.`,
+      });
+    } else if (monsterCount >= partySize * 3) {
+      warnings.push({
+        code: 'action-economy',
+        severity: 'warn',
+        message: `${monsterCount} monsters vs ${partySize} PCs is a heavy action-economy imbalance — the party may be overwhelmed regardless of the XP band.`,
+      });
+    }
+  }
+
+  // Swinginess: a lone big creature (high variance), or a fight well past Deadly.
+  if (difficulty.status === 'ok') {
+    if (monsterCount > 0 && monsterCount <= 1 && (difficulty.band === 'hard' || difficulty.band === 'deadly')) {
+      warnings.push({
+        code: 'swinginess',
+        severity: 'info',
+        message: 'A single high-threat creature makes the fight swingy — one lucky crit or failed save can decide it. Consider splitting the budget across two creatures.',
+      });
+    } else if (difficulty.adjustedXp >= Math.round(difficulty.thresholds.deadly * 1.5) && difficulty.thresholds.deadly > 0) {
+      warnings.push({
+        code: 'swinginess',
+        severity: 'warn',
+        message: 'Adjusted XP is well above the Deadly threshold — this fight risks a TPK. Reduce counts or pick weaker creatures unless a lethal set-piece is intended.',
+      });
+    }
+  }
+
+  if (!matchedBand && picks.length > 0 && difficulty.status === 'ok') {
+    warnings.push({
+      code: 'band-miss',
+      severity: 'info',
+      message: `The compendium could not field an exact "${targetBand}" group for this party — the closest achievable roster is shown (${difficulty.label}).`,
+    });
+  }
+
+  return warnings;
 }

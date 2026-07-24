@@ -67,6 +67,24 @@ background job as a live install.
 - **Over MCP** — an AI assistant can `lookup_rule` and `get_rule_entry` to cite rules
   and build encounters (see [Connect an AI](../ai/connect.md)).
 
+## Search capacity & pagination
+
+`GET /api/v1/rules/search` returns a **page**, not a silently truncated array:
+
+```json
+{ "items": [/* RuleEntry */], "total": 1234, "hasMore": true, "nextCursor": "…", "limit": 50 }
+```
+
+- **Default page size** is 50; `?limit=` may raise it up to **100**. Larger result
+  sets continue with the opaque `?cursor=` from the previous page's `nextCursor`.
+- **`total` / `hasMore`** are always present so clients can show “Showing 50 of 1 234”
+  and a Load more control — the API never hides that more matches exist.
+- **Empty-query browse** is ordered stably by name, then id (deterministic across
+  multi-pack ties). Ranked search uses name-match bucket → FTS/LIKE rank → id.
+- The Compendium UI load-mores in place; `?q=` / `?type=` (and optional deep-link
+  `?cursor=`) stay in the URL. Filter changes clear the cursor and refetch from
+  the start.
+
 ## Licensing
 
 Campfire only imports **open-licensed** content (Open5e is OGL/Creative Commons).

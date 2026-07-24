@@ -9,6 +9,7 @@ import { SessionsModule } from '../sessions/sessions.module';
 import { CharactersModule } from '../characters/characters.module';
 import { EncountersModule } from '../encounters/encounters.module';
 import { MapsModule } from '../maps/maps.module';
+import { FactionsModule } from '../factions/factions.module';
 import { ProposalRecordsModule } from './proposal-records.module';
 import { ProposalsService } from './proposals.service';
 import { CampaignProposalsController, ProposalsController } from './proposals.controller';
@@ -26,6 +27,7 @@ import { CampaignProposalsController, ProposalsController } from './proposals.co
     CharactersModule,
     EncountersModule,
     MapsModule,
+    FactionsModule,
   ],
   controllers: [CampaignProposalsController, ProposalsController],
   providers: [ProposalsService],

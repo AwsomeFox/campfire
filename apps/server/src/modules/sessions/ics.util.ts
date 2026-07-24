@@ -106,7 +106,9 @@ export function buildCampaignIcs(campaign: { id: number; name: string }, schedul
 
   for (const s of schedules) {
     const startMs = Date.parse(s.scheduledAt);
-    const endIso = new Date(startMs + s.durationMinutes * 60_000).toISOString();
+    // Timed VEVENTs require DTEND > DTSTART; treat 0-minute "ended now" as 1 minute.
+    const durationMinutes = Math.max(1, Number.isFinite(s.durationMinutes) ? s.durationMinutes : 1);
+    const endIso = new Date(startMs + durationMinutes * 60_000).toISOString();
     lines.push(
       'BEGIN:VEVENT',
       // Stable per schedule row so clients update-in-place across polls.

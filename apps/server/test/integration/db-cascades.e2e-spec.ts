@@ -51,8 +51,11 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
       midway.close();
     }
 
-    // Now the deliberate purge runs the real hard cascade.
-    const del = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+    // Now the deliberate purge runs the real hard cascade (already trashed above).
+    const del = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/purge`)
+      .set(dm)
+      .send({ confirm: 'PURGE' });
     expect(del.status).toBe(200);
 
     // The DB is the source of truth — inspect it directly for orphans.
@@ -176,7 +179,11 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     // incomplete list would leave real orphans instead of being masked by ON DELETE CASCADE.
     raw.pragma('foreign_keys = OFF');
     try {
-      const del = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+      await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+      const del = await request(server)
+        .delete(`/api/v1/campaigns/${campaignId}/purge`)
+        .set(dm)
+        .send({ confirm: 'PURGE' });
       expect(del.status).toBe(200);
     } finally {
       raw.pragma('foreign_keys = ON');
@@ -214,7 +221,11 @@ describe('campaign purge cascade (real SQLite, no orphan rows)', () => {
     const doomed = await seedFullCampaign(server, 'Sacrificial Campaign');
     const keeper = await seedFullCampaign(server, 'Surviving Campaign');
 
-    const del = await request(server).delete(`/api/v1/campaigns/${doomed.campaignId}/purge`).set(dm);
+    await request(server).delete(`/api/v1/campaigns/${doomed.campaignId}`).set(dm);
+    const del = await request(server)
+      .delete(`/api/v1/campaigns/${doomed.campaignId}/purge`)
+      .set(dm)
+      .send({ confirm: 'PURGE' });
     expect(del.status).toBe(200);
 
     const after = openRawDb(ctx.dataDir);

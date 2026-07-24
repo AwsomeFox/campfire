@@ -290,6 +290,310 @@ describe('campaign invites / join codes (e2e, real cookie sessions)', () => {
   });
 });
 
+describe('issue #857: campaign lifecycle suspends public invites', () => {
+  let ctx: TestAppContext;
+  let adminAgent: ReturnType<typeof request.agent>;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let playerAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let code: string;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'life-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'life-dm', password: 'dm-password-1', serverRole: 'user' });
+    await adminAgent.post('/api/v1/users').send({ username: 'life-pat', password: 'pat-password-1', serverRole: 'user' });
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/login').send({ username: 'life-dm', password: 'dm-password-1' });
+    playerAgent = request.agent(server);
+    await playerAgent.post('/api/v1/auth/login').send({ username: 'life-pat', password: 'pat-password-1' });
+
+    const campaignRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Lifecycle Vale' });
+    campaignId = campaignRes.body.id;
+    expect(campaignRes.body.publicInvitesEnabled).toBe(true);
+
+    const inviteRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+    expect(inviteRes.status).toBe(201);
+    code = inviteRes.body.code;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  const uniform404 = 'This invite link is invalid or no longer active';
+
+  it('preview works while the campaign is active and invites are enabled', async () => {
+    const res = await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`);
+    expect(res.status).toBe(200);
+    expect(res.body.campaignName).toBe('Lifecycle Vale');
+  });
+
+  it('archiving suspends invites: preview/accept/join all return the same 404; unarchive does not revive', async () => {
+    const pause = await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'paused' });
+    expect(pause.status).toBe(200);
+    expect(pause.body.publicInvitesEnabled).toBe(false);
+
+    const preview = await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`);
+    expect(preview.status).toBe(404);
+    expect(preview.body.message).toBe(uniform404);
+
+    const accept = await request(ctx.app.getHttpServer())
+      .post(`/api/v1/invites/${code}/accept`)
+      .send({ username: 'archive-blocked', password: 'blocked-password-1' });
+    expect(accept.status).toBe(404);
+    expect(accept.body.message).toBe(uniform404);
+
+    const join = await playerAgent.post(`/api/v1/invites/${code}/join`);
+    expect(join.status).toBe(404);
+    expect(join.body.message).toBe(uniform404);
+
+    // Invite rows survive suspension (deliberate reactivation can restore the same codes).
+    const listed = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
+    expect(listed.status).toBe(200);
+    expect(listed.body.some((i: { code: string }) => i.code === code)).toBe(true);
+
+    // Unarchive alone must NOT revive links.
+    const unarchive = await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' });
+    expect(unarchive.status).toBe(200);
+    expect(unarchive.body.publicInvitesEnabled).toBe(false);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+
+    // Creating while suspended is refused.
+    const createWhileSuspended = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({});
+    expect(createWhileSuspended.status).toBe(403);
+
+    // Deliberate reactivation restores the same code.
+    const policy = await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+    expect(policy.status).toBe(200);
+    const camp = await dmAgent.get(`/api/v1/campaigns/${campaignId}`);
+    expect(camp.body.publicInvitesEnabled).toBe(true);
+    const revived = await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`);
+    expect(revived.status).toBe(200);
+    expect(revived.body.campaignName).toBe('Lifecycle Vale');
+  });
+
+  it('trash suspends invites; restore leaves them suspended until deliberate reactivation', async () => {
+    const inviteRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'viewer' });
+    const trashCode = inviteRes.body.code;
+
+    const trash = await dmAgent.delete(`/api/v1/campaigns/${campaignId}`);
+    expect(trash.status).toBe(200);
+
+    const preview = await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${trashCode}`);
+    expect(preview.status).toBe(404);
+    expect(preview.body.message).toBe(uniform404);
+
+    const restore = await dmAgent.post(`/api/v1/campaigns/${campaignId}/restore`);
+    expect(restore.status).toBe(201);
+    expect(restore.body.deletedAt).toBeNull();
+    expect(restore.body.publicInvitesEnabled).toBe(false);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${trashCode}`)).status).toBe(404);
+
+    // Re-enable for subsequent tests / cleanup.
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${trashCode}`)).status).toBe(200);
+  });
+
+  it('revoke-all deletes invite rows and is allowed while archived', async () => {
+    const a = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+    const b = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'viewer' });
+    expect(a.status).toBe(201);
+    expect(b.status).toBe(201);
+
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'completed' });
+    const revoked = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/invites`);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body.revoked).toBeGreaterThanOrEqual(2);
+
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${a.body.code}`)).status).toBe(404);
+    const listed = await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`);
+    expect(listed.body).toEqual([]);
+
+    // Cannot re-enable while archived.
+    const enable = await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+    expect(enable.status).toBe(403);
+
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' });
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+  });
+
+  it('archive?revokeInvites=true deletes invite rows atomically with the status change', async () => {
+    const invite = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+    expect(invite.status).toBe(201);
+    const code = invite.body.code as string;
+
+    const archived = await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}?revokeInvites=true`)
+      .send({ status: 'paused' });
+    expect(archived.status).toBe(200);
+    expect(archived.body.status).toBe('paused');
+    expect(archived.body.publicInvitesEnabled).toBe(false);
+
+    expect((await dmAgent.get(`/api/v1/campaigns/${campaignId}/invites`)).body).toEqual([]);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' });
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+    // Rows were deleted (not merely suspended) — reactivation cannot revive the code.
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+  });
+
+  it('trash?revokeInvites=true deletes invite rows atomically with the trash stamp', async () => {
+    const created = await dmAgent.post('/api/v1/campaigns').send({ name: 'Revoke Trash Vale' });
+    expect(created.status).toBe(201);
+    const cid = created.body.id as number;
+    const invite = await dmAgent.post(`/api/v1/campaigns/${cid}/invites`).send({ role: 'viewer' });
+    expect(invite.status).toBe(201);
+    const code = invite.body.code as string;
+
+    const trash = await dmAgent.delete(`/api/v1/campaigns/${cid}?revokeInvites=true`);
+    expect(trash.status).toBe(200);
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+
+    const restore = await dmAgent.post(`/api/v1/campaigns/${cid}/restore`);
+    expect(restore.status).toBe(201);
+    expect(restore.body.publicInvitesEnabled).toBe(false);
+    await dmAgent.put(`/api/v1/campaigns/${cid}/invites/policy`).send({ enabled: true });
+    expect((await request(ctx.app.getHttpServer()).get(`/api/v1/invites/${code}`)).status).toBe(404);
+    expect((await dmAgent.get(`/api/v1/campaigns/${cid}/invites`)).body).toEqual([]);
+  });
+
+  it('audit log records suspend, revoke_all, and reactivate', async () => {
+    const invite = await dmAgent.post(`/api/v1/campaigns/${campaignId}/invites`).send({ role: 'player' });
+    expect(invite.status).toBe(201);
+
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'paused' });
+    await dmAgent.delete(`/api/v1/campaigns/${campaignId}/invites`);
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ status: 'active' });
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/invites/policy`).send({ enabled: true });
+
+    const audit = await dmAgent.get(`/api/v1/campaigns/${campaignId}/audit`);
+    expect(audit.status).toBe(200);
+    const actions = audit.body.map((e: { action: string }) => e.action);
+    expect(actions).toEqual(expect.arrayContaining(['invite.suspend', 'invite.revoke_all', 'invite.reactivate']));
+  });
+});
+
+describe('issue #857: lifecycle change between preview and accept/join (service layer)', () => {
+  let ctx: TestAppContext;
+  let invites: InvitesService;
+  let usersService: UsersService;
+  let db: DrizzleDb;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    invites = ctx.app.get(InvitesService);
+    usersService = ctx.app.get(UsersService);
+    db = ctx.app.get<DrizzleDb>(DB);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function seedJoinableInvite(): Promise<{ campaignId: number; code: string; inviteId: number }> {
+    const dm = await usersService.create({
+      username: `life-dm-${Math.random().toString(36).slice(2)}`,
+      password: 'dm-password-1',
+      serverRole: 'user',
+    });
+    const ts = new Date().toISOString();
+    const [campaign] = await db
+      .insert(campaigns)
+      .values({
+        name: 'Race Lifecycle',
+        createdAt: ts,
+        updatedAt: ts,
+        publicInvitesEnabled: true,
+      })
+      .returning();
+    await db
+      .insert(campaignMembers)
+      .values({ campaignId: campaign.id, userId: dm.id, role: 'dm', characterId: null, createdAt: ts, updatedAt: ts })
+      .run();
+    const [inv] = await db
+      .insert(campaignInvites)
+      .values({
+        campaignId: campaign.id,
+        code: `LIFE-${campaign.id}-${Math.random().toString(36).slice(2)}`,
+        role: 'player',
+        createdByUserId: dm.id,
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        maxUses: null,
+        useCount: 0,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    return { campaignId: campaign.id, code: inv.code, inviteId: inv.id };
+  }
+
+  it('accept after archive creates neither user nor membership and returns uniform 404', async () => {
+    const { code, campaignId, inviteId } = await seedJoinableInvite();
+    const preview = await invites.preview(code);
+    expect(preview.campaignId).toBe(campaignId);
+
+    await db.update(campaigns).set({ status: 'paused', publicInvitesEnabled: false }).where(eq(campaigns.id, campaignId));
+
+    await expect(
+      invites.accept(code, { username: 'race-arch-a', password: 'aa-password-1', displayName: 'A' }),
+    ).rejects.toThrow('This invite link is invalid or no longer active');
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(0);
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.role, 'player')));
+    expect(seats.value).toBe(0);
+    // No stranded account from the failed accept.
+    expect(await usersService.getRowByUsername('race-arch-a')).toBeNull();
+  });
+
+  it('join after trash creates no membership and returns uniform 404', async () => {
+    const { code, campaignId, inviteId } = await seedJoinableInvite();
+    await invites.preview(code);
+
+    const existing = await usersService.create({
+      username: 'life-joiner',
+      password: 'joiner-password-1',
+      serverRole: 'user',
+    });
+    await db
+      .update(campaigns)
+      .set({ deletedAt: new Date().toISOString(), publicInvitesEnabled: false })
+      .where(eq(campaigns.id, campaignId));
+
+    await expect(
+      invites.join(code, {
+        id: String(existing.id),
+        name: 'life-joiner',
+        serverRole: 'user',
+      }),
+    ).rejects.toThrow('This invite link is invalid or no longer active');
+
+    const [invite] = await db.select().from(campaignInvites).where(eq(campaignInvites.id, inviteId));
+    expect(invite.useCount).toBe(0);
+    const [seats] = await db
+      .select({ value: count() })
+      .from(campaignMembers)
+      .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, existing.id)));
+    expect(seats.value).toBe(0);
+  });
+
+  it('completed status is not joinable even if publicInvitesEnabled was left true', async () => {
+    const { code, campaignId } = await seedJoinableInvite();
+    // Belt-and-suspenders: status alone must block, even if a buggy path left the flag on.
+    await db.update(campaigns).set({ status: 'completed', publicInvitesEnabled: true }).where(eq(campaigns.id, campaignId));
+    await expect(invites.preview(code)).rejects.toThrow('This invite link is invalid or no longer active');
+  });
+});
+
 describe('issue #655: maxUses TOCTOU — interleaved accepts never exceed the cap (service layer, real SQLite)', () => {
   // This is the deterministic regression guard for the race. The public HTTP
   // endpoint is exercised end-to-end by the suites above; here we drive the

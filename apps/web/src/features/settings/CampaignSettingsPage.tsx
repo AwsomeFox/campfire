@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { Campaign, CampaignCloneMode, DangerLevel, RulePack } from '@campfire/schema';
+import type { Campaign, CampaignCloneMode, CampaignInvite, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { adminRulesHref } from '../../lib/adminNavigation';
@@ -18,9 +18,12 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
+import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 import { useAnnounce } from '../../components/Announcer';
 import {
   confirmOpen,
@@ -31,6 +34,14 @@ import {
   type CampaignStatus,
   type StatusConfirmSnapshot,
 } from './statusConfirmState';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
+import { useUnsavedWork } from '../../lib/useUnsavedWork';
+import { PageTitle } from '../../components/PageTitle';
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -45,34 +56,96 @@ export default function CampaignSettingsPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Issue #853: campaign switch must not leave prior settings/forms painted against
+  // the new route id (child cards key off campaign.id; sequencer drops stale commits).
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   const load = async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(id);
     setLoading(true);
     setError(null);
+    setCampaign(null);
     try {
-      const data = await api.get<Campaign>(`${API}/campaigns/${id}`);
-      setCampaign(data);
+      const data = await api.get<Campaign>(`${API}/campaigns/${id}`, { signal });
+      const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, id, data);
+      if (decision.kind !== 'commit') return;
+      setCampaign(decision.record);
     } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, id)) return;
+      setCampaign(null);
+      if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
       setError(err instanceof ApiError ? err.message : "Couldn't load campaign settings.");
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, id)) setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (Number.isFinite(id) && role) void load();
+    if (!Number.isFinite(id) || !role) return;
+    void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, role]);
 
-  // Deep-link support (#343): the AI-DM onboarding checklist links to specific controls
-  // by hash (e.g. #ai-dm-provider). React Router doesn't auto-scroll to a hash, and the
-  // target only exists once the (lazy) page has loaded the campaign, so scroll it into
-  // view here once the anchor is present.
+  const settingsReady = mutationsEnabledForRoute(campaign, id, loading);
+
+  // Deep-link support (#343 / #751): the AI-DM onboarding checklist links to specific
+  // controls by hash (e.g. #ai-dm-provider, #ai-dm-budget). React Router doesn't
+  // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
+  // own async seat load — retry on a short interval until the anchor exists (or 10s).
   useEffect(() => {
-    if (!campaign || !location.hash) return;
-    const el = document.getElementById(location.hash.slice(1));
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }, [campaign, location.hash]);
+    if (!campaign?.id || !location.hash) return;
+    const hashId = decodeLocationHashId(location.hash);
+    let frame: number | null = null;
+    let retryTimer: number | null = null;
+    let cancelled = false;
+    let delay = 100;
+
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
+    const scrollToAnchor = (): boolean => {
+      const el = document.getElementById(hashId);
+      if (!el) return false;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+      });
+      return true;
+    };
+
+    const scheduleRetry = (startedAt: number) => {
+      clearRetry();
+      if (cancelled) return;
+      if (Date.now() - startedAt >= 10_000) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (cancelled) return;
+        if (scrollToAnchor()) return;
+        delay = Math.min(delay * 2, 250);
+        scheduleRetry(startedAt);
+      }, delay);
+    };
+
+    if (!scrollToAnchor()) {
+      // Bounded backoff polling avoids a subtree MutationObserver on #root.
+      const startedAt = Date.now();
+      scheduleRetry(startedAt);
+    }
+
+    return () => {
+      cancelled = true;
+      clearRetry();
+      if (frame !== null) window.cancelAnimationFrame(frame);
+    };
+  }, [campaign?.id, location.hash]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -84,7 +157,8 @@ export default function CampaignSettingsPage() {
 
   if (!isDm) {
     return (
-      <div className="max-w-4xl mx-auto px-4 mt-5">
+      <div className="max-w-4xl mx-auto px-4 mt-5 space-y-3">
+        <PageTitle>Campaign settings</PageTitle>
         <Card className="text-center space-y-1">
           <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p style={{ fontSize: 13, color: 'var(--color-neutral-300)', fontWeight: 600 }}>DM only</p>
@@ -96,18 +170,13 @@ export default function CampaignSettingsPage() {
 
   return (
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 640 }}>
-      <h3 style={{ margin: '4px 0 0' }}>Campaign settings</h3>
+      <PageTitle>Campaign settings</PageTitle>
 
-      {loading && !campaign ? (
-        <Card>
-          <Skeleton lines={6} />
-        </Card>
-      ) : error && !campaign ? (
-        <ErrorNote message={error} onRetry={load} />
-      ) : campaign ? (
+      {campaign && settingsReady ? (
         <>
           {error && <ErrorNote message={error} onRetry={load} />}
           <GeneralCard
+            key={`general-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             onSaved={(c) => {
@@ -116,6 +185,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <StatusCard
+            key={`status-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             onSaved={(c) => {
@@ -124,6 +194,15 @@ export default function CampaignSettingsPage() {
             }}
           />
           <PublicRecapSharingCard
+            key={`recap-${campaign.id}`}
+            campaign={campaign}
+            onChanged={async () => {
+              await load();
+              await refreshCampaigns();
+            }}
+          />
+          <PublicInvitesCard
+            key={`invites-${campaign.id}`}
             campaign={campaign}
             onChanged={async () => {
               await load();
@@ -131,14 +210,16 @@ export default function CampaignSettingsPage() {
             }}
           />
           <RuleSystemCard
+            key={`rules-${campaign.id}`}
             campaignId={id}
             campaign={campaign}
             isAdmin={isAdmin}
             onSaved={(c) => setCampaign(c)}
           />
-          <AiDmCard campaignId={id} />
-          <ExportCard campaignId={id} />
+          <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
+          <ExportCard key={`export-${campaign.id}`} campaignId={id} />
           <CloneCard
+            key={`clone-${campaign.id}`}
             campaign={campaign}
             onCloned={(c) => {
               void refreshCampaigns();
@@ -146,6 +227,7 @@ export default function CampaignSettingsPage() {
             }}
           />
           <DangerZoneCard
+            key={`danger-${campaign.id}`}
             campaign={campaign}
             onDeleted={() => {
               void refreshCampaigns();
@@ -153,7 +235,13 @@ export default function CampaignSettingsPage() {
             }}
           />
         </>
-      ) : null}
+      ) : error && !campaign ? (
+        <ErrorNote message={error} onRetry={load} />
+      ) : (
+        <Card>
+          <Skeleton lines={6} />
+        </Card>
+      )}
     </div>
   );
 }
@@ -250,6 +338,118 @@ function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; o
   );
 }
 
+/**
+ * Public invite join-link policy (issue #857). Archive/trash auto-suspends
+ * invites; restoring the campaign does NOT revive them — the DM must flip this
+ * switch deliberately. Suspend keeps invite rows (same codes can work again);
+ * revoke-all deletes them permanently.
+ */
+function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChanged: () => Promise<void> }) {
+  const [confirming, setConfirming] = useState<'suspend' | 'revoke' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function setPolicy(enabled: boolean) {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await api.put<{ revoked: number }>(`${API}/campaigns/${campaign.id}/invites/policy`, { enabled });
+      setMessage(
+        enabled
+          ? 'Public invites re-enabled. Existing unrevoked links work again.'
+          : 'Public invites suspended. Outstanding links stop working until you re-enable them.',
+      );
+      setConfirming(null);
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't update public invites.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeAll() {
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await api.delete<{ revoked: number }>(`${API}/campaigns/${campaign.id}/invites`);
+      setMessage(`Revoked ${result.revoked} invite ${result.revoked === 1 ? 'link' : 'links'}.`);
+      setConfirming(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't revoke invite links.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const canEnable = campaign.status === 'active' && campaign.deletedAt == null;
+
+  return (
+    <div className="card elev-sm" data-testid="public-invites-settings">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="card-kicker" style={{ margin: 0 }}>Public invites</span>
+        <span className={`tag ${campaign.publicInvitesEnabled ? 'tag-accent' : 'tag-neutral'}`}>
+          {campaign.publicInvitesEnabled ? 'enabled' : 'suspended'}
+        </span>
+      </div>
+      <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+        Join links let anyone with the URL create an account or join this campaign. Archiving or moving the
+        campaign to Trash suspends every outstanding link automatically; restoring does not revive them —
+        re-enable here deliberately. Revoke destroys codes permanently.
+      </p>
+      <div className="flex flex-col sm:flex-row gap-2">
+        {campaign.publicInvitesEnabled ? (
+          <button className="btn" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('suspend')}>
+            Suspend invites
+          </button>
+        ) : (
+          <button
+            className="btn btn-primary"
+            disabled={busy || !canEnable}
+            aria-busy={busy || undefined}
+            onClick={() => void setPolicy(true)}
+          >
+            Re-enable invites
+          </button>
+        )}
+        <button className="btn btn-danger" disabled={busy} aria-busy={busy || undefined} onClick={() => setConfirming('revoke')}>
+          Revoke all links
+        </button>
+      </div>
+      {!campaign.publicInvitesEnabled && !canEnable && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          Unarchive the campaign before re-enabling public invites.
+        </p>
+      )}
+      {message && <p className="text-sm text-emerald-300 m-0" role="status">{message}</p>}
+      {error && <p className="text-sm text-red-400 m-0" role="alert">{error}</p>}
+      {confirming === 'suspend' && (
+        <ConfirmDialog
+          title="Suspend public invites?"
+          body="Outstanding join links stop working immediately. Invite rows are kept — re-enabling later restores the same codes unless you revoke them."
+          confirmLabel="Suspend invites"
+          busy={busy}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => void setPolicy(false)}
+        />
+      )}
+      {confirming === 'revoke' && (
+        <ConfirmDialog
+          title="Revoke every invite link?"
+          body="All invite codes for this campaign are deleted permanently. Existing members are unaffected."
+          confirmLabel="Revoke all links"
+          busy={busy}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => void revokeAll()}
+        />
+      )}
+    </div>
+  );
+}
+
 function GeneralCard({
   campaignId,
   campaign,
@@ -269,12 +469,16 @@ function GeneralCard({
 
   const metadataDirty = isCampaignMetadataDirty(campaign, { name, description, dangerLevel });
   const dirty = metadataDirty || dmControlsProgression !== campaign.dmControlsProgression;
+  // Issue #760: campaign switcher confirms before discarding mid-edit settings.
+  useUnsavedWork(`campaign-settings:${campaignId}`, dirty);
 
   async function save() {
     if (!name.trim()) {
       setError('Campaign name is required.');
       return;
     }
+    // Issue #853: refuse to PATCH B with form state opened against A.
+    if (!assertMutationTarget(campaign.id, campaignId).ok) return;
     setSaving(true);
     setError(null);
     setSaved(false);
@@ -344,11 +548,11 @@ const STATUS_LABEL: Record<CampaignStatus, string> = {
 /** Consequence copy per target status, so the confirmation spells out the real effect. */
 const STATUS_CONSEQUENCE: Record<CampaignStatus, string> = {
   active:
-    "The campaign becomes editable again — quests, notes, rolls and encounters are no longer read-only, and it leaves the Archive group on the campaign hub.",
+    "The campaign becomes editable again — quests, notes, rolls and encounters are no longer read-only, and it leaves the Archive group on the campaign hub. Public invite links stay suspended until you deliberately re-enable them.",
   paused:
-    "The campaign becomes read-only for everyone (quests, notes, rolls — everything) and is grouped under Archive on the campaign hub. No one can edit it until you set it back to Active.",
+    "The campaign becomes read-only for everyone (quests, notes, rolls — everything) and is grouped under Archive on the campaign hub. Outstanding invite links are suspended so old join URLs stop working. No one can edit it until you set it back to Active.",
   completed:
-    "The campaign becomes read-only for everyone and is grouped under Archive on the campaign hub, marking the story finished. Set it back to Active to resume play.",
+    "The campaign becomes read-only for everyone and is grouped under Archive on the campaign hub, marking the story finished. Outstanding invite links are suspended so old join URLs stop working. Set it back to Active to resume play.",
 };
 
 /** Window during which Undo is offered after an archiving change (issue #640). */
@@ -382,6 +586,8 @@ function StatusCard({
   const [saving, setSaving] = useState(false);
   const [undoBusy, setUndoBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [liveInviteCount, setLiveInviteCount] = useState(0);
+  const [revokeInvitesOnArchive, setRevokeInvitesOnArchive] = useState(false);
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // If the persisted status changes out from under us (reload or an external
@@ -444,10 +650,18 @@ function StatusCard({
   }
 
   function requestConfirm() {
+    setRevokeInvitesOnArchive(false);
     setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'requestConfirm' }));
+    // Load outstanding invites for the consequence dialog (#857). Failures are
+    // non-fatal — the archive still proceeds; the count just stays at 0.
+    void api
+      .get<CampaignInvite[]>(`${API}/campaigns/${campaignId}/invites`)
+      .then((list) => setLiveInviteCount(list.length))
+      .catch(() => setLiveInviteCount(0));
   }
 
   function cancelConfirm() {
+    setRevokeInvitesOnArchive(false);
     setSnapshot((cur) => reduceStatusConfirm(cur, { type: 'cancelConfirm' }));
   }
 
@@ -460,7 +674,14 @@ function StatusCard({
     setError(null);
     const from = campaign.status;
     try {
-      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}`, { status: value });
+      // Revoke+archive in one server transaction via query flag — never revoke
+      // client-side before the status change, or a failed archive permanently
+      // destroys invite rows while the campaign stays active (#857 Bugbot).
+      const revokeQs =
+        isArchivingTransition(from, value) && revokeInvitesOnArchive ? '?revokeInvites=true' : '';
+      const updated = await api.patch<Campaign>(`${API}/campaigns/${campaignId}${revokeQs}`, {
+        status: value,
+      });
       onSaved(updated);
       // Announce via the app-root live region (survives the card re-rendering
       // into the archived state) so a screen reader hears the lock land.
@@ -619,6 +840,34 @@ function StatusCard({
               <p style={{ margin: 0 }}>
                 {STATUS_CONSEQUENCE[pending]}
               </p>
+              {liveInviteCount > 0 && (
+                <div
+                  data-testid="archive-outstanding-invites"
+                  className="flex flex-col gap-1.5"
+                  style={{
+                    border: '1px solid var(--color-divider)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '8px 10px',
+                    fontSize: 11.5,
+                  }}
+                >
+                  <p style={{ margin: 0 }}>
+                    {liveInviteCount === 1
+                      ? '1 outstanding invite link will be suspended.'
+                      : `${liveInviteCount} outstanding invite links will be suspended.`}{' '}
+                    Restoring Active does not revive them — re-enable invites deliberately afterwards.
+                  </p>
+                  <label className="flex items-center gap-2" style={{ margin: 0, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={revokeInvitesOnArchive}
+                      onChange={(e) => setRevokeInvitesOnArchive(e.target.checked)}
+                      data-testid="archive-revoke-invites"
+                    />
+                    <span>Also revoke all invite links permanently</span>
+                  </label>
+                </div>
+              )}
               <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
                 You can undo this for a few seconds, or set the status back to Active at any time.
               </p>
@@ -895,8 +1144,9 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
       <span className="card-kicker">Duplicate campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         Reuse your prep. A full copy duplicates everything — quests, NPCs, locations, characters, sessions, notes and
-        encounters. A template copies the world only and resets progress: quests back to available, objectives
-        unchecked, no sessions or play state. Members aren't copied — you become the new campaign's DM.
+        encounters (encounter combat state is reset: fights go back to preparing with full HP and no conditions). A template
+        copies the world only and resets progress: quests back to available, objectives unchecked, no sessions or play
+        state. Members aren't copied — you become the new campaign's DM.
       </p>
       <div className="field">
         <label htmlFor="settings-clone-name">New campaign name</label>
@@ -931,19 +1181,31 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
 }
 
 function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted: () => void }) {
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [liveInviteCount, setLiveInviteCount] = useState(0);
+  const [revokeInvitesOnTrash, setRevokeInvitesOnTrash] = useState(false);
 
-  const canDelete = confirmText.trim() === campaign.name;
+  function openConfirm() {
+    setOpen(true);
+    setError(null);
+    setRevokeInvitesOnTrash(false);
+    void api
+      .get<CampaignInvite[]>(`${API}/campaigns/${campaign.id}/invites`)
+      .then((list) => setLiveInviteCount(list.length))
+      .catch(() => setLiveInviteCount(0));
+  }
 
   async function remove() {
-    if (!canDelete) return;
     setDeleting(true);
     setError(null);
     try {
-      await api.delete(`${API}/campaigns/${campaign.id}`);
+      // Revoke+trash in one server transaction via query flag — never revoke
+      // client-side before trash, or a failed trash permanently destroys invite
+      // rows while the campaign stays live (#857 Bugbot).
+      const revokeQs = revokeInvitesOnTrash ? '?revokeInvites=true' : '';
+      await api.delete(`${API}/campaigns/${campaign.id}${revokeQs}`);
       onDeleted();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete campaign.");
@@ -952,56 +1214,76 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="danger-zone-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>Danger zone</span>
-      {!open ? (
-        <div className="flex items-center gap-2">
-          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
-            permanently removed until you purge it from the Trash on your campaigns page.
-          </p>
-          <div className="flex-1" />
-          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={() => setOpen(true)}>
-            Delete campaign…
-          </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
-            Type <strong>{campaign.name}</strong> to move it to the Trash (you can restore it later).
-          </p>
-          <input
-            className="input"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={campaign.name}
-          />
-          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-          <div className="flex gap-2 items-center">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5 }}
-              onClick={() => {
-                setOpen(false);
-                setConfirmText('');
-                setError(null);
-              }}
-              disabled={deleting}
-            >
-              Cancel
-            </button>
-            <div className="flex-1" />
-            <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={!canDelete || deleting}
-              aria-busy={deleting || undefined}
-              onClick={remove}
-            >
-              {deleting ? 'Moving…' : 'Move to Trash'}
-            </button>
-          </div>
-        </div>
+      <div className="flex items-center gap-2">
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
+          permanently removed until you purge it from the Trash on your campaigns page.
+          Outstanding invite links are suspended automatically.
+        </p>
+        <div className="flex-1" />
+        <button
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
+          onClick={openConfirm}
+          data-testid="delete-campaign-trigger"
+        >
+          Delete campaign…
+        </button>
+      </div>
+      {open && (
+        <ConfirmDestructiveDialog
+          title="Delete campaign"
+          consequence={
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              Typing <strong>{campaign.name}</strong> will move this campaign to the Trash.
+              Invite links are suspended so old join URLs stop working; restore does not revive them.
+            </p>
+          }
+          extraBody={
+            liveInviteCount > 0 ? (
+              <div
+                data-testid="trash-outstanding-invites"
+                className="flex flex-col gap-1.5"
+                style={{
+                  marginTop: 8,
+                  border: '1px solid var(--color-divider)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '8px 10px',
+                  fontSize: 11.5,
+                }}
+              >
+                <p style={{ margin: 0 }}>
+                  {liveInviteCount === 1
+                    ? '1 outstanding invite link will be suspended.'
+                    : `${liveInviteCount} outstanding invite links will be suspended.`}
+                </p>
+                <label className="flex items-center gap-2" style={{ margin: 0, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={revokeInvitesOnTrash}
+                    onChange={(e) => setRevokeInvitesOnTrash(e.target.checked)}
+                    data-testid="trash-revoke-invites"
+                  />
+                  <span>Also revoke all invite links permanently</span>
+                </label>
+              </div>
+            ) : null
+          }
+          confirmValue={campaign.name}
+          hintMismatch={`You must type "${campaign.name}" to enable the button.`}
+          confirmLabel="Move to Trash"
+          pendingLabel="Moving…"
+          busy={deleting}
+          error={error}
+          onConfirm={() => void remove()}
+          onCancel={() => {
+            setOpen(false);
+            setError(null);
+            setRevokeInvitesOnTrash(false);
+          }}
+        />
       )}
     </div>
   );

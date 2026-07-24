@@ -27,6 +27,14 @@ function semantic(page: Page, kind: 'quest-status' | 'npc-disposition', value: s
   return page.locator(`[data-semantic="${kind}"][data-semantic-value="${value}"]`);
 }
 
+/** Cast is scene-based (issue #823): quests + revealed NPCs live on the Quests
+ * scene, so switch the stage there before asserting on the cast display. */
+async function showCastQuestsScene(page: Page): Promise<void> {
+  await page.mouse.move(24, 24);
+  await page.getByTestId('cf-scene-btn-quests').click();
+  await expect(page.getByTestId('cf-stage')).toHaveAttribute('data-scene', 'quests');
+}
+
 async function expectSemanticBadge(locator: Locator, label: string, variant: string) {
   await expect(locator).toBeVisible();
   await expect(locator).toHaveText(label);
@@ -155,14 +163,17 @@ test.describe('semantic consistency across representative shipped surfaces', () 
 
     await page.goto(`/c/${fixture.campaignId}/quests/${fixture.quests.active.id}`);
     await expect(semantic(page, 'quest-status', 'active')).toHaveCount(2); // header + facts
-    await page.getByRole('button', { name: 'Status ▾' }).click();
+    await page.getByRole('button', { name: /Quest status:/i }).click();
+    const listbox = page.getByRole('listbox');
+    await expect(listbox).toBeVisible();
     for (const [status, expected] of Object.entries(QUEST_EXPECTATIONS)) {
-      const menuBadge = page.getByRole('button').filter({ has: semantic(page, 'quest-status', status) });
+      const menuBadge = listbox.getByRole('option').filter({ has: semantic(page, 'quest-status', status) });
       await expect(menuBadge).toHaveCount(1);
       await expectSemanticBadge(menuBadge.locator('[data-semantic="quest-status"]'), expected.label, expected.variant);
     }
 
     await page.goto(`/c/${fixture.campaignId}/screen`);
+    await showCastQuestsScene(page);
     for (const status of ['available', 'active'] as const) {
       const expected = QUEST_EXPECTATIONS[status];
       await expectSemanticBadge(semantic(page, 'quest-status', status), expected.label, expected.variant);
@@ -174,6 +185,7 @@ test.describe('semantic consistency across representative shipped surfaces', () 
 
     for (const route of [`/c/${fixture.campaignId}`, `/c/${fixture.campaignId}/screen`]) {
       await page.goto(route);
+      if (route.endsWith('/screen')) await showCastQuestsScene(page);
       for (const [disposition, expected] of Object.entries(NPC_EXPECTATIONS)) {
         await expectSemanticBadge(semantic(page, 'npc-disposition', disposition), expected.label, expected.variant);
       }

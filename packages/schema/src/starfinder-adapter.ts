@@ -17,7 +17,8 @@
 // `StarfinderAdapter` with a two-line change. See #275 (candidate rulesets), #70 (the
 // RuleSystemAdapter seam), #295-300 (sibling rulesets following the same pattern).
 
-import type { MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
+import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 /** Family id of the Starfinder 1e adapter. Matches the rule-pack slug the importer stamps, so a
  *  campaign whose `ruleSystem` is set to the installed Starfinder pack resolves to this adapter. */
@@ -151,9 +152,24 @@ export interface StarfinderRuleSystemAdapter extends RuleSystemAdapter {
  * SP+HP pool and EAC/KAC), with `armorClasses()`/`hitPointsBreakdown()` for surfaces that
  * need the full sci-fi detail the single-slot RuleSystemAdapter interface can't carry.
  */
+/**
+ * Starfinder presentation — CR for rating; the generic defense slot carries KAC, so the
+ * accessible label is Kinetic Armor Class (short KAC). EAC remains available via
+ * `armorClasses()` for surfaces that show both.
+ */
+export const STARFINDER_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge Rating', short: 'CR' },
+  defense: { full: 'Kinetic Armor Class', short: 'KAC' },
+  hitPoints: { full: 'Stamina + Hit Points', short: 'SP + HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
 export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   id: STARFINDER_ADAPTER_ID,
   label: 'Starfinder 1e',
+  presentation: STARFINDER_STATBLOCK_PRESENTATION,
   // Same d20 ability-modifier formula as 5e/PF1e.
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
@@ -161,10 +177,18 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   initiativeDie: 20,
   // Starfinder 1e caps characters at level 20 (Core Rulebook), the same ceiling as 5e/PF.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = starfinderDexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — no runtime import from ./index (cycle).
+    return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
+  // Starfinder initiative is DEX-derived like 5e/PF1e; on a tied total, higher DEX
+  // (initMod) first, then sortOrder (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: STARFINDER_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): StarfinderStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
@@ -181,6 +205,7 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
       hitPoints: total > 0 ? total : null,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       eac: d.eac ?? d.energyArmorClass ?? d.energy_armor_class ?? null,

@@ -17,16 +17,15 @@ import { useId, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { CoDmDraftResult, CoDmDraftTarget } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
-import { useAiDmSeat } from '../../lib/query';
 import { Btn, TextArea } from '../../components/ui';
 import { isKnownAiGate } from './aiGate';
 import { AiGateExplainer } from './AiSetupChecklist';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
+import { useDraftWithAiAvailable } from './useDraftWithAiAvailable';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
 
 const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   npc: 'NPC',
@@ -35,6 +34,8 @@ const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   recap: 'session recap',
   encounter: 'encounter',
   map: 'map',
+  quest: 'quest',
+  faction: 'faction',
 };
 
 const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
@@ -44,6 +45,8 @@ const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
   recap: 'session recaps',
   encounter: 'encounters',
   map: 'maps',
+  quest: 'quests',
+  faction: 'factions',
 };
 
 const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
@@ -53,6 +56,8 @@ const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
   recap: 'Draft a session recap with AI',
   encounter: 'Draft an encounter with AI',
   map: 'Draft a map with AI',
+  quest: 'Draft a quest with AI',
+  faction: 'Draft a faction with AI',
 };
 
 const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
@@ -61,45 +66,64 @@ const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
   beat: 'the next story beat once the party learns the mayor is a doppelganger',
   recap: 'summarize tonight: the ambush at the bridge, losing Kira, the truce offer',
   encounter: 'a level-3 ambush on a forest road, bandits with a hidden archer',
-  map: 'a small smugglers’ cave with a tidal chamber',
+  map: "a small smugglers' cave with a tidal chamber",
+  quest: "retrieve the stolen relic from the bandits' hideout before the full moon",
+  faction: 'a merchant guild that secretly controls the city council through debts',
 };
 
 /**
  * DM-only "Draft with AI" button for a given proposal target. Renders nothing for
  * non-DMs or when the seat is off/disabled — this is a convenience gate; the server
  * re-enforces role + experimental flag + seat + budget on every request regardless.
+ *
+ * Controlled `open` / `onOpenChange` + `showTrigger={false}` let PageHeader (#707)
+ * open the same dialog from an overflow menuitem without a second trigger.
  */
 export function DraftWithAiButton({
   campaignId,
   target,
   label = 'Draft with AI',
   className = '!min-h-0 !py-1.5 text-xs',
+  open: openProp,
+  onOpenChange,
+  showTrigger = true,
+  dialogId: dialogIdProp,
 }: {
   campaignId: number;
   target: CoDmDraftTarget;
   label?: string;
   className?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  /** When false, only the dialog mounts (caller owns the trigger). */
+  showTrigger?: boolean;
+  /** Stable id shared with an external PageHeader trigger (issue #707). */
+  dialogId?: string;
 }) {
-  const { roleIn } = useAuth();
-  const isDm = roleIn(campaignId) === 'dm';
-  const { data: seat } = useAiDmSeat(isDm ? campaignId : undefined);
-  const [open, setOpen] = useState(false);
-  const dialogId = useId();
+  const available = useDraftWithAiAvailable(campaignId);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const isControlled = openProp !== undefined && onOpenChange !== undefined;
+  const open = isControlled ? openProp : uncontrolledOpen;
+  const setOpen = isControlled ? onOpenChange : setUncontrolledOpen;
+  const generatedDialogId = useId();
+  const dialogId = dialogIdProp ?? generatedDialogId;
 
-  if (!isDm || !seat || seat.mode === 'off' || !seat.enabled) return null;
+  if (!available) return null;
 
   return (
     <>
-      <Btn
-        ghost
-        className={className}
-        onClick={() => setOpen(true)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls={dialogId}
-      >
-        <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
-      </Btn>
+      {showTrigger && (
+        <Btn
+          ghost
+          className={className}
+          onClick={() => setOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-controls={dialogId}
+        >
+          <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
+        </Btn>
+      )}
       {open && (
         <DraftWithAiModal id={dialogId} campaignId={campaignId} target={target} onClose={() => setOpen(false)} />
       )}

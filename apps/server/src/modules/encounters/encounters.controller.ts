@@ -1,13 +1,19 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post, Query, Req, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { EncounterStatus } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
+import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterUpdateDto, CombatantCreateDto, CombatantUpdateDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterMapService } from './encounter-map.service';
+import type { Request, Response } from 'express';
+import { parseFogState } from '../../common/fog';
 
 @ApiTags('encounters')
+// Campaign-scoped list/create only. Role-safe map bytes live on
+// EncountersController at GET /encounters/:id/map (not under this prefix).
 @Controller('campaigns/:campaignId/encounters')
 export class CampaignEncountersController {
   constructor(
@@ -62,6 +68,50 @@ export class CampaignEncountersController {
     return this.encounters.generateEncounter(campaignId, body, role);
   }
 
+  @Post('preview')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Preview & tune a generated encounter (issue #412)',
+    description:
+      'NON-MUTATING. Assembles a multi-slot roster for a target difficulty and returns per-creature ' +
+      'inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (not just a band), and actionable ' +
+      'warnings (role duplication, action-economy mismatch, missing statblocks, unsupported-system math, ' +
+      'swinginess). Pass back `roster` (the returned plan) with a `tune` op to reroll all/one slot, swap, adjust ' +
+      'count, or pin — deterministic by the per-slot seeds so pinned slots survive re-rolls. Requires campaign ' +
+      'membership; any member/AI may preview. Nothing is persisted — commit via POST .../encounters/commit.',
+  })
+  @ApiResponse({ status: 200, description: 'Read-only preview: roster + inspection + difficulty explanation + warnings + fallbacks.' })
+  async preview(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: EncounterPreviewDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    return this.encounters.previewEncounter(campaignId, body, role);
+  }
+
+  @Post('commit')
+  @HttpCode(201)
+  @ApiOperation({
+    summary: 'Commit a tuned encounter roster (issue #412)',
+    description:
+      'dm role + write mode required. Atomically creates the encounter with its combatants and optional ' +
+      'location/quest/session links, battle map/grid, and token placement in ONE transaction — never a partial ' +
+      'encounter or duplicate combatants. IDEMPOTENT: a retry with the same `idempotencyKey` returns the SAME ' +
+      'encounter. Created hidden + `preparing` by default (DM prep, #262). Audits source, inputs, roster, and manual edits.',
+  })
+  @ApiResponse({ status: 201, description: '{ encounter, idempotent }. idempotent=true when a prior commit with this key was replayed.' })
+  @ApiResponse({ status: 400, description: 'A roster creature/link/map is invalid (refresh the preview).' })
+  @ApiResponse({ status: 403, description: 'Requires the dm role + write mode.' })
+  async commit(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: EncounterCommitDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, campaignId, 'dm');
+    return this.encounters.commitGeneratedEncounter(campaignId, body, user, role);
+  }
+
   @Get()
   @ApiOperation({ summary: 'List encounters in a campaign', description: 'Requires campaign membership.' })
   @ApiQuery({ name: 'status', required: false, enum: ['preparing', 'running', 'ended'], description: 'Filter to a single encounter status.' })
@@ -112,6 +162,7 @@ export class EncountersController {
   constructor(
     private readonly encounters: EncountersService,
     private readonly access: CampaignAccessService,
+    private readonly encounterMaps: EncounterMapService,
   ) {}
 
   @Get(':id')
@@ -123,6 +174,83 @@ export class EncountersController {
     // HP as a coarse band, never exact numbers.
     const role = await this.access.requireMember(user, row.campaignId);
     return this.encounters.getWithCombatantsOrThrow(id, role);
+  }
+
+  @Get(':id/map')
+  @ApiOperation({
+    summary: 'Get the role-safe battle-map image for an encounter',
+    description:
+      'Requires campaign membership. DMs receive the source map. When fog conceals pixels, non-DMs receive an ' +
+      'opaque server-rendered PNG containing only revealed regions; the source attachment remains inaccessible. ' +
+      'Responses are private/no-store and byte ranges are rejected so role or fog revisions cannot leak through caches.',
+  })
+  @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for full resolution; `thumb` caps the longest edge at 512px.' })
+  @ApiQuery({ name: 'revision', required: false, type: String, description: 'Opaque client cache-buster derived from encounter.updatedAt; ignored by the server.' })
+  @ApiResponse({ status: 200, description: 'Role-safe image bytes.' })
+  @ApiResponse({ status: 404, description: 'Encounter/map is absent, hidden from the caller, or its bytes are missing.' })
+  @ApiResponse({ status: 416, description: 'Range requests are not supported on role-specific map views.' })
+  @ApiResponse({ status: 422, description: 'The source image could not be safely rasterized while fog is active.' })
+  async map(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Req() req: Request,
+    @Res() res: Response,
+    @Query('size') size?: string,
+  ): Promise<void> {
+    if (size !== undefined && size !== 'thumb') {
+      throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+
+    // A range response would add a second cache/validator path and is unnecessary
+    // for <=8MB image uploads. Reject it explicitly after authorization instead of
+    // ever slicing the raw source attachment.
+    if (req.headers.range !== undefined) {
+      // RFC 9110: 416 should advertise the valid range space even when we refuse ranges.
+      res
+        .status(416)
+        .set({
+          'Accept-Ranges': 'none',
+          'Cache-Control': 'private, no-store',
+          'Content-Range': 'bytes */0',
+          // Keep Vary identical to the 200 map response so intermediaries cannot
+          // key 416/200 differently across auth/cookie/dev-role variants.
+          Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        })
+        .end();
+      return;
+    }
+
+    // Map bytes only need the encounter row (map/fog/visibility) — skip the combatant join.
+    const encounter = this.encounters.encounterForMapOrThrow(row, role);
+
+    // Ordinary encounter JSON tolerates malformed legacy fog data, but map pixels
+    // must fail closed: a non-null invalid value renders an all-concealed view.
+    const persistedFogInvalid = row.fog !== null && parseFogState(row.fog) === null;
+    const view = await this.encounterMaps.resolve(
+      encounter,
+      role,
+      size === 'thumb' ? 'thumb' : 'original',
+      persistedFogInvalid,
+    );
+    res
+      .status(200)
+      .set({
+        'Content-Type': view.mime,
+        'Content-Length': String(view.bytes.length),
+        // Issue #630: ASCII fallback + RFC 5987 filename* (not percent-encoding
+        // the Unicode name into the legacy filename= slot).
+        'Content-Disposition': contentDispositionHeader(view.filename, 'inline'),
+        ETag: view.etag,
+        'Cache-Control': 'private, no-store, max-age=0',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Accept-Ranges': 'none',
+        Vary: 'Cookie, Authorization, x-dev-role, x-dev-user',
+        'X-Campfire-Map-View': view.protected ? 'fog-protected' : 'fully-revealed',
+      })
+      .end(view.bytes);
   }
 
   @Get(':id/difficulty')
@@ -172,8 +300,10 @@ export class EncountersController {
   @ApiResponse({ status: 201, description: 'Ping broadcast.' })
   async ping(@Param('id', ParseIntPipe) id: number, @Body() body: MapPingDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
-    await this.access.requireMember(user, row.campaignId, { write: true });
-    this.encounters.pingMap(id, row.campaignId, body);
+    // Role drives hidden-encounter secrecy (issue #869): a non-DM must not learn a
+    // prepared fight exists via ping — 404, matching roster/events/difficulty.
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    this.encounters.pingMap(id, row.campaignId, body, role, row.hidden);
     return { ok: true };
   }
 
@@ -181,9 +311,10 @@ export class EncountersController {
   @ApiOperation({
     summary: "List an encounter's persistent combat log",
     description:
-      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Member-visible; details record only HP deltas, never a monster’s exact HP totals.',
+      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Hidden encounters 404 for non-DMs; hidden NPC identities are masked via current role-aware projection (issue #869). Details record only HP deltas / name-free outcomes, never a monster’s exact HP totals.',
   })
   @ApiResponse({ status: 200, description: 'Encounter events in chronological order.' })
+  @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
   async events(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -270,6 +401,81 @@ export class EncountersController {
     return this.encounters.nextTurn(id, user, role);
   }
 
+  @Get(':id/turn')
+  @ApiOperation({
+    summary: 'Get the current-turn workspace (issue #413)',
+    description:
+      'Requires campaign membership. The focused "what can I do now?" view for the active combatant: prominent actor / ' +
+      'round / next actor, a "your turn" flag, the adapter-defined action-economy slots with plain-language help + live ' +
+      'usage, movement / reaction / concentration / active effects, suggested actions from the sheet or statblock, and ' +
+      'the start/end-of-turn prompts to resolve before advancing. The detailed workspace is only populated for the DM ' +
+      'or the user who owns the current combatant’s character — other viewers get identity + round only (secrecy).',
+  })
+  @ApiResponse({ status: 200, description: 'The current-turn workspace.' })
+  async turn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.encounters.getTurnWorkspace(id, user, role);
+  }
+
+  @Post(':id/end-turn')
+  @ApiOperation({
+    summary: 'End the current combatant’s turn (issue #413)',
+    description:
+      'Any campaign member with write access. The DM may always end the current turn; a PLAYER may end the turn of ' +
+      'their OWN active character when the campaign allows player advancement (dmControlsTurns=false). The server ' +
+      'validates ownership + that it is actually that combatant’s turn, serializes advancement, and guards against ' +
+      'double-advance via the optional expectedCurrentCombatantId (a stale click after someone else advanced returns ' +
+      '409). When the campaign requires DM confirmation, a player end-turn is staged (409) and the DM advances it ' +
+      'directly (a DM end-turn / next-turn is the confirmation). Advancing resolves start/end-of-turn effects and logs structured combat-log events.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter advanced to the next turn.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running / no current combatant.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or the owning player of the current combatant, or DM-only advancement is set.' })
+  @ApiResponse({ status: 409, description: 'The turn already advanced (double-advance guard) or DM confirmation is required.' })
+  async endTurn(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterEndTurnDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.endTurn(id, body, user, role);
+  }
+
+  @Post(':id/undo-turn')
+  @ApiOperation({
+    summary: 'Undo the last turn advance (issue #413)',
+    description:
+      'dm role required. Steps the turn pointer BACKWARD (decrementing the round when unwrapping past the top). ' +
+      'Effect ticks applied while advancing are not reversed — the DM re-applies any effect corrections manually.',
+  })
+  @ApiResponse({ status: 201, description: 'Encounter turn pointer moved back.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not running.' })
+  async undoTurn(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.undoTurn(id, user, role);
+  }
+
+  @Post(':id/combatants/:cid/turn-state')
+  @ApiOperation({
+    summary: 'Declare / resolve turn state on a combatant (issue #413)',
+    description:
+      'Track the current turn’s action economy and effects: use/release/set an action-economy slot, spend movement, ' +
+      'set/clear concentration, add/remove a structured active effect (duration + save timing), or mark a combatant ' +
+      'delaying / readying an action. The DM may edit any combatant; a player only a combatant linked to a character ' +
+      'they own. Changes compose atomically under concurrency.',
+  })
+  @ApiResponse({ status: 200, description: 'Updated combatant.' })
+  @ApiResponse({ status: 403, description: 'Not the DM or the owning player.' })
+  async turnState(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('cid', ParseIntPipe) cid: number,
+    @Body() body: CombatantTurnStatePatchDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.encounters.updateCombatantTurnState(id, cid, body, user, role);
+  }
+
   @Post(':id/end')
   @ApiOperation({ summary: 'End the encounter', description: 'dm role required. Writes combatant hp back to their linked characters.' })
   @ApiResponse({ status: 201, description: 'Ended encounter.' })
@@ -281,12 +487,23 @@ export class EncountersController {
   }
 
   @Post(':id/reopen')
-  @ApiOperation({ summary: 'Reopen an ended encounter', description: "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state — recovers an accidental End. HP was already written back on End; the same write-back caveat applies on the next End." })
+  @ApiOperation({
+    summary: 'Reopen an ended encounter',
+    description:
+      "dm role required. Flips an 'ended' encounter back to 'running', preserving round/turn state. " +
+      'When character sheets advanced after the previous End (heal/rest/another fight), pass `hpResync` ' +
+      'decisions for each conflict listed on GET (issue #466) — never silently overwrite newer sheet HP.',
+  })
   @ApiResponse({ status: 201, description: 'Reopened (running) encounter.' })
   @ApiResponse({ status: 400, description: 'Encounter is not ended.' })
-  async reopen(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  @ApiResponse({ status: 409, description: 'HP sync conflicts require hpResync decisions (issue #466).' })
+  async reopen(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: EncounterReopenDto,
+    @CurrentUser() user: RequestUser,
+  ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
-    return this.encounters.reopen(id, user, role);
+    return this.encounters.reopen(id, user, role, body);
   }
 }

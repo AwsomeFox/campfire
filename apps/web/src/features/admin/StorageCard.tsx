@@ -52,6 +52,19 @@ export function StorageCard() {
     void load();
   }, [load]);
 
+  async function retryFsCleanup() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post(`${API}/admin/storage/fs-cleanup/retry`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Couldn't retry filesystem cleanup.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runCleanup(dryRun: boolean) {
     setBusy(true);
     setError(null);
@@ -83,6 +96,7 @@ export function StorageCard() {
   }
 
   const orphanCount = stats.orphans.rowsWithoutFile + stats.orphans.filesWithoutRow;
+  const fsPending = stats.fsCleanup.pendingCount + stats.fsCleanup.failedCount;
 
   return (
     <Card className="space-y-4">
@@ -96,10 +110,11 @@ export function StorageCard() {
       {error && <p className="text-xs text-rose-400">{error}</p>}
 
       {/* Top-line usage */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <Stat label="Upload total" value={formatBytes(stats.totalBytes)} />
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <Stat label="Committed" value={formatBytes(stats.committedBytes)} />
+        <Stat label="Reserved" value={formatBytes(stats.reservedBytes)} />
         <Stat label="On disk" value={formatBytes(stats.diskBytes)} />
-        <Stat label="Files" value={stats.fileCount.toLocaleString()} />
+        <Stat label="Committed files" value={stats.fileCount.toLocaleString()} />
         <Stat label="Orphans" value={orphanCount.toLocaleString()} />
       </div>
 
@@ -115,7 +130,8 @@ export function StorageCard() {
                 <tr className="text-[10px] uppercase text-slate-500 text-left">
                   <th className="py-2 pr-4 font-bold">Campaign</th>
                   <th className="pr-4 font-bold">Files</th>
-                  <th className="pr-4 font-bold">Used</th>
+                  <th className="pr-4 font-bold">Committed</th>
+                  <th className="pr-4 font-bold">Reserved</th>
                   <th className="pr-4 font-bold">Quota</th>
                   <th></th>
                 </tr>
@@ -128,6 +144,40 @@ export function StorageCard() {
             </table>
           </div>
         )}
+      </div>
+
+      {/* Filesystem deletion queue (issue #727) */}
+      <div id="fs-cleanup" className="cf-inset p-3.5 space-y-2">
+        <p className="text-[10px] font-bold text-rose-400 uppercase tracking-widest">Pending file erasure</p>
+        <p className="text-[11px] text-slate-500">
+          Paths whose database metadata was removed but bytes could not be verified erased (
+          {stats.fsCleanup.pendingCount} retrying, {stats.fsCleanup.failedCount} need attention).
+        </p>
+        {stats.fsCleanup.items.length > 0 && (
+          <ul className="text-[11px] text-slate-300 space-y-1 max-h-40 overflow-y-auto">
+            {stats.fsCleanup.items.map((item) => (
+              <li key={item.id}>
+                <span className="font-mono text-slate-400">{item.relPath}</span>
+                {item.status === 'held' && (
+                  <span className="text-amber-400"> — held until metadata deletion commits</span>
+                )}
+                {item.status === 'failed' && (
+                  <span className="text-rose-400"> — {item.lastError || 'failed'}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {stats.fsCleanup.queueCount > stats.fsCleanup.items.length && (
+          <p className="text-[10px] text-slate-500 m-0">
+            Showing {stats.fsCleanup.items.length} of {stats.fsCleanup.queueCount} queued paths (oldest first).
+          </p>
+        )}
+        <div className="flex gap-2 justify-end">
+          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void retryFsCleanup()} disabled={busy || fsPending === 0}>
+            {busy ? 'Working…' : 'Retry cleanup'}
+          </Btn>
+        </div>
       </div>
 
       {/* Orphan cleanup */}
@@ -205,8 +255,14 @@ function QuotaRow({
         {campaign.name}
         {campaign.overQuota && <span className="cf-chip cf-chip-failed ml-2 !py-0 !text-[9px]">over</span>}
       </td>
-      <td className="pr-4 text-slate-400">{campaign.fileCount}</td>
-      <td className="pr-4 text-slate-300">{formatBytes(campaign.totalBytes)}</td>
+      <td className="pr-4 text-slate-400">
+        {campaign.fileCount.toLocaleString()}
+        {campaign.reservedFileCount > 0 && (
+          <span className="text-amber-400"> +{campaign.reservedFileCount.toLocaleString()}</span>
+        )}
+      </td>
+      <td className="pr-4 text-slate-300">{formatBytes(campaign.committedBytes)}</td>
+      <td className="pr-4 text-amber-400">{formatBytes(campaign.reservedBytes)}</td>
       <td className="pr-4 text-slate-400">
         {editing ? (
           <div className="flex items-center gap-1">

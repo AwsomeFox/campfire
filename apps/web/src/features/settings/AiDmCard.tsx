@@ -16,6 +16,7 @@
 import { useEffect, useState } from 'react';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
 
 export const MODES: { value: AiDmMode; label: string; blurb: string }[] = [
@@ -317,14 +318,14 @@ function BudgetSection({
   }
 
   return (
-    <Section title="Budget & usage" id="ai-dm-budget">
+    <Section title="Budget & usage" id={AI_DM_BUDGET_SECTION_ID}>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         A hard token cap. Turns stop once it's reached — a positive budget is required to run Driver mode.
       </p>
       <div className="field" style={{ maxWidth: 200 }}>
-        <label htmlFor="ai-dm-budget">Token budget</label>
+        <label htmlFor={AI_DM_BUDGET_INPUT_ID}>Token budget</label>
         <input
-          id="ai-dm-budget"
+          id={AI_DM_BUDGET_INPUT_ID}
           className="input"
           type="number"
           min={0}

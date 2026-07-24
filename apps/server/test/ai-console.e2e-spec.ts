@@ -117,6 +117,15 @@ describe('ai-console (e2e)', () => {
     expect(row.tokenBudget).toBe(55_000);
   });
 
+  it('caps rejects unknown campaign ids with 400 (#537)', async () => {
+    const res = await request(server)
+      .put('/api/v1/settings/ai/caps')
+      .set(dm)
+      .send({ campaigns: [{ campaignId: 999999, tokenBudget: 10_000 }] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/999999/);
+  });
+
   it('the model allowlist editor drives the #310 provider allowlist', async () => {
     // Setting an allowlist requires a server-default provider first.
     const noProvider = await request(server)

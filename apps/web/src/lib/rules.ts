@@ -25,6 +25,7 @@ import {
   PF1E_PACK_SLUG,
   STARFINDER_ADAPTER_ID,
   OSR_RULE_SYSTEM_SLUGS,
+  osrMechanicsProfile,
   ruleSystemAdapter,
 } from '@campfire/schema';
 
@@ -45,8 +46,22 @@ export const SECTION_LABELS: Record<RulePackInstallSection, string> = {
   starships: 'Starships',
   vehicles: 'Vehicles',
   creatures: 'Creatures',
+  ancestries: 'Ancestries',
+  backgrounds: 'Backgrounds',
+  hazards: 'Hazards',
+  deities: 'Deities',
+  rituals: 'Rituals',
+  planes: 'Planes',
+  curses: 'Curses',
+  diseases: 'Diseases',
   banes: 'Banes',
   boons: 'Boons',
+  // Datasworn / Ironsworn: Starforged (issue #405)
+  npcs: 'NPCs',
+  assets: 'Assets',
+  moves: 'Moves',
+  oracles: 'Oracles',
+  truths: 'Truths',
 };
 
 /** Human label for a section name (falls back to a title-cased raw value for anything unknown). */
@@ -106,6 +121,23 @@ export interface RuleSystemMeta {
 }
 
 const FIVE_E_SECTIONS: RulePackInstallSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];
+const AON_SECTIONS: RulePackInstallSection[] = [
+  'creatures',
+  'spells',
+  'equipment',
+  'feats',
+  'ancestries',
+  'classes',
+  'backgrounds',
+  'conditions',
+  'vehicles',
+  'hazards',
+  'deities',
+  'rituals',
+  'planes',
+  'curses',
+  'diseases',
+];
 
 /**
  * Every installable rule system, in picker order. `sections` mirror the server's
@@ -128,10 +160,9 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     source: 'pf2e',
     label: 'Pathfinder 2e',
     license: 'Archives of Nethys · ORC / OGL',
-    blurb: 'Pathfinder 2e (remaster) content from the Archives of Nethys open dataset.',
+    blurb: 'Open rules and setting reference content from Archives of Nethys. Adventure, scenario, and story publications are excluded.',
     mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e conditions · four degrees of success.',
-    // PF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
-    sections: FIVE_E_SECTIONS,
+    sections: AON_SECTIONS,
     packSlug: PF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('pf2e'),
   },
@@ -139,10 +170,9 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     source: 'sf2e',
     label: 'Starfinder 2e',
     license: 'Archives of Nethys · ORC / OGL',
-    blurb: 'Starfinder 2e (remaster/playtest) content from the Archives of Nethys open dataset.',
+    blurb: 'Open rules and setting reference content from Archives of Nethys. Adventure, scenario, and story publications are excluded.',
     mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e-style mechanics & conditions · four degrees of success.',
-    // SF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
-    sections: FIVE_E_SECTIONS,
+    sections: AON_SECTIONS,
     packSlug: SF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('sf2e'),
   },
@@ -200,6 +230,32 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     requiresUrl: SOURCES_REQUIRING_URL.has('osr'),
     osrVariants: OSR_VARIANTS,
   },
+  {
+    source: 'cepheus',
+    label: 'Cepheus Engine SRD',
+    license: 'orffen/cepheus-srd · OGL 1.0a',
+    blurb: 'Cepheus Engine — a Classic-Era 2D6 science-fiction SRD, imported as section-level rules text from its mdBook Markdown.',
+    mechanics: 'Task resolution is 2D6 + characteristic DM + skill vs. a target of 8+ · reference text only (no combat adapter — falls back to 5e turn order).',
+    // Cepheus imports the whole SRD; its mdBook "books" are not a per-statblock section
+    // filter (the server rejects a foreign `sections` value), so the picker offers no
+    // section checkboxes — mirroring RulesService.SECTIONS_BY_SOURCE['cepheus'].
+    sections: [],
+    packSlug: 'cepheus-srd',
+    requiresUrl: SOURCES_REQUIRING_URL.has('cepheus'),
+  },
+  {
+    source: 'datasworn',
+    label: 'Ironsworn: Starforged',
+    license: 'datasworn · CC-BY-4.0',
+    blurb:
+      'Ironsworn: Starforged via the canonical datasworn dataset — a PbtA sci-fi reference pack. ' +
+      'NPCs import as statblocks; assets, moves, oracles and truths import as reference sections.',
+    mechanics:
+      'PbtA/narrative: no initiative/AC/levels — action rolls vs oracles & moves. Imported as reference text, with NPCs as the one statblock section.',
+    sections: ['npcs', 'assets', 'moves', 'oracles', 'truths'],
+    packSlug: 'ironsworn-starforged',
+    requiresUrl: SOURCES_REQUIRING_URL.has('datasworn'),
+  },
 ];
 
 /** Metadata for an install source, or undefined for a non-picker source ('other'). */
@@ -222,6 +278,9 @@ export function ruleSystemForPackSlug(slug: string | null | undefined): RuleSyst
 
 /** One-line mechanics summary for a pack slug, or undefined if the system isn't recognised. */
 export function mechanicsForPackSlug(slug: string | null | undefined): string | undefined {
+  if (slug && (OSR_RULE_SYSTEM_SLUGS as readonly string[]).includes(slug)) {
+    return osrMechanicsProfile(slug).mechanicsSummary;
+  }
   return ruleSystemForPackSlug(slug)?.mechanics;
 }
 

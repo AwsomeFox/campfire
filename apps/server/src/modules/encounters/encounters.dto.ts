@@ -1,10 +1,15 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterUpdate, CombatantCreate, CombatantUpdate, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterPreviewRequest, EncounterCommit, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
 // rather than being silently dropped, consistent with the other encounter write bodies.
 export class EncounterGenerateDto extends createZodDto(EncounterGenerate.strict()) {}
+// Preview-and-tune wizard (issue #412). .strict() rejects unknown keys. The nested tune op is a
+// discriminated union already validated by the zod schema.
+export class EncounterPreviewDto extends createZodDto(EncounterPreviewRequest.strict()) {}
+// Idempotent atomic commit of a tuned roster (issue #412).
+export class EncounterCommitDto extends createZodDto(EncounterCommit.strict()) {}
 // .strict() (see CombatantUpdateDto below): an unknown key in an encounter PATCH body
 // 400s instead of silently no-op'ing. expectedUpdatedAt (issue #532) added here, not in
 // the shared EncounterUpdate — it's a request-time CAS concern, not a stored field (see
@@ -26,3 +31,10 @@ export class CombatantUpdateDto extends createZodDto(CombatantUpdate.strict()) {
 export class RollRequestDto extends createZodDto(RollRequest.strict()) {}
 // Transient battle-map ping (issue #238) — a one-shot SSE broadcast, nothing persisted.
 export class MapPingDto extends createZodDto(MapPing.strict()) {}
+// Issue #466: reopen may carry per-character HP resync directions when the sheet
+// advanced after the previous /end.
+export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {}
+// Issue #413: player/DM end-turn body (optimistic double-advance guard) and
+// the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
+export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
+export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}

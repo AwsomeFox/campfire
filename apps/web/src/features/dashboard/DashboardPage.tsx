@@ -14,6 +14,7 @@ import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { StatusHeader } from './StatusHeader';
 import { InstallHintBanner } from './InstallHintBanner';
+import { OfflinePackBanner } from './OfflinePackBanner';
 import { RegionMap } from './RegionMap';
 import { QuestsCard } from './QuestsCard';
 import { NpcGrid } from './NpcGrid';
@@ -65,8 +66,8 @@ export default function DashboardPage() {
       const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`);
       if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
       // Replace the complete server projection in one state transition. In
-      // particular, nextSession is never field-merged: reschedules replace every
-      // detail and cancellation replaces the object with null atomically.
+      // particular, inProgressSession/nextSession are never field-merged:
+      // reschedules replace every detail and cancellation replaces each with null.
       setProjection({ campaignId: id, data });
       setSummaryStale(false);
       // Keep the sidebar/topbar/Home tiles in sync — StatusHeader can rename the
@@ -121,6 +122,10 @@ export default function DashboardPage() {
       }
     }, [load, refreshLiveEncounter]),
     onReconnect: useCallback(() => {
+      void load();
+      void refreshLiveEncounter();
+    }, [load, refreshLiveEncounter]),
+    onStreamRecovery: useCallback(() => {
       void load();
       void refreshLiveEncounter();
     }, [load, refreshLiveEncounter]),
@@ -205,27 +210,30 @@ export default function DashboardPage() {
       <AiDmDashboardOnboarding campaignId={id} isDm={role === 'dm'} isAdmin={isAdmin} />
 
       <InstallHintBanner />
+      <OfflinePackBanner campaignId={id} />
 
       {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
           See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} role={role} onChange={load} />
-          <QuestsCard campaignId={id} quests={summary.quests} role={role} onChange={load} />
+          <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} onChange={load} />
+          <QuestsCard campaignId={id} quests={summary.quests} onChange={load} />
           <SessionLog
             campaignId={id}
             sessions={summary.sessions}
+            inProgressSession={summary.inProgressSession}
             nextSession={summary.nextSession}
             scheduleSync={scheduleSync}
+            role={role}
           />
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <PartyCard campaignId={id} characters={summary.characters} />
           <NpcGrid campaignId={id} npcs={summary.npcs} />
-          <HandoutsCard campaignId={id} role={role} />
+          <HandoutsCard campaignId={id} />
           <DiceWidget campaignId={id} />
-          <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} role={role} />
+          <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} />
         </div>
       </div>
 

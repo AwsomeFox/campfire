@@ -104,7 +104,7 @@ export function decodeEntities(s: string): string {
 /** Strip all tags to plain text, decode entities, and collapse runs of whitespace. */
 export function stripTags(html: string): string {
   return decodeEntities(html.replace(/<[^>]+>/g, ' '))
-    .replace(/[ \t ]+/g, ' ')
+    .replace(/[ \t\u00a0]+/g, ' ')
     .replace(/\s*\n\s*/g, '\n')
     .trim();
 }
@@ -127,7 +127,7 @@ export function htmlToMarkdown(html: string): string {
   s = decodeEntities(s);
   // Tidy: collapse spaces, drop empty bold/italic artifacts, limit blank-line runs.
   s = s
-    .replace(/[ \t ]+/g, ' ')
+    .replace(/[ \t\u00a0]+/g, ' ')
     .replace(/\*\*\s*\*\*/g, '')
     .replace(/ *\n */g, '\n')
     .replace(/\n{3,}/g, '\n\n')

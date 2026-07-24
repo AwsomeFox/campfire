@@ -7,6 +7,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { RevisionEntityType } from '@campfire/schema';
@@ -22,7 +23,7 @@ import { RevisionsService } from './revisions.service';
  * one place to list an entity's prior-content snapshots and restore one.
  *
  * Access has two shapes, matching each entity's own edit path:
- *  - World-building prose (session/quest/npc/location/faction): dm-gated on the entity's
+ *  - World-building/shared-editor prose: dm-gated on the entity's
  *    OWN campaign (resolved from the live row), matching their uniformly dm-only edits.
  *  - Notes: gated on the NOTE'S own visibility (canSee) for reads and author-only for
  *    restore — never a blanket dm-gate, so a private note's history is not a redaction
@@ -40,7 +41,7 @@ export class RevisionsController {
     const parsed = RevisionEntityType.safeParse(entityType);
     if (!parsed.success) {
       throw new BadRequestException(
-        `Unsupported revision entityType: ${entityType} (expected session|quest|npc|location|faction|note)`,
+        `Unsupported revision entityType: ${entityType}`,
       );
     }
     return parsed.data;
@@ -72,7 +73,7 @@ export class RevisionsController {
   @ApiOperation({
     summary: 'List an entity\'s prose revision history',
     description:
-      'Newest-first snapshots of an entity\'s PRIOR prose (session recap, or quest/npc/location/faction/note body), ' +
+      'Newest-first snapshots of an entity\'s PRIOR prose or structured Session Zero charter, ' +
       'one per committed change (issue #157/#233). dm role required for world-building entities; a note\'s history is ' +
       'gated on the note\'s own visibility instead. Empty when the entity has never been edited since revisions were introduced.',
   })
@@ -105,17 +106,19 @@ export class RevisionsController {
     @Param('entityType') entityType: string,
     @Param('entityId', ParseIntPipe) entityId: number,
     @Param('revisionId', ParseIntPipe) revisionId: number,
+    @Query('expectedUpdatedAt') expectedUpdatedAt: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
     const type = this.parseEntityType(entityType);
+    const opts = expectedUpdatedAt ? { expectedUpdatedAt } : undefined;
     if (type === 'note') {
       // Restoring a note's prose is an edit — author-only, mirroring note update/delete.
       const { authorUserId, role } = await this.resolveNoteAccess(entityId, user, { write: true });
       if (authorUserId !== user.id) throw new ForbiddenException('Only the author may restore this note');
-      return this.revisions.restore(type, entityId, revisionId, user, role);
+      return this.revisions.restore(type, entityId, revisionId, user, role, opts);
     }
     const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId);
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    return this.revisions.restore(type, entityId, revisionId, user, role);
+    return this.revisions.restore(type, entityId, revisionId, user, role, opts);
   }
 }

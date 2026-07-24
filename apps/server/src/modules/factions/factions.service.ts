@@ -6,7 +6,7 @@ import type { Faction, FactionStanding, FactionWithMembers, Role } from '@campfi
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { factions, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -95,7 +95,8 @@ export class FactionsService {
         body: input.body ?? '',
         goals: input.goals ?? '',
         dmSecret: input.dmSecret ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         reputation: input.reputation ?? 0,
         standing: input.standing ?? 'neutral',
         createdAt: ts,
@@ -110,6 +111,17 @@ export class FactionsService {
       entityId: row.id,
       campaignId,
     });
+    // Initial prose tip so the first overwrite keeps real authorship (#813).
+    if (row.body !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'faction',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.body,
+        user,
+      });
+    }
     return redactSecret(toDomain(row), role);
   }
 
@@ -123,13 +135,14 @@ export class FactionsService {
     const existing = await this.getRowOrThrow(id);
     // Optimistic concurrency (#157): 409 on a stale expectedUpdatedAt before any write.
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
-    // Snapshot the PRIOR body into revision history when it changes (#157/#221).
+    // Commit an immutable prose version when the body changes (#157/#221/#813).
     if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'faction',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.body,
+        nextProse: input.body,
         user,
       });
     }

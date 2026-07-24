@@ -1,46 +1,32 @@
 /**
  * AI-DM narration stream over SSE (GET /campaigns/:id/ai-dm/stream) — the shared
- * client foundation for the AI-DM web UI (#338; the Table page #339, stuck-ladder
- * #340, co-DM #341, scribe #342, onboarding #343, live-state relay #344 build on it).
+ * client foundation for the AI-DM web UI (#338).
  *
- * Modelled line-for-line on {@link ./useCampaignEvents}: fetch + ReadableStream rather
- * than native EventSource, so the request carries the exact same auth surface as
- * lib/api.ts — the session cookie (credentials: include) plus the dev-role override
- * headers, which EventSource cannot send. Reconnects with capped exponential backoff;
- * after a heal, `onReconnect` fires so the page can refetch GET /ai-dm/session to catch
- * up on state it missed while offline. A 401/403 stops the loop entirely (no access —
- * retrying won't help), which is also how the server enforces the role matrix: the
- * client simply stops when told no.
- *
- * The transcript is NOT assembled here — this hook only decodes and validates the typed
- * event union and hands each event to `onEvent`. See features/ai-dm/transcript.ts (the
- * reducer that turns these events into a running transcript) and features/ai-dm/
- * toolActivity.ts (the tool-event → query-invalidation map).
+ * Modelled on {@link useCampaignEvents}: fetch + ReadableStream rather than native
+ * EventSource. Reconnects with capped exponential backoff via
+ * {@link startSseReconnectLoop} (issue #800). Parser buffer-overrun recovery is
+ * separate (`onStreamRecovery`). A proven 401 signals session expiry (#885) and
+ * stops until reauth; a campaign/feature 403 stops without clearing identity.
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { API } from './api';
+import { getSessionResumeEpoch, subscribeSessionResume } from './sessionExpiry';
+import { sseBlockData, startSseReconnectLoop } from './sseReconnect';
 
-/**
- * One AI-DM stream event, mirroring the server union in
- * apps/server/src/modules/ai-driver/ai-driver-stream.service.ts (`AiDmStreamEvent`).
- * Kept as a hand-authored client mirror (like {@link ./useCampaignEvents}'s
- * `CampaignEvent`) so the web bundle needn't import server code; the parser below is
- * the single client-side authority on the shape, exercised by recorded fixtures.
- *
- *  - `narration.delta`   — a token-by-token chunk as the model streams (makes the DM "type").
- *  - `narration.message` — the fully-aggregated narration for one step (repairs missed deltas).
- *  - `tool`              — id-only signal the AI invoked a Campfire tool; refetch via REST.
- *  - `turn.start`/`turn.end` — bracket a turn with its stop reason + budget snapshot.
- *  - `stuck`/`recovered`/`state`/`vote`/`takeover` — stuck-ladder + session-state signals (#314).
- *
- * Every event carries `campaignId` and an ISO `at`. `{"type":"ping"}` keepalives are not
- * part of this union — they are dropped by the parser.
- */
 export type AiDmStreamEvent =
   | { type: 'turn.start'; campaignId: number; at: string }
   | { type: 'narration.delta'; campaignId: number; text: string; at: string }
   | { type: 'narration.message'; campaignId: number; text: string; at: string }
-  | { type: 'tool'; campaignId: number; name: string; isError: boolean; proposed: boolean; at: string }
+  | {
+      type: 'tool';
+      campaignId: number;
+      name: string;
+      isError: boolean;
+      proposed: boolean;
+      /** Encounter mutated by this tool, when the server could derive it safely (#825). */
+      encounterId?: number;
+      at: string;
+    }
   | {
       type: 'turn.end';
       campaignId: number;
@@ -61,12 +47,16 @@ export type AiDmStreamEventType = AiDmStreamEvent['type'];
 
 export interface AiDmStreamHandlers {
   onEvent: (event: AiDmStreamEvent) => void;
-  /** Fires after the stream reconnects following a drop — refetch session state to catch up. */
+  /** Fires after the stream reconnects following a transport drop — refetch session state. */
   onReconnect?: () => void;
+  /**
+   * Fires when the SSE parser discards mid-stream bytes while the connection
+   * stays up. Distinct from {@link onReconnect}; wire the same catch-up refetch
+   * when transcript/session state may have skipped events.
+   */
+  onStreamRecovery?: () => void;
 }
 
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 15_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -94,16 +84,24 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
     case 'narration.message':
       if (typeof v.text !== 'string') return null;
       return { type, campaignId: v.campaignId as number, text: v.text, at: v.at as string };
-    case 'tool':
+    case 'tool': {
       if (typeof v.name !== 'string' || typeof v.isError !== 'boolean' || typeof v.proposed !== 'boolean') return null;
+      // Optional encounterId (#825): accept a positive int, ignore malformed values so an
+      // older/newer server never breaks the stream. Never accept names — identity is id-only.
+      const encounterId =
+        typeof v.encounterId === 'number' && Number.isInteger(v.encounterId) && v.encounterId > 0
+          ? v.encounterId
+          : undefined;
       return {
         type,
         campaignId: v.campaignId as number,
         name: v.name,
         isError: v.isError,
         proposed: v.proposed,
+        ...(encounterId !== undefined ? { encounterId } : {}),
         at: v.at as string,
       };
+    }
     case 'turn.end':
       if (
         typeof v.stopReason !== 'string' ||
@@ -170,20 +168,20 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
   }
 }
 
-/** Extracts the concatenated `data:` payload of one SSE event block. */
-export function sseBlockData(block: string): string {
-  return block
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice('data:'.length).trimStart())
-    .join('\n');
-}
-
 /**
  * Subscribe to a campaign's AI-DM narration stream for the lifetime of the mount (or until
  * `campaignId`/`enabled` changes). Handlers are read from a ref so a re-render never tears
  * down and reopens the connection. Pass `enabled: false` to hold the connection closed
  * (e.g. the seat mode is `off`/`co_dm` and no one should be watching a player stream).
+ */
+
+/** Re-export shared SSE block parser (stable import path for existing callers). */
+export { sseBlockData };
+
+/**
+ * Subscribe to a campaign's AI-DM narration stream for the lifetime of the mount (or until
+ * `campaignId`/`enabled`/resume epoch changes). Pass `enabled: false` to hold the
+ * connection closed.
  */
 export function useAiDmStream(
   campaignId: number | undefined,
@@ -193,77 +191,25 @@ export function useAiDmStream(
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const enabled = options?.enabled ?? true;
+  const resumeEpoch = useSyncExternalStore(subscribeSessionResume, getSessionResumeEpoch, () => 0);
 
   useEffect(() => {
     if (!enabled || campaignId === undefined || !Number.isFinite(campaignId)) return;
 
-    const controller = new AbortController();
-    let disposed = false;
-
-    const sleep = (ms: number) =>
-      new Promise<void>((resolve) => {
-        const handle = setTimeout(resolve, ms);
-        controller.signal.addEventListener('abort', () => {
-          clearTimeout(handle);
-          resolve();
-        });
-      });
-
-    (async () => {
-      let attempt = 0;
-      while (!disposed) {
+    const loop = startSseReconnectLoop({
+      url: `${API}/campaigns/${campaignId}/ai-dm/stream`,
+      onData: (data) => {
         try {
-          const headers: Record<string, string> = { accept: 'text/event-stream' };
-          const devRole = localStorage.getItem('cf.devRole');
-          const devUser = localStorage.getItem('cf.devUser');
-          if (devRole) headers['x-dev-role'] = devRole;
-          if (devUser) headers['x-dev-user'] = devUser;
-
-          const res = await fetch(`${API}/campaigns/${campaignId}/ai-dm/stream`, {
-            credentials: 'include',
-            headers,
-            signal: controller.signal,
-          });
-          // 401/403 = no access (feature off, not a member, seat disabled) — retrying won't heal it.
-          if (res.status === 401 || res.status === 403) return;
-          if (!res.ok || !res.body) throw new Error(`AI-DM SSE connect failed (${res.status})`);
-
-          if (attempt > 0) handlersRef.current.onReconnect?.();
-          attempt = 0;
-
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = '';
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let sep: number;
-            while ((sep = buffer.indexOf('\n\n')) !== -1) {
-              const data = sseBlockData(buffer.slice(0, sep));
-              buffer = buffer.slice(sep + 2);
-              if (!data) continue;
-              try {
-                const parsed = parseAiDmStreamEvent(JSON.parse(data));
-                if (parsed && !disposed) handlersRef.current.onEvent(parsed);
-              } catch {
-                /* malformed frame — skip */
-              }
-            }
-          }
-          // Server closed the stream cleanly (e.g. restart) — fall through to reconnect.
-          throw new Error('AI-DM SSE stream ended');
+          const parsed = parseAiDmStreamEvent(JSON.parse(data));
+          if (parsed) handlersRef.current.onEvent(parsed);
         } catch {
-          if (disposed || controller.signal.aborted) return;
-          await sleep(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS));
-          attempt += 1;
+          /* malformed frame — skip */
         }
-      }
-    })();
+      },
+      onReconnect: () => handlersRef.current.onReconnect?.(),
+      onStreamRecovery: () => handlersRef.current.onStreamRecovery?.(),
+    });
 
-    return () => {
-      disposed = true;
-      controller.abort();
-    };
-  }, [campaignId, enabled]);
+    return () => loop.dispose();
+  }, [campaignId, enabled, resumeEpoch]);
 }

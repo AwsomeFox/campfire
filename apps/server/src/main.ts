@@ -8,7 +8,11 @@ import helmet from 'helmet';
 import express from 'express';
 import { AppModule } from './app.module';
 import { SESSION_COOKIE_NAME } from './modules/auth/auth.constants';
+import { APP_VERSION } from './common/build-metadata';
 import { resolveTrustProxy, resolveAllowInsecureHttp, isDevAuthActive } from './common/security-config';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { resolveRequestIdFromHeader } from './common/api-error.envelope';
+import { registerErrorSchemas } from './common/openapi-error-schemas';
 
 patchNestJsSwagger();
 
@@ -98,8 +102,20 @@ export function configureApp(app: INestApplication): void {
   // resource-exhaustion vector on any authenticated (or unauthenticated, e.g. /auth/login)
   // write endpoint. Multipart uploads (attachments) go through multer's own FileInterceptor
   // size limit, not these parsers, so this cap doesn't affect them.
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  app.use(express.json({ limit: '16mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '16mb' }));
+  // Issue #682 — stamp a per-request id on EVERY response (not just errors).
+  // Accepts an inbound `X-Request-Id` header (validated, length-capped, charset-
+  // restricted to defeat log-injection) so a downstream caller's correlation id
+  // propagates end-to-end; mints a fresh UUIDv4 otherwise. The AllExceptionsFilter
+  // reuses the same id on the error envelope's `body.requestId`, so a user-reported
+  // id pivots to both the success-path access log and the error-path stack trace.
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
+    (req as { requestId?: string }).requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    next();
+  });
 
   const corsOrigin = resolveCorsOrigin();
   if (corsOrigin) {
@@ -129,6 +145,14 @@ export function configureApp(app: INestApplication): void {
       'api/openapi.json',
     ],
   });
+
+  // Issue #682 — global REST exception filter: shapes every escaped exception
+  // into the published Problem Details-style envelope and stamps an
+  // `X-Request-Id` on every response. Registered in configureApp() (not the
+  // AppModule APP_FILTER token) so test/test-app.ts's app, which DOESN'T run
+  // through this function, can opt in explicitly — keeping the production and
+  // test wiring identical and discoverable from a single source of truth.
+  app.useGlobalFilters(new AllExceptionsFilter());
 }
 
 /**
@@ -158,7 +182,7 @@ export function setupApiDocs(app: INestApplication): void {
             'x-dev-user (default dev-user) headers when no session cookie is present — used by e2e tests only.'
           : ''),
     )
-    .setVersion('0.1.0')
+    .setVersion(APP_VERSION)
     .addTag('auth')
     .addTag('users')
     .addTag('settings')
@@ -191,6 +215,11 @@ export function setupApiDocs(app: INestApplication): void {
   const builtConfig = config.build();
 
   const document = SwaggerModule.createDocument(app, builtConfig);
+  // Issue #682 — publish the machine-readable error response schemas (the
+  // same envelope the global AllExceptionsFilter emits) as named components,
+  // and attach a default 4xx/5xx ErrorResponse to every operation so generated
+  // clients can resolve a typed error type per route instead of `unknown`.
+  registerErrorSchemas(document);
   SwaggerModule.setup('api/docs', app, document, {
     jsonDocumentUrl: 'api/openapi.json',
   });

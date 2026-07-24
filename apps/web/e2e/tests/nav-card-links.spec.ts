@@ -142,7 +142,9 @@ test.describe('navigation cards are native anchors', () => {
     await page.route('**/api/v1/rules/packs', (route) =>
       route.fulfill({ json: [{ id: 1, slug: 'e2e-navcard', name: 'NavCard pack', version: '1' }] }),
     );
-    await page.route('**/api/v1/rules/search**', (route) => route.fulfill({ json: [entry] }));
+    await page.route('**/api/v1/rules/search**', (route) =>
+      route.fulfill({ json: { items: [entry], total: 1, hasMore: false, limit: 50 } }),
+    );
 
     await page.goto(`/c/${campaignId}/compendium`);
     const href = `/c/${campaignId}/compendium/${entryId}`;

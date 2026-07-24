@@ -1,22 +1,18 @@
-import type { MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
+import { initModDescThenSortOrderAsc, sortOrderAscTiebreak } from './initiative-tiebreak';
 
-// ---------- OSR (Old-School Renaissance) rule-system adapter (issues #70, #300) ----------
-// A single shared adapter for the B/X-descended retroclone family: Basic Fantasy RPG
-// (CC-BY-SA 4.0), OSRIC, Swords & Wizardry, Labyrinth Lord, and Old-School Essentials
-// (all OGL). These systems share the same core math, so ONE adapter unlocks the whole
-// family rather than one per clone. The two things that actually vary between clones —
-// whether armor class counts DOWN (classic THAC0) or UP (ascending AC) — are handled by
-// a single normalized to-hit path so a campaign can use either convention and get
-// identical hit/miss results (see `osrAttackHits`).
+// ---------- OSR (Old-School Renaissance) native adapters (issues #70, #300, #765) ----------
+// Each advertised retroclone variant owns its own mechanics profile — ability table,
+// save vocabulary, AC convention/anchor, initiative mode, and tiebreak rules — instead
+// of every slug sharing one Basic Fantasy / B/X profile.
 
-/** Family id for the shared OSR adapter (not a pack slug). */
+/** Family id kept for backward-compat tests; generic 'osr' slug aliases basic-fantasy. */
 export const OSR_ADAPTER_ID = 'osr';
 
 /**
- * Rule-pack slugs that resolve to the shared OSR adapter. The importer stamps a pack
- * with one of these slugs per source system (Basic Fantasy → 'basic-fantasy', etc.), and
- * a campaign whose `ruleSystem` is any of them gets OSR combat behavior. 'osr' is the
- * generic catch-all for a mixed/home OSR pack.
+ * Rule-pack slugs that resolve to a native OSR adapter. The importer stamps a pack with
+ * one of these slugs per source system; a campaign whose `ruleSystem` is any of them gets
+ * that variant's combat behavior. 'osr' is the generic catch-all and aliases basic-fantasy.
  */
 export const OSR_RULE_SYSTEM_SLUGS = [
   'osr',
@@ -28,15 +24,41 @@ export const OSR_RULE_SYSTEM_SLUGS = [
   'ose',
 ] as const;
 
+export type OsrRuleSystemSlug = (typeof OSR_RULE_SYSTEM_SLUGS)[number];
+
+/** How initiative is rolled for an OSR variant (issue #765). */
+export type OsrInitiativeMode = 'individual' | 'group';
+
+/** Which AC convention a variant uses by default (issue #765). */
+export type AcMode = 'descending' | 'ascending';
+
 /**
- * The B/X ability-score adjustment table shared by Basic Fantasy and the OGL retroclones.
- * Unlike 5e's linear floor((score-10)/2), OSR uses a fixed banded table that tops out at
- * ±3 (or ±2 in some clones — Basic Fantasy uses ±3, which is the widest and a superset).
- *   3 → -3 · 4-5 → -2 · 6-8 → -1 · 9-12 → 0 · 13-15 → +1 · 16-17 → +2 · 18 → +3
- * Scores below 3 clamp to -3 and above 18 clamp to +3 (exceptional scores are rare in
- * OSR and always sit at the extremes of the band).
+ * Complete native mechanics profile for one OSR variant (issue #765). Exposed for UI copy,
+ * migration preview, and fixture-vector tests so every call site can show the exact variant
+ * and active options wherever math is derived.
  */
-export function osrAbilityModifier(score: number): number {
+export interface OsrMechanicsProfile {
+  readonly slug: string;
+  readonly label: string;
+  /** One-line summary for install pickers / campaign settings. */
+  readonly mechanicsSummary: string;
+  readonly abilityTable: 'bx-banded' | 'sw-banded' | 'adnd-linear';
+  readonly abilityCap: number;
+  readonly saves: readonly string[];
+  readonly acMode: AcMode;
+  /** Unarmored AC in this variant's native convention. */
+  readonly acAnchor: number;
+  readonly initiativeMode: OsrInitiativeMode;
+  readonly initiativeDie: number;
+  /** Whether individual initiative adds the DEX modifier to the d6 roll. */
+  readonly initiativeUsesDexMod: boolean;
+  readonly tiebreak: 'dex-then-order' | 'order-only';
+}
+
+// ---------- Ability modifier tables ----------
+
+/** B/X banded table (±3): Basic Fantasy, Labyrinth Lord, OSE. */
+export function osrBxAbilityModifier(score: number): number {
   if (!Number.isFinite(score)) return 0;
   if (score <= 3) return -3;
   if (score <= 5) return -2;
@@ -47,26 +69,46 @@ export function osrAbilityModifier(score: number): number {
   return 3;
 }
 
-/**
- * The five OSR saving-throw categories (Basic Fantasy / B/X). Ascending-AC clones keep
- * the same five categories, so this vocabulary is shared. A save succeeds on a d20 roll
- * that MEETS OR BEATS the character's target number for the category (see `savingThrowSucceeds`).
- */
-export const OSR_SAVES = [
+/** Swords & Wizardry banded table (±2 cap). */
+export function osrSwAbilityModifier(score: number): number {
+  if (!Number.isFinite(score)) return 0;
+  if (score <= 4) return -2;
+  if (score <= 8) return -1;
+  if (score <= 12) return 0;
+  if (score <= 15) return 1;
+  return 2;
+}
+
+/** OSRIC / AD&D linear table: floor((score - 10) / 2). */
+export function osrAdndAbilityModifier(score: number): number {
+  if (!Number.isFinite(score)) return 0;
+  return Math.floor((score - 10) / 2);
+}
+
+/** @deprecated Use {@link osrBxAbilityModifier} — kept for existing imports. */
+export const osrAbilityModifier = osrBxAbilityModifier;
+
+// ---------- Save categories ----------
+
+/** Five B/X save categories (Basic Fantasy, Labyrinth Lord, OSRIC). */
+export const OSR_BX_SAVES = [
   'Death Ray or Poison',
   'Magic Wands',
   'Paralysis or Petrify',
   'Dragon Breath',
   'Spells',
 ] as const;
-export type OsrSaveCategory = (typeof OSR_SAVES)[number];
+
+/** Three OSE B/X save categories (DEX / WIS / CON). */
+export const OSR_OSE_SAVES = ['DEX Save', 'WIS Save', 'CON Save'] as const;
+
+/** @deprecated Use {@link OSR_BX_SAVES} — kept for existing imports. */
+export const OSR_SAVES = OSR_BX_SAVES;
+export type OsrSaveCategory = (typeof OSR_BX_SAVES)[number];
 
 /**
  * Whether an OSR saving throw succeeds: roll d20, add any situational modifier, and
- * meet-or-beat the target number for the category. Lower target numbers are better (they
- * improve with level), the opposite of 5e's DC model — this helper hides that so callers
- * don't re-implement the comparison. A natural 20 always succeeds and a natural 1 always
- * fails, matching common OSR practice.
+ * meet-or-beat the target number for the category.
  */
 export function savingThrowSucceeds(roll: number, target: number, modifier = 0): boolean {
   if (roll <= 1) return false;
@@ -75,15 +117,6 @@ export function savingThrowSucceeds(roll: number, target: number, modifier = 0):
 }
 
 // ---------- AC / to-hit: descending (THAC0) AND ascending, one normalized path ----------
-// Descending and ascending AC are two encodings of the same thing. Anchored so the
-// unarmored value matches both traditions: descending AC 9 ⇄ ascending AC 10, and the
-// THAC0 reference descending AC 0 ⇄ ascending AC 19. Under this anchor `AAC = 19 - DAC`
-// is its own inverse, and a THAC0 converts to an ascending attack bonus of `19 - THAC0`
-// such that BOTH conventions yield the identical to-hit threshold (proven in the tests):
-//   descending:  hit ⇔ roll ≥ THAC0 - DAC
-//   ascending:   hit ⇔ roll + (19 - THAC0) ≥ AAC = 19 - DAC   ⇔   roll ≥ THAC0 - DAC
-
-export type AcMode = 'descending' | 'ascending';
 
 /** Convert a descending armor class to its ascending equivalent (self-inverse: 19 - x). */
 export function descendingToAscendingAc(descendingAc: number): number {
@@ -103,22 +136,13 @@ export function attackBonusToThac0(attackBonus: number): number {
 }
 
 export interface OsrAttack {
-  /** The raw d20 attack roll (before any bonus). */
   roll: number;
-  /** The attacker's THAC0. If you only have an ascending attack bonus, pass `attackBonusToThac0(bonus)`. */
   thac0: number;
-  /** The defender's armor class, expressed in `mode`'s convention. */
   targetAc: number;
-  /** Which AC convention `targetAc` is in — a per-campaign toggle covering both clone styles. */
   mode: AcMode;
 }
 
-/**
- * Whether an OSR attack hits, working identically whether the campaign tracks armor class
- * as descending (THAC0) or ascending. The target AC is normalized to descending internally
- * so the single classic comparison `roll ≥ THAC0 - AC` decides both — no divergent code
- * paths, no rounding drift. Natural 1 always misses and natural 20 always hits.
- */
+/** Whether an OSR attack hits, working identically in both AC conventions. */
 export function osrAttackHits(attack: OsrAttack): boolean {
   if (attack.roll <= 1) return false;
   if (attack.roll >= 20) return true;
@@ -126,28 +150,8 @@ export function osrAttackHits(attack: OsrAttack): boolean {
   return attack.roll >= attack.thac0 - descendingAc;
 }
 
-/** Read the governing (DEX) score from either a canonical (`{ DEX }`) or raw (`{ dexterity }`) map. */
-function osrDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
-  if (!abilities) return null;
-  const raw = abilities.DEX ?? abilities.dexterity ?? abilities.dex;
-  return typeof raw === 'number' ? raw : null;
-}
+// ---------- Variant profiles (issue #765) ----------
 
-/** Prefer an explicit ascending AC; otherwise convert a descending AC; else undefined. */
-function preferredAscendingAc(d: Record<string, unknown>): number | undefined {
-  const asc = d.armorClassAscending ?? d.ascendingArmorClass ?? d.aac;
-  if (typeof asc === 'number') return asc;
-  const desc = d.armorClass ?? d.armor_class ?? d.ac;
-  if (typeof desc === 'number') return descendingToAscendingAc(desc);
-  return undefined;
-}
-
-/**
- * The OSR condition vocabulary offered in the combat UI. Deliberately leaner than 5e —
- * old-school play leans on rulings over a large status list — but covers the effects the
- * core spells and monster abilities actually impose (Sleep → Sleeping, Hold Person →
- * Held, gorgon/medusa → Petrified, ghoul → Paralyzed, etc.).
- */
 export const OSR_CONDITIONS = [
   'Blinded',
   'Charmed',
@@ -164,45 +168,277 @@ export const OSR_CONDITIONS = [
   'Unconscious',
 ] as const;
 
-export const OsrAdapter: RuleSystemAdapter = {
-  id: OSR_ADAPTER_ID,
-  label: 'OSR (Basic Fantasy / B/X retroclones)',
-  abilityModifier(score: number): number {
-    return osrAbilityModifier(score);
+const OSR_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Hit Dice', short: 'HD' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** @deprecated Use per-adapter presentation — kept for existing imports. */
+export { OSR_STATBLOCK_PRESENTATION };
+
+export const OSR_VARIANT_PROFILES: Record<string, OsrMechanicsProfile> = {
+  'basic-fantasy': {
+    slug: 'basic-fantasy',
+    label: 'Basic Fantasy RPG',
+    mechanicsSummary:
+      'Initiative d6 + DEX (individual) · B/X banded mods (±3) · 5 saves · descending AC (unarmored 9) · DEX tiebreak.',
+    abilityTable: 'bx-banded',
+    abilityCap: 3,
+    saves: OSR_BX_SAVES,
+    acMode: 'descending',
+    acAnchor: 9,
+    initiativeMode: 'individual',
+    initiativeDie: 6,
+    initiativeUsesDexMod: true,
+    tiebreak: 'dex-then-order',
   },
-  // OSR initiative is individual d6 + DEX modifier (Basic Fantasy's optional-but-common
-  // individual rule; group-initiative clones still roll a d6, just per side).
-  initiativeDie: 6,
-  // The OSR family has no single system-wide level cap: caps are per-class and per-clone
-  // (a B/X magic-user tops out near 26, a fighter near 9-14, Basic Fantasy differs again, and
-  // high-level "name level" play is open-ended). This shared adapter therefore reports Infinity
-  // rather than picking one clone's number, so a retroclone campaign isn't artificially held to
-  // the 5e ceiling (issue #535). The per-class progression table remains the real gate.
-  maxLevel: Infinity,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
-    const dex = osrDexScore(abilities);
-    return dex === null ? 0 : osrAbilityModifier(dex);
+  osric: {
+    slug: 'osric',
+    label: 'OSRIC',
+    mechanicsSummary:
+      'Initiative d6 (individual) · AD&D linear mods · 5 saves · descending AC (unarmored 10) · DEX tiebreak.',
+    abilityTable: 'adnd-linear',
+    abilityCap: 5,
+    saves: OSR_BX_SAVES,
+    acMode: 'descending',
+    acAnchor: 10,
+    initiativeMode: 'individual',
+    initiativeDie: 6,
+    initiativeUsesDexMod: false,
+    tiebreak: 'dex-then-order',
   },
-  conditions: OSR_CONDITIONS,
-  mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
-    const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
-    return {
-      size: d.size,
-      creatureType: d.type ?? d.creatureType ?? d.category,
-      // OSR has no CR — hit dice is the difficulty proxy, so it fills the same slot.
-      challengeRating: d.hitDice ?? d.hit_dice ?? d.hd ?? d.challengeRating,
-      // Normalize to ascending AC so downstream numeric comparisons behave like the 5e UI,
-      // regardless of which convention the source statblock used.
-      armorClass: preferredAscendingAc(d),
-      hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
-      speed: d.movement ?? d.speed,
-      abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
-      specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.abilities,
-      actions: d.actions ?? d.attacks,
-    };
+  'swords-wizardry': {
+    slug: 'swords-wizardry',
+    label: 'Swords & Wizardry',
+    mechanicsSummary:
+      'Initiative d6 per side (group) · S&W banded mods (±2) · 5 saves · ascending AC (unarmored 10) · order tiebreak.',
+    abilityTable: 'sw-banded',
+    abilityCap: 2,
+    saves: OSR_BX_SAVES,
+    acMode: 'ascending',
+    acAnchor: 10,
+    initiativeMode: 'group',
+    initiativeDie: 6,
+    initiativeUsesDexMod: false,
+    tiebreak: 'order-only',
   },
-  monsterHitPoints(d: Record<string, unknown>): number | null {
-    const hp = d.hitPoints ?? d.hit_points ?? d.hp;
-    return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+  'labyrinth-lord': {
+    slug: 'labyrinth-lord',
+    label: 'Labyrinth Lord',
+    mechanicsSummary:
+      'Initiative d6 per side (group) · B/X banded mods (±3) · 5 saves · descending AC (unarmored 9) · order tiebreak.',
+    abilityTable: 'bx-banded',
+    abilityCap: 3,
+    saves: OSR_BX_SAVES,
+    acMode: 'descending',
+    acAnchor: 9,
+    initiativeMode: 'group',
+    initiativeDie: 6,
+    initiativeUsesDexMod: false,
+    tiebreak: 'order-only',
+  },
+  'old-school-essentials': {
+    slug: 'old-school-essentials',
+    label: 'Old-School Essentials',
+    mechanicsSummary:
+      'Initiative d6 per side (group) · B/X banded mods (±3) · 3 saves (DEX/WIS/CON) · ascending AC (unarmored 10) · order tiebreak.',
+    abilityTable: 'bx-banded',
+    abilityCap: 3,
+    saves: OSR_OSE_SAVES,
+    acMode: 'ascending',
+    acAnchor: 10,
+    initiativeMode: 'group',
+    initiativeDie: 6,
+    initiativeUsesDexMod: false,
+    tiebreak: 'order-only',
+  },
+  ose: {
+    slug: 'ose',
+    label: 'Old-School Essentials',
+    mechanicsSummary:
+      'Initiative d6 per side (group) · B/X banded mods (±3) · 3 saves (DEX/WIS/CON) · ascending AC (unarmored 10) · order tiebreak.',
+    abilityTable: 'bx-banded',
+    abilityCap: 3,
+    saves: OSR_OSE_SAVES,
+    acMode: 'ascending',
+    acAnchor: 10,
+    initiativeMode: 'group',
+    initiativeDie: 6,
+    initiativeUsesDexMod: false,
+    tiebreak: 'order-only',
+  },
+  osr: {
+    slug: 'osr',
+    label: 'OSR (generic)',
+    mechanicsSummary:
+      'Initiative d6 + DEX (individual) · B/X banded mods (±3) · 5 saves · descending AC (unarmored 9) · DEX tiebreak.',
+    abilityTable: 'bx-banded',
+    abilityCap: 3,
+    saves: OSR_BX_SAVES,
+    acMode: 'descending',
+    acAnchor: 9,
+    initiativeMode: 'individual',
+    initiativeDie: 6,
+    initiativeUsesDexMod: true,
+    tiebreak: 'dex-then-order',
   },
 };
+
+/** Resolve the native mechanics profile for a rule-pack slug (issue #765). */
+export function osrMechanicsProfile(slug: string | null | undefined): OsrMechanicsProfile {
+  if (slug && OSR_VARIANT_PROFILES[slug]) return OSR_VARIANT_PROFILES[slug];
+  return OSR_VARIANT_PROFILES['basic-fantasy'];
+}
+
+/** Whether a slug is a known OSR variant. */
+export function isOsrSlug(slug: string | null | undefined): slug is OsrRuleSystemSlug {
+  return !!slug && (OSR_RULE_SYSTEM_SLUGS as readonly string[]).includes(slug);
+}
+
+// ---------- Migration preview (issue #765) ----------
+
+export interface OsrMigrationPreview {
+  fromSlug: string;
+  toSlug: string;
+  from: OsrMechanicsProfile;
+  to: OsrMechanicsProfile;
+  /** Human-readable list of mechanics that would change. */
+  changes: string[];
+}
+
+/** Preview how combat math would change when migrating a campaign between OSR variants. */
+export function previewOsrMigration(fromSlug: string, toSlug: string): OsrMigrationPreview {
+  const from = osrMechanicsProfile(fromSlug);
+  const to = osrMechanicsProfile(toSlug);
+  const changes: string[] = [];
+  if (from.abilityTable !== to.abilityTable) {
+    changes.push(`Ability modifiers: ${from.abilityTable} (±${from.abilityCap}) → ${to.abilityTable} (±${to.abilityCap})`);
+  }
+  if (from.saves.join() !== to.saves.join()) {
+    changes.push(`Save categories: ${from.saves.length} (${from.saves.join(', ')}) → ${to.saves.length} (${to.saves.join(', ')})`);
+  }
+  if (from.acMode !== to.acMode || from.acAnchor !== to.acAnchor) {
+    changes.push(`AC convention: ${from.acMode} (unarmored ${from.acAnchor}) → ${to.acMode} (unarmored ${to.acAnchor})`);
+  }
+  if (from.initiativeMode !== to.initiativeMode || from.initiativeUsesDexMod !== to.initiativeUsesDexMod) {
+    const fromInit = from.initiativeMode === 'group' ? 'group d6 per side' : `individual d6${from.initiativeUsesDexMod ? ' + DEX' : ''}`;
+    const toInit = to.initiativeMode === 'group' ? 'group d6 per side' : `individual d6${to.initiativeUsesDexMod ? ' + DEX' : ''}`;
+    changes.push(`Initiative: ${fromInit} → ${toInit}`);
+  }
+  if (from.tiebreak !== to.tiebreak) {
+    changes.push(`Initiative ties: ${from.tiebreak === 'dex-then-order' ? 'higher DEX first' : 'insertion order'} → ${to.tiebreak === 'dex-then-order' ? 'higher DEX first' : 'insertion order'}`);
+  }
+  if (changes.length === 0) changes.push('No mechanics changes — profiles are identical.');
+  return { fromSlug: from.slug, toSlug: to.slug, from, to, changes };
+}
+
+// ---------- Adapter factory ----------
+
+function abilityFnFor(profile: OsrMechanicsProfile): (score: number) => number {
+  switch (profile.abilityTable) {
+    case 'sw-banded':
+      return osrSwAbilityModifier;
+    case 'adnd-linear':
+      return osrAdndAbilityModifier;
+    default:
+      return osrBxAbilityModifier;
+  }
+}
+
+function osrDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
+  if (!abilities) return null;
+  const raw = abilities.DEX ?? abilities.dexterity ?? abilities.dex;
+  return typeof raw === 'number' ? raw : null;
+}
+
+function preferredAc(d: Record<string, unknown>, profile: OsrMechanicsProfile): number | undefined {
+  const asc = d.armorClassAscending ?? d.ascendingArmorClass ?? d.aac;
+  const desc = d.armorClass ?? d.armor_class ?? d.ac;
+  if (profile.acMode === 'ascending') {
+    if (typeof asc === 'number') return asc;
+    if (typeof desc === 'number') return descendingToAscendingAc(desc);
+    return undefined;
+  }
+  // Descending-native: store descending AC in the armorClass slot for display consistency.
+  if (typeof desc === 'number') return desc;
+  if (typeof asc === 'number') return ascendingToDescendingAc(asc);
+  return undefined;
+}
+
+/** Build a native RuleSystemAdapter for one OSR variant profile (issue #765). */
+export function createOsrVariantAdapter(profile: OsrMechanicsProfile): RuleSystemAdapter {
+  const abilityFn = abilityFnFor(profile);
+  const tiebreak = profile.tiebreak === 'dex-then-order' ? initModDescThenSortOrderAsc : sortOrderAscTiebreak;
+  return {
+    id: profile.slug,
+    label: profile.label,
+    presentation: OSR_STATBLOCK_PRESENTATION,
+    abilityModifier: abilityFn,
+    initiativeDie: profile.initiativeDie,
+    maxLevel: Infinity,
+    initiativeModel: {
+      mode: profile.initiativeMode,
+      usesDexModifier: profile.initiativeUsesDexMod,
+    },
+    initiativeModifier(
+      abilities: Record<string, unknown> | null | undefined,
+      representation: AbilityRepresentation = 'score',
+    ): number {
+      if (!profile.initiativeUsesDexMod) return 0;
+      const dex = osrDexScore(abilities);
+      if (dex === null) return 0;
+      return representation === 'score' ? abilityFn(dex) : Math.trunc(dex);
+    },
+    initiativeTiebreak: tiebreak,
+    conditions: OSR_CONDITIONS,
+    mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
+      const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+      return {
+        size: d.size,
+        creatureType: d.type ?? d.creatureType ?? d.category,
+        challengeRating: d.hitDice ?? d.hit_dice ?? d.hd ?? d.challengeRating,
+        armorClass: preferredAc(d, profile),
+        hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
+        speed: d.movement ?? d.speed,
+        abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+        abilityRepresentation: 'score',
+        specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.abilities,
+        actions: d.actions ?? d.attacks,
+      };
+    },
+    monsterHitPoints(d: Record<string, unknown>): number | null {
+      const hp = d.hitPoints ?? d.hit_points ?? d.hp;
+      return typeof hp === 'number' && hp > 0 ? Math.round(hp) : null;
+    },
+  };
+}
+
+// ---------- Per-variant adapter exports ----------
+
+export const BasicFantasyAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['basic-fantasy']);
+export const OsricAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES.osric);
+export const SwordsWizardryAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['swords-wizardry']);
+export const LabyrinthLordAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['labyrinth-lord']);
+export const OldSchoolEssentialsAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES['old-school-essentials']);
+export const OseAdapter = createOsrVariantAdapter(OSR_VARIANT_PROFILES.ose);
+
+/** Map from rule-pack slug → native adapter (issue #765). */
+export const OSR_VARIANT_ADAPTERS: Record<string, RuleSystemAdapter> = {
+  'basic-fantasy': BasicFantasyAdapter,
+  osric: OsricAdapter,
+  'swords-wizardry': SwordsWizardryAdapter,
+  'labyrinth-lord': LabyrinthLordAdapter,
+  'old-school-essentials': OldSchoolEssentialsAdapter,
+  ose: OseAdapter,
+  osr: createOsrVariantAdapter(OSR_VARIANT_PROFILES.osr),
+};
+
+/**
+ * @deprecated Use per-variant adapters via {@link OSR_VARIANT_ADAPTERS} or
+ * {@link ruleSystemAdapter}(slug). Kept as an alias for BasicFantasyAdapter.
+ */
+export const OsrAdapter = BasicFantasyAdapter;

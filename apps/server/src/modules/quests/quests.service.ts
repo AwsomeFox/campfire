@@ -15,7 +15,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -354,7 +354,8 @@ export class QuestsService {
         giverNpcId: input.giverNpcId ?? null,
         reward: input.reward ?? '',
         dmSecret: input.dmSecret ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         sortOrder: input.sortOrder ?? 0,
         createdAt: ts,
         updatedAt: ts,
@@ -368,6 +369,17 @@ export class QuestsService {
       entityId: row.id,
       campaignId,
     });
+    // Initial prose tip so the first overwrite keeps real authorship (#813).
+    if (row.body !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'quest',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.body,
+        user,
+      });
+    }
     return redactSecret(toDomain(row), role);
   }
 
@@ -383,13 +395,14 @@ export class QuestsService {
     this.revisions.assertNotStale(existing, opts?.expectedUpdatedAt);
     await this.validateParentRef(input.parentId, existing.campaignId, id);
     await this.validateGiverNpcRef(input.giverNpcId, existing.campaignId);
-    // Snapshot the PRIOR body into revision history when it changes (#157).
+    // Commit an immutable prose version when the body changes (#157/#813).
     if (input.body !== undefined && input.body !== existing.body) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'quest',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.body,
+        nextProse: input.body,
         user,
       });
     }

@@ -17,6 +17,7 @@ import { ResetPasswordPage } from '../features/auth/ResetPasswordPage';
 import { JoinPage } from '../features/auth/JoinPage';
 import { HomePage } from '../features/home/HomePage';
 import { NotFoundPage } from '../features/home/NotFoundPage';
+import { PUBLIC_BASE } from '../lib/public-base';
 
 function lazyPage(loader: Parameters<typeof lazy>[0]) {
   const LazyComponent = lazy(loader);
@@ -39,7 +40,8 @@ function page(element: ReactNode) {
   return <RouteErrorBoundary>{element}</RouteErrorBoundary>;
 }
 
-export const router = createBrowserRouter([
+export const router = createBrowserRouter(
+  [
   {
     path: '/setup',
     element: page(<SetupPage />),
@@ -250,4 +252,11 @@ export const router = createBrowserRouter([
       },
     ],
   },
-]);
+],
+  // Reverse-proxy subpath support (issue #798): the router treats the configured
+  // PUBLIC_BASE as its basename so deep links/refreshes/`<Link to>`s all resolve
+  // under e.g. /campfire/... The proxy strips the prefix before forwarding, so
+  // the server is never aware of it. PUBLIC_BASE defaults to '/' (no basename),
+  // preserving the pre-#798 root deployment.
+  { basename: PUBLIC_BASE === '/' ? undefined : PUBLIC_BASE },
+);

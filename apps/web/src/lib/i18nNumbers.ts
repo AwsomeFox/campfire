@@ -194,7 +194,7 @@ function stripSeparatorsAndWhitespace(
 ): string {
   // First normalize any non-ASCII digits to ASCII so grouping/decimal logic
   // below operates on a uniform digit alphabet.
-  let s = normalizeDigits(raw);
+  const s = normalizeDigits(raw);
   // Strip ASCII whitespace anywhere (users paste "1 234" with regular spaces
   // in fr-FR, or accidentally include leading/trailing spaces from IME).
   // Also strip the locale's grouping characters wherever they appear — a

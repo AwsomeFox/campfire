@@ -12,13 +12,15 @@
  * and the plaintext is never retained in state after a save.
  */
 import { useEffect, useRef, useState } from 'react';
-import type {
-  AiProviderConfigType,
-  AiProviderConfigView,
-  AiProviderTestRequest,
-  AiProviderTestResult,
+import {
+  AI_EXTERNAL_PROVIDER_PRIVACY,
+  type AiProviderConfigType,
+  type AiProviderConfigView,
+  type AiProviderTestRequest,
+  type AiProviderTestResult,
 } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { AiProviderPrivacyNotice } from '../../components/AiProviderPrivacyNotice';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'gemini', 'mock'];
@@ -308,6 +310,14 @@ export function ProviderForm({
   return (
     <>
       <div className="flex flex-col gap-2" data-testid={`ai-provider-form-${scope}`}>
+        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
+          Review the{' '}
+          <a href={`#${AI_EXTERNAL_PROVIDER_PRIVACY.settingsAnchorId}`} className="text-muted" style={{ textDecoration: 'underline' }}>
+            AI privacy notice
+          </a>{' '}
+          below before saving — it lists what campaign context leaves your server when this provider is enabled.
+        </p>
+        <AiProviderPrivacyNotice />
         <div className="flex gap-2 items-center flex-wrap" aria-live="polite">
           <span className={`tag ${provider?.ready ? 'tag-accent' : 'tag-neutral'}`} style={{ fontSize: 10 }}>
             {provider?.ready ? 'Ready' : 'Not ready'}

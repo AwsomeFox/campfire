@@ -32,7 +32,7 @@ test('first admin reaches the campaign hub without reload or stale auth routes',
   await page.getByLabel('Username').fill(ADMIN.username);
   await page.getByLabel('Display name').fill(ADMIN.displayName);
   await page.getByLabel('Password', { exact: true }).fill(ADMIN.password);
-  await page.getByLabel('Confirm password').fill(ADMIN.password);
+  await page.getByLabel('Confirm password', { exact: true }).fill(ADMIN.password);
 
   const setupResponse = page.waitForResponse(
     (response) => response.url().endsWith('/api/v1/auth/setup') && response.request().method() === 'POST',
@@ -216,11 +216,18 @@ test('successful setup exits safely when the auth-status cache refresh fails', a
   await page.route('**/api/v1/campaigns', async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
   });
+  await page.route('**/api/v1/notifications**', async (route) => {
+    if (route.request().url().includes('unread-count')) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ count: 0 }) });
+    } else {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    }
+  });
 
   await page.goto('/setup');
   await page.getByLabel('Username').fill('fallback-admin');
   await page.getByLabel('Password', { exact: true }).fill('campfire-fallback-admin-1');
-  await page.getByLabel('Confirm password').fill('campfire-fallback-admin-1');
+  await page.getByLabel('Confirm password', { exact: true }).fill('campfire-fallback-admin-1');
   await page.getByRole('button', { name: 'Light the fire' }).click();
 
   await expect(page).toHaveURL(/\/$/);
@@ -265,7 +272,7 @@ test('a browser that loses a concurrent setup claim exits the stale first-run fo
   await page.goto('/setup');
   await page.getByLabel('Username').fill('setup-race-loser');
   await page.getByLabel('Password', { exact: true }).fill('campfire-race-loser-1');
-  await page.getByLabel('Confirm password').fill('campfire-race-loser-1');
+  await page.getByLabel('Confirm password', { exact: true }).fill('campfire-race-loser-1');
 
   const setupResponse = page.waitForResponse(
     (response) => response.url().endsWith('/api/v1/auth/setup') && response.request().method() === 'POST',

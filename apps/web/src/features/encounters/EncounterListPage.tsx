@@ -9,10 +9,29 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  ENCOUNTER_CREATE_PREFIX,
+  ENCOUNTER_FIELD,
+  ENCOUNTER_LOCATION_HELP,
+  ENCOUNTER_LOCATION_LABEL,
+  ENCOUNTER_QUEST_HELP,
+  ENCOUNTER_QUEST_LABEL,
+  ENCOUNTER_SESSION_HELP,
+  ENCOUNTER_SESSION_LABEL,
+} from '../../components/formFieldLabels';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
+import {
+  ENCOUNTER_NAME_HELP,
+  ENCOUNTER_NAME_LABEL,
+  ENCOUNTER_NAME_PLACEHOLDER,
+} from './postCreateGuidance';
+import { GenerateEncounterWizard } from './GenerateEncounterWizard';
 
 const STATUS_LABEL: Record<EncounterStatus, string> = {
   preparing: 'Preparing',
@@ -29,14 +48,17 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 export default function EncounterListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'encounter',
+  });
 
   const load = useCallback(async () => {
     setError(null);
@@ -62,22 +84,35 @@ export default function EncounterListPage() {
     );
   }
 
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAction ? [draftAction] : [];
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-extrabold text-white">Encounters</h1>
-        <div className="flex-1" />
-        <DraftWithAiButton campaignId={id} target="encounter" />
-        {isDm && !creating && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-            + New encounter
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Encounters"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          canDmWrite && !creating && !generating ? (
+            <div className="flex gap-2 flex-wrap">
+              <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)}>
+                Generate encounter
+              </Btn>
+              <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New encounter
+              </Btn>
+            </div>
+          ) : undefined
+        }
+      />
+      {draftDialog}
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && creating && (
+      {canDmWrite && generating && (
+        <GenerateEncounterWizard campaignId={id} onCancel={() => setGenerating(false)} />
+      )}
+
+      {canDmWrite && creating && (
         <NewEncounterForm campaignId={id} onCancel={() => setCreating(false)} />
       )}
 
@@ -94,7 +129,7 @@ export default function EncounterListPage() {
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
           {encounters.map((enc) => (
-            <EncounterCard key={enc.id} campaignId={id} encounter={enc} />
+            <EncounterCard key={enc.id} campaignId={id} encounter={enc} showHidden={isDm} />
           ))}
         </div>
       )}
@@ -102,7 +137,15 @@ export default function EncounterListPage() {
   );
 }
 
-function EncounterCard({ campaignId, encounter }: { campaignId: number; encounter: Encounter }) {
+function EncounterCard({
+  campaignId,
+  encounter,
+  showHidden,
+}: {
+  campaignId: number;
+  encounter: Encounter;
+  showHidden?: boolean;
+}) {
   return (
     <Link
       to={`/c/${campaignId}/encounters/${encounter.id}`}
@@ -123,6 +166,13 @@ function EncounterCard({ campaignId, encounter }: { campaignId: number; encounte
             Round {encounter.round}
           </span>
         )}
+        {showHidden && encounter.hidden && (
+          <Chip variant="failed">
+            <span className="inline-flex items-center gap-1">
+              <GameIcon slug="sight-disabled" size={12} /> Hidden
+            </span>
+          </Chip>
+        )}
       </div>
     </Link>
   );
@@ -136,6 +186,8 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #754: Preparing encounters default to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
 
   // Optional where/why/when links (issue #126). Loaded lazily so opening the form
   // doesn't block on three list fetches — empty selects just show "— none —".
@@ -165,15 +217,21 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError('Enter an encounter name.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
+      const hidden = audienceToHidden(audience);
       const created = await api.post<Encounter>(`${API}/campaigns/${campaignId}/encounters`, {
-        name: name.trim(),
+        name: trimmed,
         locationId: locationId ? Number(locationId) : undefined,
         questId: questId ? Number(questId) : undefined,
         sessionId: sessionId ? Number(sessionId) : undefined,
+        hidden,
       });
       navigate(`/c/${campaignId}/encounters/${created.id}`);
     } catch (err) {
@@ -182,53 +240,107 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
     }
   }
 
+  const nameInvalid = !!error && !name.trim();
+  const formError = nameInvalid ? error : null;
+
   return (
-    <Card className="space-y-3">
+    <Card className="space-y-3" data-testid="encounter-create-form">
       <h2 className="font-bold text-white text-sm">New encounter</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && !nameInvalid && (
+        <p className="text-sm text-rose-400" role="alert">
+          {error}
+        </p>
+      )}
       <form onSubmit={submit} className="space-y-3">
-        <TextInput
-          placeholder="Ambush at the ford"
+        <Field
+          idPrefix={ENCOUNTER_CREATE_PREFIX}
+          name={ENCOUNTER_FIELD.name}
+          label={ENCOUNTER_NAME_LABEL}
+          labelClassName="text-xs text-slate-400"
+          placeholder={ENCOUNTER_NAME_PLACEHOLDER}
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(e) => {
+            setName(e.target.value);
+            if (error) setError(null);
+          }}
           maxLength={120}
           autoFocus
+          required
+          help={ENCOUNTER_NAME_HELP}
+          error={formError}
         />
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="treasure-map" size={12} /> Location</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={locationId} onChange={(e) => setLocationId(e.target.value)}>
-              <option value="">— none —</option>
-              {locations.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.name ?? `#${l.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="scroll-unfurled" size={12} /> Quest</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={questId} onChange={(e) => setQuestId(e.target.value)}>
-              <option value="">— none —</option>
-              {quests.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.title ?? `#${q.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs text-slate-400 space-y-1">
-            <span className="inline-flex items-center gap-1"><GameIcon slug="book-cover" size={12} /> Session</span>
-            <select className="cf-select !min-h-0 !py-2 text-xs w-full" value={sessionId} onChange={(e) => setSessionId(e.target.value)}>
-              <option value="">— none —</option>
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.title || `Session ${s.number ?? s.id}`}
-                </option>
-              ))}
-            </select>
-          </label>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.locationId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="treasure-map" size={12} /> {ENCOUNTER_LOCATION_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
+            help={ENCOUNTER_LOCATION_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name ?? `#${l.id}`}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.questId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="scroll-unfurled" size={12} /> {ENCOUNTER_QUEST_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={questId}
+            onChange={(e) => setQuestId(e.target.value)}
+            help={ENCOUNTER_QUEST_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {quests.map((q) => (
+              <option key={q.id} value={q.id}>
+                {q.title ?? `#${q.id}`}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={ENCOUNTER_CREATE_PREFIX}
+            name={ENCOUNTER_FIELD.sessionId}
+            as="select"
+            label={
+              <span className="inline-flex items-center gap-1">
+                <GameIcon slug="book-cover" size={12} /> {ENCOUNTER_SESSION_LABEL}
+              </span>
+            }
+            labelClassName="text-xs text-slate-400"
+            selectClassName="cf-select !min-h-0 !py-2 text-xs w-full"
+            value={sessionId}
+            onChange={(e) => setSessionId(e.target.value)}
+            help={ENCOUNTER_SESSION_HELP}
+            optional
+          >
+            <option value="">— none —</option>
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.title || `Session ${s.number ?? s.id}`}
+              </option>
+            ))}
+          </Field>
         </div>
+        <AudienceField value={audience} onChange={setAudience} entityLabel="encounter" name="encounter-audience" />
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
             Cancel

@@ -1,5 +1,5 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, desc, eq, gt, isNull, lt } from 'drizzle-orm';
+import { and, count, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { AuditActorRole } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
@@ -16,6 +16,47 @@ export const DEFAULT_AUDIT_RETENTION_DAYS = 365;
 
 /** How often the retention sweep runs. Daily is plenty — retention is coarse (days). */
 const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Internal page size when walking the full retained audit trail for campaign export
+ * (#731). This is NOT a cap on how many rows are exported — we page until every row
+ * in the snapshot is collected.
+ */
+export const EXPORT_AUDIT_PAGE_SIZE = 500;
+
+/** #731: rows omitted from export vs snapshot — unit-tested for pruning/post-append semantics. */
+export function computeCampaignAuditExportTruncated(
+  total: number,
+  exported: number,
+  /** Rows with id > snapshotMaxId at the end of the export walk. */
+  postSnapshotCount: number,
+): number {
+  const missingFromSnapshot = Math.max(0, total - exported);
+  return missingFromSnapshot + Math.max(0, postSnapshotCount);
+}
+
+/** Metadata bundled with campaign exports so a partial audit slice never looks complete. */
+export type CampaignAuditExportMeta = {
+  /** Rows retained for this campaign with id <= snapshotMaxId at capture time. */
+  total: number;
+  /** Rows actually present in the export's `audit` array. */
+  exported: number;
+  /**
+   * Rows omitted from this export relative to what the snapshot promised:
+   * `(total - exported)` — rows at or below `cutoff.snapshotMaxId` that were not
+   * collected (e.g. retention pruning during the walk), plus any rows appended after
+   * the snapshot ceiling (`id > snapshotMaxId`, concurrent writes during export).
+   */
+  truncated: number;
+  cutoff: {
+    /** Monotonic autoincrement ceiling for this snapshot — rows with id > this are excluded. */
+    snapshotMaxId: number;
+    /** ISO timestamp when the snapshot ceiling was recorded. */
+    capturedAt: string;
+    /** createdAt of the oldest exported row (the trailing edge of included history). */
+    oldestExportedCreatedAt: string | null;
+  };
+};
 
 function resolveRetentionDays(): number {
   const raw = process.env.AUDIT_RETENTION_DAYS;
@@ -75,6 +116,106 @@ export class AuditService implements OnApplicationBootstrap {
    * Still ordered newest-first so the freshest change is row 0; the caller takes the
    * first row's id as the next cursor. All filters compose (AND).
    */
+  /** Count of retained audit rows for a campaign (all ids, or only id <= maxId when capped). */
+  async countForCampaign(campaignId: number, maxId?: number): Promise<number> {
+    const conditions = [eq(auditLog.campaignId, campaignId)];
+    if (maxId != null) conditions.push(lte(auditLog.id, maxId));
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(auditLog)
+      .where(and(...conditions));
+    return Number(row?.n ?? 0);
+  }
+
+  /** Rows for a campaign with id strictly greater than `minId` (post-snapshot appends). */
+  async countForCampaignAbove(campaignId: number, minId: number): Promise<number> {
+    const [row] = await this.db
+      .select({ value: count() })
+      .from(auditLog)
+      .where(and(eq(auditLog.campaignId, campaignId), gt(auditLog.id, minId)));
+    return Number(row?.value ?? 0);
+  }
+
+
+  /**
+   * #731: export the full retained audit trail for a campaign from a stable snapshot.
+   * Records the max(id) ceiling first, then keyset-pages every row with id <= that
+   * ceiling (newest-first, same order as GET /audit). Rows inserted after the ceiling
+   * are excluded from `entries` and counted in `meta.truncated` (with any snapshot
+   * rows missed because of retention pruning during the walk).
+   */
+  async listForCampaignExport(campaignId: number): Promise<{
+    entries: Awaited<ReturnType<AuditService['listForCampaign']>>;
+    meta: CampaignAuditExportMeta;
+  }> {
+    const capturedAt = nowIso();
+    const [snapshotRow] = await this.db
+      .select({
+        maxId: sql<number>`coalesce(max(${auditLog.id}), 0)`,
+        total: sql<number>`count(*)`,
+      })
+      .from(auditLog)
+      .where(eq(auditLog.campaignId, campaignId));
+    const snapshotMaxId = Number(snapshotRow?.maxId ?? 0);
+    const total = snapshotMaxId === 0 ? 0 : Number(snapshotRow?.total ?? 0);
+
+    type Row = Awaited<ReturnType<AuditService['listForCampaign']>>[number];
+    const entries: Row[] = [];
+    if (snapshotMaxId > 0) {
+      let cursorBelow: number | undefined;
+      while (true) {
+        const pageConditions = [eq(auditLog.campaignId, campaignId), lte(auditLog.id, snapshotMaxId)];
+        if (cursorBelow != null) pageConditions.push(lt(auditLog.id, cursorBelow));
+        const page = await this.db
+          .select()
+          .from(auditLog)
+          .where(and(...pageConditions))
+          .orderBy(desc(auditLog.id))
+          .limit(EXPORT_AUDIT_PAGE_SIZE);
+        if (!page.length) break;
+        entries.push(...page);
+        if (page.length < EXPORT_AUDIT_PAGE_SIZE) break;
+        cursorBelow = page[page.length - 1]!.id;
+      }
+    }
+
+    const exported = entries.length;
+    // Count post-snapshot appends directly so concurrent inserts between two
+    // total-count queries cannot hide truncation (orchestrator review / #731).
+    const postSnapshotCount = await this.countForCampaignAbove(campaignId, snapshotMaxId);
+    const truncated = computeCampaignAuditExportTruncated(total, exported, postSnapshotCount);
+
+    const oldest = entries.length ? entries[entries.length - 1]! : null;
+    return {
+      entries,
+      meta: {
+        total,
+        exported,
+        truncated,
+        cutoff: {
+          snapshotMaxId,
+          capturedAt,
+          oldestExportedCreatedAt: oldest?.createdAt ?? null,
+        },
+      },
+    };
+  }
+
+  /**
+   * Recompute `meta.truncated` after the rest of a campaign export payload is assembled,
+   * so audit rows appended while other tables are being read are still disclosed (#731).
+   */
+  async finalizeCampaignExportMeta(
+    campaignId: number,
+    meta: CampaignAuditExportMeta,
+  ): Promise<CampaignAuditExportMeta> {
+    const postSnapshotCount = await this.countForCampaignAbove(campaignId, meta.cutoff.snapshotMaxId);
+    return {
+      ...meta,
+      truncated: computeCampaignAuditExportTruncated(meta.total, meta.exported, postSnapshotCount),
+    };
+  }
+
   async listForCampaign(
     campaignId: number,
     limit = 100,

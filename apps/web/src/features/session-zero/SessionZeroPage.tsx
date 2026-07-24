@@ -15,13 +15,33 @@
  * Data:
  *   GET/PUT  /api/v1/campaigns/:campaignId/session-zero
  */
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
-import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  SESSION_ZERO_FIELD,
+  SESSION_ZERO_HOUSE_RULES_HELP,
+  SESSION_ZERO_HOUSE_RULES_LABEL,
+  SESSION_ZERO_LINES_HELP,
+  SESSION_ZERO_LINES_LABEL,
+  SESSION_ZERO_PREFIX,
+  SESSION_ZERO_SUPPORT_HELP,
+  SESSION_ZERO_SUPPORT_LABEL,
+  SESSION_ZERO_TONE_HELP,
+  SESSION_ZERO_TONE_LABEL,
+  SESSION_ZERO_TOOLS_HELP,
+  SESSION_ZERO_TOOLS_LABEL,
+  SESSION_ZERO_VEILS_HELP,
+  SESSION_ZERO_VEILS_LABEL,
+} from '../../components/formFieldLabels';
+import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
+import { PageTitle } from '../../components/PageTitle';
+import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 interface Draft {
   lines: string[];
@@ -42,6 +62,14 @@ const EMPTY_SUPPORT_DRAFT: SupportDraft = {
   visibility: 'facilitator',
   aiUseConsent: false,
 };
+
+const CONFLICT_FIELDS: Array<ConflictField<Draft>> = [
+  { key: 'lines', label: 'Lines', merge: true },
+  { key: 'veils', label: 'Veils', merge: true },
+  { key: 'safetyTools', label: 'Safety tools', merge: true },
+  { key: 'houseRules', label: 'House rules', merge: true },
+  { key: 'toneAndExpectations', label: 'Tone & expectations', merge: true },
+];
 
 function draftFrom(c: SessionZero): Draft {
   return {
@@ -72,8 +100,7 @@ function isEmptyCharter(c: SessionZero): boolean {
 export default function SessionZeroPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [charter, setCharter] = useState<SessionZero | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,10 +115,16 @@ export default function SessionZeroPage() {
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [baseDraft, setBaseDraft] = useState<Draft | null>(null);
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{ base: Draft; theirs: Draft } | null>(null);
+  const [historyNonce, setHistoryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const loadSequence = useRef(0);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setError(null);
     setForbidden(false);
@@ -101,6 +134,7 @@ export default function SessionZeroPage() {
         api.get<ParticipantSupportPreference | null>(`${API}/campaigns/${cid}/session-zero/support-preferences/me`),
         api.get<ParticipantSupportPreference[]>(`${API}/campaigns/${cid}/session-zero/support-preferences`),
       ]);
+      if (sequence !== loadSequence.current) return;
       setCharter(c);
       setOwnSupport(own ?? null);
       setVisibleSupports(visible);
@@ -110,10 +144,11 @@ export default function SessionZeroPage() {
           : EMPTY_SUPPORT_DRAFT,
       );
     } catch (e) {
+      if (sequence !== loadSequence.current) return;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
       else setError("Couldn't load the session-zero charter.");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [cid]);
 
@@ -121,9 +156,21 @@ export default function SessionZeroPage() {
     if (Number.isFinite(cid)) void load();
   }, [cid, load]);
 
+  useEffect(() => {
+    const refreshAfterResume = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    document.addEventListener('visibilitychange', refreshAfterResume);
+    return () => document.removeEventListener('visibilitychange', refreshAfterResume);
+  }, [load]);
+
   const startEdit = () => {
     if (!charter) return;
-    setDraft(draftFrom(charter));
+    const next = draftFrom(charter);
+    setDraft(next);
+    setBaseDraft(next);
+    setExpectedUpdatedAt(charter.updatedAt);
+    setConflict(null);
     setEditing(true);
     setActionError(null);
   };
@@ -139,12 +186,29 @@ export default function SessionZeroPage() {
         safetyTools: cleanList(draft.safetyTools),
         houseRules: draft.houseRules,
         toneAndExpectations: draft.toneAndExpectations,
+        expectedUpdatedAt: expectedUpdatedAt ?? undefined,
       });
       setCharter(updated);
       setEditing(false);
       setDraft(null);
-    } catch {
-      setActionError("Couldn't save the charter.");
+      setBaseDraft(null);
+      setConflict(null);
+      setHistoryNonce((value) => value + 1);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<SessionZero>(`${API}/campaigns/${cid}/session-zero`);
+          const theirs = draftFrom(latest);
+          setConflict({ base: baseDraft ?? draft, theirs });
+          setBaseDraft(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+          setCharter(latest);
+        } catch {
+          setActionError("The charter changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setActionError("Couldn't save the charter.");
+      }
     } finally {
       setBusy(false);
     }
@@ -210,9 +274,9 @@ export default function SessionZeroPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Session Zero</h3>
+        <PageTitle>Session Zero</PageTitle>
         <div style={{ flex: 1 }} />
-        {isDm && !editing && !loading && (
+        {canDmWrite && !editing && !loading && (
           <Btn onClick={startEdit} style={{ fontSize: 13 }}>
             Edit charter
           </Btn>
@@ -244,10 +308,44 @@ export default function SessionZeroPage() {
       ) : null}
 
       {editing && draft && (
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Btn onClick={save} disabled={busy}>Save charter</Btn>
-          <Btn ghost onClick={() => { setEditing(false); setDraft(null); }} disabled={busy}>Cancel</Btn>
-        </div>
+        <>
+          {conflict && (
+            <StaleWriteConflict
+              base={conflict.base}
+              mine={draft}
+              theirs={conflict.theirs}
+              fields={CONFLICT_FIELDS}
+              onResolve={(key, value) => setDraft((current) => current ? { ...current, [key]: value } : current)}
+              onReloadAll={() => {
+                setDraft(conflict.theirs);
+                setBaseDraft(conflict.theirs);
+                setConflict(null);
+              }}
+            />
+          )}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Btn onClick={save} disabled={busy}>{conflict ? 'Save resolution' : 'Save charter'}</Btn>
+            <Btn ghost onClick={() => { setEditing(false); setDraft(null); setConflict(null); }} disabled={busy}>Cancel</Btn>
+          </div>
+        </>
+      )}
+
+      {isDm && charter && !editing && (
+        <RevisionHistoryPanel
+          entityType="session_zero"
+          entityId={cid}
+          currentSnapshot={{
+            lines: charter.lines.join('\n'),
+            veils: charter.veils.join('\n'),
+            safetyTools: charter.safetyTools.join('\n'),
+            houseRules: charter.houseRules,
+            toneAndExpectations: charter.toneAndExpectations,
+          }}
+          expectedUpdatedAt={charter.updatedAt}
+          reloadNonce={historyNonce}
+          onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
+          label="Charter history"
+        />
       )}
 
       {!loading && (
@@ -256,7 +354,7 @@ export default function SessionZeroPage() {
           style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
         >
           <div style={{ marginTop: 10 }}>
-            <h3 id="access-support-heading" style={{ margin: 0 }}>Access support</h3>
+            <h2 id="access-support-heading" style={{ margin: 0, fontSize: '1.12rem' }}>Access support</h2>
             <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13, lineHeight: 1.5 }}>
               Optional practical preferences that help participation. No diagnosis or explanation is needed, and sharing
               is never required. You own your submission and can change or delete it at any time.
@@ -270,20 +368,21 @@ export default function SessionZeroPage() {
             hint="Examples include extra processing time, explicit turn cues, breaks, reading support, motion limits, or avoiding timers."
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div>
-                <label htmlFor="support-preference-text" style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>
-                  What would help you participate comfortably?
-                </label>
-                <TextArea
-                  id="support-preference-text"
-                  rows={4}
-                  maxLength={2000}
-                  value={supportDraft.supportText}
-                  placeholder="For example: Give me a moment to answer after asking what my character does."
-                  onChange={(e) => setSupportDraft({ ...supportDraft, supportText: e.target.value })}
-                  style={{ marginTop: 6 }}
-                />
-              </div>
+              <Field
+                idPrefix={SESSION_ZERO_PREFIX}
+                name={SESSION_ZERO_FIELD.supportText}
+                as="textarea"
+                label={SESSION_ZERO_SUPPORT_LABEL}
+                labelClassName=""
+                value={supportDraft.supportText}
+                onChange={(e) => setSupportDraft({ ...supportDraft, supportText: e.target.value })}
+                help={SESSION_ZERO_SUPPORT_HELP}
+                placeholder="For example: Give me a moment to answer after asking what my character does."
+                rows={4}
+                maxLength={2000}
+                minHeight={96}
+                optional
+              />
 
               <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
                 <legend style={{ fontSize: 13, fontWeight: 600 }}>Who can read this?</legend>
@@ -434,74 +533,94 @@ function CharterView({ charter }: { charter: SessionZero }) {
 
 // A simple newline-per-entry editor for a string list — one line/veil/tool per row.
 function ListEditor({
+  name,
   label,
-  hint,
+  help,
   placeholder,
   items,
   onChange,
 }: {
+  name: string;
   label: string;
-  hint: string;
+  help: string;
   placeholder: string;
   items: string[];
   onChange: (items: string[]) => void;
 }) {
   return (
-    <div>
-      <label className="text-muted" style={{ fontSize: 11 }}>{label}</label>
-      <div className="text-muted" style={{ fontSize: 11, marginBottom: 4 }}>{hint} One per line.</div>
-      <TextArea
-        rows={4}
-        value={items.join('\n')}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value.split('\n'))}
-      />
-    </div>
+    <Field
+      idPrefix={SESSION_ZERO_PREFIX}
+      name={name}
+      as="textarea"
+      label={label}
+      help={help}
+      value={items.join('\n')}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value.split('\n'))}
+      rows={4}
+      minHeight={96}
+      optional
+    />
   );
 }
 
 function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | null) => void }) {
   return (
-    <div className="card elev-sm" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div
+      className="card elev-sm"
+      style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+      data-testid="session-zero-charter-form"
+    >
       <ListEditor
-        label="Lines (hard limits)"
-        hint="Content that never appears at the table."
+        name={SESSION_ZERO_FIELD.lines}
+        label={SESSION_ZERO_LINES_LABEL}
+        help={SESSION_ZERO_LINES_HELP}
         placeholder={'Harm to children\nSexual violence\nSpiders'}
         items={draft.lines}
         onChange={(lines) => setDraft({ ...draft, lines })}
       />
       <ListEditor
-        label="Veils (soft limits)"
-        hint="Content that may exist but stays off-screen."
+        name={SESSION_ZERO_FIELD.veils}
+        label={SESSION_ZERO_VEILS_LABEL}
+        help={SESSION_ZERO_VEILS_HELP}
         placeholder={'On-screen torture\nGraphic gore'}
         items={draft.veils}
         onChange={(veils) => setDraft({ ...draft, veils })}
       />
       <ListEditor
-        label="Safety tools"
-        hint="Tools the table agreed to use."
+        name={SESSION_ZERO_FIELD.safetyTools}
+        label={SESSION_ZERO_TOOLS_LABEL}
+        help={SESSION_ZERO_TOOLS_HELP}
         placeholder={'X-Card\nOpen Door\nScript Change'}
         items={draft.safetyTools}
         onChange={(safetyTools) => setDraft({ ...draft, safetyTools })}
       />
-      <div>
-        <label className="text-muted" style={{ fontSize: 11 }}>House rules (markdown, optional)</label>
-        <TextArea
-          rows={4}
-          value={draft.houseRules}
-          placeholder="Table conventions, rules-as-written deviations…"
-          onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
-        />
-      </div>
-      <div>
-        <label className="text-muted" style={{ fontSize: 11 }}>Tone & content expectations (markdown, optional)</label>
-        <TextArea
-          rows={4}
-          value={draft.toneAndExpectations}
-          placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
-          onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
-        />
-      </div>
+      <Field
+        idPrefix={SESSION_ZERO_PREFIX}
+        name={SESSION_ZERO_FIELD.houseRules}
+        as="textarea"
+        label={SESSION_ZERO_HOUSE_RULES_LABEL}
+        help={SESSION_ZERO_HOUSE_RULES_HELP}
+        value={draft.houseRules}
+        placeholder="Table conventions, rules-as-written deviations…"
+        onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
+        rows={4}
+        minHeight={96}
+        optional
+      />
+      <Field
+        idPrefix={SESSION_ZERO_PREFIX}
+        name={SESSION_ZERO_FIELD.tone}
+        as="textarea"
+        label={SESSION_ZERO_TONE_LABEL}
+        help={SESSION_ZERO_TONE_HELP}
+        value={draft.toneAndExpectations}
+        placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
+        onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
+        rows={4}
+        minHeight={96}
+        optional
+      />
     </div>
   );
 }

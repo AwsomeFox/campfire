@@ -28,7 +28,8 @@
  *    added by callers via `levelInitiativeBonus` (monsters carry a flat Initiative in
  *    their statblock instead, surfaced from dataJson).
  */
-import type { MonsterStatblockData, RuleSystemAdapter } from '../index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from '../index';
+import { initModDescThenSortOrderAsc } from '../initiative-tiebreak';
 
 /** Family id of the 13th Age (Archmage Engine) adapter. Matches the importer's pack slug family. */
 export const ARCHMAGE_ADAPTER_ID = 'archmage';
@@ -108,9 +109,20 @@ export interface Archmage13aRuleSystemAdapter extends RuleSystemAdapter {
   levelInitiativeBonus(level: number): number;
 }
 
+/** 13th Age presentation — Level (not CR); creature type often carries a combat Role. */
+export const ARCHMAGE_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Role' },
+};
+
 export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   id: ARCHMAGE_ADAPTER_ID,
   label: '13th Age',
+  presentation: ARCHMAGE_STATBLOCK_PRESENTATION,
   // Same ability-score → modifier curve as 5e: floor((score - 10) / 2).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
@@ -120,10 +132,18 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
   // to 5e). Sourced from the adapter, not hardcoded, so a 13th-Age campaign rejects a level-11
   // level-up that 5e's hardcoded cap would wrongly allow (issue #535).
   maxLevel: 10,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = dexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    if (dex === null) return 0;
+    // Inline of resolveAbilityModifier — no runtime import from ../index (cycle).
+    return representation === 'score' ? this.abilityModifier(dex) : Math.trunc(dex);
   },
+  // 13th Age initiative is Dex-based (plus level, applied elsewhere); on a tied total,
+  // higher Dex (initMod) first, then sortOrder — 5e-like default (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: ARCHMAGE_CONDITIONS,
   escalationDieMax: ESCALATION_DIE_MAX,
   escalationDieForRound(round: number): number {
@@ -148,12 +168,13 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
       size: d.size,
-      creatureType: d.creatureType ?? d.type ?? d.role,
+      creatureType: d.role ?? d.creatureType ?? d.type,
       challengeRating: d.level ?? d.challengeRating ?? d.challenge_rating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.traits,
       actions: d.actions ?? d.attacks,
     };

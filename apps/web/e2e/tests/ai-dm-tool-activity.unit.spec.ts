@@ -1,0 +1,164 @@
+import { expect, test } from '@playwright/test';
+import { parseAiDmStreamEvent } from '../../src/lib/useAiDmStream';
+import {
+  invalidateForToolEvent,
+  invalidationKeysForResource,
+  resolveToolActivity,
+  toolResource,
+  type ToolStreamEvent,
+} from '../../src/features/ai-dm/toolActivity';
+import { emptyTranscript, transcriptReducer } from '../../src/features/ai-dm/transcript';
+import { queryKeys } from '../../src/lib/query';
+
+/**
+ * Issue #825 — encounter resource identity on AI tool activity: parse, chip
+ * deep-links, invalidation keys, and transcript persistence.
+ */
+
+const at = '2026-07-23T12:00:00.000Z';
+
+function tool(partial: Partial<ToolStreamEvent> & Pick<ToolStreamEvent, 'name'>): ToolStreamEvent {
+  return {
+    type: 'tool',
+    campaignId: 1,
+    isError: false,
+    proposed: false,
+    at,
+    ...partial,
+  };
+}
+
+test.describe('parseAiDmStreamEvent tool identity (#825)', () => {
+  test('accepts optional positive encounterId', () => {
+    expect(
+      parseAiDmStreamEvent({
+        type: 'tool',
+        campaignId: 1,
+        name: 'next_turn',
+        isError: false,
+        proposed: false,
+        encounterId: 42,
+        at,
+      }),
+    ).toEqual({
+      type: 'tool',
+      campaignId: 1,
+      name: 'next_turn',
+      isError: false,
+      proposed: false,
+      encounterId: 42,
+      at,
+    });
+  });
+
+  test('drops malformed encounterId without rejecting the frame', () => {
+    expect(
+      parseAiDmStreamEvent({
+        type: 'tool',
+        campaignId: 1,
+        name: 'next_turn',
+        isError: false,
+        proposed: false,
+        encounterId: '42',
+        at,
+      }),
+    ).toEqual({
+      type: 'tool',
+      campaignId: 1,
+      name: 'next_turn',
+      isError: false,
+      proposed: false,
+      at,
+    });
+  });
+
+  test('never accepts an encounter name field as identity', () => {
+    const parsed = parseAiDmStreamEvent({
+      type: 'tool',
+      campaignId: 1,
+      name: 'next_turn',
+      isError: false,
+      proposed: false,
+      encounterId: 9,
+      encounterName: 'Secret Ambush',
+      at,
+    });
+    expect(parsed).toMatchObject({ encounterId: 9 });
+    expect(parsed).not.toHaveProperty('encounterName');
+  });
+});
+
+test.describe('resolveToolActivity encounter identity (#825)', () => {
+  test('deep-links the event encounterId, not the open page context', () => {
+    const chip = resolveToolActivity(tool({ name: 'update_combatant', encounterId: 7 }), {
+      campaignId: 1,
+      encounterId: 3,
+    });
+    expect(toolResource('update_combatant')).toBe('encounter');
+    expect(chip.href).toBe('/c/1/encounters/7');
+    expect(chip.label).toContain('other encounter');
+  });
+
+  test('matching ids keep a plain label and link the same fight', () => {
+    const chip = resolveToolActivity(tool({ name: 'next_turn', encounterId: 3 }), {
+      campaignId: 1,
+      encounterId: 3,
+    });
+    expect(chip.href).toBe('/c/1/encounters/3');
+    expect(chip.label).toBe('Next turn');
+    expect(chip.label).not.toContain('other encounter');
+  });
+
+  test('failed cross-encounter tools still link the actual fight', () => {
+    const chip = resolveToolActivity(tool({ name: 'next_turn', encounterId: 7, isError: true }), {
+      campaignId: 1,
+      encounterId: 3,
+    });
+    expect(chip.variant).toBe('error');
+    expect(chip.href).toBe('/c/1/encounters/7');
+    expect(chip.label).toContain('other encounter');
+  });
+});
+
+test.describe('invalidateForToolEvent prefers event encounterId (#825)', () => {
+  test('invalidation keys target the event fight over page context', () => {
+    const keys = invalidationKeysForResource('encounter', {
+      campaignId: 1,
+      encounterId: 7,
+    });
+    expect(keys.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.encounter(7)))).toBe(true);
+    expect(keys.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.encounter(3)))).toBe(false);
+
+    const calls: unknown[] = [];
+    const client = {
+      invalidateQueries: (opts: { queryKey: unknown }) => {
+        calls.push(opts.queryKey);
+        return Promise.resolve();
+      },
+    };
+    invalidateForToolEvent(
+      client as never,
+      tool({ name: 'add_combatant', encounterId: 7 }),
+      { campaignId: 1, encounterId: 3 },
+    );
+    expect(calls.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.encounter(7)))).toBe(true);
+    expect(calls.some((k) => JSON.stringify(k) === JSON.stringify(queryKeys.encounter(3)))).toBe(false);
+  });
+});
+
+test.describe('transcript preserves tool encounterId across hydrate (#825)', () => {
+  test('tool entries keep encounterId through reducer + JSON round-trip', () => {
+    const state = transcriptReducer(emptyTranscript, {
+      type: 'stream',
+      event: tool({ name: 'roll_initiative', encounterId: 11 }),
+    });
+    const entry = state.entries[0];
+    expect(entry).toMatchObject({ kind: 'tool', name: 'roll_initiative', encounterId: 11 });
+
+    const rehydrated = transcriptReducer(emptyTranscript, {
+      type: 'hydrate',
+      state: JSON.parse(JSON.stringify(state)),
+    });
+    expect(rehydrated.entries[0]).toMatchObject({ kind: 'tool', encounterId: 11 });
+  });
+});

@@ -12,8 +12,10 @@ import { levelForXp, ddbImportSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
-import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -23,9 +25,8 @@ export default function PartyPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
-  const { me, roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { me } = useAuth();
+  const { canDmWrite, canPlayerWrite } = useCampaignAccess();
   // The campaign record drives the D&D Beyond import affordance (issue #714): the importer
   // produces a 5e-shaped character, so it is only offered for an explicitly-D&D-5e campaign.
   // A homebrew campaign (no pack selected) resolves to 5e for combat math but is NOT treated
@@ -45,7 +46,7 @@ export default function PartyPage() {
   const awardXpRequested = searchParams.get('action') === 'award-xp';
   // Keep the URL authoritative so Back/Forward closes and reopens the deep-linked
   // form instead of leaving local state out of sync with browser history.
-  const awarding = isDm && awardXpRequested;
+  const awarding = canDmWrite && awardXpRequested;
 
   function setAwardingOpen(open: boolean) {
     setSearchParams(
@@ -119,28 +120,30 @@ export default function PartyPage() {
   const myUserId = me?.user.id;
   // A player may own multiple characters (backup PC, familiar, companion) — the API
   // allows it, so don't cap the button at one owned character (issue #129).
-  const canCreate = isDm || role === 'player';
+  const canCreate = canPlayerWrite;
+
+  const secondaryActions: PageHeaderSecondaryAction[] =
+    canDmWrite && !awarding && characters.length > 0
+      ? [{ key: 'award-xp', label: '✦ Award XP', onClick: () => setAwardingOpen(true) }]
+      : [];
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
-      <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-extrabold text-white">Party</h1>
-        <div className="flex-1" />
-        {isDm && !awarding && characters.length > 0 && (
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setAwardingOpen(true)}>
-            ✦ Award XP
-          </Btn>
-        )}
-        {canCreate && !creating && characters.length > 0 && (
-          <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-            + New character
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Party"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          canCreate && !creating && characters.length > 0 ? (
+            <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+              + New character
+            </Btn>
+          ) : undefined
+        }
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && awarding && (
+      {canDmWrite && awarding && (
         <AwardXpForm
           campaignId={id}
           characters={characters}
@@ -169,10 +172,10 @@ export default function PartyPage() {
               ownerLabel={ownerLabel(c.ownerUserId)}
               // Quick HP is offered on a card the viewer can edit: the DM (any card)
               // or a player on their own character (issue #68).
-              canEditHp={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              canEditHp={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
               // Move-to-Trash (issue #716): owner or DM only — the menu is not rendered
               // for an unrelated player, matching PATCH /characters/:id role gating.
-              canTrash={isDm || (c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
+              canTrash={canDmWrite || (canPlayerWrite && c.ownerUserId != null && myUserId != null && c.ownerUserId === String(myUserId))}
               onTrashed={onCharacterTrashed}
               onError={setError}
               onChange={load}
@@ -181,7 +184,9 @@ export default function PartyPage() {
         </div>
       )}
 
-      {canCreate && (creating || characters.length === 0) && (
+      {/* Wait for the roster load so an empty-state create form (autoFocus) does not
+          flash during loading and steal route-change focus from the page h1 (#591). */}
+      {canCreate && !loading && (creating || characters.length === 0) && (
         <NewCharacterForm campaignId={id} ddbAllowed={ddbAllowed} onCancel={characters.length > 0 ? () => setCreating(false) : undefined} onCreated={load} />
       )}
 
@@ -218,7 +223,6 @@ function CharacterCard({
   onChange: () => void;
 }) {
   const tone = avatarTone(index);
-  const hpPct = character.hpMax > 0 ? Math.max(0, Math.min(100, (character.hpCurrent / character.hpMax) * 100)) : 0;
   // Dead/retired/inactive PCs (issue #115) are muted so a fallen or shelved character
   // is visually distinct from the live party, while staying fully viewable.
   const isActive = character.status === 'active';
@@ -244,7 +248,7 @@ function CharacterCard({
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
   // <button> inside an <a> is invalid and would hijack the navigation click (#68).
   return (
-    <div className={`cf-card p-3.5 space-y-2.5 hover:border-amber-500/50 transition-colors ${isActive ? '' : 'opacity-60'}`}>
+    <div className={`cf-card cf-card-hover p-3.5 space-y-2.5 ${isActive ? '' : 'opacity-60'}`}>
       <div className="relative">
         <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
           <div className="flex items-center gap-2.5">
@@ -275,9 +279,7 @@ function CharacterCard({
             {character.hpCurrent} / {character.hpMax}
           </span>
         </div>
-        <div className="h-[5px] rounded-full bg-[var(--color-neutral-800)] overflow-hidden">
-          <div className="h-full rounded-full bg-[var(--color-accent)]" style={{ width: `${hpPct}%` }} />
-        </div>
+        <HpBar current={character.hpCurrent} max={character.hpMax} />
         {character.conditions.length > 0 && (
           <div className="flex gap-1.5 flex-wrap">
             <span className="tag tag-outline" style={{ fontSize: 10 }}>

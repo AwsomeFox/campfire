@@ -92,6 +92,9 @@ export function MetricsCard() {
         <h2 className="font-bold text-white text-sm">Server overview</h2>
         <div className="flex items-center gap-2 text-[11px] text-slate-500">
           <span className="cf-chip cf-chip-private">v{metrics.version}</span>
+          {metrics.commit && (
+            <span className="cf-chip" title="Build commit">{metrics.commit.slice(0, 7)}</span>
+          )}
           <span>up {formatUptime(metrics.uptimeSeconds)}</span>
         </div>
       </div>

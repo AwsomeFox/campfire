@@ -1,6 +1,6 @@
-import { randomUUID } from 'node:crypto';
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { randomUUID, createHash } from 'node:crypto';
+import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -14,13 +14,24 @@ import {
   type RulePackInstallJob,
   type RulePackInstallSource,
   type RulePackUpload,
+  type RuleSearchPage,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
-import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
+import { rulePacks, ruleEntries, combatants, campaigns, importJobs } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import {
+  clampRuleSearchLimit,
+  decodeRuleSearchCursor,
+  encodeRuleSearchCursor,
+  nameMatchBucket,
+  type BrowseCursor,
+  type FtsCursor,
+  type LikeCursor,
+} from './rules-search';
 import {
   ALL_OPEN5E_SECTIONS,
   MAX_ENTRIES_PER_SECTION,
@@ -83,6 +94,37 @@ import {
   osrSource,
   type OsrSection,
 } from './osr-importer';
+import {
+  ALL_CEPHEUS_SECTIONS,
+  CEPHEUS_DEFAULT_BASE_URL,
+  CEPHEUS_FETCH_CONCURRENCY,
+  CEPHEUS_LICENSE,
+  CEPHEUS_PACK_NAME,
+  CEPHEUS_PACK_SLUG,
+  consoleLogger,
+  createFetchLimiter,
+  fetchCepheusSection,
+  type CepheusSection,
+} from './cepheus-importer';
+import {
+  ALL_DATASWORN_SECTIONS,
+  DATASWORN_LICENSE,
+  DATASWORN_MAX_ENTRIES_PER_SECTION,
+  DATASWORN_PACK_NAME,
+  DATASWORN_PACK_SLUG,
+  DATASWORN_STARFORGED_URL,
+  fetchDataswornDocument,
+  mapDataswornSection,
+  type DataswornSection,
+} from './datasworn-importer';
+
+/** Internal progress shape persisted as JSON in import_jobs.progress. */
+interface ImportJobProgress {
+  committed: number;
+  skipped: number;
+  failed: number;
+  sections: Array<{ section: string; status: string; imported: number }>;
+}
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -170,9 +212,10 @@ function effectiveEntryProvenance(
  */
 function nameMatchRank(q: string) {
   // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
-  // sanitisation in the LIKE fallback below); lower() both sides for
-  // case-insensitive comparison independent of the column's collation.
-  const needle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  // sanitisation in the LIKE fallback below). Fold the needle with the shared
+  // helper (#624); SQL lower() on the column remains ASCII-limited on SQLite —
+  // FTS path is preferred when available; LIKE fallback is best-effort for ASCII.
+  const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
   return sql`CASE
     WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
     WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
@@ -192,17 +235,8 @@ function toFtsQuery(q: string): string {
 }
 
 @Injectable()
-export class RulesService {
-  /**
-   * In-memory registry of background install jobs (issue #20). Campfire is a
-   * single-node SQLite app, so an in-process map is sufficient — job state is
-   * ephemeral progress, not durable data, and a restart simply drops in-flight
-   * jobs (their DB writes are transactional and already committed by section).
-   * Completed/failed jobs are pruned lazily once past PRUNE_AFTER_MS so the map
-   * can't grow without bound over a long-lived server.
-   */
-  private readonly jobs = new Map<string, RulePackInstallJob>();
-  private static readonly PRUNE_AFTER_MS = 60 * 60 * 1000; // 1h
+export class RulesService implements OnModuleInit {
+  private readonly runningJobs = new Map<string, { cancelled: boolean }>();
 
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
@@ -210,101 +244,178 @@ export class RulesService {
     private readonly audit: AuditService,
   ) {}
 
-  // ---------- background install jobs (issue #20) ----------
-
-  getJobOrThrow(id: string): RulePackInstallJob {
-    const job = this.jobs.get(id);
-    if (!job) throw new NotFoundException(`Install job ${id} not found`);
-    return { ...job, progress: job.progress.map((p) => ({ ...p })) };
+  async onModuleInit(): Promise<void> {
+    const interrupted = this.db
+      .select()
+      .from(importJobs)
+      .where(inArray(importJobs.status, ['running', 'queued']))
+      .all();
+    for (const job of interrupted) {
+      const ts = nowIso();
+      const errors = RulesService.parseErrors(job.errors);
+      errors.push('Job interrupted by server restart');
+      this.db.update(importJobs).set({ status: 'failed', updatedAt: ts, completedAt: ts, errors: JSON.stringify(errors) }).where(eq(importJobs.id, job.id)).run();
+    }
   }
 
-  private newJob(source: RulePackInstallJob['source'], sections: string[]): RulePackInstallJob {
-    this.pruneOldJobs();
-    const ts = nowIso();
-    const job: RulePackInstallJob = {
-      id: randomUUID(),
-      source,
-      status: 'pending',
-      progress: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })),
-      totalSections: sections.length,
-      completedSections: 0,
-      outcome: null,
-      pack: null,
-      added: null,
-      skippedExisting: null,
-      error: null,
-      createdAt: ts,
-      updatedAt: ts,
+  // ---------- persistent import jobs (issue #737) ----------
+
+  private static parseProgress(json: string): ImportJobProgress {
+    try { return JSON.parse(json) as ImportJobProgress; }
+    catch { return { committed: 0, skipped: 0, failed: 0, sections: [] }; }
+  }
+
+  private static parseErrors(json: string): string[] {
+    try { return JSON.parse(json || '[]') as string[]; }
+    catch { return []; }
+  }
+
+  getJobOrThrow(id: string): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, id)).all();
+    if (!row) throw new NotFoundException(`Install job ${id} not found`);
+    return this.rowToJob(row);
+  }
+
+  listJobs(limit = 50): RulePackInstallJob[] {
+    const rows = this.db.select().from(importJobs).orderBy(sql`${importJobs.createdAt} DESC`).limit(limit).all();
+    return rows.map((r) => this.rowToJob(r));
+  }
+
+  private rowToJob(row: typeof importJobs.$inferSelect): RulePackInstallJob {
+    const progress = RulesService.parseProgress(row.progress);
+    const packSlug = (progress as unknown as Record<string, unknown>).packSlug as string | undefined;
+    let pack: RulePack | null = null;
+    if (packSlug && row.status === 'completed') {
+      const [packRow] = this.db.select().from(rulePacks).where(eq(rulePacks.slug, packSlug)).all();
+      if (packRow) pack = { id: packRow.id, slug: packRow.slug, name: packRow.name, version: packRow.version, license: packRow.license, sourceUrl: packRow.sourceUrl, installedAt: packRow.installedAt, entryCount: packRow.entryCount };
+    }
+    return {
+      id: row.id,
+      source: row.source as RulePackInstallJob['source'],
+      status: row.status === 'queued' ? 'pending' : row.status === 'cancelled' ? 'failed' : row.status as RulePackInstallJob['status'],
+      progress: progress.sections.map((s) => ({ section: s.section, status: s.status as 'pending' | 'running' | 'done' | 'failed', imported: s.imported })),
+      totalSections: progress.sections.length,
+      completedSections: progress.sections.filter((s) => s.status === 'done').length,
+      outcome: row.outcome as RulePackInstallJob['outcome'],
+      pack,
+      added: row.status === 'completed' ? progress.committed : null,
+      skippedExisting: row.status === 'completed' ? progress.skipped : null,
+      error: RulesService.parseErrors(row.errors)[0] ?? null,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
     };
-    this.jobs.set(job.id, job);
-    return job;
+  }
+
+  private newJob(source: RulePackInstallJob['source'], sections: string[], user: RequestUser, input: Record<string, unknown> = {}): RulePackInstallJob {
+    const ts = nowIso();
+    const id = randomUUID();
+    const progress: ImportJobProgress = { committed: 0, skipped: 0, failed: 0, sections: sections.map((s) => ({ section: s, status: 'pending', imported: 0 })) };
+    const persistedInput = { source, ...input };
+    const payload = JSON.stringify(persistedInput);
+    const sourceHash = createHash('sha256').update(payload).digest('hex').slice(0, 16);
+    this.db.insert(importJobs).values({ id, source, sourceHash, input: payload, status: 'queued', progress: JSON.stringify(progress), cursor: null, actorId: user.id, startedAt: null, updatedAt: ts, completedAt: null, outcome: null, errors: '[]', createdAt: ts }).run();
+    return this.getJobOrThrow(id);
   }
 
   private markSectionDone(jobId: string, section: string, imported: number): void {
-    const job = this.jobs.get(jobId);
-    if (!job) return;
-    const row = job.progress.find((p) => p.section === section);
-    if (row) {
-      row.status = 'done';
-      row.imported = imported;
-    }
-    job.completedSections = job.progress.filter((p) => p.status === 'done').length;
-    job.updatedAt = nowIso();
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) return;
+    const progress = RulesService.parseProgress(row.progress);
+    const entry = progress.sections.find((s) => s.section === section);
+    if (entry) { entry.status = 'done'; entry.imported = imported; }
+    progress.committed += imported;
+    const cursor = entry ? JSON.stringify({ lastSection: section, index: progress.sections.indexOf(entry) }) : null;
+    this.db.update(importJobs).set({ progress: JSON.stringify(progress), cursor, updatedAt: nowIso() }).where(eq(importJobs.id, jobId)).run();
   }
 
-  /**
-   * Runs one enqueued install in the background. `work` performs the actual
-   * fetch+persist (installFromOpen5e / installFromUpload) and returns the
-   * resulting pack, incremental installs additionally carrying added/skipped.
-   * All progress is reflected on the job so the UI can poll it — the request
-   * that enqueued the job has already returned 202 by the time this runs.
-   */
-  private async runJob(
-    jobId: string,
-    work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>,
-  ): Promise<void> {
-    const job = this.jobs.get(jobId);
-    if (!job) return;
-    job.status = 'running';
-    job.progress.forEach((p) => {
-      if (p.status === 'pending') p.status = 'running';
-    });
-    job.updatedAt = nowIso();
+  private markJobCompleted(jobId: string, outcome: 'created' | 'updated', added: number, skipped: number, pack?: RulePack, isIncremental = false): void {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row || row.status === 'cancelled') {
+      this.runningJobs.delete(jobId);
+      return;
+    }
+    const progress = RulesService.parseProgress(row.progress);
+    if (isIncremental) {
+      progress.committed = added;
+      progress.skipped = skipped;
+    }
+    if (pack) (progress as unknown as Record<string, unknown>).packSlug = pack.slug;
+    progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'done'; });
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'completed', outcome, progress: JSON.stringify(progress), updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.delete(jobId);
+  }
 
+  private markJobFailed(jobId: string, error: string): void {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row || row.status === 'cancelled') {
+      this.runningJobs.delete(jobId);
+      return;
+    }
+    const errors = RulesService.parseErrors(row.errors); errors.push(error);
+    const progress = RulesService.parseProgress(row.progress);
+    progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'failed'; });
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'failed', progress: JSON.stringify(progress), errors: JSON.stringify(errors), updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    this.runningJobs.delete(jobId);
+  }
+
+  cancelJob(jobId: string): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) throw new NotFoundException(`Install job ${jobId} not found`);
+    if (row.status !== 'queued' && row.status !== 'running') throw new BadRequestException(`Job ${jobId} is already in terminal state: ${row.status}`);
+    const ts = nowIso();
+    const running = this.runningJobs.get(jobId);
+    if (running) running.cancelled = true;
+    else this.runningJobs.set(jobId, { cancelled: true });
+    this.db.update(importJobs).set({ status: 'cancelled', updatedAt: ts, completedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    return this.getJobOrThrow(jobId);
+  }
+
+  retryJob(jobId: string, user: RequestUser): RulePackInstallJob {
+    const [row] = this.db.select().from(importJobs).where(eq(importJobs.id, jobId)).all();
+    if (!row) throw new NotFoundException(`Install job ${jobId} not found`);
+    if (row.status !== 'failed' && row.status !== 'cancelled') throw new BadRequestException(`Job ${jobId} cannot be retried (status: ${row.status})`);
+    if (row.source === 'upload') throw new BadRequestException(`Upload jobs cannot be retried`);
+    const input = JSON.parse(row.input) as RulePackInstall;
+    return this.enqueueInstall(input, user);
+  }
+
+  private isJobCancelled(jobId: string): boolean {
+    if (this.runningJobs.get(jobId)?.cancelled) return true;
+    const [row] = this.db.select({ status: importJobs.status }).from(importJobs).where(eq(importJobs.id, jobId)).all();
+    return row?.status === 'cancelled';
+  }
+
+  private async runJob(jobId: string, work: () => Promise<RulePack & { added?: number; skippedExisting?: number }>): Promise<void> {
+    if (this.isJobCancelled(jobId)) {
+      this.runningJobs.delete(jobId);
+      return;
+    }
+    const ts = nowIso();
+    this.db.update(importJobs).set({ status: 'running', startedAt: ts, updatedAt: ts }).where(eq(importJobs.id, jobId)).run();
+    if (this.isJobCancelled(jobId)) {
+      this.runningJobs.delete(jobId);
+      return;
+    }
+    if (!this.runningJobs.has(jobId)) {
+      this.runningJobs.set(jobId, { cancelled: false });
+    }
     try {
       const result = await work();
+      if (this.isJobCancelled(jobId)) {
+        this.runningJobs.delete(jobId);
+        return;
+      }
       const isIncremental = 'added' in result;
       const { added, skippedExisting, ...pack } = result as RulePack & { added?: number; skippedExisting?: number };
-      const current = this.jobs.get(jobId);
-      if (!current) return;
-      current.status = 'completed';
-      current.outcome = isIncremental ? 'updated' : 'created';
-      current.pack = pack;
-      current.added = added ?? null;
-      current.skippedExisting = skippedExisting ?? null;
-      current.progress.forEach((p) => {
-        if (p.status !== 'done') p.status = 'done';
-      });
-      current.completedSections = current.progress.length;
-      current.updatedAt = nowIso();
+      this.markJobCompleted(jobId, isIncremental ? 'updated' : 'created', added ?? 0, skippedExisting ?? 0, pack, isIncremental);
     } catch (err) {
-      const current = this.jobs.get(jobId);
-      if (!current) return;
-      current.status = 'failed';
-      current.error = err instanceof Error ? err.message : String(err);
-      current.progress.forEach((p) => {
-        if (p.status !== 'done') p.status = 'failed';
-      });
-      current.updatedAt = nowIso();
-    }
-  }
-
-  private pruneOldJobs(): void {
-    const cutoff = Date.now() - RulesService.PRUNE_AFTER_MS;
-    for (const [id, job] of this.jobs) {
-      if ((job.status === 'completed' || job.status === 'failed') && new Date(job.updatedAt).getTime() < cutoff) {
-        this.jobs.delete(id);
+      if (this.isJobCancelled(jobId)) {
+        this.runningJobs.delete(jobId);
+        return;
       }
+      this.markJobFailed(jobId, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -325,19 +436,26 @@ export class RulesService {
    * that isn't in the chosen source's set is rejected 400 synchronously, before a job is
    * enqueued (acceptance criteria) — the widened `RulePackInstallSection` enum lets a name
    * like 'starships' parse for Zod, but it's only meaningful for Starfinder. PF2e and SF2e
-   * accept both 5e-shaped section names and native PF2e/SF2e section keys (e.g., 'creatures',
-   * 'equipment'); 'other' rides the Open5e path for back-compat.
+   * accept only the native PF2e/SF2e section keys in ALL_PF2E_SECTIONS (e.g., 'creatures',
+   * 'equipment') — Open5e-shaped section names are rejected for those sources; 'other' rides
+   * the Open5e path for back-compat.
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
-    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
-    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    pf2e: ALL_PF2E_SECTIONS,
+    sf2e: ALL_PF2E_SECTIONS,
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,
     'open-legend': ALL_OPEN_LEGEND_SECTIONS,
     osr: ALL_OSR_SECTIONS,
+    // Cepheus organizes its content as mdBook "books" (parts), not a per-statblock section
+    // vocabulary. Its section keys aren't in the shared RulePackInstallSection enum, so the
+    // enum-typed `sections` input can never carry one — the importer imports the whole SRD
+    // (like PF2e/SF2e import their full set regardless of the filter). Listed here so a caller
+    // that DOES pass a foreign section (e.g. 'spells') gets a clear 400 naming the real books.
+    cepheus: ALL_CEPHEUS_SECTIONS,
+    datasworn: ALL_DATASWORN_SECTIONS,
     other: ALL_OPEN5E_SECTIONS,
   };
 
@@ -403,6 +521,10 @@ export class RulesService {
         return this.enqueueOpenLegendInstall(input, user);
       case 'osr':
         return this.enqueueOsrInstall(input, user);
+      case 'cepheus':
+        return this.enqueueCepheusInstall(input, user);
+      case 'datasworn':
+        return this.enqueueDataswornInstall(input, user);
       case 'open5e':
       case 'other':
       default:
@@ -438,6 +560,10 @@ export class RulesService {
         return this.installFromOpenLegend(input, user, onSectionDone);
       case 'osr':
         return this.installFromOsr(input, user, onSectionDone);
+      case 'cepheus':
+        return this.installFromCepheus(input, user, onSectionDone);
+      case 'datasworn':
+        return this.installFromDatasworn(input, user, onSectionDone);
       case 'open5e':
       case 'other':
       default:
@@ -452,9 +578,7 @@ export class RulesService {
    */
   enqueueOpen5eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
-    const job = this.newJob('open5e', sections);
-    // Defer to a microtask so this method returns the 'pending' snapshot before any
-    // work (or DB writes) begin — the POST is truly non-blocking (issue #20).
+    const job = this.newJob('open5e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOpen5e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -470,10 +594,10 @@ export class RulesService {
    * the `pf2e-srd` pack slug, which the PF2e RuleSystemAdapter is registered against.
    */
   enqueuePf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    // The shared RulePackInstall.sections enum is Open5e-shaped (spells/monsters/…); PF2e
-    // has its own section vocabulary (creatures/equipment/ancestries/…), so a PF2e install
-    // always imports all PF2e sections rather than honouring the 5e-named filter.
-    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('pf2e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -483,7 +607,10 @@ export class RulesService {
   }
 
   enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('sf2e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -500,7 +627,7 @@ export class RulesService {
    */
   enqueuePf1eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
-    const job = this.newJob('pf1e', sections);
+    const job = this.newJob('pf1e', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf1e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -519,7 +646,7 @@ export class RulesService {
     const sections: StarfinderSection[] = input.sections?.length
       ? (input.sections as StarfinderSection[])
       : ALL_STARFINDER_SECTIONS;
-    const job = this.newJob('starfinder', sections);
+    const job = this.newJob('starfinder', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromStarfinder(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -538,7 +665,7 @@ export class RulesService {
     const sections: ArchmageSection[] = input.sections?.length
       ? (input.sections as ArchmageSection[])
       : ALL_ARCHMAGE_SECTIONS;
-    const job = this.newJob('archmage', sections);
+    const job = this.newJob('archmage', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromArchmage(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -556,7 +683,7 @@ export class RulesService {
     const sections: OpenLegendSection[] = input.sections?.length
       ? (input.sections as OpenLegendSection[])
       : ALL_OPEN_LEGEND_SECTIONS;
-    const job = this.newJob('open-legend', sections);
+    const job = this.newJob('open-legend', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOpenLegend(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -573,10 +700,47 @@ export class RulesService {
    */
   enqueueOsrInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
     const sections: OsrSection[] = input.sections?.length ? (input.sections as OsrSection[]) : ALL_OSR_SECTIONS;
-    const job = this.newJob('osr', sections);
+    const job = this.newJob('osr', sections, user, input as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromOsr(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue a Cepheus Engine SRD install (issue #406). The importer fetches raw Markdown
+   * from the mdBook and maps each chapter into a `section`-typed rule entry, so it reuses the
+   * same background-job machinery as every other importer. Installs under CEPHEUS_PACK_SLUG.
+   * Cepheus imports the whole SRD (its mdBook "books" are progress groups, not a selectable
+   * per-statblock filter — a foreign `sections` value is rejected 400 before enqueue).
+   */
+  enqueueCepheusInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const job = this.newJob('cepheus', ALL_CEPHEUS_SECTIONS, user, input as unknown as Record<string, unknown>);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromCepheus(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
+      ),
+    );
+    return this.getJobOrThrow(job.id);
+  }
+
+  /**
+   * Enqueue an Ironsworn: Starforged (datasworn) install (issue #405). Unlike the paginated
+   * siblings, datasworn is a SINGLE JSON document, so installFromDatasworn fetches the file
+   * once and maps each requested section from memory — but it still reports per-section
+   * progress, so the background-job machinery is identical. Installs under
+   * DATASWORN_PACK_SLUG. Sections are npcs/assets/moves/oracles/truths (see the importer).
+   */
+  enqueueDataswornInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
+    const sections: DataswornSection[] = input.sections?.length
+      ? (input.sections as DataswornSection[])
+      : ALL_DATASWORN_SECTIONS;
+    const job = this.newJob('datasworn', sections, user, input as unknown as Record<string, unknown>);
+    queueMicrotask(() =>
+      void this.runJob(job.id, () =>
+        this.installFromDatasworn(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
       ),
     );
     return this.getJobOrThrow(job.id);
@@ -596,7 +760,7 @@ export class RulesService {
     this.assertOpenLicense(input.pack.license);
     this.assertEntriesOpenLicensed(input);
     const types = [...new Set(input.entries.map((e) => e.type))];
-    const job = this.newJob('upload', types);
+    const job = this.newJob('upload', types, user, { pack: input.pack } as unknown as Record<string, unknown>);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromUpload(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -676,6 +840,21 @@ export class RulesService {
     const [row] = await this.db.select().from(ruleEntries).where(eq(ruleEntries.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Rule entry ${id} not found`);
     return entryToDomain(row);
+  }
+
+  /**
+   * Look up an installed rule pack by its slug (issue #717). The AI table's rules help
+   * binds lookups to the campaign's active rule system — its `ruleSystem` field is the
+   * slug of the installed pack the table is playing under (or '' for homebrew). This
+   * resolves that slug to a `RulePack` (with name/license/sourceUrl for the human-
+   * readable answer) so the driver can scope `search` to a single pack and render the
+   * pack's attribution. Returns undefined for a missing/empty slug rather than throwing,
+   * so the caller can render a "no rule system configured" note for homebrew tables.
+   */
+  async getPackBySlug(slug: string): Promise<RulePack | undefined> {
+    if (!slug) return undefined;
+    const [row] = await this.db.select().from(rulePacks).where(eq(rulePacks.slug, slug)).limit(1);
+    return row ? packToDomain(row) : undefined;
   }
 
   /**
@@ -779,7 +958,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? PF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
@@ -811,7 +992,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
@@ -1061,6 +1244,108 @@ export class RulesService {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
+    );
+  }
+
+  /**
+   * Installs the Cepheus Engine SRD rule pack (issue #406), or incrementally adds any
+   * not-yet-present entries if `cepheus-srd` is already installed. Deliberate mirror of
+   * installFromOpen5e — concurrent per-book fetch, per-book progress, the shared persistPack
+   * path (multi-pack coexistence + incremental add + concurrent-install race guard) — but the
+   * importer parses mdBook Markdown into `section`-typed entries instead of JSON statblocks.
+   * The pack carries the OGL v1.0a license and the Cepheus SRD's own attribution/trademark
+   * notice (issue #143 / #734); an oversized chapter is split at headings by the importer so
+   * no entry exceeds the body cap and no rules text is truncated away.
+   */
+  async installFromCepheus(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const baseUrl = input.url ?? CEPHEUS_DEFAULT_BASE_URL;
+    // Cepheus imports the whole SRD; its mdBook "books" are progress groups, not a selectable
+    // per-statblock filter (a foreign `sections` value was already rejected 400 before enqueue).
+    const sections: CepheusSection[] = ALL_CEPHEUS_SECTIONS;
+
+    // One limiter shared across all books bounds the TOTAL in-flight raw-CDN fetches for the
+    // whole install (books are fetched concurrently, so without a shared cap the burst would be
+    // books × chapters). Chapters still complete in a deterministic order within each book.
+    const fetchLimiter = createFetchLimiter(CEPHEUS_FETCH_CONCURRENCY);
+    const sectionResults = await Promise.all(
+      sections.map(async (s) => {
+        const r = await fetchCepheusSection(baseUrl, s, consoleLogger, fetchLimiter);
+        onSectionDone?.(s, r.entries.length);
+        return r;
+      }),
+    );
+    const allEntries = sectionResults.flatMap((r) => r.entries);
+    const totalSkipped = sectionResults.reduce((sum, r) => sum + r.skippedCount, 0);
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Cepheus Engine import returned no entries');
+    }
+
+    return this.persistPack(
+      {
+        slug: CEPHEUS_PACK_SLUG,
+        name: CEPHEUS_PACK_NAME,
+        version: nowIso().slice(0, 10),
+        license: CEPHEUS_LICENSE,
+        sourceUrl: baseUrl,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(${totalSkipped} skipped)`,
+      { refreshExisting: true },
+    );
+  }
+
+  /**
+   * Installs the Ironsworn: Starforged (datasworn) rule pack (issue #405), or incrementally
+   * adds missing entries if `ironsworn-starforged` already exists. Datasworn is a SINGLE JSON
+   * document, so — unlike the paginated importers — this fetches the whole file ONCE and maps
+   * each requested section out of it (npcs→monster, assets→item, moves/oracles/truths→section),
+   * reporting per-section progress the caller polls. Oracles are flattened recursively (they
+   * are collections-of-collections). Every entry carries CC-BY-4.0 licensing + attribution
+   * built from the object's own provenance. The canonical source is live and open, so no
+   * `url` is required (an explicit `url` overrides the default file location for tests/mirrors).
+   */
+  async installFromDatasworn(
+    input: RulePackInstall,
+    user: RequestUser,
+    onSectionDone?: (section: string, imported: number) => void,
+  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+    const url = input.url ?? DATASWORN_STARFORGED_URL;
+    const sections: DataswornSection[] = input.sections?.length
+      ? (input.sections as DataswornSection[])
+      : ALL_DATASWORN_SECTIONS;
+
+    // Fetch + validate the whole document ONCE, then map each requested section from memory.
+    const doc = await fetchDataswornDocument(url);
+    let totalSkipped = 0;
+    const allEntries: ImportedEntry[] = [];
+    for (const section of sections) {
+      const result = mapDataswornSection(doc, section);
+      totalSkipped += result.skippedCount;
+      allEntries.push(...result.entries);
+      onSectionDone?.(section, result.entries.length);
+    }
+    if (allEntries.length === 0) {
+      throw new BadRequestException('Datasworn import returned no entries for the requested sections');
+    }
+
+    return this.persistPack(
+      {
+        slug: DATASWORN_PACK_SLUG,
+        name: DATASWORN_PACK_NAME,
+        version: nowIso().slice(0, 10),
+        license: DATASWORN_LICENSE,
+        sourceUrl: url,
+        sectionLabels: sections,
+      },
+      allEntries,
+      user,
+      `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
     );
   }
 
@@ -1383,56 +1668,196 @@ export class RulesService {
    *
    * Both paths order results by nameMatchRank() so exact/prefix name matches
    * rank ahead of body-only matches (issue #33), with FTS bm25 rank (or name,
-   * in the LIKE fallback) breaking ties within a bucket.
+   * in the LIKE fallback) breaking ties within a bucket, and `id` as the final
+   * stable tiebreak (issue #613). Empty-query browse orders by lower(name), id.
+   *
+   * Returns a paginated page (`items` / `total` / `hasMore` / `nextCursor`) —
+   * never a silently truncated array. Default page size is 50; pass `cursor`
+   * from a previous `nextCursor` to continue. The optional second `limit` arg
+   * is kept for MCP / AI-driver callers that want a smaller top-N page.
    */
-  async search(params: { q: string; type?: RuleEntryType; pack?: string }, limit = 50): Promise<RuleEntry[]> {
+  async search(
+    params: { q: string; type?: RuleEntryType; pack?: string; cursor?: string; limit?: number },
+    limitArg?: number,
+  ): Promise<RuleSearchPage> {
+    const limit = clampRuleSearchLimit(params.limit ?? limitArg);
+    const empty = (total = 0): RuleSearchPage => ({ items: [], total, hasMore: false, limit });
+
     const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
-    if (params.pack && (!packFilter || packFilter.length === 0)) return [];
+    if (params.pack && (!packFilter || packFilter.length === 0)) return empty();
     const packId = packFilter?.[0]?.id;
 
     if (!params.q.trim()) {
-      const conditions = [
-        params.type ? eq(ruleEntries.type, params.type) : undefined,
-        packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
-      ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-      const rows = await this.db
-        .select()
-        .from(ruleEntries)
-        .where(conditions.length ? and(...conditions) : undefined)
-        .limit(limit);
-      return rows.map(entryToDomain);
+      return this.searchBrowse({ type: params.type, packId, cursor: params.cursor, limit });
     }
 
     if (this.ftsAvailable) {
       const ftsQuery = toFtsQuery(params.q);
-      if (!ftsQuery) return [];
-      const conditions = [
-        params.type ? eq(ruleEntries.type, params.type) : undefined,
-        packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
-      ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-      const rows = await this.db
-        .select({ entry: ruleEntries })
-        .from(ruleEntries)
-        .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
-        .where(and(sql`rule_entries_fts MATCH ${ftsQuery}`, ...conditions))
-        .orderBy(nameMatchRank(params.q), sql`rule_entries_fts.rank`)
-        .limit(limit);
-      return rows.map((r) => entryToDomain(r.entry));
+      if (!ftsQuery) return empty();
+      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packId, cursor: params.cursor, limit });
     }
 
-    // LIKE fallback — documented in README as the no-fts5 path.
-    const like = `%${params.q.replace(/[%_]/g, '')}%`;
-    const conditions = [
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
-      params.type ? eq(ruleEntries.type, params.type) : undefined,
-      packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
+    return this.searchLike({ q: params.q, type: params.type, packId, cursor: params.cursor, limit });
+  }
+
+  /** Empty-query browse: deterministic lower(name), id order with keyset cursor. */
+  private async searchBrowse(opts: {
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
+    const baseConditions = [
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(lower(${ruleEntries.name}) > ${cursor.n} OR (lower(${ruleEntries.name}) = ${cursor.n} AND ${ruleEntries.id} > ${cursor.i}))`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countEntries(baseConditions);
+    const rows = await this.db
+      .select()
+      .from(ruleEntries)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(sql`lower(${ruleEntries.name})`, asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map(entryToDomain);
+    const last = page[page.length - 1];
+    // Cursor `n` must match SQL lower(name) used in ORDER BY / keyset (ASCII-oriented).
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'browse',
+            n: last.name.toLowerCase(),
+            i: last.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async searchFts(opts: {
+    q: string;
+    ftsQuery: string;
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
+    const rankExpr = nameMatchRank(opts.q);
+    const baseConditions = [
+      sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(
+          ${rankExpr} > ${cursor.b}
+          OR (${rankExpr} = ${cursor.b} AND rule_entries_fts.rank > ${cursor.r})
+          OR (${rankExpr} = ${cursor.b} AND rule_entries_fts.rank = ${cursor.r} AND ${ruleEntries.id} > ${cursor.i})
+        )`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countFts(baseConditions);
+    const rows = await this.db
+      .select({ entry: ruleEntries, ftsRank: sql<number>`rule_entries_fts.rank` })
+      .from(ruleEntries)
+      .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
+      .where(and(...conditions))
+      .orderBy(rankExpr, sql`rule_entries_fts.rank`, asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map((r) => entryToDomain(r.entry));
+    const last = page[page.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'fts',
+            b: nameMatchBucket(opts.q, last.entry.name),
+            r: Number(last.ftsRank),
+            i: last.entry.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async searchLike(opts: {
+    q: string;
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'like') as LikeCursor | undefined;
+    const rankExpr = nameMatchRank(opts.q);
+    const like = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const baseConditions = [
+      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(
+          ${rankExpr} > ${cursor.b}
+          OR (${rankExpr} = ${cursor.b} AND ${ruleEntries.name} > ${cursor.n})
+          OR (${rankExpr} = ${cursor.b} AND ${ruleEntries.name} = ${cursor.n} AND ${ruleEntries.id} > ${cursor.i})
+        )`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countEntries(baseConditions);
     const rows = await this.db
       .select()
       .from(ruleEntries)
       .where(and(...conditions))
-      .orderBy(nameMatchRank(params.q), ruleEntries.name)
-      .limit(limit);
-    return rows.map(entryToDomain);
+      .orderBy(rankExpr, asc(ruleEntries.name), asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map(entryToDomain);
+    const last = page[page.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'like',
+            b: nameMatchBucket(opts.q, last.name),
+            n: last.name,
+            i: last.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async countEntries(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(ruleEntries)
+      .where(conditions.length ? and(...conditions) : undefined);
+    return Number(row?.n ?? 0);
+  }
+
+  private async countFts(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(ruleEntries)
+      .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
+      .where(and(...conditions));
+    return Number(row?.n ?? 0);
   }
 }

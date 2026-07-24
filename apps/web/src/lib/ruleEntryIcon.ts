@@ -18,6 +18,7 @@ import type { RuleEntry, RuleEntryType } from '@campfire/schema';
 const TYPE_DEFAULT: Record<RuleEntryType, string> = {
   spell: 'spell-book',
   monster: 'death-skull',
+  hazard: 'skull-crossed-bones',
   item: 'chest',
   condition: 'aura',
   class: 'wizard-staff',
@@ -117,7 +118,7 @@ export function ruleEntryIconSlug(entry: Pick<RuleEntry, 'type' | 'dataJson' | '
   if (entry.iconSlug) return entry.iconSlug;
 
   const data = readData(entry.dataJson);
-  let slug: string | null = null;
+  let slug: string | null;
 
   switch (entry.type) {
     case 'spell': {

@@ -1,9 +1,9 @@
 /**
- * UndoSnackbar (issues #116, #694) — the transient "X deleted — Undo" affordance
- * shown after a soft-delete. Deletes are reversible server-side (every trashable
- * entity has a `deleted_at` + a restore endpoint), so a mis-click is recoverable:
- * this bar gives an immediate one-click Undo (which POSTs the restore endpoint)
- * before the user leaves the page.
+ * UndoSnackbar (issues #116, #694, #794) — the transient "X deleted — Undo"
+ * affordance shown after a soft-delete. Deletes are reversible server-side
+ * (every trashable entity has a `deleted_at` + a restore endpoint), so a
+ * mis-click is recoverable: this bar gives an immediate one-click Undo (which
+ * POSTs the restore endpoint) before the user leaves the page.
  *
  * Issue #694 — keep the recovery path available while a restore is pending and
  * after one fails:
@@ -18,9 +18,16 @@
  *   - The auto-dismiss timer is cancelled synchronously inside `undo()`, so a
  *     timeout firing at the click boundary can't race the pending-state clear.
  *
+ * Issue #794 — clear the mobile tab bar, safe-area, and on-screen keyboard:
+ *   - Bottom offset is measured tab-bar content + safe-area + keyboard inset
+ *     (see `undoSnackbarLayout.ts` / `useUndoSnackbarChrome`).
+ *   - Stacking uses `--cf-layer-snackbar` so the bar sits above the tab bar and
+ *     coordinates with dialog / notification layers.
+ *   - Narrow viewports wrap; Undo / Dismiss keep 44×44 hit targets.
+ *
  * The lifecycle lives in `undoSnackbarState.ts` (pure, tested without a
  * browser); this component owns the side-effectful bits — the real timeout, the
- * restore promise, and the render.
+ * restore promise, chrome measurement, and the render.
  */
 import { useEffect, useRef, useState } from 'react';
 import { useAnnounce } from './Announcer';
@@ -32,6 +39,7 @@ import {
   timerArmed,
   type UndoSnapshot,
 } from './undoSnackbarState';
+import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
 export function UndoSnackbar({
   message,
@@ -57,6 +65,9 @@ export function UndoSnackbar({
   // App-root live region (mounted once in AnnounceProvider, see Announcer.tsx).
   // Durable: survives this snackbar being unmounted by its parent mid-`undo`.
   const announce = useAnnounce();
+  // Publish --cf-tabbar-content-height / --cf-keyboard-inset while mounted so
+  // `.cf-undo-snackbar` clears the tab bar, safe-area, and virtual keyboard.
+  useUndoSnackbarChrome();
 
   // Unmount guard: the restore promise in `undo()` resolves asynchronously, so
   // the bar's parent may have unmounted it (e.g. cleared `pendingUndo`) while
@@ -173,58 +184,37 @@ export function UndoSnackbar({
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      style={{
-        position: 'fixed',
-        left: '50%',
-        bottom: 24,
-        transform: 'translateX(-50%)',
-        zIndex: 1000,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 14,
-        maxWidth: 'calc(100vw - 32px)',
-        padding: '10px 12px 10px 16px',
-        borderRadius: 'var(--radius-md, 10px)',
-        background: 'var(--color-neutral-800, #1c1c22)',
-        color: 'var(--color-neutral-100, #f2f2f5)',
-        border: failed
-          ? '1px solid var(--color-danger-500, #d33)'
-          : '1px solid var(--color-neutral-700, #333)',
-        boxShadow: '0 8px 28px rgba(0,0,0,0.4)',
-        fontSize: 13,
-      }}
+      data-testid="undo-snackbar"
+      className={failed ? 'cf-undo-snackbar cf-undo-snackbar--failed' : 'cf-undo-snackbar'}
     >
       {/* The visible message is ALWAYS aria-hidden: with role="status" +
           aria-atomic="true" the live region would otherwise concatenate it
           with the sr-only announcement, producing duplicate reads in the
           idle/pending states. The sr-only span below is the single
           announcement source. */}
-      <span aria-hidden>{error ?? message}</span>
+      <span className="cf-undo-snackbar__message" aria-hidden>
+        {error ?? message}
+      </span>
       <span className="sr-only">{announcement}</span>
-      <button
-        className="btn btn-secondary"
-        style={{ fontSize: 12.5, minHeight: 0, padding: '4px 12px' }}
-        onClick={() => void undo()}
-        disabled={busy}
-      >
-        {actionLabel}
-      </button>
-      <button
-        aria-label="Dismiss"
-        onClick={() => onExpire()}
-        disabled={busy}
-        style={{
-          background: 'transparent',
-          border: 'none',
-          color: 'var(--color-neutral-400, #999)',
-          cursor: 'pointer',
-          fontSize: 16,
-          lineHeight: 1,
-          padding: '2px 4px',
-        }}
-      >
-        ✕
-      </button>
+      <div className="cf-undo-snackbar__actions">
+        <button
+          type="button"
+          className="btn btn-secondary cf-undo-snackbar__action"
+          onClick={() => void undo()}
+          disabled={busy}
+        >
+          {actionLabel}
+        </button>
+        <button
+          type="button"
+          className="cf-undo-snackbar__dismiss"
+          aria-label="Dismiss"
+          onClick={() => onExpire()}
+          disabled={busy}
+        >
+          ✕
+        </button>
+      </div>
     </div>
   );
 }

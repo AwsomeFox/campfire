@@ -10,47 +10,31 @@
  * check") to attribute the roll; the user identity is still recorded server-side.
  */
 import { useCallback, useState } from 'react';
-import type { DiceRoll } from '@campfire/schema';
+import { useTranslation } from 'react-i18next';
+import type { DiceRoll, CheckRollResponse } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
+import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
+import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
+
+/** Roll modes a catalog check can be rolled with (advantage/disadvantage only where supported). */
+export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
 
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
   roll: (expr: string, label: string) => Promise<DiceRoll | null>;
+  /**
+   * Issue #415: roll a CATALOG check server-side. The server resolves the authoritative
+   * modifier + expression from the rule-system adapter (the client sends only a checkId +
+   * mode + optional dc), so proficiency math is never invented client-side. Returns the full
+   * resolved response (breakdown + persisted roll + optional degree of success).
+   */
+  rollCheck: (characterId: number, checkId: string, mode?: CheckRollMode, dc?: number) => Promise<CheckRollResponse | null>;
   rolling: boolean;
 }
 
-/**
- * Crit/fumble flavour for a d20 roll. Matches `d20` even when preceded by a die
- * count (`1d20+3`, `2d20kh1`) — a `\bd20\b` boundary fails there because a digit is
- * a word char — while excluding `d200` via the negative lookahead. Checks the KEPT
- * die when a keep/drop clause is present (advantage/disadvantage), so a nat-20/nat-1
- * reflects the die that actually counted, not any rolled die.
- *
- * For a COMPOUND expression (issue #536, e.g. "2d20kh1+1d4") the flat `kept` is omitted
- * (ambiguous across terms), so we read each d20 term's own kept dice from `terms[]`
- * instead — a nat-20/nat-1 must reflect a d20 term's kept die, not a dropped d20 or a
- * coincidental 1 on a different die in the flat rolls array.
- */
-export function d20Flavor(r: DiceRoll): 'crit' | 'fumble' | null {
-  if (!/d20(?!\d)/i.test(r.expr)) return null;
-  let dice: number[];
-  if (r.terms) {
-    // Gather the kept (or all, when no keep clause) dice from every d20 term only.
-    dice = [];
-    for (const t of r.terms) {
-      if (!/^1?d20(?!\d)/i.test(t.term)) continue;
-      const termDice = t.kept && t.kept.length > 0 ? t.kept : t.rolls;
-      if (termDice) dice.push(...termDice);
-    }
-    if (dice.length === 0) return null; // expr had d20 but no d20 term survived (shouldn't happen)
-  } else {
-    dice = r.kept && r.kept.length > 0 ? r.kept : r.rolls;
-  }
-  if (dice.includes(20)) return 'crit';
-  if (dice.includes(1)) return 'fumble';
-  return null;
-}
+/** Re-export for existing import sites (also used by `useRoller` announcements). */
+export { d20Flavor } from './d20Flavor';
 
 export function useRoller(campaignId: number, onError: (msg: string | null) => void): Roller & {
   last: DiceRoll | null;
@@ -58,6 +42,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
 } {
   const [rolling, setRolling] = useState(false);
   const [last, setLast] = useState<DiceRoll | null>(null);
+  const { t } = useTranslation();
   const announce = useAnnounce();
 
   const roll = useCallback(
@@ -67,11 +52,10 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
-        const flavor = d20Flavor(result);
-        announce(
-          `${result.label ? `${result.label}: ` : ''}rolled ${result.expr}, total ${result.total}` +
-            (flavor === 'crit' ? ' — natural 20!' : flavor === 'fumble' ? ' — natural 1.' : ''),
-        );
+        rememberLocalDiceAnnouncement(campaignId, result.id);
+        announce(formatDiceRollAnnouncement(result, t), {
+          dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+        });
         return result;
       } catch (err) {
         onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
@@ -80,8 +64,34 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         setRolling(false);
       }
     },
-    [campaignId, onError, announce],
+    [campaignId, onError, announce, t],
   );
 
-  return { roll, rolling, last, dismiss: () => setLast(null) };
+  const rollCheck = useCallback(
+    async (characterId: number, checkId: string, mode: CheckRollMode = 'flat', dc?: number): Promise<CheckRollResponse | null> => {
+      setRolling(true);
+      onError(null);
+      try {
+        const res = await api.post<CheckRollResponse>(`${API}/characters/${characterId}/checks/roll`, {
+          checkId,
+          mode,
+          ...(dc != null ? { dc } : {}),
+        });
+        setLast(res.roll);
+        rememberLocalDiceAnnouncement(campaignId, res.roll.id);
+        announce(formatDiceRollAnnouncement(res.roll, t), {
+          dedupeKey: `dice-roll:${campaignId}:1:${res.roll.id}:${res.roll.id}`,
+        });
+        return res;
+      } catch (err) {
+        onError(err instanceof ApiError ? err.message : "Couldn't roll the check.");
+        return null;
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, onError, announce, t],
+  );
+
+  return { roll, rollCheck, rolling, last, dismiss: () => setLast(null) };
 }

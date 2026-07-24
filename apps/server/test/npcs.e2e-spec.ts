@@ -25,7 +25,8 @@ describe('npcs (e2e)', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/npcs`)
       .set(dm)
-      .send({ name: 'Mayor Higgins', dmSecret: 'Is actually a doppelganger' });
+      // #754: omit defaults to DM-only; this case tests dmSecret redaction, so create visible.
+      .send({ name: 'Mayor Higgins', dmSecret: 'Is actually a doppelganger', hidden: false });
     expect(createRes.status).toBe(201);
     const npcId = createRes.body.id;
     expect(createRes.body.dmSecret).toBe('Is actually a doppelganger');

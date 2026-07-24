@@ -3,7 +3,7 @@ import { seed, stateFor } from './seed';
 
 // ─── Wake Lock mock infrastructure ─────────────────────────────────────────
 
-type WakeLockMockMode = 'supported' | 'unsupported' | 'denied';
+type WakeLockMockMode = 'supported' | 'unsupported' | 'denied' | 'slow';
 
 interface MockSentinel {
   released: boolean;
@@ -38,6 +38,9 @@ async function installWakeLockMock(page: Page, mode: WakeLockMockMode = 'support
           request: async (type: string): Promise<MockSentinel> => {
             if (mockMode === 'denied') {
               throw new DOMException('User denied wake lock', 'NotAllowedError');
+            }
+            if (mockMode === 'slow') {
+              await new Promise((resolve) => setTimeout(resolve, 300));
             }
             const listeners: Array<() => void> = [];
             const sentinel: MockSentinel & { _listeners: Array<() => void> } = {
@@ -169,6 +172,24 @@ test.describe('Player Display wake lock', () => {
     await expect(wakeLockNotice(page)).not.toBeVisible();
   });
 
+  test('does not leave wake lock active when fullscreen exits during a slow request', async ({ page }) => {
+    await openPlayerDisplay(page, 'slow');
+
+    await page.getByRole('button', { name: /fullscreen/i }).click();
+    await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveAttribute('aria-pressed', 'true');
+
+    // Exit fullscreen before the delayed wake lock request resolves.
+    await page.getByRole('button', { name: /fullscreen/i }).click();
+    await expect(page.getByRole('button', { name: /fullscreen/i })).toHaveAttribute('aria-pressed', 'false');
+
+    // After the in-flight request settles, no wake lock should remain held.
+    await page.waitForFunction(
+      () =>
+        (window as typeof window & { __wakeLockTest: { getActiveSentinels: () => number } }).__wakeLockTest.getActiveSentinels() ===
+        0,
+    );
+  });
+
   test('releases wake lock when exiting fullscreen', async ({ page }) => {
     await openPlayerDisplay(page);
 
@@ -269,12 +290,12 @@ test.describe('Player Display wake lock', () => {
     await expect(page).toHaveURL(`/c/${campaignId}`);
 
     // All sentinels should be released after unmount.
-    const count = await page.evaluate(
+    await page.waitForFunction(
       () => {
-        const test = (window as typeof window & { __wakeLockTest?: { getActiveSentinels: () => number } }).__wakeLockTest;
-        return test ? test.getActiveSentinels() : 0;
+        const test = (window as typeof window & { __wakeLockTest?: { getActiveSentinels: () => number } })
+          .__wakeLockTest;
+        return !test || test.getActiveSentinels() === 0;
       },
     );
-    expect(count).toBe(0);
   });
 });

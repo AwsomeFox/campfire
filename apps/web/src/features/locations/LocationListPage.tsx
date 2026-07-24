@@ -3,14 +3,15 @@
  * (~1259-1271): a stacked row list, name + status chip + DM-secret tag, body preview.
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { LocationStatusLabel } from '../../components/LocationStatusLabel';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { GameIcon } from '../../components/GameIcon';
 
 function firstLine(body: string): string {
@@ -53,9 +54,7 @@ export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,6 +66,10 @@ export default function LocationListPage() {
   const [newParentId, setNewParentId] = useState('');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'location',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -83,6 +86,16 @@ export default function LocationListPage() {
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  const secondaryActions: PageHeaderSecondaryAction[] = useMemo(() => {
+    const actions: PageHeaderSecondaryAction[] = [
+      { key: 'npcs', label: 'NPCs →', href: `/c/${id}/npcs` },
+    ];
+    if (draftAction) {
+      actions.push(draftAction);
+    }
+    return actions;
+  }, [draftAction, id]);
 
   async function createLocation() {
     if (!newName.trim()) return;
@@ -136,22 +149,23 @@ export default function LocationListPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2">
-            <GameIcon slug="world" size={18} /> World <span className="text-slate-500 font-normal text-sm">· Locations</span>
-          </h1>
-          <Link to={`/c/${id}/npcs`} className="btn btn-ghost" style={{ fontSize: 12 }}>
-            NPCs →
-          </Link>
-          <DraftWithAiButton campaignId={id} target="location" />
-          {isDm && !creating && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-              + New location
-            </Btn>
-          )}
-        </div>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="world" size={18} />}
+          title="World"
+          subtitle="· Locations"
+          secondaryActions={secondaryActions}
+          primaryAction={
+            canDmWrite && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New location
+              </Btn>
+            ) : undefined
+          }
+        />
+        {draftDialog}
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
@@ -198,7 +212,7 @@ export default function LocationListPage() {
               <Link
                 key={loc.id}
                 to={`/c/${id}/locations/${loc.id}`}
-                className="cf-card flex items-center gap-3 p-3.5 hover:border-amber-500/50"
+                className="cf-card cf-card-hover flex items-center gap-3 p-3.5"
                 style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
                 {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}

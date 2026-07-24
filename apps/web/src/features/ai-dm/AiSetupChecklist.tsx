@@ -17,7 +17,7 @@
  *
  * All reads already exist; this is orchestration UI only (no new endpoints).
  */
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
@@ -25,6 +25,7 @@ import type { AiConsoleOverview, AiProviderEffectiveView } from '@campfire/schem
 import { api, API } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
+import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
@@ -214,22 +215,20 @@ function StepRow({ step }: { step: Step }) {
 /** A copy-to-clipboard chip carrying the exact ask a DM can send their server admin. */
 function CopyRequest({ text }: { text: string }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard?.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked — the text is visible below regardless */
-    }
-  }
+  const textId = useId();
   return (
     <div className="cf-inset p-2 mt-1.5 space-y-1">
-      <p className="text-[11px] text-[var(--color-neutral-400)] italic">“{text}”</p>
-      <button type="button" onClick={copy} className="cf-btn cf-btn-ghost !min-h-0 !py-1 text-[11px]">
-        {copied ? t('aiOnboarding.checklist.steps.flag.copied') : t('aiOnboarding.checklist.steps.flag.copy')}
-      </button>
+      <p className="text-[11px] text-[var(--color-neutral-400)] italic">
+        “<span id={textId}>{text}</span>”
+      </p>
+      <CopyControl
+        text={text}
+        selectTargetId={textId}
+        label={t('aiOnboarding.checklist.steps.flag.copy')}
+        copiedLabel={t('aiOnboarding.checklist.steps.flag.copied')}
+        ghost
+        className="!min-h-0 !py-1 text-[11px]"
+      />
     </div>
   );
 }
@@ -328,19 +327,29 @@ export function AiDmDashboardOnboarding({
   return (
     <section className="cf-card p-4">
       {!expanded ? (
-        <div className="flex items-start gap-3 flex-wrap">
-          <span className="flex text-[var(--color-accent)]" aria-hidden>
-            <GameIcon slug="sparkles" size={20} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>
-            <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{t('aiOnboarding.dashboard.hintBody')}</p>
+        // Mobile reflow (issue #675): below `sm` the actions used to sit in the
+        // same row as the icon + copy. Because the copy block carries `min-w-0`
+        // it would collapse to an unreadable narrow column (≈73px at 390px) while
+        // the two buttons held ≈199px. Instead we stack: icon + copy on a top row,
+        // then a full-width actions row underneath. Above `sm` the original inline
+        // row (icon + copy + actions together) is preserved so the hint stays
+        // compact on wide viewports. The copy block keeps `min-w-0` for ellipsis
+        // safety but never has to fight the buttons for width on mobile.
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-3 sm:flex-wrap">
+          <div className="flex items-start gap-3">
+            <span className="flex shrink-0 text-[var(--color-accent)]" aria-hidden>
+              <GameIcon slug="sparkles" size={20} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="font-bold text-[var(--color-text)]">{t('aiOnboarding.dashboard.hintTitle')}</p>
+              <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{t('aiOnboarding.dashboard.hintBody')}</p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs" onClick={dismiss}>
+          <div className="flex items-center gap-2 sm:shrink-0 w-full sm:w-auto sm:ml-auto">
+            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={dismiss}>
               {t('aiOnboarding.dashboard.hide')}
             </button>
-            <button type="button" className="cf-btn !min-h-0 !py-1.5 text-xs" onClick={() => setExpanded(true)}>
+            <button type="button" className="cf-btn !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={() => setExpanded(true)}>
               {t('aiOnboarding.dashboard.setUp')}
             </button>
           </div>

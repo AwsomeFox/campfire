@@ -1,16 +1,31 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
-import type { EntityRevision, Role, RevisionEntityType } from '@campfire/schema';
+import { and, asc, desc, eq, isNull } from 'drizzle-orm';
+import type { EntityRevision, RevisionAuthorSource, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { entityRevisions, factions, locations, notes, npcs, quests, sessions } from '../../db/schema';
+import {
+  auditLog,
+  comments,
+  entityRevisions,
+  factions,
+  locations,
+  notes,
+  npcs,
+  quests,
+  scheduledSessions,
+  sessionZero,
+  sessions,
+  storyBeats,
+  timelineCalendars,
+  timelineEvents,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
+import { nextUpdatedAt } from '../../common/stale-write';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { AuditService } from '../audit/audit.service';
 
 /**
- * Prose revision history + optimistic-concurrency guard (issue #157).
+ * Prose revision history + optimistic-concurrency guard (issue #157 / #813 / #513).
  *
  * Two cooperating tiers protect the prose entities most at risk of a blind
  * last-write-wins clobber (a co-DM polishing a recap while a connected AI over MCP
@@ -18,34 +33,96 @@ import { AuditService } from '../audit/audit.service';
  *
  *  1. `assertNotStale` — the optimistic-concurrency check every prose service calls
  *     at the top of its update() when the caller supplied an `expectedUpdatedAt`.
- *  2. `record` / `listForEntity` / `restore` — the revision history: the owning
- *     service snapshots the PRIOR prose here on every committed change, the history
- *     is listable, and any prior snapshot can be re-applied (itself recorded).
+ *  2. `commitProseVersion` / `listForEntity` / `restore` — immutable version history:
+ *     each committed prose write opens a version tip attributed to the writer; the
+ *     previous tip is closed with the replacing actor/time. History listings omit
+ *     the live tip. Any prior version can be re-applied (itself recorded as a new
+ *     tip linked via `restoredFromRevisionId`).
  *
- * The four supported entity types share a single prose column each: sessions.recap
- * and quests/npcs/locations.body. `restore` writes that column DIRECTLY (never back
- * through the owning service) so this module has no dependency on any entity service
- * — the recording direction is one-way (entity service → RevisionsService), so there
- * is no cycle. A restore skips entity-specific side effects (e.g. recap_posted
+ * The six supported entity types share a single prose column each: sessions.recap
+ * and quests/npcs/locations/factions/notes.body. `restore` writes that column DIRECTLY
+ * (never back through the owning service) so this module has no dependency on any
+ * entity service — the recording direction is one-way (entity service → RevisionsService),
+ * so there is no cycle. A restore skips entity-specific side effects (e.g. recap_posted
  * notifications) on purpose: re-applying old text is not a fresh post.
+ *
+ * Restore itself is one synchronous better-sqlite3 transaction (issue #513): the
+ * pre-restore snapshot, entity prose update, new revision tip, and audit row either
+ * all commit or all roll back. Concurrent restore/edit uses the same `expectedUpdatedAt`
+ * version guard as prose PATCH.
  */
 
 /** The prose field snapshotted/restored for each supported entity type. */
-const PROSE_FIELD: Record<RevisionEntityType, 'recap' | 'body'> = {
+type ProseField = 'recap' | 'body' | 'note' | 'notes';
+const PROSE_FIELD: Record<RevisionEntityType, ProseField> = {
   session: 'recap',
   quest: 'body',
   npc: 'body',
   location: 'body',
   faction: 'body',
   note: 'body',
+  timeline_event: 'body',
+  timeline_calendar: 'note',
+  scheduled_session: 'notes',
+  comment: 'body',
+  story_beat: 'body',
+  session_zero: 'body',
 };
+
+const AUTHOR_SOURCES = new Set<RevisionAuthorSource>(['human', 'ai', 'tool']);
+
+/** better-sqlite3 transaction handle or the root db — both expose sync `.all()`/`.run()`. */
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
+
+function asAuthorSource(value: string | null | undefined): RevisionAuthorSource {
+  return value && AUTHOR_SOURCES.has(value as RevisionAuthorSource)
+    ? (value as RevisionAuthorSource)
+    : 'human';
+}
+
+/**
+ * Resolve human / AI / tool provenance for a revision actor (issue #813).
+ * AI seats carry `proposalAttribution` (and often a synthetic tokenContext); check
+ * AI first so they are not mislabeled as ordinary tool/PAT actors.
+ */
+export function revisionActorProvenance(user: RequestUser): {
+  userId: string;
+  name: string;
+  source: RevisionAuthorSource;
+  sourceDetail: string;
+} {
+  const aiUserId = user.proposalAttribution?.proposerUserId;
+  if (
+    (typeof aiUserId === 'string' && aiUserId.startsWith('ai-dm:')) ||
+    user.id.startsWith('ai-dm-seat:') ||
+    user.id.startsWith('ai-dm:')
+  ) {
+    return {
+      userId: aiUserId && aiUserId.startsWith('ai-dm:') ? aiUserId : user.id,
+      name: user.proposalAttribution?.proposer?.trim() || user.name || 'AI Dungeon Master',
+      source: 'ai',
+      sourceDetail: user.tokenContext?.name ?? '',
+    };
+  }
+  if (user.tokenContext) {
+    return {
+      userId: user.id,
+      name: user.name,
+      source: 'tool',
+      sourceDetail: user.tokenContext.name,
+    };
+  }
+  return {
+    userId: user.id,
+    name: user.name,
+    source: 'human',
+    sourceDetail: '',
+  };
+}
 
 @Injectable()
 export class RevisionsService {
-  constructor(
-    @Inject(DB) private readonly db: DrizzleDb,
-    private readonly audit: AuditService,
-  ) {}
+  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
 
   /**
    * Optimistic-concurrency guard (tier 1). When `expectedUpdatedAt` is supplied and it
@@ -67,7 +144,7 @@ export class RevisionsService {
   }
 
   /** The prose field name for an entity type (public so callers can key their snapshots). */
-  proseField(entityType: RevisionEntityType): 'recap' | 'body' {
+  proseField(entityType: RevisionEntityType): ProseField {
     return PROSE_FIELD[entityType];
   }
 
@@ -80,15 +157,155 @@ export class RevisionsService {
       snapshot: fromJsonText<Record<string, string>>(row.snapshot, {}),
       authorUserId: row.authorUserId,
       authorName: row.authorName,
+      authorSource: asAuthorSource(row.authorSource),
+      authorSourceDetail: row.authorSourceDetail,
       createdAt: row.createdAt,
+      replacedByUserId: row.replacedByUserId,
+      replacedByName: row.replacedByName,
+      replacedBySource: asAuthorSource(row.replacedBySource),
+      replacedBySourceDetail: row.replacedBySourceDetail,
+      replacedAt: row.replacedAt ?? null,
+      restoredFromRevisionId: row.restoredFromRevisionId ?? null,
+      authorshipKnown: row.authorshipKnown,
     };
   }
 
+  /** Current unreplaced tip for an entity, if one exists. */
+  private loadTip(
+    db: SyncDb,
+    entityType: RevisionEntityType,
+    entityId: number,
+  ): typeof entityRevisions.$inferSelect | null {
+    return (
+      db
+        .select()
+        .from(entityRevisions)
+        .where(
+          and(
+            eq(entityRevisions.entityType, entityType),
+            eq(entityRevisions.entityId, entityId),
+            isNull(entityRevisions.replacedAt),
+          ),
+        )
+        .orderBy(desc(entityRevisions.id))
+        .limit(1)
+        .get() ?? null
+    );
+  }
+
   /**
-   * Snapshot an entity's PRIOR prose as a new revision. Called by the owning service
-   * from inside its update() BEFORE the write, only when the prose actually changes —
-   * so history is bounded to committed edits (never one row per keystroke), and an
-   * unchanged save records nothing. `priorProse` is the value being overwritten.
+   * Synchronous tip-close + tip-open (issue #813). Callers that need atomicity with
+   * other writes (restore, #513) pass a transaction handle; ordinary entity updates
+   * pass `this.db`.
+   */
+  private commitProseVersionOn(
+    db: SyncDb,
+    params: {
+      entityType: RevisionEntityType;
+      entityId: number;
+      campaignId: number;
+      priorProse: string;
+      nextProse: string;
+      user: RequestUser;
+      restoredFromRevisionId?: number | null;
+      ts?: string;
+    },
+  ): void {
+    if (params.priorProse === params.nextProse) return;
+
+    const field = PROSE_FIELD[params.entityType];
+    const ts = params.ts ?? nowIso();
+    const actor = revisionActorProvenance(params.user);
+    const tip = this.loadTip(db, params.entityType, params.entityId);
+
+    if (tip) {
+      db.update(entityRevisions)
+        .set({
+          replacedByUserId: actor.userId,
+          replacedByName: actor.name,
+          replacedBySource: actor.source,
+          replacedBySourceDetail: actor.sourceDetail,
+          replacedAt: ts,
+        })
+        .where(eq(entityRevisions.id, tip.id))
+        .run();
+    } else if (params.priorProse !== '') {
+      // No tip — prior content's author is unknowable. Record an honest legacy row.
+      db.insert(entityRevisions)
+        .values({
+          campaignId: params.campaignId,
+          entityType: params.entityType,
+          entityId: params.entityId,
+          snapshot: toJsonText({ [field]: params.priorProse }),
+          authorUserId: '',
+          authorName: '',
+          authorSource: 'human',
+          authorSourceDetail: '',
+          // Author/time of prior prose is unknowable; stamp createdAt with the close
+          // time so clients never parse an empty date string.
+          createdAt: ts,
+          replacedByUserId: actor.userId,
+          replacedByName: actor.name,
+          replacedBySource: actor.source,
+          replacedBySourceDetail: actor.sourceDetail,
+          replacedAt: ts,
+          restoredFromRevisionId: null,
+          authorshipKnown: false,
+        })
+        .run();
+    }
+
+    db.insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText({ [field]: params.nextProse }),
+        authorUserId: actor.userId,
+        authorName: actor.name,
+        authorSource: actor.source,
+        authorSourceDetail: actor.sourceDetail,
+        createdAt: ts,
+        replacedByUserId: '',
+        replacedByName: '',
+        replacedBySource: 'human',
+        replacedBySourceDetail: '',
+        replacedAt: null,
+        restoredFromRevisionId: params.restoredFromRevisionId ?? null,
+        authorshipKnown: true,
+      })
+      .run();
+  }
+
+  /**
+   * Commit an immutable prose version (issue #813).
+   *
+   * - Closes the current tip (if any) with the replacing actor/time — that tip already
+   *   carries the real version author/createdAt from when it was opened.
+   * - When there is no tip but `priorProse` is non-empty (entity existed before tip
+   *   tracking, or pre-#813 content), records a legacy closed version with
+   *   `authorshipKnown=false` so the UI labels it "Replaced by …".
+   * - Opens a new tip for `nextProse` attributed to `user` (human/AI/tool provenance).
+   *
+   * No-op when prior and next prose are identical. Callers invoke this on create
+   * (`priorProse: ''`) and on every committed prose change.
+   */
+  async commitProseVersion(params: {
+    entityType: RevisionEntityType;
+    entityId: number;
+    campaignId: number;
+    priorProse: string;
+    nextProse: string;
+    user: RequestUser;
+    restoredFromRevisionId?: number | null;
+  }): Promise<void> {
+    this.commitProseVersionOn(this.db, params);
+  }
+
+  /**
+   * @deprecated Prefer {@link commitProseVersion}. Kept as a thin adapter so any
+   * stray caller that only has prior prose still records a legacy closed version
+   * and opens an empty tip — not used by production entity services.
    */
   async record(params: {
     entityType: RevisionEntityType;
@@ -97,16 +314,84 @@ export class RevisionsService {
     priorProse: string;
     user: RequestUser;
   }): Promise<void> {
+    // Without next prose we cannot open a truthful tip; record prior as legacy-closed only.
+    if (params.priorProse === '') return;
     const field = PROSE_FIELD[params.entityType];
-    await this.db.insert(entityRevisions).values({
-      campaignId: params.campaignId,
-      entityType: params.entityType,
-      entityId: params.entityId,
-      snapshot: toJsonText({ [field]: params.priorProse }),
-      authorUserId: params.user.id,
-      authorName: params.user.name,
-      createdAt: nowIso(),
-    });
+    const ts = nowIso();
+    const actor = revisionActorProvenance(params.user);
+    const tip = this.loadTip(this.db, params.entityType, params.entityId);
+    if (tip) {
+      this.db
+        .update(entityRevisions)
+        .set({
+          replacedByUserId: actor.userId,
+          replacedByName: actor.name,
+          replacedBySource: actor.source,
+          replacedBySourceDetail: actor.sourceDetail,
+          replacedAt: ts,
+        })
+        .where(eq(entityRevisions.id, tip.id))
+        .run();
+      return;
+    }
+    this.db
+      .insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText({ [field]: params.priorProse }),
+        authorUserId: '',
+        authorName: '',
+        authorSource: 'human',
+        authorSourceDetail: '',
+        // Author/time of prior prose is unknowable; stamp createdAt with the close
+        // time so clients never parse an empty date string.
+        createdAt: ts,
+        replacedByUserId: actor.userId,
+        replacedByName: actor.name,
+        replacedBySource: actor.source,
+        replacedBySourceDetail: actor.sourceDetail,
+        replacedAt: ts,
+        restoredFromRevisionId: null,
+        authorshipKnown: false,
+      })
+      .run();
+  }
+
+  /** Record a structured prior snapshot (Session Zero safety charter — issue #881). */
+  async recordSnapshot(params: {
+    entityType: RevisionEntityType;
+    entityId: number;
+    campaignId: number;
+    snapshot: Record<string, unknown>;
+    user: RequestUser;
+  }): Promise<void> {
+    const ts = nowIso();
+    const actor = revisionActorProvenance(params.user);
+    // Prior Session Zero content has no author provenance on the entity row — attribute
+    // only the replacing editor and mark authorshipKnown=false (issue #881).
+    this.db
+      .insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText(params.snapshot),
+        authorUserId: '',
+        authorName: '',
+        authorSource: 'human',
+        authorSourceDetail: '',
+        createdAt: ts,
+        replacedByUserId: actor.userId,
+        replacedByName: actor.name,
+        replacedBySource: actor.source,
+        replacedBySourceDetail: actor.sourceDetail,
+        replacedAt: ts,
+        restoredFromRevisionId: null,
+        authorshipKnown: false,
+      })
+      .run();
   }
 
   /** Delete every revision for one entity — called by the owning service's remove() so a single entity delete leaves no orphan. */
@@ -116,47 +401,150 @@ export class RevisionsService {
       .where(and(eq(entityRevisions.entityType, entityType), eq(entityRevisions.entityId, entityId)));
   }
 
-  /** An entity's revisions, newest-first. */
+  /**
+   * An entity's superseded versions, newest-first. Omits the live tip (replacedAt
+   * null) — history is prior canon, not the current editor buffer.
+   */
   async listForEntity(entityType: RevisionEntityType, entityId: number): Promise<EntityRevision[]> {
     const rows = await this.db
       .select()
       .from(entityRevisions)
       .where(and(eq(entityRevisions.entityType, entityType), eq(entityRevisions.entityId, entityId)))
       .orderBy(desc(entityRevisions.id));
+    return rows.filter((r) => r.replacedAt != null).map((r) => this.toDomain(r));
+  }
+
+  /** Every revision row for a campaign (including live tips) — used by export/import (#813). */
+  async listForCampaign(campaignId: number): Promise<EntityRevision[]> {
+    const rows = await this.db
+      .select()
+      .from(entityRevisions)
+      .where(eq(entityRevisions.campaignId, campaignId))
+      .orderBy(asc(entityRevisions.id));
     return rows.map((r) => this.toDomain(r));
   }
 
   /** Load the current prose + campaignId + updatedAt for a target entity, or null if it's gone. */
-  private async loadTarget(
+  private loadTarget(
+    db: SyncDb,
     entityType: RevisionEntityType,
     entityId: number,
-  ): Promise<{ campaignId: number; prose: string; updatedAt: string } | null> {
-    switch (entityType) {
-      case 'session': {
-        const [row] = await this.db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.recap, updatedAt: row.updatedAt } : null;
-      }
-      case 'quest': {
-        const [row] = await this.db.select().from(quests).where(eq(quests.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'npc': {
-        const [row] = await this.db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'location': {
-        const [row] = await this.db.select().from(locations).where(eq(locations.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'faction': {
-        const [row] = await this.db.select().from(factions).where(eq(factions.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-      case 'note': {
-        const [row] = await this.db.select().from(notes).where(eq(notes.id, entityId)).limit(1);
-        return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
-      }
-    }
+  ): { campaignId: number; prose: string; updatedAt: string } | null {
+    // Per-type loaders keep table/column wiring in one place when new prose entities land.
+    const loaders: Record<
+      RevisionEntityType,
+      () => { campaignId: number; prose: string; updatedAt: string } | null
+    > = {
+      session: () => {
+        const row = db
+          .select({ campaignId: sessions.campaignId, prose: sessions.recap, updatedAt: sessions.updatedAt })
+          .from(sessions)
+          .where(eq(sessions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      quest: () => {
+        const row = db
+          .select({ campaignId: quests.campaignId, prose: quests.body, updatedAt: quests.updatedAt })
+          .from(quests)
+          .where(eq(quests.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      npc: () => {
+        const row = db
+          .select({ campaignId: npcs.campaignId, prose: npcs.body, updatedAt: npcs.updatedAt })
+          .from(npcs)
+          .where(eq(npcs.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      location: () => {
+        const row = db
+          .select({ campaignId: locations.campaignId, prose: locations.body, updatedAt: locations.updatedAt })
+          .from(locations)
+          .where(eq(locations.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      faction: () => {
+        const row = db
+          .select({ campaignId: factions.campaignId, prose: factions.body, updatedAt: factions.updatedAt })
+          .from(factions)
+          .where(eq(factions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      note: () => {
+        const row = db
+          .select({ campaignId: notes.campaignId, prose: notes.body, updatedAt: notes.updatedAt })
+          .from(notes)
+          .where(eq(notes.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      timeline_event: () => {
+        const row = db
+          .select({ campaignId: timelineEvents.campaignId, prose: timelineEvents.body, updatedAt: timelineEvents.updatedAt })
+          .from(timelineEvents)
+          .where(eq(timelineEvents.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      timeline_calendar: () => {
+        const row = db
+          .select({ campaignId: timelineCalendars.campaignId, prose: timelineCalendars.note, updatedAt: timelineCalendars.updatedAt })
+          .from(timelineCalendars)
+          .where(eq(timelineCalendars.campaignId, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      scheduled_session: () => {
+        const row = db
+          .select({ campaignId: scheduledSessions.campaignId, prose: scheduledSessions.notes, updatedAt: scheduledSessions.updatedAt })
+          .from(scheduledSessions)
+          .where(eq(scheduledSessions.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      session_zero: () => {
+        const row = db
+          .select({ campaignId: sessionZero.campaignId, prose: sessionZero.houseRules, updatedAt: sessionZero.updatedAt })
+          .from(sessionZero)
+          .where(eq(sessionZero.campaignId, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      comment: () => {
+        const row = db
+          .select({ campaignId: comments.campaignId, prose: comments.body, updatedAt: comments.updatedAt })
+          .from(comments)
+          .where(eq(comments.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+      story_beat: () => {
+        const row = db
+          .select({ campaignId: storyBeats.campaignId, prose: storyBeats.body, updatedAt: storyBeats.updatedAt })
+          .from(storyBeats)
+          .where(eq(storyBeats.id, entityId))
+          .limit(1)
+          .get();
+        return row ?? null;
+      },
+    };
+    return loaders[entityType]();
   }
 
   /**
@@ -178,42 +566,156 @@ export class RevisionsService {
     };
   }
 
-  /** Write an entity's prose column back and bump updatedAt. */
-  private async writeProse(entityType: RevisionEntityType, entityId: number, prose: string, ts: string): Promise<void> {
+  /**
+   * Write an entity's prose column back and bump updatedAt, compare-and-swapping on
+   * `currentUpdatedAt` (the version read inside the current transaction — not the
+   * caller's optimistic-concurrency token). Returns false when the row was
+   * concurrently changed (0 rows).
+   */
+  private writeProseCas(
+    db: SyncDb,
+    entityType: RevisionEntityType,
+    entityId: number,
+    prose: string,
+    ts: string,
+    currentUpdatedAt: string,
+  ): boolean {
+    const changesOf = (result: unknown): number =>
+      (result as { changes?: number }).changes ?? 0;
     switch (entityType) {
       case 'session':
-        await this.db.update(sessions).set({ recap: prose, updatedAt: ts }).where(eq(sessions.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(sessions)
+              .set({ recap: prose, updatedAt: ts })
+              .where(and(eq(sessions.id, entityId), eq(sessions.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'quest':
-        await this.db.update(quests).set({ body: prose, updatedAt: ts }).where(eq(quests.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(quests)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(quests.id, entityId), eq(quests.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'npc':
-        await this.db.update(npcs).set({ body: prose, updatedAt: ts }).where(eq(npcs.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(npcs)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(npcs.id, entityId), eq(npcs.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'location':
-        await this.db.update(locations).set({ body: prose, updatedAt: ts }).where(eq(locations.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(locations)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(locations.id, entityId), eq(locations.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'faction':
-        await this.db.update(factions).set({ body: prose, updatedAt: ts }).where(eq(factions.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(factions)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(factions.id, entityId), eq(factions.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'note':
-        await this.db.update(notes).set({ body: prose, updatedAt: ts }).where(eq(notes.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(notes)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(notes.id, entityId), eq(notes.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'timeline_event':
+        return (
+          changesOf(
+            db
+              .update(timelineEvents)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(timelineEvents.id, entityId), eq(timelineEvents.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'timeline_calendar':
+        return (
+          changesOf(
+            db
+              .update(timelineCalendars)
+              .set({ note: prose, updatedAt: ts })
+              .where(and(eq(timelineCalendars.campaignId, entityId), eq(timelineCalendars.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'scheduled_session':
+        return (
+          changesOf(
+            db
+              .update(scheduledSessions)
+              .set({ notes: prose, updatedAt: ts })
+              .where(and(eq(scheduledSessions.id, entityId), eq(scheduledSessions.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'comment':
+        return (
+          changesOf(
+            db
+              .update(comments)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(comments.id, entityId), eq(comments.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'story_beat':
+        return (
+          changesOf(
+            db
+              .update(storyBeats)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(storyBeats.id, entityId), eq(storyBeats.updatedAt, currentUpdatedAt)))
+              .run(),
+          ) > 0
+        );
+      case 'session_zero':
+        return false;
     }
   }
 
   /** The current campaignId for an entity (for the controller's access check), or throws 404 if it's gone. */
   async campaignIdForEntityOrThrow(entityType: RevisionEntityType, entityId: number): Promise<number> {
-    const target = await this.loadTarget(entityType, entityId);
+    const target = this.loadTarget(this.db, entityType, entityId);
     if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
     return target.campaignId;
   }
 
   /**
-   * Restore a prior revision: snapshot the CURRENT prose (so the restore is itself
-   * undoable), re-apply the revision's snapshot to the live entity as a new update, and
-   * record the restore in the audit log. The revision must belong to the named entity
-   * (a mismatched or foreign id 404s). Returns the fresh revision list.
+   * Restore a prior revision: close the current tip (so the restore is itself
+   * undoable), re-apply the revision's snapshot as a new tip attributed to the
+   * restorer and linked via `restoredFromRevisionId`, and record the restore in
+   * the audit log. The revision must belong to the named entity (a mismatched or
+   * foreign id 404s). Returns the fresh revision list (superseded versions only).
+   *
+   * Snapshot, entity prose update, new revision tip, and audit commit in one
+   * synchronous better-sqlite3 transaction (issue #513). Optional `expectedUpdatedAt`
+   * uses the same STALE_WRITE guard as prose PATCH; the prose write also CAS-updates
+   * on the live row's updatedAt so a concurrent edit cannot interleave mid-restore.
    */
   async restore(
     entityType: RevisionEntityType,
@@ -221,35 +723,162 @@ export class RevisionsService {
     revisionId: number,
     user: RequestUser,
     role: Role,
+    opts?: { expectedUpdatedAt?: string },
   ): Promise<{ entityType: RevisionEntityType; entityId: number; updatedAt: string; revisions: EntityRevision[] }> {
-    const [revision] = await this.db.select().from(entityRevisions).where(eq(entityRevisions.id, revisionId)).limit(1);
+    const revision = this.db
+      .select()
+      .from(entityRevisions)
+      .where(eq(entityRevisions.id, revisionId))
+      .limit(1)
+      .get();
     if (!revision || revision.entityType !== entityType || revision.entityId !== entityId) {
       throw new NotFoundException(`Revision ${revisionId} not found for ${entityType} ${entityId}`);
     }
-    const target = await this.loadTarget(entityType, entityId);
-    if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
 
     const field = PROSE_FIELD[entityType];
     const snapshot = fromJsonText<Record<string, string>>(revision.snapshot, {});
     const restoredProse = snapshot[field] ?? '';
-
     const ts = nowIso();
-    // Capture the current content as a new revision FIRST so restore is reversible, then
-    // re-apply the old snapshot. Only record when it actually differs — a restore-to-same
-    // is a no-op that shouldn't grow history.
-    if (target.prose !== restoredProse) {
-      await this.record({ entityType, entityId, campaignId: target.campaignId, priorProse: target.prose, user });
-    }
-    await this.writeProse(entityType, entityId, restoredProse, ts);
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: `${entityType}.revision.restore`,
-      entityType,
-      entityId,
-      campaignId: target.campaignId,
-      detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+    // better-sqlite3 serializes this synchronous callback: tip close, tip open, prose
+    // CAS, and audit either all land or all roll back. A throw (including 409) aborts.
+    this.db.transaction((tx) => {
+      if (entityType === 'session_zero') {
+        const current = tx
+          .select()
+          .from(sessionZero)
+          .where(eq(sessionZero.campaignId, entityId))
+          .limit(1)
+          .get();
+        if (!current) throw new NotFoundException(`session_zero ${entityId} not found`);
+        this.assertNotStale(current, opts?.expectedUpdatedAt);
+        const structured = fromJsonText<Record<string, unknown>>(revision.snapshot, {});
+        const currentSnapshot = {
+          lines: fromJsonText<string[]>(current.lines, []),
+          veils: fromJsonText<string[]>(current.veils, []),
+          safetyTools: fromJsonText<string[]>(current.safetyTools, []),
+          houseRules: current.houseRules,
+          toneAndExpectations: current.toneAndExpectations,
+        };
+        const restoredSnapshot = {
+          lines: Array.isArray(structured.lines) ? structured.lines.filter((value): value is string => typeof value === 'string') : [],
+          veils: Array.isArray(structured.veils) ? structured.veils.filter((value): value is string => typeof value === 'string') : [],
+          safetyTools: Array.isArray(structured.safetyTools)
+            ? structured.safetyTools.filter((value): value is string => typeof value === 'string')
+            : [],
+          houseRules: typeof structured.houseRules === 'string' ? structured.houseRules : '',
+          toneAndExpectations: typeof structured.toneAndExpectations === 'string' ? structured.toneAndExpectations : '',
+        };
+        if (JSON.stringify(currentSnapshot) !== JSON.stringify(restoredSnapshot)) {
+          const actor = revisionActorProvenance(user);
+          tx.insert(entityRevisions)
+            .values({
+              campaignId: current.campaignId,
+              entityType,
+              entityId,
+              snapshot: toJsonText(currentSnapshot),
+              authorUserId: actor.userId,
+              authorName: actor.name,
+              authorSource: actor.source,
+              authorSourceDetail: actor.sourceDetail,
+              createdAt: ts,
+              replacedByUserId: actor.userId,
+              replacedByName: actor.name,
+              replacedBySource: actor.source,
+              replacedBySourceDetail: actor.sourceDetail,
+              replacedAt: ts,
+              restoredFromRevisionId: null,
+              authorshipKnown: true,
+            })
+            .run();
+        }
+        const nextUpdated = nextUpdatedAt(current.updatedAt);
+        const changed =
+          tx
+            .update(sessionZero)
+            .set({
+              lines: toJsonText(restoredSnapshot.lines),
+              veils: toJsonText(restoredSnapshot.veils),
+              safetyTools: toJsonText(restoredSnapshot.safetyTools),
+              houseRules: restoredSnapshot.houseRules,
+              toneAndExpectations: restoredSnapshot.toneAndExpectations,
+              updatedAt: nextUpdated,
+            })
+            .where(and(eq(sessionZero.campaignId, entityId), eq(sessionZero.updatedAt, current.updatedAt)))
+            .run().changes ?? 0;
+        if (changed === 0) {
+          throw new ConflictException({
+            code: 'STALE_WRITE',
+            message:
+              'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
+              'Reload to get the latest version, then restore again.',
+            expectedUpdatedAt: current.updatedAt,
+            currentUpdatedAt: tx.select().from(sessionZero).where(eq(sessionZero.campaignId, entityId)).limit(1).get()?.updatedAt ?? current.updatedAt,
+          });
+        }
+        tx.insert(auditLog)
+          .values({
+            campaignId: current.campaignId,
+            actor: auditActor(user),
+            actorRole: role,
+            action: `${entityType}.revision.restore`,
+            entityType,
+            entityId,
+            detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+            createdAt: nextUpdated,
+          })
+          .run();
+        return;
+      }
+
+      const target = this.loadTarget(tx, entityType, entityId);
+      if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
+      this.assertNotStale(target, opts?.expectedUpdatedAt);
+
+      // Capture the current content as a closed version FIRST so restore is reversible, then
+      // open a new tip for the restored prose. Only record when it actually differs — a
+      // restore-to-same is a no-op that shouldn't grow history.
+      if (target.prose !== restoredProse) {
+        this.commitProseVersionOn(tx, {
+          entityType,
+          entityId,
+          campaignId: target.campaignId,
+          priorProse: target.prose,
+          nextProse: restoredProse,
+          user,
+          restoredFromRevisionId: revisionId,
+          ts,
+        });
+      }
+
+      // CAS baseline is the in-tx read (`target.updatedAt`), not the caller's token —
+      // assertNotStale already validated opts.expectedUpdatedAt against that baseline.
+      const casBaseline = target.updatedAt;
+      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, casBaseline)) {
+        // Row moved between the in-tx read and the CAS write (should be rare under
+        // better-sqlite3's write lock); surface the same STALE_WRITE shape as PATCH.
+        throw new ConflictException({
+          code: 'STALE_WRITE',
+          message:
+            'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
+            'Reload to get the latest version, then restore again.',
+          expectedUpdatedAt: casBaseline,
+          currentUpdatedAt: this.loadTarget(tx, entityType, entityId)?.updatedAt ?? casBaseline,
+        });
+      }
+
+      tx.insert(auditLog)
+        .values({
+          campaignId: target.campaignId,
+          actor: auditActor(user),
+          actorRole: role,
+          action: `${entityType}.revision.restore`,
+          entityType,
+          entityId,
+          detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+          createdAt: ts,
+        })
+        .run();
     });
 
     return { entityType, entityId, updatedAt: ts, revisions: await this.listForEntity(entityType, entityId) };

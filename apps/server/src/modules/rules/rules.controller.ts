@@ -1,6 +1,6 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import { listRulePackSources, type RuleEntryType } from '@campfire/schema';
+import { isOsrSlug, listRulePackSources, previewOsrMigration, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ServerRoles } from '../../common/decorators/server-roles.decorator';
 import { type RequestUser } from '../../common/user.types';
@@ -53,6 +53,34 @@ export class RulesController {
   }
 
   /**
+   * Preview how combat math would change when migrating a campaign between OSR variants
+   * (issue #765). Read-only — any authenticated user.
+   */
+  @Get('osr/migration-preview')
+  @ApiOperation({
+    summary: 'Preview OSR variant migration mechanics changes',
+    description:
+      'Any authenticated user. Compares native mechanics profiles (abilities, saves, AC, initiative) between two OSR rule-pack slugs.',
+  })
+  @ApiQuery({ name: 'from', required: true, description: 'Current rule-pack slug (e.g. basic-fantasy).' })
+  @ApiQuery({ name: 'to', required: true, description: 'Target rule-pack slug (e.g. old-school-essentials).' })
+  @ApiResponse({ status: 200, description: 'Migration preview with list of mechanics changes.' })
+  osrMigrationPreview(@Query('from') from: string, @Query('to') to: string) {
+    const fromSlug = from?.trim();
+    const toSlug = to?.trim();
+    if (!fromSlug || !toSlug) {
+      throw new BadRequestException('Both "from" and "to" query parameters are required');
+    }
+    if (!isOsrSlug(fromSlug)) {
+      throw new BadRequestException(`Unknown OSR variant slug: ${fromSlug}`);
+    }
+    if (!isOsrSlug(toSlug)) {
+      throw new BadRequestException(`Unknown OSR variant slug: ${toSlug}`);
+    }
+    return previewOsrMigration(fromSlug, toSlug);
+  }
+
+  /**
    * Kicks off an open-content import as a background job and returns 202 with the job (issue
    * #20). The UI polls GET packs/install-jobs/:id for per-section progress and the final
    * result; `outcome` on the completed job is 'created' (fresh) or 'updated' (incremental
@@ -66,8 +94,9 @@ export class RulesController {
     description:
       "Server admin only (packs are server-wide). `source` selects the importer: 'open5e' (D&D 5e, default), " +
       "'pf2e' (Pathfinder 2e), 'sf2e' (Starfinder 2e), 'pf1e' (Pathfinder 1e), 'starfinder', 'archmage' (13th Age), 'open-legend', " +
-      "or 'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'). Sections are " +
-      'validated per-source (a foreign section is rejected 400). open5e/pf2e/sf2e/open-legend have a wired live ' +
+      "'osr' (retroclones — pass `system` to pick the variant, e.g. 'basic-fantasy'), 'cepheus' (Cepheus Engine 2D6 sci-fi SRD), or " +
+      "'datasworn' (Ironsworn: Starforged, a CC-BY-4.0 reference-text pack). Sections are " +
+      'validated per-source (a foreign section is rejected 400). open5e/pf2e/sf2e/open-legend/datasworn/cepheus have a wired live ' +
       'open source and install with no `url`; pf1e/starfinder/archmage/osr have no open source (#346, see ' +
       'GET /rules/sources) — install those via POST /rules/packs/upload or pass an explicit `url`. Returns 202 with a job to poll.',
   })
@@ -95,12 +124,41 @@ export class RulesController {
     return this.rules.enqueueUploadInstall(body, user);
   }
 
+  @Get('packs/install-jobs')
+  @ApiOperation({ summary: 'List install-job history', description: 'Any authenticated user. Returns the newest persisted import jobs (default limit 50).' })
+  @ApiResponse({ status: 200, description: 'Import job history.' })
+  listJobs() {
+    return this.rules.listJobs();
+  }
+
   @Get('packs/install-jobs/:id')
   @ApiOperation({ summary: 'Get install-job status', description: 'Any authenticated user. Poll for per-section progress and the final result of an install/upload.' })
   @ApiResponse({ status: 200, description: 'Install job status.' })
   @ApiResponse({ status: 404, description: 'No such job (or it was pruned after completion).' })
   getJob(@Param('id') id: string) {
     return this.rules.getJobOrThrow(id);
+  }
+
+  @Post('packs/install-jobs/:id/cancel')
+  @HttpCode(HttpStatus.OK)
+  @ServerRoles('admin')
+  @ApiOperation({ summary: 'Cancel a running or queued install job', description: 'Server admin only.' })
+  @ApiResponse({ status: 200, description: 'Job cancelled.' })
+  @ApiResponse({ status: 400, description: 'Job is already in a terminal state.' })
+  @ApiResponse({ status: 404, description: 'No such job.' })
+  cancelJob(@Param('id') id: string) {
+    return this.rules.cancelJob(id);
+  }
+
+  @Post('packs/install-jobs/:id/retry')
+  @ServerRoles('admin')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Retry a failed or cancelled install job', description: 'Server admin only. Creates a new job with the same input.' })
+  @ApiResponse({ status: 202, description: 'Retry job accepted.' })
+  @ApiResponse({ status: 400, description: 'Job cannot be retried.' })
+  @ApiResponse({ status: 404, description: 'No such job.' })
+  retryJob(@Param('id') id: string, @CurrentUser() user: RequestUser) {
+    return this.rules.retryJob(id, user);
   }
 
   @Delete('packs/:id')
@@ -113,17 +171,42 @@ export class RulesController {
   }
 
   @Get('search')
-  @ApiOperation({ summary: 'Search rule entries', description: 'Any authenticated user. Searches across all installed packs unless `pack` is given.' })
+  @ApiOperation({
+    summary: 'Search rule entries',
+    description:
+      'Any authenticated user. Searches across all installed packs unless `pack` is given. ' +
+      'Returns a paginated page (`items`, `total`, `hasMore`, optional `nextCursor`) — default ' +
+      'page size 50, max 100. Empty `q` browses with stable name+id order; continue with `cursor` ' +
+      'from a previous `nextCursor` (issue #613).',
+  })
   @ApiQuery({ name: 'q', required: false, description: 'Free-text search against entry name/summary. Empty returns all (subject to type/pack filters).' })
-  @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
+  @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
-  @ApiResponse({ status: 200, description: 'Matching rule entries.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
+  @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
+  @ApiResponse({ status: 200, description: 'Paginated matching rule entries (`items`, `total`, `hasMore`, `nextCursor?`).' })
   search(
     @Query('q') q: string | undefined,
     @Query('type') type: string | undefined,
     @Query('pack') pack: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('cursor') cursor: string | undefined,
   ) {
-    return this.rules.search({ q: q ?? '', type: type as RuleEntryType | undefined, pack });
+    let parsedLimit: number | undefined;
+    if (limit !== undefined && limit !== '') {
+      const n = Number(limit);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new BadRequestException('`limit` must be a positive integer');
+      }
+      parsedLimit = n;
+    }
+    return this.rules.search({
+      q: q ?? '',
+      type: type as RuleEntryType | undefined,
+      pack,
+      cursor,
+      limit: parsedLimit,
+    });
   }
 
   @Get('entries/:id')

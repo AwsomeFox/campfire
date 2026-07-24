@@ -124,7 +124,6 @@ describe('Issue #24: admin storage management (e2e)', () => {
     });
 
     it('setting a quota below the incoming file size rejects the upload (413)', async () => {
-      const server = ctx.app.getHttpServer();
 
       const setRes = await adminAgent.put(`/api/v1/admin/storage/campaigns/${quotaCampaignId}/quota`).send({ quotaBytes: 10 });
       expect(setRes.status).toBe(200);
@@ -176,7 +175,6 @@ describe('Issue #24: admin storage management (e2e)', () => {
 
   describe('orphan cleanup', () => {
     it('detects and cleans a row-without-file (bytes deleted from disk under the row)', async () => {
-      const server = ctx.app.getHttpServer();
       const up = await adminAgent
         .post(`/api/v1/campaigns/${campaignId}/attachments`)
         .field('kind', 'image')
@@ -228,7 +226,6 @@ describe('Issue #24: admin storage management (e2e)', () => {
     // the orphan rows it drops, mirroring remove(). Otherwise the encounter keeps
     // pointing at a deleted row and renders a broken battle map.
     it('clears encounter.mapAttachmentId when cleaning an orphaned battle map row', async () => {
-      const server = ctx.app.getHttpServer();
       const up = await adminAgent
         .post(`/api/v1/campaigns/${campaignId}/attachments`)
         .field('kind', 'map')

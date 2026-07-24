@@ -5,7 +5,8 @@
  */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { CampaignSummary, QuestObjective, Role } from '@campfire/schema';
+import type { CampaignSummary, QuestObjective } from '@campfire/schema';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { api, API, ApiError } from '../../lib/api';
 import { EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
@@ -16,15 +17,14 @@ type QuestWithObjectives = CampaignSummary['quests'][number];
 export function QuestsCard({
   campaignId,
   quests,
-  role,
   onChange,
 }: {
   campaignId: number;
   quests: QuestWithObjectives[];
-  role: Role | null;
   onChange: () => void;
 }) {
-  const canTick = role === 'dm' || role === 'player';
+  const { isDm, canPlayerWrite } = useCampaignAccess();
+  const canTick = canPlayerWrite;
   const [pending, setPending] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const [localObjectives, setLocalObjectives] = useState<Record<number, boolean>>({});
@@ -159,7 +159,7 @@ export function QuestsCard({
       </div>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {roots.length === 0 ? (
-        <EmptyState icon="scroll-unfurled" title="No quests yet" hint={role === 'dm' ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
+        <EmptyState icon="scroll-unfurled" title="No quests yet" hint={isDm ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
       ) : (
         roots.map((q) => renderQuest(q))
       )}
