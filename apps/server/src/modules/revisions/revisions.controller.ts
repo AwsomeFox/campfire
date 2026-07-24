@@ -7,6 +7,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { RevisionEntityType } from '@campfire/schema';
@@ -105,17 +106,19 @@ export class RevisionsController {
     @Param('entityType') entityType: string,
     @Param('entityId', ParseIntPipe) entityId: number,
     @Param('revisionId', ParseIntPipe) revisionId: number,
+    @Query('expectedUpdatedAt') expectedUpdatedAt: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
     const type = this.parseEntityType(entityType);
+    const opts = expectedUpdatedAt ? { expectedUpdatedAt } : undefined;
     if (type === 'note') {
       // Restoring a note's prose is an edit — author-only, mirroring note update/delete.
       const { authorUserId, role } = await this.resolveNoteAccess(entityId, user, { write: true });
       if (authorUserId !== user.id) throw new ForbiddenException('Only the author may restore this note');
-      return this.revisions.restore(type, entityId, revisionId, user, role);
+      return this.revisions.restore(type, entityId, revisionId, user, role, opts);
     }
     const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId);
     const role = await this.access.requireRole(user, campaignId, 'dm');
-    return this.revisions.restore(type, entityId, revisionId, user, role);
+    return this.revisions.restore(type, entityId, revisionId, user, role, opts);
   }
 }

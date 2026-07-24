@@ -167,6 +167,22 @@ export class TimelineService {
   // ---------- calendar (one "current in-world date" per campaign) ----------
 
   /**
+   * Test seam for the calendar lazy-create race (#658). Exposed as a public
+   * method so the concurrency regression in db-concurrency.e2e-spec.ts can park
+   * both racers between the read and the insert — better-sqlite3 is synchronous,
+   * so without that coordination the two HTTP requests never actually race at
+   * the SQL layer. Mirrors the treasury's `readLazyRow` in InventoryService.
+   */
+  async readLazyRow(campaignId: number): Promise<typeof timelineCalendars.$inferSelect | undefined> {
+    const [row] = await this.db
+      .select()
+      .from(timelineCalendars)
+      .where(eq(timelineCalendars.campaignId, campaignId))
+      .limit(1);
+    return row;
+  }
+
+  /**
    * The calendar row is member-readable and carries no dmSecret, so no redaction.
    * A campaign that has never set a date reads as an empty default rather than 404 —
    * the timeline view always has a header to render.
@@ -190,13 +206,9 @@ export class TimelineService {
     role: Role,
     opts?: { expectedUpdatedAt?: string },
   ): Promise<TimelineCalendar> {
-    const [existing] = await this.db
-      .select()
-      .from(timelineCalendars)
-      .where(eq(timelineCalendars.campaignId, campaignId))
-      .limit(1);
+    const existing = await this.readLazyRow(campaignId);
 
-    let row: typeof timelineCalendars.$inferSelect;
+    let row: typeof timelineCalendars.$inferSelect | undefined;
     if (!existing) {
       if (opts?.expectedUpdatedAt && opts.expectedUpdatedAt !== MISSING_REVISION) {
         throw staleWrite(opts.expectedUpdatedAt, MISSING_REVISION);
@@ -211,15 +223,18 @@ export class TimelineService {
           createdAt: ts,
           updatedAt: ts,
         })
-        .onConflictDoNothing()
+        .onConflictDoNothing({ target: timelineCalendars.campaignId })
         .returning();
-      if (!inserted[0]) {
+      row = inserted[0];
+    }
+
+    if (!row) {
+      const prior = existing ?? (await this.readLazyRow(campaignId));
+      if (!prior) {
         const current = await this.getCalendar(campaignId);
         throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
       }
-      row = inserted[0];
-    } else {
-      const patch: Partial<typeof timelineCalendars.$inferInsert> = { updatedAt: nextUpdatedAt(existing.updatedAt) };
+      const patch: Partial<typeof timelineCalendars.$inferInsert> = { updatedAt: nextUpdatedAt(prior.updatedAt) };
       if (input.currentDate !== undefined) patch.currentDate = input.currentDate;
       if (input.note !== undefined) patch.note = input.note;
       const updated = await this.db
@@ -236,12 +251,12 @@ export class TimelineService {
         throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
       }
       row = updated[0];
-      if (input.note !== undefined && input.note !== existing.note) {
+      if (input.note !== undefined && input.note !== prior.note) {
         await this.revisions.commitProseVersion({
           entityType: 'timeline_calendar',
           entityId: campaignId,
           campaignId,
-          priorProse: existing.note,
+          priorProse: prior.note,
           nextProse: input.note,
           user,
         });
