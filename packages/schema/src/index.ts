@@ -726,6 +726,10 @@ export const StoryBeatCreate = StoryBeat.omit({ id: true, campaignId: true, arcI
 export type StoryBeatCreate = z.infer<typeof StoryBeatCreate>;
 export const StoryBeatUpdate = StoryBeatCreate.partial();
 export type StoryBeatUpdate = z.infer<typeof StoryBeatUpdate>;
+// Proposal payload for AI/manual beat creates (#1307). arcId pins the beat to an arc;
+// when omitted on approve, the server auto-creates a default arc.
+export const StoryBeatProposalCreate = StoryBeatCreate.extend({ arcId: Id.optional() });
+export type StoryBeatProposalCreate = z.infer<typeof StoryBeatProposalCreate>;
 export const StoryBeatStatusPatch = z.object({ status: BeatStatus });
 export type StoryBeatStatusPatch = z.infer<typeof StoryBeatStatusPatch>;
 
@@ -4754,6 +4758,8 @@ export const CoDmDraftRequest = z.object({
   prompt: z.string().min(1).max(20_000),
   // How many drafts to produce (npc/location/beat only; ignored for recap/encounter/map).
   count: z.number().int().min(1).max(10).optional(),
+  // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
+  arcId: Id.optional(),
 });
 export type CoDmDraftRequest = z.infer<typeof CoDmDraftRequest>;
 
@@ -4761,8 +4767,8 @@ export const CoDmDraftResult = z.object({
   target: CoDmDraftTarget,
   provider: z.string(), // which provider produced the draft ('noop' by default)
   model: z.string(), // the seat's model label
-  // The proposal entity type the drafts were filed under (npc/location/quest/session/
-  // encounter/map) — a beat files a quest, a recap files a session.
+  // The proposal entity type the drafts were filed under (npc/location/story_beat/session/
+  // encounter/map, etc.) — a beat files a story_beat, a recap files a session.
   entityType: z.string(),
   proposalIds: z.array(Id), // the pending proposals awaiting DM review
   proposals: z.array(Proposal),

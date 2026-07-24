@@ -84,6 +84,9 @@ export function DraftWithAiButton({
   target,
   label = 'Draft with AI',
   className = '!min-h-0 !py-1.5 text-xs',
+  arcId,
+  disabled = false,
+  disabledTitle,
   open: openProp,
   onOpenChange,
   showTrigger = true,
@@ -93,6 +96,10 @@ export function DraftWithAiButton({
   target: CoDmDraftTarget;
   label?: string;
   className?: string;
+  /** When target is `beat`, pin drafted beat(s) to this arc (#1307). */
+  arcId?: number;
+  disabled?: boolean;
+  disabledTitle?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   /** When false, only the dialog mounts (caller owns the trigger). */
@@ -120,12 +127,14 @@ export function DraftWithAiButton({
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={dialogId}
+          disabled={disabled}
+          title={disabled ? disabledTitle : undefined}
         >
           <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}
         </Btn>
       )}
       {open && (
-        <DraftWithAiModal id={dialogId} campaignId={campaignId} target={target} onClose={() => setOpen(false)} />
+        <DraftWithAiModal id={dialogId} campaignId={campaignId} target={target} arcId={arcId} onClose={() => setOpen(false)} />
       )}
     </>
   );
@@ -135,11 +144,13 @@ function DraftWithAiModal({
   id,
   campaignId,
   target,
+  arcId,
   onClose,
 }: {
   id: string;
   campaignId: number;
   target: CoDmDraftTarget;
+  arcId?: number;
   onClose: () => void;
 }) {
   const [prompt, setPrompt] = useState('');
@@ -178,6 +189,7 @@ function DraftWithAiModal({
     try {
       const body: Record<string, unknown> = { target, prompt: prompt.trim() };
       if (multi) body.count = count;
+      if (target === 'beat' && arcId != null) body.arcId = arcId;
       const draft = await api.post<CoDmDraftResult>(`${API}/campaigns/${campaignId}/ai-dm/draft`, body);
       setResult(draft);
     } catch (err) {

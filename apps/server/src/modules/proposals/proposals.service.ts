@@ -15,6 +15,8 @@ import {
   GenerateMapParams,
   FactionCreate,
   FactionUpdate,
+  StoryBeatProposalCreate,
+  StoryBeatUpdate,
   ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
@@ -32,6 +34,7 @@ import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
 import { FactionsService } from '../factions/factions.service';
+import { StorylinesService } from '../storylines/storylines.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
@@ -58,6 +61,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
   faction: FactionCreate.strict(),
+  story_beat: StoryBeatProposalCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
   // generate_map (#306). These are create-only in v1; the update entries below reuse the
@@ -72,6 +76,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
   faction: FactionUpdate.strict(),
+  story_beat: StoryBeatUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
 };
@@ -90,6 +95,7 @@ export class ProposalsService {
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
     private readonly factions: FactionsService,
+    private readonly storylines: StorylinesService,
   ) {}
 
   async listForCampaign(
@@ -202,6 +208,26 @@ export class ProposalsService {
             ),
           update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+        };
+      case 'story_beat':
+        return {
+          create: async (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) => {
+            const { arcId, ...beatInput } = StoryBeatProposalCreate.parse(payload);
+            let resolvedArcId = arcId;
+            if (resolvedArcId == null) {
+              const arc = await this.storylines.createArc(campaignId, { title: 'Story arc' }, user, role);
+              resolvedArcId = arc.id;
+            }
+            return this.storylines.addBeat(resolvedArcId, beatInput, user, role);
+          },
+          update: (id: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.storylines.updateBeat(
+              id,
+              payload as Parameters<StorylinesService['updateBeat']>[1],
+              user,
+              role,
+            ),
+          remove: (id: number, user: RequestUser, role: Role) => this.storylines.removeBeat(id, user, role),
         };
     }
   }
