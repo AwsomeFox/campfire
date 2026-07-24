@@ -914,8 +914,8 @@ function TranscriptRow({
         ...(entry.encounterId !== undefined ? { encounterId: entry.encounterId } : {}),
         at: entry.at,
       },
-      // Prefer the entry's preserved identity over the Table's active encounter (#825).
-      { campaignId, encounterId: entry.encounterId ?? encounterId },
+      // Keep the Table's active encounter as context so cross-encounter rows label correctly (#825).
+      { campaignId, encounterId },
     );
     const tone =
       chip.variant === 'error'

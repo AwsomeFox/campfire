@@ -84,7 +84,7 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
     case 'narration.message':
       if (typeof v.text !== 'string') return null;
       return { type, campaignId: v.campaignId as number, text: v.text, at: v.at as string };
-    case 'tool':
+    case 'tool': {
       if (typeof v.name !== 'string' || typeof v.isError !== 'boolean' || typeof v.proposed !== 'boolean') return null;
       // Optional encounterId (#825): accept a positive int, ignore malformed values so an
       // older/newer server never breaks the stream. Never accept names — identity is id-only.
@@ -101,6 +101,7 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
         ...(encounterId !== undefined ? { encounterId } : {}),
         at: v.at as string,
       };
+    }
     case 'turn.end':
       if (
         typeof v.stopReason !== 'string' ||

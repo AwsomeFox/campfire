@@ -141,7 +141,8 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       const at = Date.now();
       const next: AiDmLiveActivityState = { ...prev, lastToolEvent: event, lastToolAt: at };
       if (event.proposed) next.proposalFiledCount = prev.proposalFiledCount + 1;
-      if (toolResource(event.name) === 'encounter') {
+      const resource = toolResource(event.name);
+      if (resource === 'encounter' || resource === 'party') {
         next.encounterActivity = {
           chip: resolveToolActivity(event, {
             campaignId: event.campaignId,
