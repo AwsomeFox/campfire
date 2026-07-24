@@ -300,78 +300,137 @@ export class ScribeService implements OnApplicationBootstrap {
       });
     }
 
-    // 5. Resolve the provider (configured #310 -> #309 factory; else the injected seam).
-    const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
-    const budgetPerRun = (await this.getConfig(campaignId)).budgetPerRun;
-    const maxTokens = Math.min(budgetPerRun, remaining);
+    // 5. Serialize the authoritative budget re-check, provider call, and
+    // metering as one campaign-scoped spend operation (#1058). The lock helper
+    // releases in `finally`, including config/provider/metering failures.
+    type SpendResult =
+      | { ok: true; text: string; tokensUsed: number; providerName: string }
+      | {
+          ok: false;
+          status: 'over_budget' | 'failed';
+          detail: string;
+          tokensUsed?: number;
+          providerName?: string;
+        };
 
-    let text: string;
-    let tokensUsed: number;
-    let providerName: string;
-    try {
-      // Read consent at provider-call time (never from a persisted job/source
-      // snapshot) so revocation immediately removes a preference from future runs.
-      const aiSupports = await this.supportPreferences.listForAi(campaignId);
-      const supportGuidance = aiSupports.length > 0
-        ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
-        : '';
-      const system =
-        (seat.instructions ? `${seat.instructions}\n\n` : '') +
-        'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
-        'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
-        supportGuidance;
-      if (config) {
-        const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
-        const result = await provider.generate({
-          system,
-          messages: [{ role: 'user', content: draft }],
-          model: config.model,
-          maxTokens,
-        });
-        text = result.text;
-        tokensUsed = result.usage.totalTokens;
-        providerName = provider.name;
-      } else {
-        const result = await this.fallbackProvider.generate({
-          campaignId,
-          kind: 'recap',
-          prompt: draft,
-          instructions: system,
-          model: seat.model,
-          maxTokens,
-        });
-        text = result.narration;
-        tokensUsed = result.tokensUsed;
-        providerName = this.fallbackProvider.name;
+    const spend: SpendResult = await this.aiDm.withSpendLock(campaignId, async () => {
+      const seatAfterLock = await this.aiDm.getSeat(campaignId);
+      const remainingAfterLock = seatAfterLock.tokenBudget - seatAfterLock.tokensUsed;
+      if (remainingAfterLock <= 0) {
+        return {
+          ok: false,
+          status: 'over_budget',
+          detail: `budget exhausted after lock acquisition (${seatAfterLock.tokensUsed}/${seatAfterLock.tokenBudget})`,
+        };
       }
-    } catch (err) {
-      return this.record(campaignId, trigger, user, 'failed', {
-        detail: `provider error: ${err instanceof Error ? err.message : String(err)}`,
-        sourceHash,
-      });
-    }
 
-    tokensUsed = Math.max(0, Math.floor(tokensUsed));
-    if (!text.trim()) {
-      return this.record(campaignId, trigger, user, 'failed', { detail: 'provider returned empty recap', sourceHash, tokensUsed, provider: providerName });
-    }
+      // The pre-lock global-cap check above is only a fast failure. Re-check it
+      // while this campaign cannot spend so a waiting scribe never uses a stale pass.
+      try {
+        await this.aiDm.assertWithinServerTokenCap();
+      } catch (err) {
+        return {
+          ok: false,
+          status: 'over_budget',
+          detail: err instanceof Error ? err.message : 'server-wide AI token cap reached',
+        };
+      }
 
-    // 6. Meter the cost against the seat budget atomically (AiDmService.meterTurn's
-    //    #272 in-SQL clamp + turnCount/lastTurnAt for #1055). On failure, still record a job.
-    try {
-      await this.aiDm.meterTurn(campaignId, tokensUsed, {
-        actor: auditActor(user),
-        action: 'scribe.meter',
-        detail: `${trigger} metering (+${tokensUsed} tokens)`,
-      });
-    } catch (err) {
-      return this.record(campaignId, trigger, user, 'failed', {
-        detail: `metering error: ${err instanceof Error ? err.message : String(err)}`,
+      const config = await this.providerConfig.resolveEffectiveConfig(campaignId);
+      const budgetPerRun = (await this.getConfig(campaignId)).budgetPerRun;
+      const maxTokens = Math.min(budgetPerRun, remainingAfterLock);
+
+      let text: string;
+      let tokensUsed: number;
+      let providerName: string;
+      try {
+        // Read consent at provider-call time (never from a persisted job/source
+        // snapshot) so revocation immediately removes a preference from future runs.
+        const aiSupports = await this.supportPreferences.listForAi(campaignId);
+        const supportGuidance = aiSupports.length > 0
+          ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
+          : '';
+        const system =
+          (seatAfterLock.instructions ? `${seatAfterLock.instructions}\n\n` : '') +
+          'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
+          'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
+          supportGuidance;
+        if (config) {
+          const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
+          const result = await provider.generate({
+            system,
+            messages: [{ role: 'user', content: draft }],
+            model: config.model,
+            maxTokens,
+          });
+          text = result.text;
+          tokensUsed = result.usage.totalTokens;
+          providerName = provider.name;
+        } else {
+          const result = await this.fallbackProvider.generate({
+            campaignId,
+            kind: 'recap',
+            prompt: draft,
+            instructions: system,
+            model: seatAfterLock.model,
+            maxTokens,
+          });
+          text = result.narration;
+          tokensUsed = result.tokensUsed;
+          providerName = this.fallbackProvider.name;
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          status: 'failed',
+          detail: `provider error: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+
+      tokensUsed = Math.max(0, Math.floor(tokensUsed));
+
+      // Meter every completed provider call before releasing the mutex, even
+      // when it returned no prose. Empty output can still carry paid usage; if
+      // we skipped accounting here, the next spender could pass the same gate.
+      // The SQL clamp remains defense in depth against counter overshoot.
+      try {
+        await this.aiDm.meterTurn(campaignId, tokensUsed, {
+          actor: auditActor(user),
+          action: 'scribe.meter',
+          detail: `${trigger} metering (+${tokensUsed} tokens)`,
+        });
+      } catch (err) {
+        return {
+          ok: false,
+          status: 'failed',
+          detail: `metering error: ${err instanceof Error ? err.message : String(err)}`,
+          tokensUsed,
+          providerName,
+        };
+      }
+
+      if (!text.trim()) {
+        return {
+          ok: false,
+          status: 'failed',
+          detail: 'provider returned empty recap',
+          tokensUsed,
+          providerName,
+        };
+      }
+
+      return { ok: true, text, tokensUsed, providerName };
+    });
+
+    if (!spend.ok) {
+      return this.record(campaignId, trigger, user, spend.status, {
+        detail: spend.detail,
         sourceHash,
-        tokensUsed,
-        provider: providerName,
+        ...(spend.tokensUsed !== undefined ? { tokensUsed: spend.tokensUsed } : {}),
+        ...(spend.providerName !== undefined ? { provider: spend.providerName } : {}),
       });
     }
+    const { text, tokensUsed, providerName } = spend;
 
     // 7. Dry run: preview only — metered (a real call was made) but nothing filed.
     if (dryRun) {

@@ -121,6 +121,11 @@ export class AiProviderConfigService {
     return this.cachedKey;
   }
 
+  /** Drop the in-process key cache so the next decrypt reads fresh key material. */
+  invalidateCachedKey(): void {
+    this.cachedKey = null;
+  }
+
   // ── row access ─────────────────────────────────────────────────────────────
 
   private async serverRow(): Promise<Row | undefined> {

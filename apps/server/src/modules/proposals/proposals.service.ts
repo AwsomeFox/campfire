@@ -13,6 +13,8 @@ import {
   CharacterUpdate,
   EncounterGenerate,
   GenerateMapParams,
+  FactionCreate,
+  FactionUpdate,
   ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
@@ -60,6 +62,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   // same schema only to keep the Record total (an update proposal is never filed for them).
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
+  faction: FactionCreate.strict(),
 };
 const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   quest: QuestUpdate.strict(),
@@ -69,6 +72,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   character: CharacterUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
+  faction: FactionUpdate.strict(),
 };
 
 @Injectable()

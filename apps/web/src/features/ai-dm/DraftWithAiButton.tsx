@@ -26,7 +26,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 
 /** Targets that support drafting N items at once (mirrors CoDmService's MULTI_TARGETS). */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
 
 const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   npc: 'NPC',
@@ -35,6 +35,8 @@ const TARGET_NOUN: Record<CoDmDraftTarget, string> = {
   recap: 'session recap',
   encounter: 'encounter',
   map: 'map',
+  quest: 'quest',
+  faction: 'faction',
 };
 
 const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
@@ -44,6 +46,8 @@ const TARGET_PLURAL: Record<CoDmDraftTarget, string> = {
   recap: 'session recaps',
   encounter: 'encounters',
   map: 'maps',
+  quest: 'quests',
+  faction: 'factions',
 };
 
 const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
@@ -53,6 +57,8 @@ const TARGET_TITLE: Record<CoDmDraftTarget, string> = {
   recap: 'Draft a session recap with AI',
   encounter: 'Draft an encounter with AI',
   map: 'Draft a map with AI',
+  quest: 'Draft a quest with AI',
+  faction: 'Draft a faction with AI',
 };
 
 const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
@@ -61,7 +67,9 @@ const TARGET_EXAMPLE: Record<CoDmDraftTarget, string> = {
   beat: 'the next story beat once the party learns the mayor is a doppelganger',
   recap: 'summarize tonight: the ambush at the bridge, losing Kira, the truce offer',
   encounter: 'a level-3 ambush on a forest road, bandits with a hidden archer',
-  map: 'a small smugglers’ cave with a tidal chamber',
+  map: "a small smugglers' cave with a tidal chamber",
+  quest: "retrieve the stolen relic from the bandits' hideout before the full moon",
+  faction: 'a merchant guild that secretly controls the city council through debts',
 };
 
 /**
