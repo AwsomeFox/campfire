@@ -179,6 +179,8 @@ export const MACHINE_EXPORT_MODULES = [
   'inventory',
   'treasury',
   'revisions',
+  'scheduledSessions',
+  'sessionAttendance',
   'attachments',
   'attachmentsNote',
   'participantSupportNote',

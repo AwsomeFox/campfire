@@ -250,6 +250,9 @@ export const CampaignImport = z
     // Issue #813: immutable prose versions (author + replacer provenance) round-trip
     // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
     revisions: z.array(ImportedEntity).optional(),
+    // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
+    scheduledSessions: z.array(ImportedEntity).optional(),
+    sessionAttendance: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;

@@ -59,7 +59,8 @@ function buildService(entities: {
     { listForCampaignWithObjectives: async () => entities.quests ?? [] } as any,
     { listForCampaign: async () => entities.npcs ?? [] } as any,
     { listForCampaign: async () => entities.locations ?? [] } as any,
-    { listRecapsForCampaign: async () => entities.sessions ?? [] } as any,
+    { listRecapsForCampaign: async () => entities.sessions ?? [], listAttendanceForCampaign: async () => [] } as any,
+    { listForCampaign: async () => [] } as any,
     { listForCampaign: async () => entities.characters ?? [] } as any,
     // Pagination (#608): export walks the full set via listAllForCampaign.
     { listAllForCampaign: async () => entities.notes ?? [] } as any,

@@ -1728,6 +1728,9 @@ export class CampaignsService {
     const treasurySrc = asRec(doc.treasury);
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
+    // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
+    const scheduledSessionRows = asArr(doc.scheduledSessions);
+    const sessionAttendanceRows = asArr(doc.sessionAttendance);
 
     // Issue #1078: AI seat + scribe config from the export document.
     const aiSeatSrc = asRec(doc.aiSeat);
@@ -1877,6 +1880,39 @@ export class CampaignsService {
         // staged file, so the publish step renames the right staging entry to it.
         const pw = pendingWrites.find((p) => p.srcId === a.srcId);
         if (pw) pw.finalRelPath = path.join(String(cid), `${row.id}.${ext}`);
+      }
+
+      // Scheduled sessions (issue #436): planned game nights with RSVPs. Inserted
+      // early — no cross-refs to other entity types. RSVP userIds are install-local,
+      // so reassign to the importer while preserving userName/status/note provenance.
+      for (const s of scheduledSessionRows) {
+        const [row] = tx
+          .insert(scheduledSessions)
+          .values({
+            campaignId: cid,
+            scheduledAt: typeof s.scheduledAt === 'string' ? s.scheduledAt : ts,
+            durationMinutes: intOr(s.durationMinutes, 240),
+            title: str(s.title),
+            location: str(s.location),
+            notes: str(s.notes),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        for (const rsvp of asArr(s.rsvps)) {
+          tx.insert(sessionRsvps)
+            .values({
+              scheduledSessionId: row.id,
+              userId: importerId,
+              userName: str(rsvp.userName),
+              status: str(rsvp.status, 'maybe'),
+              note: str(rsvp.note),
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
       }
 
       // Factions (issue #266) before npcs — an npc's factionId points at one, so the
@@ -2105,44 +2141,22 @@ export class CampaignsService {
         if (srcId != null) sessionMap.set(srcId, row.id);
       }
 
-      const entityMaps: Record<string, Map<number, number>> = {
-        quest: questMap,
-        npc: npcMap,
-        location: locMap,
-        character: charMap,
-        session: sessionMap,
-      };
-      const noteMap = new Map<number, number>();
-      for (const n of noteRows) {
-        let entityType = typeof n.entityType === 'string' ? n.entityType : null;
-        let entityId: number | null = null;
-        const entitySrc = intOrNull(n.entityId);
-        if (entityType === 'campaign') {
-          entityId = cid;
-        } else if (entityType != null && entitySrc != null) {
-          entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
-          if (entityId == null) entityType = null; // dangling link in the source — drop it
-        }
-        const noteSrcId = intOrNull(n.id);
-        const [noteRow] = tx
-          .insert(notes)
+      // Session attendance (issue #436): which characters played each session.
+      // Requires sessionMap + charMap; dangling refs are dropped.
+      for (const a of sessionAttendanceRows) {
+        const sessionSrc = intOrNull(a.sessionId);
+        const charSrc = intOrNull(a.characterId);
+        const sessionId = sessionSrc != null ? sessionMap.get(sessionSrc) : undefined;
+        const characterId = charSrc != null ? charMap.get(charSrc) : undefined;
+        if (sessionId == null || characterId == null) continue;
+        tx.insert(sessionAttendees)
           .values({
-            campaignId: cid,
-            authorUserId: importerId, // author ids are per-install — the importer owns imported notes
-            authorName: str(n.authorName),
-            kind: str(n.kind, 'note'),
-            visibility: str(n.visibility, 'private'),
-            entityType,
-            entityId,
-            body: str(n.body),
-            resolved: boolOf(n.resolved),
-            resolvedNote: str(n.resolvedNote),
+            sessionId,
+            characterId,
+            characterName: str(a.characterName),
             createdAt: ts,
-            updatedAt: ts,
           })
-          .returning()
-          .all();
-        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
+          .run();
       }
 
       const encounterMap = new Map<number, number>();
@@ -2233,6 +2247,54 @@ export class CampaignsService {
             tx.update(encounters).set({ currentCombatantId }).where(eq(encounters.id, row.id)).run();
           }
         }
+      }
+
+      // Notes (issue #436): inserted AFTER encounters so faction + encounter anchors
+      // remap correctly. Whisper recipientUserId is install-local — cleared on import.
+      const entityMaps: Record<string, Map<number, number>> = {
+        quest: questMap,
+        npc: npcMap,
+        faction: factionMap,
+        location: locMap,
+        character: charMap,
+        session: sessionMap,
+        encounter: encounterMap,
+      };
+      const noteMap = new Map<number, number>();
+      for (const n of noteRows) {
+        let entityType = typeof n.entityType === 'string' ? n.entityType : null;
+        let entityId: number | null = null;
+        const entitySrc = intOrNull(n.entityId);
+        if (entityType === 'campaign') {
+          entityId = cid;
+        } else if (entityType != null && entitySrc != null) {
+          entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
+          if (entityId == null) entityType = null; // dangling link in the source — drop it
+        }
+        const noteSrcId = intOrNull(n.id);
+        const rawVisibility = str(n.visibility, 'private');
+        // Whisper targets are install-local — downgrade to dm_shared so the row stays valid.
+        const visibility = rawVisibility === 'whisper' ? 'dm_shared' : rawVisibility;
+        const [noteRow] = tx
+          .insert(notes)
+          .values({
+            campaignId: cid,
+            authorUserId: importerId, // author ids are per-install — the importer owns imported notes
+            authorName: str(n.authorName),
+            kind: str(n.kind, 'note'),
+            visibility,
+            recipientUserId: null,
+            entityType,
+            entityId,
+            body: str(n.body),
+            resolved: boolOf(n.resolved),
+            resolvedNote: str(n.resolvedNote),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
       }
 
       // Discussion history (issue #787): rebuild anchors and one-level parent
