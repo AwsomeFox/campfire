@@ -178,6 +178,18 @@ export interface AiDmSessionState {
   detached?: boolean;
 }
 
+/** Session fields used only for internal execution guard bookkeeping, never exposed to members. */
+type AiDmSessionPrivateGuardFields = 'secretReadApprovals' | 'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'detached';
+
+/** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
+export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
+
+/** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
+export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
+  const { secretReadApprovals: _approvals, driverGeneratedMapIds: _mapIds, generateMapCallsThisTurn: _mapCalls, detached: _detached, ...rest } = session;
+  return rest;
+}
+
 /**
  * Safety bound on the number of concurrently-active (unconsumed) secret-read approvals a single
  * campaign session may hold (#1059). Consumed approvals are deleted on use, and same-{tool,entityId}
@@ -369,7 +381,7 @@ export function guardDriverLivePlayArgs(
         message: `The driver may call generate_map at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
       };
     }
-    return { ok: true, args };
+    return { ok: true, args: { ...args } };
   }
 
   if (toolName === 'update_encounter') {
@@ -392,7 +404,7 @@ export function guardDriverLivePlayArgs(
     return { ok: true, args: sanitized };
   }
 
-  return { ok: true, args };
+  return { ok: true, args: { ...args } };
 }
 
 /**
@@ -1192,8 +1204,9 @@ export class AiDriverService {
           toolErrored = true;
           continue;
         }
+        const guardedArgs = { ...liveGuard.args };
         for (const key of Object.keys(args)) delete args[key];
-        Object.assign(args, liveGuard.args);
+        Object.assign(args, guardedArgs);
         if (call.name === 'generate_map') noteDriverGenerateMapCall(session);
       }
 

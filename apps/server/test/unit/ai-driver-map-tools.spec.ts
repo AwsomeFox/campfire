@@ -7,6 +7,7 @@ import {
   recordDriverGeneratedMap,
   resetDriverTurnCounters,
   type AiDmSessionState,
+  toPublicAiDmSessionState,
 } from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
@@ -64,10 +65,9 @@ describe('AI Driver battle-map tools (#488)', () => {
     expect(isDriverToolAllowed(writeTool('update_attachment'))).toBe(false);
   });
 
-  it('exercises the full exploration -> combat map path (generate -> update -> reveal -> begin)', () => {
-    for (const name of ['generate_map', 'update_encounter', 'reveal_map_region', 'begin_encounter']) {
-      expect(isDriverToolAllowed(writeTool(name))).toBe(true);
-    }
+  it('keeps the generate -> update -> reveal -> begin tools all reachable on the live-play allow-list', () => {
+    const path = ['generate_map', 'update_encounter', 'reveal_map_region', 'begin_encounter'];
+    expect(path.every((name) => isDriverToolAllowed(writeTool(name)))).toBe(true);
   });
 });
 
@@ -161,5 +161,54 @@ describe('guardDriverLivePlayArgs — battle-map execution guards (#488)', () =>
     expect(s.driverGeneratedMapIds).toEqual([55]);
     const result = guardDriverLivePlayArgs('update_encounter', { encounterId: 1, mapAttachmentId: 55 }, s);
     expect(result.ok).toBe(true);
+  });
+
+  it('preserves generate_map args through execution-time clear+assign rewriting', () => {
+    const s = session();
+    const args: Record<string, unknown> = { campaignId: 1, kind: 'cave', style: 'ruins' };
+    const liveGuard = guardDriverLivePlayArgs('generate_map', args, s);
+    expect(liveGuard.ok).toBe(true);
+    if (liveGuard.ok) {
+      for (const key of Object.keys(args)) delete args[key];
+      Object.assign(args, liveGuard.args);
+      expect(args).toEqual({ campaignId: 1, kind: 'cave', style: 'ruins' });
+    }
+  });
+});
+
+describe('toPublicAiDmSessionState', () => {
+  it('omits internal guard bookkeeping fields from member-visible session payloads', () => {
+    const session: AiDmSessionState = {
+      campaignId: 1,
+      status: 'idle',
+      state: 'running',
+      scene: null,
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: [],
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+      secretReadApprovals: { 'get_npc:1': { tool: 'get_npc', entityId: 1, grantedBy: 'dm', grantedAt: 'now', note: null, consumed: false } },
+      driverGeneratedMapIds: [42],
+      generateMapCallsThisTurn: 1,
+      detached: true,
+    };
+    expect(toPublicAiDmSessionState(session)).toEqual({
+      campaignId: 1,
+      status: 'idle',
+      state: 'running',
+      scene: null,
+      lastNarration: null,
+      lastTurnAt: null,
+      turnCount: 0,
+      stuck: null,
+      levers: [],
+      actingDm: null,
+      vote: null,
+      takeoverRequestedBy: null,
+    });
   });
 });
