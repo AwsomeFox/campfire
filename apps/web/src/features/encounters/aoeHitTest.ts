@@ -11,6 +11,12 @@ import { cellSizePx, mapPercentToLayerPx, type MapPercent, type Rect } from './m
 /** Canonical reference map when viewport size is unknown (square, 1000px wide). */
 export const DEFAULT_AOE_MAP_RECT: Rect = { left: 0, top: 0, width: 1000, height: 1000 };
 
+export type AoeHitLayout = {
+  mapRect: Rect;
+  /** Calibrated cell width in px — must match BattleMap AoE rendering. */
+  cellPx: number;
+};
+
 export type AoeHitTestContext = {
   /** Cell edge as percent of map width. */
   gridSize: number;
@@ -18,6 +24,8 @@ export type AoeHitTestContext = {
   gridScale: number;
   /** Rendered map rect; defaults to {@link DEFAULT_AOE_MAP_RECT}. */
   mapRect?: Rect;
+  /** When set, overrides gridSize-derived cell size (calibrated grid). */
+  cellPx?: number;
 };
 
 type Point = { x: number; y: number };
@@ -54,6 +62,7 @@ export function aoePolygonVertices(
   const px = -dy;
   const py = dx;
   if (shape === 'cone') {
+    // D&D 5e cone: 90° quadrant; widthPx is unused (line thickness only).
     const fx = ox + dx * lengthPx;
     const fy = oy + dy * lengthPx;
     const half = lengthPx / 2;
@@ -82,7 +91,7 @@ function resolveMapRect(ctx: AoeHitTestContext): Rect {
 export function tokenInAoe(tokenPos: MapPercent, aoe: AoeTemplate, ctx: AoeHitTestContext): boolean {
   if (!(ctx.gridSize > 0) || !(ctx.gridScale > 0)) return false;
   const mapRect = resolveMapRect(ctx);
-  const cellPx = cellSizePx(ctx.gridSize, mapRect.width);
+  const cellPx = ctx.cellPx ?? cellSizePx(ctx.gridSize, mapRect.width);
   if (!(cellPx > 0)) return false;
 
   const { x: ox, y: oy } = mapPercentToLayerPx({ x: aoe.x, y: aoe.y }, mapRect);

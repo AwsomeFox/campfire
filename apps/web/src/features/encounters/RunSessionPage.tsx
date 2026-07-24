@@ -81,7 +81,7 @@ import {
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
-import { combatantsInAoe, type AoeHitTestContext } from './aoeHitTest';
+import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
   calibrationToPx,
   computeContainedRect,
@@ -622,6 +622,8 @@ export default function RunSessionPage() {
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
+  const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
     combatantId: number;
@@ -873,6 +875,10 @@ export default function RunSessionPage() {
     },
     [],
   );
+
+  const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
+    setAoeHitLayout(layout);
+  }, []);
 
   const reportError = useCallback((err: unknown) => {
     setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
@@ -1499,6 +1505,7 @@ export default function RunSessionPage() {
           onPing={sendPing}
           pings={pings}
           onError={surfaceActionError}
+          onAoeHitLayoutChange={onAoeHitLayoutChange}
         />
       )}
 
@@ -1523,8 +1530,14 @@ export default function RunSessionPage() {
             encounter.gridSize != null &&
             encounter.gridSize > 0 &&
             encounter.gridScale != null &&
-            encounter.gridScale > 0
-              ? { gridSize: encounter.gridSize, gridScale: encounter.gridScale }
+            encounter.gridScale > 0 &&
+            aoeHitLayout
+              ? {
+                  gridSize: encounter.gridSize,
+                  gridScale: encounter.gridScale,
+                  mapRect: aoeHitLayout.mapRect,
+                  cellPx: aoeHitLayout.cellPx,
+                }
               : null
           }
           isStarfinder={isStarfinder}
@@ -1533,10 +1546,16 @@ export default function RunSessionPage() {
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            for (const combatantId of combatantIds) {
-              hpDelta.mutate({ combatantId, delta });
-            }
-            setPendingApply(null);
+            void (async () => {
+              for (const combatantId of combatantIds) {
+                try {
+                  await hpDelta.mutateAsync({ combatantId, delta });
+                } catch {
+                  return;
+                }
+              }
+              setPendingApply(null);
+            })();
           }}
           onDismiss={() => setPendingApply(null)}
         />
@@ -1960,6 +1979,7 @@ function BattleMap({
   onPing,
   pings,
   onError,
+  onAoeHitLayoutChange,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -1983,6 +2003,8 @@ function BattleMap({
   onPing: (x: number, y: number) => void;
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
+  /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
+  onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
@@ -2150,6 +2172,10 @@ function BattleMap({
   const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
   const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
   const canCalibrate = gridOn && !!mapRect; // calibration acts on an enabled grid + loaded map
+
+  useEffect(() => {
+    onAoeHitLayoutChange?.(mapRect && cellPx > 0 ? { mapRect, cellPx } : null);
+  }, [mapRect, cellPx, onAoeHitLayoutChange]);
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
@@ -3392,25 +3418,25 @@ function ApplyDamageBar({
           </span>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', width: '100%' }}>
             {aoeTemplates.map((t) => {
-              const inTemplate = combatantsInAoe(targets, t, aoeHitContext);
-              const label = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
+              const affectedCombatants = combatantsInAoe(targets, t, aoeHitContext);
+              const buttonLabel = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
               return (
                 <button
                   key={t.id}
                   type="button"
                   className="btn btn-secondary cf-target-44"
                   style={{ fontSize: 12, padding: '0 12px' }}
-                  disabled={inTemplate.length === 0}
+                  disabled={affectedCombatants.length === 0}
                   title={
-                    inTemplate.length === 0
+                    affectedCombatants.length === 0
                       ? `No editable targets inside this ${t.shape} template`
-                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${inTemplate.map((c) => c.name).join(', ')}`
+                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
                   }
                   data-testid={`apply-damage-aoe-${t.id}`}
-                  onClick={() => onApplyToAll(inTemplate.map((c) => c.id), delta)}
+                  onClick={() => onApplyToAll(affectedCombatants.map((c) => c.id), delta)}
                 >
-                  {label}
-                  {inTemplate.length > 0 ? ` (${inTemplate.length})` : ''}
+                  {buttonLabel}
+                  {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
                 </button>
               );
             })}

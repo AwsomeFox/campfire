@@ -66,6 +66,27 @@ test.describe('tokenInAoe (issue #626)', () => {
     expect(tokenInAoe({ x: 40, y: 10 }, template, CTX)).toBe(false);
   });
 
+  test('uses calibrated cellPx when provided', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    const defaultCell = { ...CTX };
+    const calibrated = { ...CTX, cellPx: 150 };
+    // Larger calibrated cells widen the hit radius.
+    expect(tokenInAoe({ x: 50, y: 25 }, template, defaultCell)).toBe(false);
+    expect(tokenInAoe({ x: 50, y: 25 }, template, calibrated)).toBe(true);
+  });
+
+  test('letterboxed mapRect affects Y-axis hit detection', () => {
+    const template = aoe({ shape: 'circle', x: 50, y: 50, sizeFt: 10 });
+    const squareFallback = { ...CTX, mapRect: DEFAULT_AOE_MAP_RECT };
+    const letterbox: AoeHitTestContext = {
+      ...CTX,
+      mapRect: { left: 0, top: 219, width: 1000, height: 562 },
+    };
+    // Square fallback exaggerates Y distance from center on letterboxed maps.
+    expect(tokenInAoe({ x: 50, y: 25 }, template, squareFallback)).toBe(false);
+    expect(tokenInAoe({ x: 50, y: 25 }, template, letterbox)).toBe(true);
+  });
+
   test('returns false when grid context is invalid', () => {
     const template = aoe({ shape: 'circle' });
     expect(tokenInAoe({ x: 50, y: 50 }, template, { gridSize: 0, gridScale: 5 })).toBe(false);
@@ -110,5 +131,7 @@ test.describe('RunSessionPage wiring (issue #626)', () => {
     expect(source).toMatch(/apply-damage-aoe-/);
     expect(source).toMatch(/onApplyToAll/);
     expect(source).toMatch(/aoeTemplates=/);
+    expect(source).toMatch(/onAoeHitLayoutChange/);
+    expect(source).toMatch(/aoeHitLayout/);
   });
 });
