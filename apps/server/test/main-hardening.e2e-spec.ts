@@ -59,7 +59,7 @@ describe('main.ts hardening: helmet + body limit (e2e)', () => {
     expect(res.headers['strict-transport-security']).toBeDefined();
   });
 
-  it('a JSON body under 1mb is accepted', async () => {
+  it('a JSON body under 16mb is accepted', async () => {
     const server = app.getHttpServer();
     const res = await request(server)
       .post('/api/v1/campaigns')
@@ -68,16 +68,16 @@ describe('main.ts hardening: helmet + body limit (e2e)', () => {
     expect(res.status).toBe(201);
   });
 
-  it('a JSON body over 1mb is rejected (413)', async () => {
+  it('a JSON body over 16mb is rejected (413)', async () => {
     const server = app.getHttpServer();
     const res = await request(server)
       .post('/api/v1/campaigns')
       .set({ 'x-dev-role': 'dm', 'x-dev-user': 'hardening-dm' })
-      .send({ name: 'Big body campaign', description: 'x'.repeat(2 * 1024 * 1024) });
+      .send({ name: 'Big body campaign', description: 'x'.repeat(17 * 1024 * 1024) });
     expect(res.status).toBe(413);
   });
 
-  it('multipart attachment upload (well under 1mb) still works — express.json limit does not affect multer', async () => {
+  it('multipart attachment upload (well under 16mb) still works — express.json limit does not affect multer', async () => {
     const server = app.getHttpServer();
     const campRes = await request(server)
       .post('/api/v1/campaigns')

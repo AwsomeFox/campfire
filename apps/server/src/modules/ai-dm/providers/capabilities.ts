@@ -1,0 +1,56 @@
+/**
+ * Per-provider-type CAPABILITIES table (issue #410). The vendor-neutral provider layer
+ * (#309) already tells us WHICH adapter backs a config; this declares what each adapter
+ * family can actually DO, so genuine AI map generation can route honestly:
+ *
+ *   - a text-only provider (Anthropic today) is NEVER asked to "generate an image" and
+ *     have its prose passed off as one — it produces a structured BLUEPRINT that Campfire's
+ *     own procedural renderer draws (labeled as such);
+ *   - an OpenAI-compatible endpoint CAN be asked for a real text-to-image render;
+ *   - the deterministic `mock` provider declares no image capability, so tests exercise the
+ *     honest fallback path unless a dedicated fake IMAGE provider is injected.
+ *
+ * The concrete table lives here (server side) rather than in the schema because the runtime
+ * `AiProviderType` union is broader than the config enum (`custom`/`noop` exist at runtime).
+ * The SHAPE (`AiProviderCapabilities`) is the shared schema contract surfaced to clients.
+ */
+
+import type { AiProviderCapabilities } from '@campfire/schema';
+import type { AiProviderType } from './ai-provider';
+
+/**
+ * Static capability declarations per provider type. `imageGeneration` gates whether the
+ * map generator will attempt a real render through {@link createAiImageProvider}; when
+ * false, generation falls back to the procedural-blueprint path (still honest, still useful).
+ *
+ * NOTE these are the DEFAULTS for the adapter family. A concrete deployment can point an
+ * OpenAI-compatible `baseUrl` at an endpoint that lacks an images route; that surfaces as a
+ * runtime provider error which the router treats as "image generation unavailable" and
+ * degrades to the blueprint fallback — capability advertisement is a hint, not a guarantee.
+ */
+const CAPABILITIES: Record<AiProviderType, AiProviderCapabilities> = {
+  // OpenAI-compatible: chat + tools + a text-to-image endpoint (/images/generations),
+  // and image edits/inpaint on the same wire.
+  openai: { text: true, toolCalling: true, imageGeneration: true, imageEditing: true },
+  // Anthropic: strong text + tools, but NO first-party image-generation endpoint. This is
+  // the crux of #410's honesty requirement — Anthropic maps route through the blueprint path.
+  anthropic: { text: true, toolCalling: true, imageGeneration: false, imageEditing: false },
+  // Gemini: text + tools; image generation via a distinct API surface we do not implement
+  // here, so declared false (routes through the blueprint fallback) rather than faking it.
+  gemini: { text: true, toolCalling: true, imageGeneration: false, imageEditing: false },
+  // Deterministic offline mock: text only. Image-capable tests inject a fake IMAGE provider.
+  mock: { text: true, toolCalling: true, imageGeneration: false, imageEditing: false },
+  // No-op scaffold / fully custom DI binding: assume text-only unless a real provider is bound.
+  noop: { text: true, toolCalling: false, imageGeneration: false, imageEditing: false },
+  custom: { text: true, toolCalling: true, imageGeneration: false, imageEditing: false },
+};
+
+/** The declared capabilities for a provider type (issue #410). */
+export function providerCapabilities(type: AiProviderType): AiProviderCapabilities {
+  return CAPABILITIES[type] ?? { text: true, toolCalling: false, imageGeneration: false, imageEditing: false };
+}
+
+/** Convenience: does this provider type advertise text-to-image generation? */
+export function supportsImageGeneration(type: AiProviderType): boolean {
+  return providerCapabilities(type).imageGeneration === true;
+}

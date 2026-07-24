@@ -42,6 +42,7 @@ import {
 } from './formFieldLabels';
 import { Btn } from './ui';
 import { DraftWithAiButton } from '../features/ai-dm/DraftWithAiButton';
+import { AiMapButton } from '../features/ai-dm/AiMapWizard';
 import { useAuth } from '../app/auth';
 import { useAiDmSeat } from '../lib/query';
 import { useDisclosure } from './useDisclosure';
@@ -154,6 +155,10 @@ export function GetAMapPanel({
             {generatorOpen ? 'Close generator' : '✨ Generate a map'}
           </button>
         )}
+        {/* Genuine AI map generation (issue #410): capability-routed image/procedural
+            candidates with cost/readiness + honest provenance. Available to any DM (falls
+            back to the offline procedural renderer when no image provider is configured). */}
+        {isDm && <AiMapButton campaignId={campaignId} onAttached={onImported} />}
         {canDraftWithAi && <DraftWithAiButton campaignId={campaignId} target="map" />}
       </div>
 

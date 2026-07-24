@@ -15,6 +15,7 @@ import {
   FactionCreate,
   EncounterGenerate,
   GenerateMapParams,
+  normalizeMapTheme,
 } from '@campfire/schema';
 import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -332,12 +333,19 @@ export class CoDmService {
             ...raw,
             seed: typeof raw.seed === 'number' ? raw.seed : mintNumericSeed(),
           }) as Record<string, unknown>;
-        case 'map':
-          // Seed pinned so approve re-runs the identical generator (#306).
+        case 'map': {
+          // Seed pinned so approve re-runs the identical generator (#306). The model may
+          // hand back a FREE-FORM theme ("volcanic", "sylvan") that isn't in the procedural
+          // MapTheme enum; normalize it to the nearest palette (or drop it) so a creative
+          // theme no longer hard-fails GenerateMapParams.parse with a 422 (issue #410).
+          const { theme: rawTheme, ...restMap } = raw;
+          const normalizedTheme = normalizeMapTheme(rawTheme);
           return GenerateMapParams.parse({
-            ...raw,
+            ...restMap,
+            ...(normalizedTheme ? { theme: normalizedTheme } : {}),
             seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
           }) as Record<string, unknown>;
+        }
       }
     } catch (err) {
       throw new UnprocessableEntityException(
