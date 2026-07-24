@@ -188,8 +188,21 @@ export class ProposalsService {
           update: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
         };
+      // Co-DM (issue #1056): factions are proposable for drafting but create-only in v1 —
+      // captureAuthorizedSnapshot returns null (no prior-row diff), so update/delete must
+      // reject loudly rather than routing through the full FactionsService.
       case 'faction':
-        return this.factions;
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.factions.create(
+              campaignId,
+              payload as Parameters<FactionsService['create']>[1],
+              user,
+              role,
+            ),
+          update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+          remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+        };
     }
   }
 

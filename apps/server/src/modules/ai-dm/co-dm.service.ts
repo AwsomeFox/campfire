@@ -350,8 +350,10 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
   beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
-  quest: '{"title": string (required), "body"?: string (markdown), "status"?: "active"|"completed"|"failed", "dmSecret"?: string}',
-  faction: '{"name": string (required), "body"?: string (markdown), "standing"?: string, "dmSecret"?: string}',
+  quest:
+    '{"title": string (required), "body"?: string (markdown), "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
+  faction:
+    '{"name": string (required), "body"?: string (markdown), "kind"?: string, "standing"?: "hostile"|"unfriendly"|"neutral"|"friendly"|"allied", "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
