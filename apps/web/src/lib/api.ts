@@ -9,6 +9,7 @@
  */
 
 import { noteUnauthorizedResponse } from './sessionExpiry';
+import { registerInFlightAction } from './reloadGuard';
 
 /** A single field-level validation failure parsed from the server's `errors[]`. */
 export interface FieldError {
@@ -117,49 +118,57 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
 
-  const res = await fetch(path, {
-    ...init,
-    credentials: 'include',
-    headers,
-    body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
-  });
-  if (!res.ok) {
-    // Proven HTTP 401 (not a network throw): fan out before shaping the error so
-    // AuthProvider can transition a sleeping tab even when the caller swallows ApiError.
-    noteUnauthorizedResponse(path, res.status);
-    let message = res.statusText;
-    let fieldErrors: FieldError[] = [];
-    let code: string | undefined;
-    let currentUpdatedAt: string | undefined;
-    let expectedUpdatedAt: string | undefined;
-    try {
-      const body = await res.json();
-      fieldErrors = parseFieldErrors(body);
-      // A stable, machine-readable code (if the server supplies one) is the i18n seam:
-      // the client can translate it, falling back to the human message below.
-      const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
-      if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
-      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
-      // Prefer the structured field-level reasons — the server's `message` for a validation
-      // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
-      if (fieldErrors.length > 0) {
-        message = summarizeFieldErrors(fieldErrors);
-      } else {
-        message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+  const method = (init?.method || 'GET').toUpperCase();
+  const isMutation = method !== 'GET' && method !== 'HEAD';
+  const clearInFlight = isMutation ? registerInFlightAction() : null;
+
+  try {
+    const res = await fetch(path, {
+      ...init,
+      credentials: 'include',
+      headers,
+      body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
+    });
+    if (!res.ok) {
+      // Proven HTTP 401 (not a network throw): fan out before shaping the error so
+      // AuthProvider can transition a sleeping tab even when the caller swallows ApiError.
+      noteUnauthorizedResponse(path, res.status);
+      let message = res.statusText;
+      let fieldErrors: FieldError[] = [];
+      let code: string | undefined;
+      let currentUpdatedAt: string | undefined;
+      let expectedUpdatedAt: string | undefined;
+      try {
+        const body = await res.json();
+        fieldErrors = parseFieldErrors(body);
+        // A stable, machine-readable code (if the server supplies one) is the i18n seam:
+        // the client can translate it, falling back to the human message below.
+        const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
+        if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
+        ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
+        // Prefer the structured field-level reasons — the server's `message` for a validation
+        // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
+        if (fieldErrors.length > 0) {
+          message = summarizeFieldErrors(fieldErrors);
+        } else {
+          message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+        }
+      } catch {
+        /* non-json error body */
       }
-    } catch {
-      /* non-json error body */
+      throw new ApiError(res.status, message, fieldErrors, code, currentUpdatedAt, expectedUpdatedAt);
     }
-    throw new ApiError(res.status, message, fieldErrors, code, currentUpdatedAt, expectedUpdatedAt);
+    // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
+    // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
+    // so a succeeded operation isn't reported as a failure.
+    if (res.status === 204 || res.status === 205) return undefined as T;
+    if (res.headers.get('Content-Length') === '0') return undefined as T;
+    const text = await res.text();
+    if (text === '') return undefined as T;
+    return JSON.parse(text) as T;
+  } finally {
+    clearInFlight?.();
   }
-  // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
-  // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
-  // so a succeeded operation isn't reported as a failure.
-  if (res.status === 204 || res.status === 205) return undefined as T;
-  if (res.headers.get('Content-Length') === '0') return undefined as T;
-  const text = await res.text();
-  if (text === '') return undefined as T;
-  return JSON.parse(text) as T;
 }
 
 /**
