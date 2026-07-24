@@ -222,6 +222,25 @@ export const PF1E_STATBLOCK_PRESENTATION: StatblockPresentation = {
   creatureType: { full: 'Type' },
 };
 
+/** PF1e / 3.5e cumulative XP thresholds (CRB table, issue #441). */
+const PF1E_XP_THRESHOLDS = [
+  0, 1_000, 3_000, 6_000, 10_000, 15_000, 21_000, 28_000, 36_000, 45_000, 55_000, 66_000, 78_000, 91_000,
+  105_000, 120_000, 136_000, 153_000, 171_000, 190_000,
+] as const;
+
+function pf1eXpForLevel(level: number): number {
+  const clamped = Math.max(1, Math.min(20, Math.floor(level)));
+  return PF1E_XP_THRESHOLDS[clamped - 1]!;
+}
+
+function pf1eLevelForXp(xp: number): number {
+  let level = 1;
+  for (let i = 0; i < PF1E_XP_THRESHOLDS.length; i++) {
+    if (xp >= PF1E_XP_THRESHOLDS[i]!) level = i + 1;
+  }
+  return level;
+}
+
 export const Pathfinder1eAdapter: RuleSystemAdapter = {
   id: PF1E_ADAPTER_ID,
   label: 'Pathfinder 1e',
@@ -233,6 +252,9 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   initiativeDie: 20,
   // Pathfinder 1e caps at character level 20 (Core Rulebook), matching the 5e ceiling.
   maxLevel: 20,
+  supportsXpProgression: true,
+  xpForLevel: pf1eXpForLevel,
+  levelForXp: pf1eLevelForXp,
   // Prefer the explicit native Init folded into abilityScores by mapStatblock (issue #764);
   // derive from DEX only when that bonus is absent. `representation` applies only to the
   // DEX fallback (native Init is already a bonus).

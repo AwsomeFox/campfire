@@ -479,18 +479,51 @@ export const XP_THRESHOLDS = [
   195_000, 225_000, 265_000, 305_000, 355_000,
 ] as const;
 
-/** Total XP required to reach `level` (clamped to [1, 20]). */
+/** Total XP required to reach `level` (clamped to [1, 20]). Uses the 5e PHB table. */
 export function xpForLevel(level: number): number {
-  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1];
+  return XP_THRESHOLDS[Math.max(1, Math.min(20, Math.floor(level))) - 1]!;
 }
 
-/** Highest level the given total XP qualifies for (1–20). */
+/** Highest level the given total XP qualifies for (1–20). Uses the 5e PHB table. */
 export function levelForXp(xp: number): number {
   let level = 1;
   for (let i = 0; i < XP_THRESHOLDS.length; i++) {
-    if (xp >= XP_THRESHOLDS[i]) level = i + 1;
+    if (xp >= XP_THRESHOLDS[i]!) level = i + 1;
   }
   return level;
+}
+
+/** Advisory XP progress toward the next level — for character-sheet UI (issue #441). */
+export interface XpProgress {
+  /** False when the adapter does not model XP thresholds (OSR, Open Legend, …). */
+  readonly supported: boolean;
+  readonly atCap: boolean;
+  readonly currentThreshold: number;
+  readonly nextThreshold: number | null;
+  readonly ready: boolean;
+  readonly pct: number;
+}
+
+/** Build `xpForLevel` / `levelForXp` from a cumulative threshold table (issue #441). */
+export function xpProgressionFromThresholds(
+  thresholds: readonly number[],
+  maxLevel: number,
+): Pick<RuleSystemAdapter, 'supportsXpProgression' | 'xpForLevel' | 'levelForXp'> {
+  const cap = maxLevel === Infinity ? thresholds.length : Math.min(maxLevel, thresholds.length);
+  return {
+    supportsXpProgression: true,
+    xpForLevel(level: number): number {
+      const clamped = Math.max(1, Math.min(cap, Math.floor(level)));
+      return thresholds[clamped - 1] ?? thresholds[thresholds.length - 1]!;
+    },
+    levelForXp(xp: number): number {
+      let level = 1;
+      for (let i = 0; i < cap; i++) {
+        if (xp >= thresholds[i]!) level = i + 1;
+      }
+      return level;
+    },
+  };
 }
 
 // ---------- quest ----------
@@ -2172,6 +2205,20 @@ export interface RuleSystemAdapter {
    */
   readonly supportsDdbImport?: boolean;
   /**
+   * Whether this adapter owns XP threshold math for advisory progress UI (issue #441). D&D-family
+   * systems opt in; milestone-first systems (13th Age, Open Legend, OSR, Starforged) omit it so
+   * the sheet does not show misleading 5e guidance.
+   */
+  readonly supportsXpProgression?: boolean;
+  /**
+   * Cumulative XP required to be `level`. Required when `supportsXpProgression` is true.
+   */
+  xpForLevel?(level: number): number;
+  /**
+   * Highest level the given total XP qualifies for. Required when `supportsXpProgression` is true.
+   */
+  levelForXp?(xp: number): number;
+  /**
    * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
    * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
    * explicit unsupported result instead of a misleading 5e "Trivial" band.
@@ -2293,6 +2340,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // PHB cumulative XP thresholds — the advisory progress bar on the character sheet (issue #441).
+  ...xpProgressionFromThresholds(XP_THRESHOLDS, 20),
   // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
   supportsEncounterDifficulty: true,
   estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
@@ -2304,6 +2353,39 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return dnd5eCheckCatalog(this, character);
   },
 };
+
+/** Whether this adapter owns XP threshold math (issue #441). */
+export function xpProgressionSupported(adapter: Pick<RuleSystemAdapter, 'supportsXpProgression'>): boolean {
+  return adapter.supportsXpProgression === true;
+}
+
+/** Total XP required to reach `level` for a campaign's rule-system adapter. */
+export function xpForLevelForAdapter(adapter: RuleSystemAdapter, level: number): number {
+  if (adapter.supportsXpProgression && adapter.xpForLevel) return adapter.xpForLevel(level);
+  return Dnd5eAdapter.xpForLevel!(level);
+}
+
+/** Highest level the given total XP qualifies for under a campaign's rule-system adapter. */
+export function levelForXpForAdapter(adapter: RuleSystemAdapter, xp: number): number {
+  if (adapter.supportsXpProgression && adapter.levelForXp) return adapter.levelForXp(xp);
+  return Dnd5eAdapter.levelForXp!(xp);
+}
+
+/** Compute advisory XP progress for a character sheet (issue #441). */
+export function xpProgressForCharacter(adapter: RuleSystemAdapter, level: number, xp: number): XpProgress {
+  const atCap = level >= adapter.maxLevel;
+  if (!xpProgressionSupported(adapter) || !adapter.xpForLevel) {
+    return { supported: false, atCap, currentThreshold: 0, nextThreshold: null, ready: false, pct: 0 };
+  }
+  const currentThreshold = adapter.xpForLevel(level);
+  const nextThreshold = atCap ? null : adapter.xpForLevel(level + 1);
+  const ready = nextThreshold != null && xp >= nextThreshold;
+  const pct =
+    nextThreshold == null
+      ? 100
+      : Math.max(0, Math.min(100, ((xp - currentThreshold) / (nextThreshold - currentThreshold)) * 100));
+  return { supported: true, atCap, currentThreshold, nextThreshold, ready, pct };
+}
 
 // ---------- Open Legend adapter (issue #299) ----------
 // Open Legend (openlegendrpg.com) is a fully-open OGL system with a dice model quite unlike
@@ -3213,6 +3295,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   initiativeDie: 20,
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
+  // PF2e awards 1,000 XP per level; cumulative total at level n is (n-1)×1,000 (issue #441).
+  ...xpProgressionFromThresholds(
+    Array.from({ length: 20 }, (_, i) => i * 1_000),
+    20,
+  ),
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
   // DEX modifier (the 5e assumption). A numeric `perception` is already the full
   // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception

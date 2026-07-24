@@ -239,3 +239,44 @@ describe('RuleSystemAdapter — maxLevel per system (issue #535)', () => {
     expect(blockedAtNoCap).toBe(false);
   });
 });
+
+/**
+ * XP progression per rule system (issue #441). Thresholds and advisory readiness badges
+ * live on each adapter so PF2e/OSR campaigns don't inherit 5e PHB guidance.
+ */
+describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
+  it('5e-family adapters opt into XP thresholds', () => {
+    expect(Dnd5eAdapter.supportsXpProgression).toBe(true);
+    expect(Pathfinder1eAdapter.supportsXpProgression).toBe(true);
+    expect(Pf2eAdapter.supportsXpProgression).toBe(true);
+    expect(StarfinderAdapter.supportsXpProgression).toBe(true);
+  });
+
+  it('milestone-first systems do not model XP thresholds', () => {
+    expect(OpenLegendAdapter.supportsXpProgression).not.toBe(true);
+    expect(OsrAdapter.supportsXpProgression).not.toBe(true);
+    expect(Archmage13aAdapter.supportsXpProgression).not.toBe(true);
+  });
+
+  it('5e PHB table: level 5 requires 6,500 XP cumulative', () => {
+    expect(Dnd5eAdapter.xpForLevel!(5)).toBe(6_500);
+    expect(Dnd5eAdapter.levelForXp!(6_499)).toBe(4);
+    expect(Dnd5eAdapter.levelForXp!(6_500)).toBe(5);
+  });
+
+  it('PF2e uses 1,000 XP per level (cumulative)', () => {
+    expect(Pf2eAdapter.xpForLevel!(3)).toBe(2_000);
+    expect(Pf2eAdapter.levelForXp!(2_999)).toBe(3);
+    expect(Pf2eAdapter.levelForXp!(3_000)).toBe(4);
+  });
+
+  it('PF1e uses the 3.5e/PF1 cumulative table (differs from 5e)', () => {
+    expect(Pathfinder1eAdapter.xpForLevel!(5)).toBe(10_000);
+    expect(Dnd5eAdapter.xpForLevel!(5)).toBe(6_500);
+  });
+
+  it('13th Age cap (10) is respected by xpForLevel when thresholds were absent', () => {
+    expect(Archmage13aAdapter.maxLevel).toBe(10);
+    expect(Archmage13aAdapter.supportsXpProgression).not.toBe(true);
+  });
+});
