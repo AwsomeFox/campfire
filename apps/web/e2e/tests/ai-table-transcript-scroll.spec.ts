@@ -90,6 +90,8 @@ test.describe('AI table transcript scroll (#590)', () => {
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toBeVisible();
     // Wait for mount tail-pin: no jump affordance and scroll near the latest line.
+    // Flex layout / font settle on CI can leave the jump button visible for a frame
+    // if we assert count===0 before scrollTop catches up (#590).
     await expect.poll(async () => {
       const jumpCount = await page.getByTestId('transcript-jump-latest').count();
       const { top, max } = await transcript.evaluate((node) => ({
