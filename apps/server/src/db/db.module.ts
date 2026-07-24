@@ -1227,6 +1227,30 @@ function migrateAiScribeTables(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-turn AI usage history (issue #1060): the
+ * `ai_dm_usage_history` table didn't exist. Same "new table" pattern as
+ * migrateAiScribeTables — CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so
+ * upgraded hosts get the table before BOOTSTRAP_SQL runs. Rebuilds the
+ * (campaign_id, created_at, id) index so ORDER BY created_at DESC, id DESC is covered.
+ */
+function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      tokens_used INTEGER NOT NULL,
+      action TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      actor TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    DROP INDEX IF EXISTS idx_ai_dm_usage_history_campaign_created;
+    CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
+      ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
+  `);
+}
+
+/**
  * Issue #849: campaign_members.user_id used to be an unconstrained integer, so
  * a typo or stale import could create a "ghost" DM that could never authenticate
  * but still defeated the last-DM guard. SQLite cannot ALTER-ADD a foreign key,
@@ -2052,6 +2076,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0068_inventory_qty_idempotency', run: migrateInventoryQtyIdempotencyTable },
   { name: '0069_inventory_qty_idempotency_created_at', run: migrateInventoryQtyIdempotencyCreatedAtIndex },
   { name: '0070_notifications_data', run: migrateNotificationsTableForData },
+  { name: '0071_ai_dm_usage_history', run: migrateAiDmUsageHistoryTable },
 ];
 
 /**

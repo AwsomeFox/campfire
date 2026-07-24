@@ -14,6 +14,9 @@
 
 import request from 'supertest';
 import { createAiEvalHarness, dm, type AiEvalHarness } from './ai-eval-harness';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
+import { AiDriverService } from '../src/modules/ai-driver/ai-driver.service';
+import { ScribeService } from '../src/modules/scribe/scribe.service';
 
 const API = '/api/v1';
 
@@ -35,7 +38,7 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     await harness.close();
   });
 
-  it('returns default config, lists jobs, and updates an existing config', async () => {
+  it('returns default config, updates an existing config, and lists jobs with limit', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Config And Jobs');
 
@@ -50,19 +53,51 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     harness.script({ text: 'A quiet night at the inn.' });
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.status).toBe(201);
+    expect(Array.isArray(run.body.proposalIds)).toBe(true);
+    expect(run.body.proposalIds.length).toBeGreaterThan(0);
+    const proposalId = run.body.proposalIds[0] as number;
+    expect((await request(harness.server).post(`${API}/proposals/${proposalId}/approve`).set(dm).send({})).status).toBe(201);
 
-    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs?limit=3`).set(dm);
+    await seedResolvedInbox(harness, campaignId, 'The party broke camp at dawn.');
+    harness.script({ text: 'Dawn march toward the pass.' });
+    const secondRun = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(secondRun.status).toBe(201);
+    expect(secondRun.body.job.status).toBe('succeeded');
+
+    const jobs = await request(harness.server).get(`${API}/campaigns/${campaignId}/scribe/jobs?limit=1`).set(dm);
     expect(jobs.status).toBe(200);
-    expect(jobs.body.length).toBeGreaterThan(0);
+    expect(jobs.body).toHaveLength(1);
     expect(jobs.body[0].trigger).toBe('on_demand');
+    expect(jobs.body[0].id).toBe(secondRun.body.job.id);
+
+    const created = await request(harness.server)
+      .put(`${API}/campaigns/${campaignId}/scribe`)
+      .set(dm)
+      .send({ cron: true, budgetPerRun: 1500 });
+    expect(created.status).toBe(200);
+    expect(created.body.cron).toBe(true);
 
     const updated = await request(harness.server)
       .put(`${API}/campaigns/${campaignId}/scribe`)
       .set(dm)
-      .send({ cron: true, budgetPerRun: 1500 });
+      .send({ postSession: true, budgetPerRun: 1200 });
     expect(updated.status).toBe(200);
+    expect(updated.body.postSession).toBe(true);
+    expect(updated.body.budgetPerRun).toBe(1200);
     expect(updated.body.cron).toBe(true);
-    expect(updated.body.budgetPerRun).toBe(1500);
+  });
+
+  it('uses the configured per-campaign provider when one is stored (#310)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Configured Provider');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await harness.configureProvider(campaignId);
+    await seedResolvedInbox(harness, campaignId, 'The bard negotiated safe passage.');
+
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('succeeded');
+    expect(run.body.job.provider).toBe('mock');
   });
 
   it('#877 sends only AI-consented support to the provider and drops it after revocation', async () => {
@@ -242,6 +277,28 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     await harness.enableExperimental();
   });
 
+  it('meters reported usage when the provider returns an empty recap', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Empty Provider Response');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 100 });
+    await seedResolvedInbox(harness, campaignId, 'The party waited for the chronicler.');
+
+    harness.script({
+      text: '',
+      usage: { promptTokens: 7, completionTokens: 0, totalTokens: 7 },
+    });
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('failed');
+    expect(run.body.job.detail).toContain('empty recap');
+    expect(run.body.job.tokensUsed).toBe(7);
+    expect(run.body.proposalIds).toHaveLength(0);
+
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(7);
+    expect(seat.body.turnCount).toBe(1);
+  });
+
   it('reports no_material when there is nothing to recap', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Empty');
@@ -249,6 +306,82 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.body.job.status).toBe('no_material');
     expect(run.body.proposalIds).toHaveLength(0);
+  });
+});
+
+describe('AI driver + scribe — shared spend lock (#1058)', () => {
+  let harness: AiEvalHarness;
+
+  beforeAll(async () => {
+    harness = await createAiEvalHarness({ model: 'shared-budget-model' });
+    await harness.enableExperimental();
+  });
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it('admits only one provider operation when both queued spenders see the final token', async () => {
+    const campaignId = await harness.createCampaign('Driver Scribe Budget Race');
+    await harness.configureSeat(campaignId, { mode: 'driver', tokenBudget: 1 });
+    await seedResolvedInbox(harness, campaignId, 'The party escaped with the final ember.');
+
+    const aiDm = harness.ctx.app.get(AiDmService);
+    const driver = harness.ctx.app.get(AiDriverService);
+    const scribe = harness.ctx.app.get(ScribeService);
+    const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
+
+    // Hold the shared mutex until both real consumers have passed their cheap
+    // pre-checks and joined its queue with the same one-token snapshot.
+    let releaseHolder!: () => void;
+    let holderStarted!: () => void;
+    const holderReady = new Promise<void>((resolve) => {
+      holderStarted = resolve;
+    });
+    const holderGate = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    const holder = aiDm.withSpendLock(campaignId, async () => {
+      holderStarted();
+      await holderGate;
+    });
+    await holderReady;
+
+    const lockSpy = jest.spyOn(aiDm, 'withSpendLock');
+    harness.script({
+      text: 'The final ember gutters out.',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+    const driverRun = driver.runTurn(campaignId, user, 'Guard the ember.');
+    const scribeRun = scribe.run(campaignId, 'on_demand', user);
+
+    let bothQueued = false;
+    try {
+      const deadline = Date.now() + 2_000;
+      while (lockSpy.mock.calls.length < 2 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      bothQueued = lockSpy.mock.calls.length >= 2;
+    } finally {
+      releaseHolder();
+    }
+
+    const [driverResult, scribeResult] = await Promise.all([driverRun, scribeRun]);
+    await holder;
+    lockSpy.mockRestore();
+
+    expect(bothQueued).toBe(true);
+    const admitted = Number(driverResult.steps === 1) + Number(scribeResult.job.status === 'succeeded');
+    expect(admitted).toBe(1);
+    if (driverResult.steps === 1) {
+      expect(scribeResult.job.status).toBe('over_budget');
+    } else {
+      expect(driverResult.stopReason).toBe('budget_exhausted');
+      expect(scribeResult.job.status).toBe('succeeded');
+    }
+
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(1);
+    expect(seat.body.turnCount).toBe(1);
   });
 });
 
@@ -294,5 +427,25 @@ describe('AI scribe — post-session sweep (e2e)', () => {
     const proposals = await request(harness.server).get(`${API}/campaigns/${campaignId}/proposals`).set(dm);
     expect(proposals.body).toHaveLength(1);
     expect(proposals.body[0].entityType).toBe('session');
+  });
+
+  it('sweep() runs cron-enabled campaigns without a scheduled session', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Cron Sweep');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await seedResolvedInbox(harness, campaignId, 'The watch reported movement on the ridge.');
+
+    const cfg = await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ cron: true });
+    expect(cfg.status).toBe(200);
+
+    harness.script({ text: 'Patrols doubled along the ridge road.' });
+
+    const svc = harness.ctx.app.get(
+      (await import('../src/modules/scribe/scribe.service')).ScribeService,
+    );
+    const results = await svc.sweep();
+    const mine = results.find((r) => r.job.campaignId === campaignId);
+    expect(mine?.job.status).toBe('succeeded');
+    expect(mine?.job.trigger).toBe('cron');
   });
 });

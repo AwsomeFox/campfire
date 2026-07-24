@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -236,10 +236,19 @@ export class ProposalRecordsService {
       case 'encounter':
       case 'map':
         return null;
-      // Factions (issue #1056) are proposable for Co-DM drafting but create-only in v1;
-      // update proposals are not yet filed for factions. Return null to keep the switch total.
-      case 'faction':
-        return null;
+      case 'faction': {
+        // Co-DM faction drafts (#1056) are create-only today, but update proposals
+        // still need a prior-row snapshot when filed (and for non-AI proposers).
+        const [row] = await this.db
+          .select()
+          .from(factions)
+          .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Faction ${entityId} not found`);
+        // Factions with hidden=true are DM-only prep — non-DMs must not see them.
+        if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
+        return { ...row };
+      }
     }
   }
 

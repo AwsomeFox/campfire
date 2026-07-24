@@ -24,6 +24,35 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkgVersion),
   },
+  // Issue #462: split the ~1MB main chunk into vendor + app chunks for better
+  // caching and faster initial load on low-end mobile. The main chunk drops
+  // below 500KB and vendors (react, router, etc.) cache separately.
+  build: {
+    // Keep the warning visible — we want to stay under 500KB for the app chunk.
+    chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        // Function-based manualChunks is more robust — it gracefully handles
+        // packages that may or may not be in the dependency tree.
+        manualChunks(id) {
+          // React core — the largest single vendor, stable across releases.
+          if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/') || id.includes('node_modules/react-router-dom/')) {
+            return 'vendor-react';
+          }
+          // Markdown rendering — pulled in by Markdown component, heavy but stable.
+          if (id.includes('node_modules/marked/') || id.includes('node_modules/dompurify/')) {
+            return 'vendor-markdown';
+          }
+          // Drag-and-drop — used by encounter initiative tracker.
+          if (id.includes('node_modules/@dnd-kit/')) {
+            return 'vendor-dnd';
+          }
+          // date-fns is tree-shaken heavily; don't extract it or we break
+          // the build (it's not a single entry module).
+        },
+      },
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),

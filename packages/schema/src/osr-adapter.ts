@@ -1,4 +1,4 @@
-import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
+import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter, StatblockPresentation } from './index';
 import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 // ---------- OSR (Old-School Renaissance) rule-system adapter (issues #70, #300) ----------
@@ -165,9 +165,20 @@ export const OSR_CONDITIONS = [
   'Unconscious',
 ] as const;
 
+/** OSR presentation — Hit Dice is the difficulty proxy (not Challenge Rating). */
+export const OSR_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Hit Dice', short: 'HD' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
 export const OsrAdapter: RuleSystemAdapter = {
   id: OSR_ADAPTER_ID,
   label: 'OSR (Basic Fantasy / B/X retroclones)',
+  presentation: OSR_STATBLOCK_PRESENTATION,
   abilityModifier(score: number): number {
     return osrAbilityModifier(score);
   },
