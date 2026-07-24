@@ -67,7 +67,7 @@ test.describe('complete monster statblock surfaces', () => {
     await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.statblockEncounterId}`);
     await expect(page.getByRole('heading', { name: 'E2E — Complete Statblock' })).toBeVisible();
 
-    const toggle = page.getByRole('button', { name: /Statblock/ });
+    const toggle = page.getByRole('button', { name: /Statblock/ }).first();
     await toggle.focus();
     await page.keyboard.press('Enter');
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');

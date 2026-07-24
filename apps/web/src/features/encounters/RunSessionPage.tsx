@@ -65,6 +65,7 @@ import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
+import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
   formatCombatLogAnnouncementBatch,
@@ -219,7 +220,10 @@ function EncounterLinks({
   canEdit: boolean;
   onSaved: (updated: Partial<EncounterWithCombatants>) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const { open: editing, setOpen: setEditing, buttonProps, regionProps } = useDisclosure({
+    focusManagement: false,
+    regionLabel: 'Encounter links',
+  });
   const [locations, setLocations] = useState<LinkRow[]>([]);
   const [quests, setQuests] = useState<LinkRow[]>([]);
   const [sessions, setSessions] = useState<LinkRow[]>([]);
@@ -312,13 +316,18 @@ function EncounterLinks({
       )}
       {!hasLink && canEdit && !editing && <span className="text-muted">No location / quest / session linked.</span>}
       {canEdit && (
-        <button type="button" className="btn btn-ghost" style={{ fontSize: 'var(--type-label)' }} onClick={() => setEditing((v) => !v)}>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ fontSize: 'var(--type-label)' }}
+          {...buttonProps}
+        >
           {editing ? 'Done' : hasLink ? 'Edit links' : '+ Link'}
         </button>
       )}
       {error && <span className="text-rose-400">{error}</span>}
       {editing && canEdit && (
-        <div className="flex gap-2 flex-wrap w-full mt-1">
+        <div {...regionProps} className="flex gap-2 flex-wrap w-full mt-1">
           <select
             className="cf-select !min-h-0 !py-1.5 text-xs"
             aria-label="Location"
@@ -1807,7 +1816,11 @@ function BattleMap({
   const [tool, setTool] = useState<MapTool>('move');
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
-  const [gridPanelOpen, setGridPanelOpen] = useState(false);
+  const gridDisclosure = useDisclosure({
+    focusManagement: false,
+    regionLabel: 'Grid and fog settings',
+  });
+  const gridPanelOpen = gridDisclosure.open;
   // Shared AoE templates (issue #238) live in encounter state; `selectedAoeId` is the DM's local
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
@@ -2296,7 +2309,7 @@ function BattleMap({
               <button
                 type="button"
                 className="cf-map-tool"
-                onClick={() => setGridPanelOpen((v) => !v)}
+                {...gridDisclosure.buttonProps}
                 title="Grid & fog settings"
                 style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
               >
@@ -2339,6 +2352,7 @@ function BattleMap({
 
           {isDm && gridPanelOpen && (
             <div
+              {...gridDisclosure.regionProps}
               className="flex flex-wrap gap-3 items-center"
               style={{ padding: '10px 14px', margin: '8px 14px 0', border: '1px solid var(--color-divider)', borderRadius: 8, fontSize: 12 }}
             >
@@ -3412,7 +3426,13 @@ function CombatantRow({
  * default so the initiative row stays scannable mid-fight.
  */
 function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; ruleSystem: string | null }) {
-  const [open, setOpen] = useState(false);
+  const { open, setOpen, buttonProps, regionProps } = useDisclosure({
+    focusManagement: false,
+    // No regionLabel: the rendered StatBlock already exposes a labelled
+    // "Creature statblock" region (see StatBlock.tsx). Tagging this wrapper
+    // as a region too would create a redundant nested landmark; an unlabelled
+    // region is treated as a generic container by AT, which is what we want.
+  });
   const [entry, setEntry] = useState<RuleEntry | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -3439,14 +3459,15 @@ function CombatantStatblock({ ruleEntryId, ruleSystem }: { ruleEntryId: number; 
       <button
         type="button"
         className="btn btn-ghost"
-        aria-expanded={open}
+        {...buttonProps}
         onClick={toggle}
         style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)' }}
       >
-        {open ? '▾' : '▸'} Statblock
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span> Statblock
       </button>
       {open && (
         <div
+          {...regionProps}
           style={{
             marginTop: 6,
             padding: '10px 12px',

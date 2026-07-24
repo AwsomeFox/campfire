@@ -4,6 +4,7 @@ import { api, API, ApiError } from '../lib/api';
 import { Btn, Card, ErrorNote, Skeleton } from './ui';
 import { Markdown } from './Markdown';
 import { useDialog } from './useDialog';
+import { useDisclosure } from './useDisclosure';
 
 type Snapshot = Record<string, string>;
 type DialogStep = 'inspect' | 'confirm';
@@ -294,8 +295,9 @@ export function RevisionHistoryPanel({
   onRestored?: () => void;
   label?: string;
 }) {
-  const regionId = useId();
-  const [open, setOpen] = useState(false);
+  const { open, setOpen, buttonProps, regionProps } = useDisclosure({
+    regionLabel: `${label} versions`,
+  });
   const [revisions, setRevisions] = useState<EntityRevision[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -384,16 +386,14 @@ export function RevisionHistoryPanel({
       <button
         type="button"
         className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
-        aria-expanded={open}
-        aria-controls={regionId}
-        onClick={() => setOpen((value) => !value)}
+        {...buttonProps}
       >
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
         <span>{label}</span>
       </button>
 
       {open && (
-        <div id={regionId} className="mt-3 space-y-3">
+        <div {...regionProps} className="mt-3 space-y-3">
           {announcement && (
             <p role="status" className="cf-inset p-3 text-sm text-emerald-300">
               {announcement}

@@ -21,6 +21,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { useDialog } from '../../components/useDialog';
+import { useDisclosure } from '../../components/useDisclosure';
 import { GameIcon } from '../../components/GameIcon';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
@@ -79,8 +80,10 @@ const GATE_FAILURE_STATUSES: ScribeJobStatus[] = ['disabled', 'over_budget', 'no
 export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const seatQuery = useAiDmSeat(campaignId);
 
-  const [expanded, setExpanded] = useState(false);
-  const [configOpen, setConfigOpen] = useState(false);
+  const panelDisclosure = useDisclosure({ regionLabel: 'AI Scribe status and controls' });
+  const configDisclosure = useDisclosure({ regionLabel: 'AI Scribe configuration' });
+  const expanded = panelDisclosure.open;
+  const configOpen = configDisclosure.open;
 
   const [config, setConfig] = useState<ScribeConfig | null>(null);
   const [jobs, setJobs] = useState<ScribeJob[] | null>(null);
@@ -183,13 +186,13 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           </span>
         )}
         <div className="flex-1" />
-        <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={() => setExpanded((v) => !v)}>
+        <Btn ghost className="!min-h-0 !py-1 text-xs" {...panelDisclosure.buttonProps}>
           {expanded ? 'Hide' : 'Show'}
         </Btn>
       </div>
 
       {expanded && (
-        <div className="space-y-3">
+        <div {...panelDisclosure.regionProps} className="space-y-3">
           <p className="text-[11.5px] text-slate-500 m-0">
             Drafts a session recap from resolved inbox notes and encounters that were run, and files it as a{' '}
             <strong>pending proposal</strong> for you to review — nothing is ever published automatically.
@@ -205,7 +208,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(true)} disabled={busy !== null}>
                 {busy === 'preview' ? 'Generating preview…' : 'Preview first'}
               </Btn>
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setConfigOpen((v) => !v)}>
+              <Btn ghost className="!min-h-0 !py-1.5 text-xs" {...configDisclosure.buttonProps}>
                 {configOpen ? 'Hide config' : 'Configure'}
               </Btn>
             </div>
@@ -217,11 +220,12 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
             <ConfigForm
               campaignId={campaignId}
               config={config}
+              regionProps={configDisclosure.regionProps}
               onSaved={(c) => {
                 setConfig(c);
-                setConfigOpen(false);
+                configDisclosure.setOpen(false);
               }}
-              onCancel={() => setConfigOpen(false)}
+              onCancel={() => configDisclosure.setOpen(false)}
             />
           )}
 
@@ -275,11 +279,13 @@ function OutcomeNote({ outcome, onDismiss }: { outcome: Outcome; onDismiss: () =
 function ConfigForm({
   campaignId,
   config,
+  regionProps,
   onSaved,
   onCancel,
 }: {
   campaignId: number;
   config: ScribeConfig;
+  regionProps: ReturnType<typeof useDisclosure>['regionProps'];
   onSaved: (c: ScribeConfig) => void;
   onCancel: () => void;
 }) {
@@ -312,7 +318,7 @@ function ConfigForm({
   }
 
   return (
-    <div className="cf-inset p-3 space-y-3">
+    <div {...regionProps} className="cf-inset p-3 space-y-3">
       <label className="flex items-start gap-2 cursor-pointer">
         <input type="checkbox" className="mt-0.5" checked={postSession} onChange={(e) => setPostSession(e.target.checked)} />
         <span>

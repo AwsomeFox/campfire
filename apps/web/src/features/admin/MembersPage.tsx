@@ -51,6 +51,7 @@ import {
   memberRoleControlLabel,
   memberRoleSavedAnnouncement,
 } from './memberControlsA11y';
+import { useDisclosure } from '../../components/useDisclosure';
 
 const ROLE_CHIP: Record<Role, string> = {
   dm: 'cf-chip-dm',
@@ -743,7 +744,10 @@ function MembersCard({
   // "empty" selection. We block the select entirely while the roster is
   // unavailable so a failed load can never clear an assignment (#697 review).
   const charactersUnavailable = !!charactersError;
-  const [showAdd, setShowAdd] = useState(false);
+  const { open: showAdd, setOpen: setShowAdd, buttonProps: addMemberButtonProps } = useDisclosure({
+    id: 'add-member-dialog',
+    regionLabel: 'Add a campaign member',
+  });
   const [error, setError] = useState<string | null>(null);
   const linkHelpId = useId();
 
@@ -751,14 +755,7 @@ function MembersCard({
     <Card className="space-y-2.5" data-testid="members-card">
       <div className="flex items-center gap-2">
         <p className="card-kicker mb-0">Members</p>
-        <Btn
-          className="!min-h-0 !py-1.5 text-xs ml-auto"
-          aria-expanded={showAdd}
-          aria-controls={showAdd ? 'add-member-dialog' : undefined}
-          // Keep a stable "+ Add member" name when open — Cancel lives in the
-          // dialog (issue #451) so AT is not left on an ambiguous header Cancel.
-          onClick={() => setShowAdd((v) => !v)}
-        >
+        <Btn className="!min-h-0 !py-1.5 text-xs ml-auto" {...addMemberButtonProps}>
           + Add member
         </Btn>
       </div>
