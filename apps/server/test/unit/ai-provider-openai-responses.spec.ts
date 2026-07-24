@@ -1,7 +1,6 @@
 import { OpenAiProvider } from '../../src/modules/ai-dm/providers/openai-provider';
-import { AiProviderError } from '../../src/modules/ai-dm/providers/errors';
 import type { AiGenerateRequest, AiStreamEvent } from '../../src/modules/ai-dm/providers/ai-provider';
-import { jsonResponse, errorResponse, streamResponse, fakeFetch, sequenceFetch, collect, sentBody } from './ai-provider-fixtures';
+import { jsonResponse, errorResponse, streamResponse, fakeFetch, collect, sentBody } from './ai-provider-fixtures';
 
 const req: AiGenerateRequest = {
   system: 'You are the DM.',
@@ -111,7 +110,7 @@ describe('OpenAiProvider — Responses API — streaming', () => {
       `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', usage: { input_tokens: 12, output_tokens: 6, total_tokens: 18 } } })}\n\n`,
       'data: [DONE]\n\n',
     ];
-    const { fetchImpl, calls } = fakeFetch(streamResponse(frames));
+    const { fetchImpl } = fakeFetch(streamResponse(frames));
     const p = new OpenAiProvider({ apiKey: 'k', model: 'm', fetchImpl });
     const events = await collect(p.stream(req));
 
