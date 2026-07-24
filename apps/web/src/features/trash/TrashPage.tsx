@@ -15,7 +15,6 @@ import type { TrashedEntity, TrashedEntityType } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { formatDate as formatLocaleDate, useFormattingLocale } from '../../lib/format';
-import { useAuth } from '../../app/auth';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { ENTITY_ICON } from '../../lib/uiIcons';
