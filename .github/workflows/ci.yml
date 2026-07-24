@@ -162,7 +162,6 @@ jobs:
   # `test:cov` runs `nest build` internally, so it only needs the schema dist
   # (server compiles against @campfire/schema) — supplied by the `build` artifact.
   coverage:
-    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -182,11 +181,8 @@ jobs:
       - name: Install
         if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci
-      - name: Download dist
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: .
+      - name: Build schema dependency
+        run: npm run build -w packages/schema
       - run: npm run test:cov
       - name: Upload coverage report
         if: always()
