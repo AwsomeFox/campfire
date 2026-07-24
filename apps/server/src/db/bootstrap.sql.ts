@@ -750,6 +750,21 @@ CREATE TABLE IF NOT EXISTS ai_dm_seats (
   updated_at TEXT NOT NULL
 );
 
+-- Issue #1060: per-turn AI usage history for the DM's usage sparkline and audit.
+-- One row per metered turn (driver step, co-DM draft, scribe run). Cascades on
+-- campaign delete so purge cleans it up automatically.
+CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  tokens_used INTEGER NOT NULL,
+  action TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  actor TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
+  ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
+
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
 -- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a
 -- per-campaign override, DM-managed, cascading on campaign delete). The API key

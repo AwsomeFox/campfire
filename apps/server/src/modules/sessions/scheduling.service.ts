@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
@@ -361,18 +361,41 @@ export class SchedulingService {
       .where(and(eq(sessionRsvps.scheduledSessionId, scheduleId), eq(sessionRsvps.userId, user.id)))
       .limit(1);
 
+    const persistedNote =
+      input.note !== undefined ? input.note.trim() : (existing?.note ?? '');
+    const nextStatus = input.status ?? existing?.status;
+    if (!nextStatus) {
+      throw new BadRequestException('status is required for the first RSVP submission');
+    }
+
+    const statusChanged = input.status !== undefined && (!existing || existing.status !== input.status);
+    const noteChanged =
+      input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
+
     if (existing) {
+      const update: {
+        status?: SessionRsvp['status'];
+        userName: string;
+        updatedAt: string;
+        note?: string;
+      } = { userName: user.name, updatedAt: ts };
+      if (input.status !== undefined) {
+        update.status = input.status;
+      }
+      if (input.note !== undefined) {
+        update.note = input.note.trim();
+      }
       await this.db
         .update(sessionRsvps)
-        .set({ status: input.status, note: input.note ?? existing.note, userName: user.name, updatedAt: ts })
+        .set(update)
         .where(eq(sessionRsvps.id, existing.id));
     } else {
       await this.db.insert(sessionRsvps).values({
         scheduledSessionId: scheduleId,
         userId: user.id,
         userName: user.name,
-        status: input.status,
-        note: input.note ?? '',
+        status: nextStatus,
+        note: persistedNote,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -385,21 +408,29 @@ export class SchedulingService {
       entityType: 'session',
       entityId: scheduleId,
       campaignId: schedule.campaignId,
-      detail: input.status,
+      detail: nextStatus,
     });
     this.emitScheduleUpdated(schedule.campaignId, scheduleId);
     // Let the DM(s) know availability changed (issue #263) — they own scheduling, so
     // an RSVP is theirs to see. Fan out to every dm-role member except the actor (a DM
     // marking their own availability shouldn't ping themselves). Best-effort.
     const roles = await this.notifications.memberRoles(schedule.campaignId);
-    for (const [memberId, memberRole] of roles) {
-      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
-      await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
-        type: 'session_rsvp',
-        title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
-        entityId: scheduleId,
-        actorName: user.name,
-      });
+    if (statusChanged || noteChanged) {
+      for (const [memberId, memberRole] of roles) {
+        if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+        const title =
+          noteChanged && !statusChanged
+            ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
+            : noteChanged && statusChanged
+              ? `${user.name || 'A player'} RSVP'd ${nextStatus} and updated their note for ${this.scheduleLabel(schedule)}`
+              : `${user.name || 'A player'} RSVP'd ${nextStatus} for ${this.scheduleLabel(schedule)}`;
+        await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
+          type: 'session_rsvp',
+          title,
+          entityId: scheduleId,
+          actorName: user.name,
+        });
+      }
     }
     return this.getWithRsvps(scheduleId);
   }

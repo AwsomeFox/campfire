@@ -338,11 +338,23 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
       }
     });
 
-    h.script({ text: 'The torches gutter as the door swings wide.', streamChunks: 4 });
+    h.script({
+      text: 'The torches gutter as the door swings wide.',
+      streamChunks: 4,
+      usage: { promptTokens: 8, completionTokens: 3, totalTokens: 11 },
+    });
     const res = await h.sendMessage(campaignId, { input: 'we enter' });
     sub.unsubscribe();
     expect(res.status).toBe(201);
     expect(paused).toBe(true);
+    // #1057: pause/takeover mid-turn is `frozen`, distinct from mode-switch `aborted`.
+    expect(res.body.stopReason).toBe('frozen');
+    // The provider completed a paid call before the freeze was observed. Suppress
+    // narration/tools, but account for that usage while the spend lock is held.
+    expect(res.body.tokensUsed).toBe(11);
+    const seat = await h.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(11);
+    expect(seat.body.turnCount).toBe(1);
 
     // The turn's finally/detect path must NOT stomp the mid-turn pause back to idle/running.
     const session = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/session`).set(dm);
