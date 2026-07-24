@@ -21,6 +21,11 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  formatCalendarForPrompt,
+  formatListForPrompt,
+  formatLocationEnvironmentFromSummary,
+} from './world-state-prompt';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -291,6 +296,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
   'create_encounter',
@@ -2181,6 +2187,34 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
+    // AI can narrate coherently without needing to chain read tools every turn. All reads go
+    // through the player-scoped contextToolset so hidden entities / dmSecret / unexplored
+    // locations stay excluded (same secrecy guarantee as the campaign summary above).
+    //
+    // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
+    // the turn. The system prompt is read fresh every turn, so world-state changes propagate
+    // to the next player interaction without a cache-invalidation step. Calendar / encounters /
+    // party are fetched in parallel; location/environment is derived from the summary payload
+    // (currentLocation + dangerLevel) to avoid a redundant tool round-trip.
+    const [calendarRaw, activeEncountersRaw, partyRaw] = await Promise.all([
+      safeRead(contextToolset, 'get_calendar', { campaignId }),
+      safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
+      safeRead(contextToolset, 'get_party', { campaignId }),
+    ]);
+
+    const calendar = formatCalendarForPrompt(calendarRaw);
+    if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
+
+    const activeEncounters = formatListForPrompt(activeEncountersRaw);
+    if (activeEncounters) parts.push(`## Running encounters\n${activeEncounters}`);
+
+    const party = formatListForPrompt(partyRaw);
+    if (party) parts.push(`## Party status\n${party}`);
+
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);
 
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for

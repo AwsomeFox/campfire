@@ -82,7 +82,57 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
     expect(offered).not.toContain('approve_proposal');
     expect(offered).toContain('roll_dice'); // live play
     expect(offered).toContain('adjust_treasury'); // economy live play (#1021)
+    expect(offered).toContain('whisper_to_player'); // private delivery live play (#1023)
     expect(offered).toContain('create_quest'); // proposal-capable canon
+  });
+
+  // ── #1023 ─────────────────────────────────────────────────────────────────────
+  it('#1023 driver whisper_to_player is a direct write and stays recipient-scoped', async () => {
+    const campaignId = await h.createCampaign('Sec Whisper');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const target = { 'x-dev-role': 'player' as const, 'x-dev-user': 'whisper-target' };
+    const other = { 'x-dev-role': 'player' as const, 'x-dev-user': 'whisper-other' };
+    const recipientUserId = 'dev:whisper-target';
+
+    h.script(
+      {
+        text: 'Leaning close…',
+        toolCalls: [
+          {
+            id: 'w1',
+            name: 'whisper_to_player',
+            arguments: {
+              campaignId,
+              recipientUserId,
+              body: 'Only you notice the false bottom in the chest',
+            },
+          },
+        ],
+      },
+      { text: 'The chest looks ordinary to everyone else.' },
+    );
+    const res = await h.sendMessage(campaignId, { input: 'I search the chest carefully.' });
+    expect(res.status).toBe(201);
+    // Direct live-play write — not routed through the proposal queue.
+    expect(res.body.toolCalls).toEqual([{ name: 'whisper_to_player', isError: false, proposed: false }]);
+
+    const targetList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(target);
+    expect(targetList.status).toBe(200);
+    expect(targetList.body.some((n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'))).toBe(
+      true,
+    );
+
+    const otherList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(other);
+    expect(otherList.status).toBe(200);
+    expect(otherList.body.some((n: { body: string }) => n.body.includes('false bottom'))).toBe(false);
+
+    // DM oversight: the whisper still enters the campaign record.
+    const dmList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(dm);
+    expect(dmList.status).toBe(200);
+    expect(dmList.body.some((n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'))).toBe(
+      true,
+    );
   });
 
   // ── #1021 ────────────────────────────────────────────────────────────────────
