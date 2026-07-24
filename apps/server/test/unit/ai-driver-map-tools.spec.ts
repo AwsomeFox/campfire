@@ -22,7 +22,7 @@ import {
 describe('AI Driver battle-map tools (#488)', () => {
   const writeTool = (name: string) => ({ name, mutating: true, proposalCapable: false });
 
-  function session(overrides: Partial<AiDmSessionState> = {}): AiDmSessionState {
+  function _session(overrides: Partial<AiDmSessionState> = {}): AiDmSessionState {
     return {
       campaignId: 1,
       status: 'idle',
