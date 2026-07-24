@@ -15,6 +15,7 @@ import { ProposalsModule } from '../proposals/proposals.module';
 import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
 import { MapsModule } from '../maps/maps.module';
+import { AiMapModule } from '../ai-map/ai-map.module';
 import { AuditModule } from '../audit/audit.module';
 import { ExportModule } from '../export/export.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
@@ -25,6 +26,7 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
 import { UsersModule } from '../users/users.module';
+import { RevisionsModule } from '../revisions/revisions.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -47,6 +49,7 @@ import { McpController } from './mcp.controller';
     RulesModule,
     EncountersModule,
     MapsModule,
+    AiMapModule,
     AuditModule,
     ExportModule,
     AiDmModule,
@@ -57,6 +60,7 @@ import { McpController } from './mcp.controller';
     TimelineModule,
     CommentsModule,
     UsersModule,
+    RevisionsModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

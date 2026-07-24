@@ -12,8 +12,10 @@ import {
   LocationCreate,
   QuestCreate,
   SessionCreate,
+  FactionCreate,
   EncounterGenerate,
   GenerateMapParams,
+  normalizeMapTheme,
 } from '@campfire/schema';
 import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -38,13 +40,15 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   npc: 'npc',
   location: 'location',
   beat: 'quest', // a story beat / next objective is filed as a quest (#27)
+  quest: 'quest', // a direct quest draft (#1056)
+  faction: 'faction', // a faction draft (#1056)
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content for the DM's approval queue.
@@ -262,7 +266,9 @@ export class CoDmService {
     switch (target) {
       case 'npc':
       case 'location':
-      case 'beat': {
+      case 'beat':
+      case 'quest':
+      case 'faction': {
         if (parsed === null) {
           throw new UnprocessableEntityException(
             `The AI did not return a JSON ${target} draft. Configure a real provider (the default no-op scaffold cannot author content) or retry.`,
@@ -301,6 +307,23 @@ export class CoDmService {
             body: raw.body ?? raw.summary ?? raw.description ?? '',
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
+        case 'quest':
+          return QuestCreate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled quest',
+            body: raw.body ?? raw.description ?? '',
+            ...(typeof raw.reward === 'string' ? { reward: raw.reward } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+            ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
+          }) as Record<string, unknown>;
+        case 'faction':
+          return FactionCreate.parse({
+            name: raw.name ?? 'Untitled faction',
+            ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+            ...(typeof raw.kind === 'string' ? { kind: raw.kind } : {}),
+            ...(typeof raw.goals === 'string' ? { goals: raw.goals } : {}),
+            ...(typeof raw.standing === 'string' ? { standing: raw.standing } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
         case 'recap':
           return SessionCreate.parse(raw) as Record<string, unknown>;
         case 'encounter':
@@ -310,12 +333,19 @@ export class CoDmService {
             ...raw,
             seed: typeof raw.seed === 'number' ? raw.seed : mintNumericSeed(),
           }) as Record<string, unknown>;
-        case 'map':
-          // Seed pinned so approve re-runs the identical generator (#306).
+        case 'map': {
+          // Seed pinned so approve re-runs the identical generator (#306). The model may
+          // hand back a FREE-FORM theme ("volcanic", "sylvan") that isn't in the procedural
+          // MapTheme enum; normalize it to the nearest palette (or drop it) so a creative
+          // theme no longer hard-fails GenerateMapParams.parse with a 422 (issue #410).
+          const { theme: rawTheme, ...restMap } = raw;
+          const normalizedTheme = normalizeMapTheme(rawTheme);
           return GenerateMapParams.parse({
-            ...raw,
+            ...restMap,
+            ...(normalizedTheme ? { theme: normalizedTheme } : {}),
             seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
           }) as Record<string, unknown>;
+        }
       }
     } catch (err) {
       throw new UnprocessableEntityException(
@@ -331,6 +361,10 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
   beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
+  quest:
+    '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
+  faction:
+    '{"name": string (required), "body"?: string (markdown), "kind"?: string, "goals"?: string, "standing"?: "hostile"|"unfriendly"|"neutral"|"friendly"|"allied", "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',

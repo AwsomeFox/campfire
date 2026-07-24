@@ -16,6 +16,9 @@ import { OpenAiProvider } from './openai-provider';
 import { AnthropicProvider } from './anthropic-provider';
 import { GeminiProvider } from './gemini-provider';
 import { MockAiProvider, type MockResponse } from './mock-provider';
+import type { AiImageProvider } from './image-provider';
+import { OpenAiImageProvider } from './openai-image-provider';
+import { supportsImageGeneration } from './capabilities';
 
 /** Default sampling/limit params for a provider. */
 export interface AiProviderParams {
@@ -111,4 +114,39 @@ function requireKey(config: AiProviderConfig): void {
   if (!config.apiKey) {
     throw new AiProviderError('auth', `${config.providerType}: an API key is required`, { provider: config.providerType });
   }
+}
+
+/**
+ * Build an IMAGE provider from a text-provider config (issue #410). Only provider types that
+ * declare the `imageGeneration` capability get a concrete adapter — everything else throws
+ * `invalid_request` so the map router degrades to the honest procedural-blueprint fallback
+ * rather than pretending a text-only model drew an image. `imageModel` overrides the config's
+ * `model` (a chat model id is rarely the right image model), keeping selection explicit.
+ */
+export function createAiImageProvider(config: AiProviderConfig, imageModel?: string): AiImageProvider {
+  if (!supportsImageGeneration(config.providerType)) {
+    throw new AiProviderError(
+      'invalid_request',
+      `Provider '${config.providerType}' does not support image generation; route through the procedural-blueprint fallback instead.`,
+      { provider: config.providerType },
+    );
+  }
+  // Today only the OpenAI-compatible family exposes an /images endpoint we implement.
+  if (config.providerType === 'openai') {
+    requireKey(config);
+    return new OpenAiImageProvider({
+      apiKey: config.apiKey!,
+      baseUrl: config.baseUrl,
+      model: imageModel ?? config.model,
+      timeoutMs: config.timeoutMs,
+      retry: config.retry,
+      headers: config.headers,
+      fetchImpl: config.fetchImpl,
+    });
+  }
+  throw new AiProviderError(
+    'invalid_request',
+    `No image adapter is implemented for provider '${config.providerType}'.`,
+    { provider: config.providerType },
+  );
 }

@@ -7,26 +7,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
+import { initials } from '../../lib/avatarText';
 
 export default function NpcListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
@@ -36,8 +30,14 @@ export default function NpcListPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState('');
+  // #754: quick-create defaults to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: id,
+    target: 'npc',
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,9 +70,15 @@ export default function NpcListPage() {
     setSaving(true);
     setCreateError(null);
     try {
-      const npc = await api.post<Npc>(`${API}/campaigns/${id}/npcs`, { name: newName.trim(), role: newRole.trim() });
+      const hidden = audienceToHidden(audience);
+      const npc = await api.post<Npc>(`${API}/campaigns/${id}/npcs`, {
+        name: newName.trim(),
+        role: newRole.trim(),
+        hidden,
+      });
       setNewName('');
       setNewRole('');
+      setAudience('dm');
       setCreating(false);
       await load();
       navigate(`/c/${id}/npcs/${npc.id}`);
@@ -109,26 +115,32 @@ export default function NpcListPage() {
     );
   }
 
+  const secondaryActions: PageHeaderSecondaryAction[] = draftAction ? [draftAction] : [];
+
   return (
     <div data-testid="npc-list-surface" className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="hooded-figure" size={18} /> NPCs</h1>
-          <div className="flex items-center gap-2">
-            <DraftWithAiButton campaignId={id} target="npc" />
-            {isDm && !creating && (
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="hooded-figure" size={18} />}
+          title="NPCs"
+          secondaryActions={secondaryActions}
+          primaryAction={
+            canDmWrite && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
                 + New NPC
               </Btn>
-            )}
-          </div>
-        </div>
+            ) : undefined
+          }
+        />
+        {draftDialog}
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="NPC name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="NPC role" placeholder="Role (e.g. Townmaster)" value={newRole} onChange={(e) => setNewRole(e.target.value)} />
+            <AudienceField value={audience} onChange={setAudience} entityLabel="NPC" name="npc-audience" />
             <div className="flex items-center justify-end gap-2">
               <Btn
                 ghost
@@ -137,6 +149,7 @@ export default function NpcListPage() {
                   setCreating(false);
                   setNewName('');
                   setNewRole('');
+                  setAudience('dm');
                   setCreateError(null);
                 }}
               >
@@ -157,7 +170,7 @@ export default function NpcListPage() {
               <Link
                 key={npc.id}
                 to={`/c/${id}/npcs/${npc.id}`}
-                className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
+                className="cf-card cf-card-hover p-3.5 space-y-2"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">

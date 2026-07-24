@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
+import { AiDmService } from '../src/modules/ai-dm/ai-dm.service';
 
 /**
  * Experimental server-side AI Dungeon Master (issue #28).
@@ -33,6 +34,61 @@ describe('ai-dm (e2e)', () => {
     expect(res.status).toBe(200);
     expect(res.body.experimentalAiDm).toBe(on);
   }
+
+  it('#1058 serializes concurrent budget gates with FIFO release after failures', async () => {
+    const aiDm = ctx.app.get(AiDmService);
+
+    // Queue four owners before releasing the first. A failing middle owner must
+    // still hand the mutex to every follower in arrival order.
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = aiDm.withSpendLock(campaignId, async () => {
+      order.push('first');
+      firstStarted();
+      await firstGate;
+      return 'first';
+    });
+    await firstReady;
+    const second = aiDm.withSpendLock(campaignId, async () => {
+      order.push('second');
+      throw new Error('simulated provider failure');
+    });
+    const third = aiDm.withSpendLock(campaignId, async () => {
+      order.push('third');
+      return 'third';
+    });
+    const fourth = aiDm.withSpendLock(campaignId, async () => {
+      order.push('fourth');
+      return 'fourth';
+    });
+
+    releaseFirst();
+    const settled = await Promise.allSettled([first, second, third, fourth]);
+    expect(order).toEqual(['first', 'second', 'third', 'fourth']);
+    expect(settled.map((result) => result.status)).toEqual(['fulfilled', 'rejected', 'fulfilled', 'fulfilled']);
+
+    // Reproduce the reported TOCTOU shape: both spenders arrive together, but
+    // only the owner may pass the budget gate and make the provider call.
+    let remaining = 1;
+    let providerCalls = 0;
+    const spend = () => aiDm.withSpendLock(campaignId, async () => {
+      if (remaining <= 0) return false;
+      providerCalls += 1;
+      await Promise.resolve();
+      remaining -= 1;
+      return true;
+    });
+
+    await expect(Promise.all([spend(), spend()])).resolves.toEqual([true, false]);
+    expect(providerCalls).toBe(1);
+  });
 
   it('GET seat returns an un-configured default (members, no experimental gate)', async () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
@@ -197,6 +253,57 @@ describe('ai-dm (e2e)', () => {
     const seatRes = await request(server).get(`/api/v1/campaigns/${campaignId}/ai-dm`).set(dm);
     expect(seatRes.body.tokensUsed).toBe(second.body.seat.tokensUsed);
     expect(seatRes.body.turnCount).toBe(2);
+  });
+
+  it('usage-history returns newest-first items + summary after metered turns (#1060)', async () => {
+    await request(server).post(`/api/v1/campaigns/${campaignId}/ai-dm/reset`).set(dm).send({});
+    await request(server)
+      .put(`/api/v1/campaigns/${campaignId}/ai-dm`)
+      .set(dm)
+      .send({ enabled: true, tokenBudget: 100_000 });
+
+    const first = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'History turn one.', kind: 'narrate' });
+    expect(first.status).toBe(201);
+    const second = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/turn`)
+      .set(dm)
+      .send({ prompt: 'History turn two.', kind: 'narrate' });
+    expect(second.status).toBe(201);
+
+    const history = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history`)
+      .set(dm);
+    expect(history.status).toBe(200);
+    expect(history.body.count).toBeGreaterThanOrEqual(2);
+    expect(history.body.items).toHaveLength(history.body.count);
+    expect(history.body.totalTokens).toBe(
+      history.body.items.reduce((sum: number, row: { tokensUsed: number }) => sum + row.tokensUsed, 0),
+    );
+    // Newest-first: first item is at/after the second item's createdAt.
+    expect(history.body.items[0].createdAt >= history.body.items[1].createdAt).toBe(true);
+    expect(history.body.items[0].action).toBe('ai-dm.turn');
+    expect(history.body.items[0].tokensUsed).toBeGreaterThan(0);
+
+    // Whitespace-only since is ignored (treated as unset).
+    const blankSince = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history?since=%20%20%20`)
+      .set(dm);
+    expect(blankSince.status).toBe(200);
+    expect(blankSince.body.count).toBe(history.body.count);
+
+    const badSince = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history?since=not-a-date`)
+      .set(dm);
+    expect(badSince.status).toBe(400);
+
+    // Players cannot read DM-only metering history.
+    const playerDenied = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/ai-dm/usage-history`)
+      .set(player);
+    expect(playerDenied.status).toBe(403);
   });
 
   it('turn is 403 when the seat is disabled even with the flag on', async () => {

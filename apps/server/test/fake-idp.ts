@@ -33,6 +33,14 @@ export interface FakeIdp {
   setNextUser(user: FakeIdpUser): void;
   /** Controls one authorization round trip, then resets to success. */
   setNextMode(mode: FakeIdpMode): void;
+  /** Override the issuer claim/field returned by discovery (for mismatch tests). Null = use the real listen URL. */
+  setDiscoveryIssuer(issuer: string | null): void;
+  /** Delay discovery responses (ms) — used to exercise probe timeouts. */
+  setDiscoveryDelayMs(ms: number): void;
+  /** When set, /authorize rejects redirect_uri values outside this allowlist. Null = accept any. */
+  setAllowedRedirectUris(uris: string[] | null): void;
+  /** Expected client credentials. Defaults to test-client / test-secret. */
+  setClient(clientId: string, clientSecret: string): void;
   close(): Promise<void>;
 }
 
@@ -42,6 +50,7 @@ interface PendingAuthorization {
   user: FakeIdpUser;
   mode: FakeIdpMode;
   codeChallenge?: string;
+  clientId: string;
 }
 
 const b64url = (input: Buffer | string): string =>
@@ -67,6 +76,11 @@ export async function startFakeIdp(): Promise<FakeIdp> {
 
   let nextUser: FakeIdpUser = { sub: 'default-sub', preferred_username: 'defaultuser', email: 'default@example.com', name: 'Default User' };
   let nextMode: FakeIdpMode = 'success';
+  let discoveryIssuerOverride: string | null = null;
+  let discoveryDelayMs = 0;
+  let allowedRedirectUris: string[] | null = null;
+  let expectedClientId = 'test-client';
+  let expectedClientSecret = 'test-secret';
   const pendingCodes = new Map<string, PendingAuthorization>();
 
   const app = express();
@@ -75,9 +89,13 @@ export async function startFakeIdp(): Promise<FakeIdp> {
 
   let issuer = '';
 
-  app.get('/.well-known/openid-configuration', (_req, res) => {
+  app.get('/.well-known/openid-configuration', async (_req, res) => {
+    if (discoveryDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, discoveryDelayMs));
+    }
+    const discoveryIssuer = discoveryIssuerOverride ?? issuer;
     res.json({
-      issuer,
+      issuer: discoveryIssuer,
       authorization_endpoint: `${issuer}/authorize`,
       token_endpoint: `${issuer}/token`,
       jwks_uri: `${issuer}/jwks`,
@@ -97,7 +115,15 @@ export async function startFakeIdp(): Promise<FakeIdp> {
 
   // No real login screen: immediately "authenticates" as whatever setNextUser() queued and redirects back.
   app.get('/authorize', (req, res) => {
-    const { redirect_uri, state, code_challenge } = req.query as Record<string, string>;
+    const { redirect_uri, state, code_challenge, client_id } = req.query as Record<string, string>;
+    if (client_id && client_id !== expectedClientId) {
+      res.status(400).json({ error: 'unauthorized_client' });
+      return;
+    }
+    if (allowedRedirectUris && (!redirect_uri || !allowedRedirectUris.includes(redirect_uri))) {
+      res.status(400).json({ error: 'invalid_request', error_description: 'redirect_uri not registered' });
+      return;
+    }
     const mode = nextMode;
     nextMode = 'success';
     const url = new URL(redirect_uri);
@@ -109,13 +135,39 @@ export async function startFakeIdp(): Promise<FakeIdp> {
       return;
     }
     const code = `code-${Math.random().toString(36).slice(2)}`;
-    pendingCodes.set(code, { user: nextUser, mode, codeChallenge: code_challenge });
+    pendingCodes.set(code, {
+      user: nextUser,
+      mode,
+      codeChallenge: code_challenge,
+      clientId: client_id || expectedClientId,
+    });
     url.searchParams.set('code', code);
     res.redirect(url.toString());
   });
 
   app.post('/token', (req, res) => {
-    const { code, code_verifier } = req.body as Record<string, string>;
+    const body = req.body as Record<string, string>;
+    // Support client_secret_post and (minimal) client_secret_basic.
+    let clientId = body.client_id;
+    let clientSecret = body.client_secret;
+    const auth = req.headers.authorization;
+    if (auth?.startsWith('Basic ')) {
+      const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+      const colon = decoded.indexOf(':');
+      if (colon >= 0) {
+        clientId = decoded.slice(0, colon);
+        clientSecret = decoded.slice(colon + 1);
+      }
+    }
+    if (clientId !== expectedClientId || clientSecret !== expectedClientSecret) {
+      res.status(401).json({
+        error: 'invalid_client',
+        error_description: 'PROVIDER_PRIVATE_CLIENT_DETAIL',
+      });
+      return;
+    }
+
+    const { code, code_verifier } = body;
     const pending = pendingCodes.get(code);
     if (!pending) {
       res.status(400).json({ error: 'invalid_grant' });
@@ -153,7 +205,7 @@ export async function startFakeIdp(): Promise<FakeIdp> {
     const idToken = signRs256Jwt(
       {
         iss: issuer,
-        aud: (req.body as Record<string, string>).client_id ?? 'test-client',
+        aud: pending.clientId,
         sub: user.sub,
         preferred_username: user.preferred_username,
         email: user.email,
@@ -189,6 +241,19 @@ export async function startFakeIdp(): Promise<FakeIdp> {
     },
     setNextMode(mode: FakeIdpMode) {
       nextMode = mode;
+    },
+    setDiscoveryIssuer(next: string | null) {
+      discoveryIssuerOverride = next;
+    },
+    setDiscoveryDelayMs(ms: number) {
+      discoveryDelayMs = ms;
+    },
+    setAllowedRedirectUris(uris: string[] | null) {
+      allowedRedirectUris = uris;
+    },
+    setClient(clientId: string, clientSecret: string) {
+      expectedClientId = clientId;
+      expectedClientSecret = clientSecret;
     },
     close() {
       return new Promise((resolve, reject) => {

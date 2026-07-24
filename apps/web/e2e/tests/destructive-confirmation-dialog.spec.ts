@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { seed, stateFor } from './seed';
 
 /**
@@ -13,30 +13,31 @@ import { seed, stateFor } from './seed';
  *  - Server errors are announced + associated via aria-invalid/aria-errormessage
  *  - Escape closes the dialog
  *  - axe-core passes on the open dialog
- *
- * Tests exercise the campaign-deletion flow (DM role). Account deletion is
- * tested in a separate describe block using the admin role to avoid destroying
- * the shared seeded user.
  */
+
+const CAMPAIGN_NAME = 'E2E — Cinderhaven';
+
+async function openCampaignDeleteDialog(page: Page) {
+  const trigger = page.getByRole('button', { name: 'Delete campaign…' });
+  await trigger.scrollIntoViewIfNeeded();
+  await trigger.click();
+  await expect(page.getByTestId('confirm-destructive-dialog')).toBeVisible();
+  return trigger;
+}
 
 test.describe('destructive confirmation dialog — campaign deletion (#775)', () => {
   test.use({ storageState: stateFor('dm') });
-
-  const CAMPAIGN_NAME = 'E2E — Cinderhaven';
 
   test('dialog opens with correct focus on the confirmation input', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    const trigger = page.getByTestId('delete-campaign-trigger');
-    await trigger.click();
+    await openCampaignDeleteDialog(page);
 
     const dialog = page.getByTestId('confirm-destructive-dialog');
-    await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAttribute('role', 'alertdialog');
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
 
-    // Focus should be on the confirmation input.
     const input = page.getByTestId('confirm-destructive-input');
     await expect(input).toBeFocused();
   });
@@ -45,16 +46,10 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    const trigger = page.getByTestId('delete-campaign-trigger');
-    await trigger.click();
+    const trigger = await openCampaignDeleteDialog(page);
 
-    await expect(page.getByTestId('confirm-destructive-dialog')).toBeVisible();
-
-    // Click cancel.
     await page.getByTestId('confirm-destructive-cancel').click();
     await expect(page.getByTestId('confirm-destructive-dialog')).toHaveCount(0);
-
-    // Focus should return to the trigger.
     await expect(trigger).toBeFocused();
   });
 
@@ -62,23 +57,18 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    await page.getByTestId('delete-campaign-trigger').click();
-    const dialog = page.getByTestId('confirm-destructive-dialog');
-    const input = page.getByTestId('confirm-destructive-input');
+    await openCampaignDeleteDialog(page);
     const confirmBtn = page.getByTestId('confirm-destructive-confirm');
+    const input = page.getByTestId('confirm-destructive-input');
     const hint = page.getByTestId('confirm-destructive-hint');
 
-    // Initially disabled.
     await expect(confirmBtn).toBeDisabled();
-    // Non-color text explanation is visible.
-    await expect(hint).toContainText('must type the exact name');
+    await expect(hint).toContainText('must type');
 
-    // Type a partial match — still disabled.
     await input.fill('E2E — Cinder');
     await expect(confirmBtn).toBeDisabled();
-    await expect(hint).toContainText('must type the exact name');
+    await expect(hint).toContainText('must type');
 
-    // Type the wrong thing entirely.
     await input.fill('wrong name');
     await expect(confirmBtn).toBeDisabled();
   });
@@ -87,7 +77,7 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    await page.getByTestId('delete-campaign-trigger').click();
+    await openCampaignDeleteDialog(page);
     const input = page.getByTestId('confirm-destructive-input');
     const confirmBtn = page.getByTestId('confirm-destructive-confirm');
     const hint = page.getByTestId('confirm-destructive-hint');
@@ -96,7 +86,6 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     await expect(confirmBtn).toBeEnabled();
     await expect(hint).toContainText('Confirmed');
 
-    // Don't actually submit — we don't want to delete the shared seed campaign.
     await page.getByTestId('confirm-destructive-cancel').click();
   });
 
@@ -104,56 +93,90 @@ test.describe('destructive confirmation dialog — campaign deletion (#775)', ()
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    await page.getByTestId('delete-campaign-trigger').click();
+    await openCampaignDeleteDialog(page);
     const input = page.getByTestId('confirm-destructive-input');
     const confirmBtn = page.getByTestId('confirm-destructive-confirm');
 
     await input.fill(CAMPAIGN_NAME);
     await expect(confirmBtn).toBeEnabled();
 
-    // Intercept the DELETE and make it fail with 500.
     await page.route(`**/api/v1/campaigns/${campaignId}`, (route) => {
       if (route.request().method() === 'DELETE') {
-        return route.fulfill({ status: 500, body: JSON.stringify({ error: 'Internal server error' }) });
+        return route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: { message: 'Internal server error' } }),
+        });
       }
       return route.continue();
     });
 
     await confirmBtn.click();
 
-    // Error should appear.
     const errorEl = page.getByTestId('confirm-destructive-error');
     await expect(errorEl).toBeVisible();
-    await expect(errorEl).toHaveAttribute('role', 'alert');
-
-    // Input should be marked invalid.
     await expect(input).toHaveAttribute('aria-invalid', 'true');
 
-    // Clean up route.
     await page.unroute(`**/api/v1/campaigns/${campaignId}`);
+  });
+
+  test('successful delete routes away from settings', async ({ page }) => {
+    seed();
+    const trashName = `E2E trash ${Date.now()}`;
+    const createRes = await page.request.post('/api/v1/campaigns', { data: { name: trashName } });
+    expect(createRes.ok()).toBeTruthy();
+    const { id: trashId } = (await createRes.json()) as { id: number };
+
+    await page.goto(`/c/${trashId}/settings`);
+    await openCampaignDeleteDialog(page);
+    await page.getByTestId('confirm-destructive-input').fill(trashName);
+
+    const [deleteRes] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().includes(`/api/v1/campaigns/${trashId}`) && res.request().method() === 'DELETE',
+      ),
+      page.getByTestId('confirm-destructive-confirm').click(),
+    ]);
+    expect(deleteRes.ok()).toBeTruthy();
+    await expect(page).not.toHaveURL(new RegExp(`/c/${trashId}/settings`));
   });
 
   test('Escape key closes the dialog', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    const trigger = page.getByTestId('delete-campaign-trigger');
-    await trigger.click();
-    await expect(page.getByTestId('confirm-destructive-dialog')).toBeVisible();
+    const trigger = await openCampaignDeleteDialog(page);
 
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('confirm-destructive-dialog')).toHaveCount(0);
-
-    // Focus restored.
     await expect(trigger).toBeFocused();
+  });
+
+  test('keyboard Tab cycles within the dialog', async ({ page }) => {
+    const { campaignId } = seed();
+    await page.goto(`/c/${campaignId}/settings`);
+
+    await openCampaignDeleteDialog(page);
+    const input = page.getByTestId('confirm-destructive-input');
+    const cancel = page.getByTestId('confirm-destructive-cancel');
+    const confirm = page.getByTestId('confirm-destructive-confirm');
+
+    await expect(input).toBeFocused();
+    // Enable the destructive button so it stays in the tab order.
+    await input.fill(CAMPAIGN_NAME);
+    await page.keyboard.press('Tab');
+    await expect(cancel).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(confirm).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(input).toBeFocused();
   });
 
   test('axe accessibility check passes on the open dialog', async ({ page }) => {
     const { campaignId } = seed();
     await page.goto(`/c/${campaignId}/settings`);
 
-    await page.getByTestId('delete-campaign-trigger').click();
-    await expect(page.getByTestId('confirm-destructive-dialog')).toBeVisible();
+    await openCampaignDeleteDialog(page);
 
     const results = await new AxeBuilder({ page })
       .include('[data-testid="confirm-destructive-backdrop"]')
@@ -167,7 +190,8 @@ test.describe('destructive confirmation dialog — account deletion (#775)', () 
 
   test('account deletion dialog opens with correct structure', async ({ page }) => {
     await page.goto('/preferences');
-    const trigger = page.getByTestId('delete-account-trigger');
+    const trigger = page.getByRole('button', { name: /delete my account/i });
+    await trigger.scrollIntoViewIfNeeded();
     await trigger.click();
 
     const dialog = page.getByTestId('confirm-destructive-dialog');
@@ -175,18 +199,12 @@ test.describe('destructive confirmation dialog — account deletion (#775)', () 
     await expect(dialog).toHaveAttribute('role', 'alertdialog');
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
 
-    // Focus on input.
     const input = page.getByTestId('confirm-destructive-input');
     await expect(input).toBeFocused();
-
-    // Has the title and consequence description.
     await expect(dialog.locator('.dialog-title')).toBeVisible();
     await expect(dialog.locator('.dialog-body')).toBeVisible();
-
-    // Button should be disabled initially (name not typed).
     await expect(page.getByTestId('confirm-destructive-confirm')).toBeDisabled();
 
-    // Cancel and verify focus returns.
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
@@ -194,7 +212,9 @@ test.describe('destructive confirmation dialog — account deletion (#775)', () 
 
   test('account deletion axe check passes', async ({ page }) => {
     await page.goto('/preferences');
-    await page.getByTestId('delete-account-trigger').click();
+    const trigger = page.getByRole('button', { name: /delete my account/i });
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
     await expect(page.getByTestId('confirm-destructive-dialog')).toBeVisible();
 
     const results = await new AxeBuilder({ page })

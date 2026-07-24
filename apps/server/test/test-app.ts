@@ -1,8 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import express from 'express';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
+import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
+import { resolveRequestIdFromHeader } from '../src/common/api-error.envelope';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module';
 
@@ -27,6 +30,8 @@ export interface TestAppOverride {
 export interface CreateTestAppOptions {
   /** Provider bindings to override in the AppModule before it compiles. */
   overrides?: TestAppOverride[];
+  /** Re-open an existing test data directory (used by interruption/recovery specs). */
+  dataDir?: string;
 }
 
 /**
@@ -38,12 +43,15 @@ export interface CreateTestAppOptions {
  * supertest agent instead, which SessionAuthGuard prefers over headers.
  */
 export async function createTestApp(options: CreateTestAppOptions = {}): Promise<TestAppContext> {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
+  const dataDir = options.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DEV_AUTH = '1';
   // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
   // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
   process.env.THROTTLE_DISABLED = '1';
+  // Fake in-process providers bind 127.0.0.1; opt into private hosts so existing
+  // AI-provider suites keep working. SSRF suites (#1064) unset this themselves.
+  process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
 
   let builder = Test.createTestingModule({ imports: [AppModule] });
   for (const { token, useValue } of options.overrides ?? []) {
@@ -71,6 +79,18 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
       'api/openapi.json',
     ],
   });
+  // Issue #682 — same per-request id middleware as main.ts: stamps X-Request-Id
+  // on every response so e2e suites that assert on the header see the production
+  // shape, and the AllExceptionsFilter can reuse the same id on error envelopes.
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
+    (req as { requestId?: string }).requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    next();
+  });
+  // Mirror main.ts configureApp() — same global exception filter so every e2e
+  // suite sees the published Problem Details-style envelope on the wire (issue #682).
+  app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();
 
   return { app, dataDir };
@@ -89,6 +109,7 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
   // Rate limiting (P2 fix) is opt-out for ordinary e2e suites — see throttle.constants.ts.
   // Suites that specifically exercise throttling (throttle.e2e-spec.ts) unset this themselves.
   process.env.THROTTLE_DISABLED = '1';
+  process.env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS = '1';
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
@@ -114,6 +135,15 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
       'api/openapi.json',
     ],
   });
+  // Issue #682 — same per-request id middleware + global exception filter as
+  // the production wiring (mirrors createTestApp above).
+  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
+    (req as { requestId?: string }).requestId = requestId;
+    res.setHeader('X-Request-Id', requestId);
+    next();
+  });
+  app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();
 
   return { app, dataDir };

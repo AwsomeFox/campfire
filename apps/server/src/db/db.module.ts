@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { drizzle, type BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
+import { APP_VERSION } from '../common/build-metadata';
 import { BOOTSTRAP_SQL, RULE_ENTRIES_FTS_SQL } from './bootstrap.sql';
 import { assertDataMount } from './boot-guard';
 import * as schema from './schema';
@@ -27,14 +28,12 @@ export type DrizzleDb = BetterSQLite3Database<typeof schema>;
 const dbLog = new Logger('Database');
 
 /**
- * The version of THIS running binary, single-sourced from apps/server/package.json (the same
- * source /healthz and /readyz report — see health.controller.ts). Recorded alongside the
- * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary can detect
- * that the DB was last touched by a newer app version and refuse to start against a schema it
- * does not understand, rather than silently writing into it.
+ * APP_VERSION (from common/build-metadata, issue #432) is recorded alongside the
+ * migration log in `__db_meta` (issue #726) so a subsequently booted OLDER binary
+ * can detect that the DB was last touched by a newer app version and refuse to
+ * start against a schema it does not understand, rather than silently writing
+ * into it.
  */
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const APP_VERSION: string = require('../../package.json').version;
 
 /**
  * Startup diagnostic (issue #235): run `PRAGMA foreign_key_check` once enforcement is on
@@ -398,6 +397,30 @@ function migrateCampaignsTableForStorageQuota(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before the one-authoritative-live-fight invariant
+ * (issue #744): `campaigns.active_encounter_id` didn't exist. Plain nullable ADD
+ * COLUMN — no table rebuild needed, same shape as
+ * migrateCampaignsTableForMapAttachment above. The declared REFERENCES clause is
+ * omitted here (added only for fresh DBs via bootstrap) per the #69 convention —
+ * SQLite cannot ADD a foreign key to an existing table; the service layer's End
+ * clears the pointer, and ON DELETE SET NULL semantics are reproduced in
+ * EncountersService.remove(). Existing campaigns get NULL (no active fight),
+ * preserving the pre-migration behavior. New DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateCampaignsTableForActiveEncounter(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'active_encounter_id')) return;
+
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN active_encounter_id INTEGER');
+}
+
+/**
  * Migration for DBs created before XP tracking (issue #14): `characters.xp`
  * didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN — no table rebuild needed,
  * same as migrateApiTokensTableForAdminEnabled above. New DBs never hit this
@@ -627,6 +650,30 @@ function migrateAttachmentsTableForHidden(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #728 migration: attachment publication became an explicit two-state
+ * protocol. Existing rows predate reservations and were already publicly readable,
+ * so they must backfill to `committed`; treating them as reservations would hide
+ * every existing map/portrait and let startup recovery delete their bytes.
+ *
+ * The CHECK keeps malformed states from becoming quota-counted but permanently
+ * invisible. BOOTSTRAP_SQL creates the companion (campaign_id, state) index after
+ * this migration runs. Fresh databases already have the modern declaration.
+ */
+function migrateAttachmentsTableForPublicationState(sqlite: Database.Database): void {
+  const hasAttachmentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='attachments'")
+    .get();
+  if (!hasAttachmentsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(attachments)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'state')) return;
+
+  sqlite.exec(
+    "ALTER TABLE attachments ADD COLUMN state TEXT NOT NULL DEFAULT 'committed' CHECK (state IN ('reserved', 'committed'))",
+  );
+}
+
+/**
  * Migration for DBs created before location nesting (issue #99): `locations.parent_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
  * migrateQuestsTableForHidden above. Existing rows get NULL (top-level), preserving
@@ -818,6 +865,25 @@ function migrateCommentsTableForEditorProvenance(sqlite: Database.Database): voi
 }
 
 /**
+ * Issue #787: persist the speaking character as immutable historical display
+ * metadata while retaining the account author columns. Nullable ADD COLUMNs keep
+ * legacy/OOC comments valid; old `in_character=1` rows remain honest legacy posts
+ * with no invented character identity.
+ */
+function migrateCommentsTableForCharacterAttribution(sqlite: Database.Database): void {
+  const hasCommentsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='comments'")
+    .get();
+  if (!hasCommentsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(comments)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('character_id')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_id INTEGER');
+  if (!has('character_name')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_name TEXT');
+  if (!has('character_avatar_url')) sqlite.exec('ALTER TABLE comments ADD COLUMN character_avatar_url TEXT');
+}
+
+/**
  * Migration for DBs created before the VTT grid + fog of war (issue #40, phases 2–3):
  * `encounters` gained `grid_size` / `grid_scale` / `grid_unit` / `grid_snap` / `fog`.
  * Plain nullable/defaulted ADD COLUMNs. Existing encounters get NULL grid (no grid) and
@@ -886,6 +952,29 @@ function migrateEncountersTableForAoeHex(sqlite: Database.Database): void {
   const has = (name: string) => columns.some((c) => c.name === name);
   if (!has('grid_type')) sqlite.exec("ALTER TABLE encounters ADD COLUMN grid_type TEXT NOT NULL DEFAULT 'square'");
   if (!has('aoe')) sqlite.exec('ALTER TABLE encounters ADD COLUMN aoe TEXT');
+}
+
+/**
+ * Migration for DBs created before grid calibration (issue #417): `encounters` gained
+ * `grid_offset_x` / `grid_offset_y` / `grid_rotation` / `grid_opacity` (NOT NULL with
+ * defaults that reproduce the classic top-left square grid) and the nullable
+ * `grid_cell_height` (null = square cells, same as grid_size). Plain ADD COLUMNs — same
+ * shape as migrateEncountersTableForVtt / migrateEncountersTableForAoeHex above. Existing
+ * encounters backfill to the defaults, so their overlay is byte-for-byte unchanged.
+ */
+function migrateEncountersTableForGridCalibration(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('grid_offset_x')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_x REAL NOT NULL DEFAULT 0');
+  if (!has('grid_offset_y')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_y REAL NOT NULL DEFAULT 0');
+  if (!has('grid_cell_height')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_cell_height REAL');
+  if (!has('grid_rotation')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_rotation REAL NOT NULL DEFAULT 0');
+  if (!has('grid_opacity')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_opacity REAL NOT NULL DEFAULT 0.35');
 }
 
 /**
@@ -1157,6 +1246,128 @@ function migrateAiScribeTables(sqlite: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
+  `);
+}
+
+/**
+ * Migration for DBs created before per-turn AI usage history (issue #1060): the
+ * `ai_dm_usage_history` table didn't exist. Same "new table" pattern as
+ * migrateAiScribeTables — CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so
+ * upgraded hosts get the table before BOOTSTRAP_SQL runs. Rebuilds the
+ * (campaign_id, created_at, id) index so ORDER BY created_at DESC, id DESC is covered.
+ */
+function migrateAiDmUsageHistoryTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      tokens_used INTEGER NOT NULL,
+      action TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL DEFAULT '',
+      actor TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    DROP INDEX IF EXISTS idx_ai_dm_usage_history_campaign_created;
+    CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
+      ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
+  `);
+}
+
+/**
+ * Migration for DBs created before DM-initiated check requests (issue #415): the
+ * `check_requests` table didn't exist. Same "new table" pattern as migrateAiScribeTables —
+ * CREATE TABLE / CREATE INDEX IF NOT EXISTS, recorded so upgraded hosts get the table (and its
+ * indexes) before BOOTSTRAP_SQL runs. Runs with foreign_keys OFF, so the declared FK
+ * REFERENCES never trips a constraint on a fresh DB where campaigns/characters don't exist yet.
+ */
+function migrateCheckRequestsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS check_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+      encounter_id INTEGER,
+      check_id TEXT NOT NULL,
+      check_label TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'flat',
+      dc INTEGER,
+      consequence TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      requested_by_user_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL DEFAULT '',
+      roll_id INTEGER,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
+    CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);
+  `);
+}
+
+/**
+ * Issue #789 — notification preferences. Four NEW tables (per-category delivery
+ * mode, quiet hours, the deferred/digest queue, and the reminder/nudge dedup
+ * ledger). All are plain CREATE TABLE / CREATE INDEX IF NOT EXISTS, so this is a
+ * recorded no-op on fresh DBs (BOOTSTRAP_SQL already declares them) and a
+ * one-time create on upgraded DBs. Mirrors bootstrap.sql.ts exactly. The
+ * declared FK REFERENCES are inert at CREATE time (SQLite resolves FK targets at
+ * write time) but kept identical so both paths converge on the same schema.
+ */
+function migrateNotificationPreferencesTables(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      category TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'immediate',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_prefs_user_campaign_category
+      ON notification_preferences(user_id, campaign_id, category);
+
+    CREATE TABLE IF NOT EXISTS notification_quiet_hours (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      start_minute INTEGER NOT NULL DEFAULT 1320,
+      end_minute INTEGER NOT NULL DEFAULT 420,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_quiet_hours_user_campaign
+      ON notification_quiet_hours(user_id, campaign_id);
+
+    CREATE TABLE IF NOT EXISTS notification_digest_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      entity_type TEXT,
+      entity_id INTEGER,
+      comment_id INTEGER,
+      data TEXT,
+      actor_name TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT 'digest',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_digest_queue_campaign
+      ON notification_digest_queue(campaign_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS notification_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduled_session_id INTEGER NOT NULL REFERENCES scheduled_sessions(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_reminders_session_user_kind
+      ON notification_reminders(scheduled_session_id, user_id, kind);
   `);
 }
 
@@ -1441,6 +1652,51 @@ function migratePublicRecapSharePolicy(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #857: campaign-level public-invite kill switch. Existing *active* campaigns
+ * keep invites enabled (DEFAULT 1) so live tables are uninterrupted; paused/
+ * completed/trashed rows are cleared immediately so restore after upgrade cannot
+ * accidentally revive bearer join links (see also 0059 for DBs that already ran
+ * an earlier 0058 that only ADDed the column).
+ */
+function migrateCampaignsTableForPublicInvitesEnabled(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+  if (!hasCampaigns) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === 'public_invites_enabled')) return;
+  sqlite.exec('ALTER TABLE campaigns ADD COLUMN public_invites_enabled INTEGER NOT NULL DEFAULT 1');
+  // Soft-delete (0031) runs before this migration, so deleted_at is present.
+  sqlite.exec(`
+    UPDATE campaigns
+    SET public_invites_enabled = 0
+    WHERE status IN ('paused', 'completed')
+       OR deleted_at IS NOT NULL
+  `);
+}
+
+/**
+ * Issue #857 follow-up: 0058 originally ADDed `public_invites_enabled` DEFAULT 1
+ * without clearing paused/completed/trashed rows. DBs that already applied that
+ * shape would restore those campaigns with invites still enabled. Clear the flag
+ * for any non-live campaign so restore matches the suspend-on-archive contract.
+ * Idempotent: re-running on an already-cleared DB is a no-op UPDATE.
+ */
+function migratePublicInvitesDisabledForInactiveCampaigns(sqlite: Database.Database): void {
+  const hasCampaigns = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'").get();
+  if (!hasCampaigns) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'public_invites_enabled')) return;
+  sqlite.exec(`
+    UPDATE campaigns
+    SET public_invites_enabled = 0
+    WHERE public_invites_enabled != 0
+      AND (
+        status IN ('paused', 'completed')
+        OR deleted_at IS NOT NULL
+      )
+  `);
+}
+
+/**
  * Migration for issue #723 (PWA restore safety): the `server_meta` table didn't
  * exist before install/data-generation identity was tracked. The table itself is
  * a single-row singleton (key='singleton') carrying a per-install UUID and a
@@ -1458,6 +1714,156 @@ function migrateServerMetaTable(sqlite: Database.Database): void {
       data_generation INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL
     );
+  `);
+}
+
+/**
+ * Issue #864: encounter create historically accepted arbitrary location/quest/session
+ * ids without checking they belong to the encounter's campaign. SQLite FKs only prove
+ * the target ROW exists — not that its campaign_id matches — so cross-campaign links
+ * could persist. This repair nullifies any location_id / quest_id / session_id whose
+ * target is missing or owned by a different campaign. Valid same-campaign links are
+ * untouched. Idempotent: a second run finds nothing left to clear. Fresh DBs never
+ * hit real work (encounters table absent during early migration pass; bootstrap then
+ * creates a clean schema, and create() now validates before insert).
+ */
+function migrateEncounterLinksCampaignScope(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Pre-0019 DBs may lack some/all link columns. Repair whichever exist —
+  // each UPDATE below is independently gated on its column.
+  if (!has('location_id') && !has('quest_id') && !has('session_id')) return;
+
+  const hasLocations = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'").get();
+  const hasQuests = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='quests'").get();
+  const hasSessions = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get();
+
+  // Clear each link independently so a single bad field never wipes the other two
+  // valid attachments on the same encounter. When the target table is absent we
+  // cannot prove campaign ownership — nullify those links so stale ids do not linger.
+  if (has('location_id')) {
+    if (hasLocations) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET location_id = NULL
+        WHERE location_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM locations
+            WHERE locations.id = encounters.location_id
+              AND locations.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET location_id = NULL WHERE location_id IS NOT NULL`);
+    }
+  }
+  if (has('quest_id')) {
+    if (hasQuests) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET quest_id = NULL
+        WHERE quest_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM quests
+            WHERE quests.id = encounters.quest_id
+              AND quests.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET quest_id = NULL WHERE quest_id IS NOT NULL`);
+    }
+  }
+  if (has('session_id')) {
+    if (hasSessions) {
+      sqlite.exec(`
+        UPDATE encounters
+        SET session_id = NULL
+        WHERE session_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions
+            WHERE sessions.id = encounters.session_id
+              AND sessions.campaign_id = encounters.campaign_id
+          )
+      `);
+    } else {
+      sqlite.exec(`UPDATE encounters SET session_id = NULL WHERE session_id IS NOT NULL`);
+    }
+  }
+}
+
+/**
+ * Issue #813: entity_revisions historically snapshotted prior prose while stamping
+ * the REPLACING editor as `author_*` / `created_at`, so the archive attributed old
+ * canon to the person who overwrote it. Add version-vs-replacer columns and migrate
+ * existing rows into the honest legacy shape: author fields cleared, authorship_known=0,
+ * and the old author/time moved onto replaced_by_* / replaced_at so the UI can label
+ * them "Replaced by Bob at…" rather than inventing an author. Fresh DBs never hit this
+ * path — BOOTSTRAP_SQL already declares the modern columns.
+ */
+function migrateEntityRevisionsForVersionAuthorship(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='entity_revisions'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(entity_revisions)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  // Only backfill when this run is the one that introduces the replacer columns —
+  // every row present at that moment is pre-#813. Re-running later must not touch
+  // current tips (replaced_at IS NULL with real authorship).
+  const needsLegacyBackfill = !has('replaced_at') || !has('authorship_known');
+
+  if (!has('author_source')) sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source TEXT NOT NULL DEFAULT 'human'");
+  if (!has('author_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN author_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_user_id')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_user_id TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_name')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_name TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_by_source')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source TEXT NOT NULL DEFAULT 'human'");
+  }
+  if (!has('replaced_by_source_detail')) {
+    sqlite.exec("ALTER TABLE entity_revisions ADD COLUMN replaced_by_source_detail TEXT NOT NULL DEFAULT ''");
+  }
+  if (!has('replaced_at')) sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN replaced_at TEXT');
+  if (!has('restored_from_revision_id')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN restored_from_revision_id INTEGER');
+  }
+  if (!has('authorship_known')) {
+    sqlite.exec('ALTER TABLE entity_revisions ADD COLUMN authorship_known INTEGER NOT NULL DEFAULT 1');
+  }
+
+  if (!needsLegacyBackfill) return;
+
+  // Pre-#813 rows stamped the replacing editor as author/created_at. Move those
+  // onto the replacer fields and clear version authorship so the UI can say
+  // "Replaced by …" instead of inventing an author.
+  sqlite.exec(`
+    UPDATE entity_revisions
+    SET
+      replaced_by_user_id = author_user_id,
+      replaced_by_name = author_name,
+      replaced_by_source = CASE
+        WHEN author_source IS NULL OR author_source = '' THEN 'human'
+        ELSE author_source
+      END,
+      replaced_by_source_detail = COALESCE(author_source_detail, ''),
+      replaced_at = created_at,
+      author_user_id = '',
+      author_name = '',
+      author_source = 'human',
+      author_source_detail = '',
+      created_at = '',
+      authorship_known = 0
   `);
 }
 
@@ -1485,6 +1891,100 @@ function migrateOAuthAccessTokensForAtomicRotation(sqlite: Database.Database): v
     sqlite.exec('CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_family ON oauth_access_tokens(family_id)');
   });
   migrate();
+}
+
+/**
+ * Migration for DBs created before combat-log combatant ids (issue #869):
+ * `encounter_events.actor_id` / `target_id` didn't exist. Plain nullable ADD
+ * COLUMNs — no table rebuild needed. Existing rows keep denormalized name strings
+ * and get NULL ids; listing still best-effort redacts by matching those names to
+ * currently-hidden NPC combatants. Fresh DBs never hit this path — BOOTSTRAP_SQL
+ * already declares the columns.
+ */
+function migrateEncounterEventsTableForCombatantIds(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_events'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounter_events)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('actor_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN actor_id INTEGER');
+  if (!has('target_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN target_id INTEGER');
+}
+
+/**
+ * Issue #466: `combatants.sheet_synced_updated_at` stores the character.updatedAt
+ * CAS token from the last acknowledged sheet↔combatant HP sync. Plain nullable
+ * ADD COLUMN — no table rebuild. Fresh DBs never hit this path (BOOTSTRAP_SQL).
+ */
+function migrateCombatantsTableForSheetSyncedUpdatedAt(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'sheet_synced_updated_at')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN sheet_synced_updated_at TEXT');
+  }
+}
+
+/**
+ * Issue #413: `combatants.turn_state` (JSON CombatantTurnState — per-turn action-economy
+ * usage, movement, concentration, delay/ready) and `combatants.active_effects` (JSON
+ * ActiveEffect[] with duration + save timing) power the current-turn workspace. Plain
+ * nullable ADD COLUMNs — no table rebuild. null degrades to the defaults (EMPTY_TURN_STATE
+ * / []) in the read path. Fresh DBs never hit this path (BOOTSTRAP_SQL declares both).
+ */
+function migrateCombatantsTableForTurnState(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'turn_state')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN turn_state TEXT');
+  }
+  if (!columns.some((c) => c.name === 'active_effects')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN active_effects TEXT');
+  }
+}
+
+/**
+ * Issue #765: `combatants.initiative_group` stores the side label for OSR group-initiative
+ * variants (e.g. "party", "monsters"). Combatants on the same side share one d6 roll.
+ * Nullable plain ADD COLUMN — no table rebuild.
+ */
+function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'initiative_group')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN initiative_group TEXT');
+  }
+}
+
+/**
+ * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
+ * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
+ * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
+ * NOT NULL DEFAULT 0 ADD COLUMNs — no table rebuild. Fresh DBs never hit this path
+ * (BOOTSTRAP_SQL declares both).
+ */
+function migrateCampaignsTableForTurnControls(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'dm_controls_turns')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN dm_controls_turns INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!columns.some((c) => c.name === 'require_dm_turn_confirmation')) {
+    sqlite.exec('ALTER TABLE campaigns ADD COLUMN require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
 }
 
 /**
@@ -1517,13 +2017,9 @@ function migrateParticipantSupportPreferences(sqlite: Database.Database): void {
 }
 
 /**
- * Migration for issue #711: characters gain the four combat death/temp-HP fields
- * the encounter tracker has tracked since issue #57. `hp_temp`, `death_state`,
- * `death_save_successes`, `death_save_failures` are written by the encounters
- * service on /end so a dead PC stays dead on the sheet (and is skipped by the
- * next encounter's auto-add) instead of being silently resurrected.
- *
- * Plain ADD COLUMN with NOT NULL DEFAULT — no table rebuild needed, same shape
+ * Migration for DBs created before persistent death/temp-HP on character sheets
+ * (issue #711): `characters.hp_temp`, `death_state`, and death-save counters didn't
+ * exist. Plain ADD COLUMN with NOT NULL DEFAULT — no table rebuild needed, same shape
  * as migrateCharactersTableForStatus above. Existing rows read as alive (none)
  * with zero temp HP and zero death-save counters, which is correct for every
  * pre-#711 sheet (the death subsystem existed only on combatants before). Fresh
@@ -1549,6 +2045,153 @@ function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before notification deep-links could focus a specific
+ * comment (issue #446): `notifications.comment_id` didn't exist. Plain nullable
+ * ADD COLUMN — no table rebuild. Existing rows stay null (parent-entity link only).
+ * Fresh DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForCommentId(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'comment_id')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN comment_id INTEGER');
+}
+
+/**
+ * Migration for issue #820: schedule lifecycle notifications store structured
+ * metadata (schedule id, UTC instant, duration, change type) in
+ * `notifications.data` so clients can localize the start time. Plain nullable
+ * ADD COLUMN — existing rows stay null. Fresh DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForData(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'data')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN data TEXT');
+}
+
+/**
+ * Migration for issue #819: character assignment is an exclusive seat — at most
+ * one campaign_members row may reference a given character_id. Pre-fix DBs could
+ * accumulate duplicate links (the service overwrote ownerUserId without clearing
+ * the previous seat). This migration:
+ *
+ *   1. Collapses duplicates so the unique index can be created. For each
+ *      character_id with multiple seats, keep the member whose user_id matches
+ *      characters.owner_user_id (canonical owner); fall back to the earliest
+ *      membership id. Losing seats are unlinked (character_id cleared), never
+ *      deleted — the member stays in the campaign.
+ *   2. Creates the partial unique index idempotently (BOOTSTRAP_SQL declares the
+ *      same name for fresh DBs).
+ */
+function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): void {
+  const hasMembersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_members'")
+    .get();
+  if (!hasMembersTable) return;
+
+  // Prefer the seat whose user matches the character's owner_user_id (string form
+  // of users.id). When no seat matches the owner (or the character is missing),
+  // keep MIN(id) so the index can be applied deterministically.
+  const dupGroups = sqlite
+    .prepare(
+      `SELECT character_id
+       FROM campaign_members
+       WHERE character_id IS NOT NULL
+       GROUP BY character_id
+       HAVING COUNT(*) > 1`,
+    )
+    .all() as Array<{ character_id: number }>;
+
+  const seatsFor = sqlite.prepare(
+    `SELECT id, user_id FROM campaign_members WHERE character_id = ? ORDER BY id ASC`,
+  );
+  const ownerOf = sqlite.prepare(`SELECT owner_user_id FROM characters WHERE id = ? LIMIT 1`);
+  const unlink = sqlite.prepare(
+    `UPDATE campaign_members SET character_id = NULL, updated_at = datetime('now') WHERE id = ?`,
+  );
+
+  for (const { character_id } of dupGroups) {
+    const seats = seatsFor.all(character_id) as Array<{ id: number; user_id: number }>;
+    const ownerRow = ownerOf.get(character_id) as { owner_user_id: string | null } | undefined;
+    const ownerUserId = ownerRow?.owner_user_id ?? null;
+    const keep =
+      (ownerUserId != null ? seats.find((s) => String(s.user_id) === ownerUserId) : undefined) ?? seats[0];
+    if (!keep) continue;
+    for (const seat of seats) {
+      if (seat.id !== keep.id) unlink.run(seat.id);
+    }
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
+      ON campaign_members(character_id) WHERE character_id IS NOT NULL;
+  `);
+}
+
+/**
+ * Issue #782: per-action idempotency for inventory quantity writes. CREATE TABLE
+ * IF NOT EXISTS is fully idempotent; fresh DBs never hit this path because
+ * BOOTSTRAP_SQL already declares the table. Same shape as other new-table
+ * migrations (e.g. 0051 server_meta).
+ */
+function migrateInventoryQtyIdempotencyTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
+      key TEXT PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item
+      ON inventory_qty_idempotency(item_id);
+  `);
+}
+
+/** Issue #782: created_at index so TTL prune-on-write is a range scan, not a table scan. */
+function migrateInventoryQtyIdempotencyCreatedAtIndex(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created
+      ON inventory_qty_idempotency(created_at);
+  `);
+}
+
+/**
+ * Issue #867: server-level purge tombstones. NEW table (no ALTER) — CREATE TABLE
+ * IF NOT EXISTS is fully idempotent. No FKs by design: rows must outlive the
+ * campaign hard-cascade they document.
+ */
+function migrateCampaignPurgeTombstones(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_purge_tombstones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      campaign_name_hash TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      requested_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+  `);
+}
+
+/**
  * Ordered, named registry of the hand-rolled migrations above (issue #69). Each
  * entry is applied at most once and its name is recorded in the `__migrations`
  * schema-version table, replacing the previous "call every migrate* fn on every
@@ -1561,6 +2204,10 @@ function migrateCharactersTableForDeathTempHp(sqlite: Database.Database): void {
  * it is the canonical sequence in which an old-shaped DB is upgraded (mirrors the
  * historical call order in openDatabase). Append new migrations to the END only.
  */
+function migrateImportJobsTable(sqlite: Database.Database): void {
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, source TEXT NOT NULL, source_hash TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'queued', progress TEXT NOT NULL DEFAULT '{}', cursor TEXT, actor_id TEXT NOT NULL DEFAULT '', started_at TEXT, updated_at TEXT NOT NULL, completed_at TEXT, outcome TEXT, errors TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status); CREATE INDEX IF NOT EXISTS idx_import_jobs_created_at ON import_jobs(created_at);`);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -1618,7 +2265,29 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0054_combatants_unique_identity', run: migrateCombatantsUniqueIdentity },
   { name: '0055_participant_support_preferences', run: migrateParticipantSupportPreferences },
   { name: '0056_characters_death_temp_hp', run: migrateCharactersTableForDeathTempHp },
-
+  { name: '0057_campaigns_active_encounter', run: migrateCampaignsTableForActiveEncounter },
+  { name: '0058_campaigns_public_invites_enabled', run: migrateCampaignsTableForPublicInvitesEnabled },
+  { name: '0059_public_invites_disabled_inactive', run: migratePublicInvitesDisabledForInactiveCampaigns },
+  { name: '0060_encounter_events_combatant_ids', run: migrateEncounterEventsTableForCombatantIds },
+  { name: '0061_combatants_sheet_synced_updated_at', run: migrateCombatantsTableForSheetSyncedUpdatedAt },
+  { name: '0062_attachments_publication_state', run: migrateAttachmentsTableForPublicationState },
+  { name: '0063_comments_character_attribution', run: migrateCommentsTableForCharacterAttribution },
+  { name: '0064_encounter_links_campaign_scope', run: migrateEncounterLinksCampaignScope },
+  { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
+  { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
+  { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
+  { name: '0068_inventory_qty_idempotency', run: migrateInventoryQtyIdempotencyTable },
+  { name: '0069_inventory_qty_idempotency_created_at', run: migrateInventoryQtyIdempotencyCreatedAtIndex },
+  { name: '0070_notifications_data', run: migrateNotificationsTableForData },
+  { name: '0071_ai_dm_usage_history', run: migrateAiDmUsageHistoryTable },
+  { name: '0072_combatants_turn_state', run: migrateCombatantsTableForTurnState },
+  { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
+  { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
+  { name: '0075_check_requests', run: migrateCheckRequestsTable },
+  { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
+  { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
+  { name: '0078_import_jobs', run: migrateImportJobsTable },
+  { name: '0079_notification_preferences', run: migrateNotificationPreferencesTables },
 ];
 
 /**

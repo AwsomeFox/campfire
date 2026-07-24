@@ -1,11 +1,15 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { buildMcpEnvelope } from '../../common/api-error.envelope';
 import { auditActor, roleAtLeast, type RequestUser } from '../../common/user.types';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
-import type { AiDmSeat, Role } from '@campfire/schema';
+import { CampaignsService } from '../campaigns/campaigns.service';
+import { RulesService } from '../rules/rules.service';
+import { EncountersService } from '../encounters/encounters.service';
+import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -13,9 +17,17 @@ import type {
   AiToolSchema,
   AiGenerateResult,
 } from '../ai-dm/providers/ai-provider';
+import { AiProviderError } from '../ai-dm/providers/errors';
+import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  formatCalendarForPrompt,
+  formatListForPrompt,
+  formatLocationEnvironmentFromSummary,
+} from './world-state-prompt';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -26,12 +38,26 @@ const HARD_MAX_STEPS = 12;
 /** How long an unresolved table vote stays open before it lazily fails (#382) — 30 minutes. */
 const VOTE_TTL_MS = 30 * 60_000;
 
+/**
+ * Max silence between provider stream events before the driver aborts the step (#1063).
+ * Mutable so unit/e2e tests can shrink the watchdog without waiting 30s.
+ */
+export let DRIVER_STREAM_IDLE_TIMEOUT_MS = DEFAULT_IDLE_TIMEOUT_MS;
+
+/** Test-only: override {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}. */
+export function setDriverStreamIdleTimeoutMsForTests(ms: number): void {
+  DRIVER_STREAM_IDLE_TIMEOUT_MS = ms;
+}
+
 /** Why a driver turn stopped — surfaced on the result + the turn.end SSE event. */
 export type AiDmStopReason =
   | 'complete' // the model produced narration with no further tool calls
   | 'budget_exhausted' // the per-campaign token budget hit its hard cap
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
-  | 'max_steps'; // the tool loop hit its iteration ceiling
+  | 'max_steps' // the tool loop hit its iteration ceiling
+  | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
+  | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
+  | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
@@ -39,6 +65,13 @@ export interface AiDmExecutedTool {
   isError: boolean;
   /** True when the call was routed to the proposal queue (a canon write the seat can't make directly). */
   proposed: boolean;
+  /** Encounter mutated by this call, when known from validated args/results (#825). */
+  encounterId?: number;
+}
+
+/** Narrow resource identity to the fields persisted on a turn's executed-tool summary. */
+function pickExecutedIdentity(identity: ToolResourceIdentity): Pick<AiDmExecutedTool, 'encounterId'> {
+  return identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {};
 }
 
 export interface AiDmTurnRunResult {
@@ -62,6 +95,23 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
  */
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
+/**
+ * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
+ * it at compile time but concurrent pause/takeover can change it at runtime. Returns true for
+ * deliberate DM freeze states (`paused` / `human_control`).
+ */
+export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
+  return state === 'paused' || state === 'human_control';
+}
+
+/**
+ * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
+ * (#1057) to abort early with stopReason `'frozen'` when a concurrent lever fires mid-turn.
+ */
+function isFrozen(session: AiDmSessionState): boolean {
+  return isMidTurnFrozenState(session.state);
+}
+
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
 export type AiDmStuckReason =
   | 'tool_error' // a tool call errored (surfaced by the turn loop's stop reason)
@@ -69,7 +119,8 @@ export type AiDmStuckReason =
   | 'max_steps' // the tool loop hit its ceiling without producing final narration
   | 'no_narration' // the turn produced no narration at all
   | 'loop' // the model repeated its previous narration verbatim
-  | 'dispute'; // a player flagged the AI's last ruling as wrong/unfair
+  | 'dispute' // a player flagged the AI's last ruling as wrong/unfair
+  | 'provider_error'; // provider failed or stalled mid-stream (#1046 / #1063)
 
 /** Snapshot of the current stuck condition; null when the seat is healthy. */
 export interface AiDmStuckInfo {
@@ -132,7 +183,41 @@ export interface AiDmSessionState {
    * literal so existing snapshots deserialize unchanged).
    */
   secretReadApprovals?: Record<string, AiDmSecretReadApproval>;
+  /**
+   * Attachment ids produced by generate_map during this session (#488). The driver may only
+   * link mapAttachmentId to ids in this set (or null to detach); arbitrary campaign attachments
+   * stay off-limits so hidden handouts cannot be exposed via update_encounter.
+   */
+  driverGeneratedMapIds?: number[];
+  /** generate_map calls consumed this turn — reset at turn start (#488 / #474 policy-lite). */
+  generateMapCallsThisTurn?: number;
+  /**
+   * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
+   * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
+   * must not write ladder/status updates that would race a replacement session.
+   */
+  detached?: boolean;
 }
+
+/** Session fields used only for internal execution guard bookkeeping, never exposed to members. */
+type AiDmSessionPrivateGuardFields = 'secretReadApprovals' | 'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'detached';
+
+/** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
+export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
+
+/** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
+export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
+  const { secretReadApprovals: _approvals, driverGeneratedMapIds: _mapIds, generateMapCallsThisTurn: _mapCalls, detached: _detached, ...rest } = session;
+  return rest;
+}
+
+/**
+ * Safety bound on the number of concurrently-active (unconsumed) secret-read approvals a single
+ * campaign session may hold (#1059). Consumed approvals are deleted on use, and same-{tool,entityId}
+ * grants replace in place, so this cap only bites when a DM stacks many DISTINCT pending approvals;
+ * the oldest is then evicted to keep the in-memory session map bounded.
+ */
+const MAX_ACTIVE_SECRET_READ_APPROVALS = 50;
 
 /**
  * A DM-granted, narrowly-scoped approval for the autonomous seat to read ONE secret entity
@@ -220,7 +305,14 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
-  // encounter / turn flow
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
+  // encounter / turn flow — includes create_encounter so the AI can originate a fight
+  // during play (#1075).
+  'create_encounter',
+  // commit_encounter (#412): the driver may commit a GENERATED roster as a hidden, preparing
+  // encounter during prep — the same prep-only latitude as generate_map (it never reveals to
+  // players or replaces a live map). preview_encounter is a non-mutating read (always allowed).
+  'commit_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',
@@ -232,15 +324,261 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'set_character_conditions',
   'award_xp',
   'level_up_character',
-  // scene / exploration
+  // scene / exploration / world consequences
   'reveal_map_region',
   'check_objective',
+  'set_npc_disposition',
+  'set_faction_reputation',
+  'set_location_discovery',
+  // battle-map authoring (#488) — spin up a battlefield and shape VTT overlays mid-encounter.
+  // Execution-time guards (guardDriverLivePlayArgs) bound generate_map to one call per turn,
+  // restrict update_encounter to VTT fields only, and limit map linkage to session-generated
+  // maps (mapAttachmentId:null detaches/undoes).
+  'generate_map',
+  // Genuine AI map generation (#410): the driver may GENERATE/REFINE candidates during prep
+  // (previews only — nothing persisted). It is intentionally NOT given attach_generated_map,
+  // so it can never reveal/replace a live map without the DM performing the attach.
+  'generate_ai_map',
+  'refine_ai_map',
+  'update_encounter',
+  // private information delivery (#1023)
+  'whisper_to_player',
+  // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
+  // (guardDriverLivePlayArgs): adjust_treasury allows positive bounded delta grants only.
+  'adjust_treasury',
+  'add_inventory_item',
+  // update_inventory_item: grant-only — guardDriverLivePlayArgs enforces positive qtyDelta
+  // only; absolute qty, zero/negative qtyDelta, and owner moves are refused at execution.
+  'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
 ]);
 
 /** Tool-name prefixes the driver seat may never call — every hard delete (delete_*), even proposed. */
 const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
+
+/** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
+export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
+/** Per-call treasury grant cap (per denomination) for autonomous live play. */
+export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+
+/** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
+const DRIVER_LOOT_COMBAT_LOG_TOOLS = new Set(['adjust_treasury', 'add_inventory_item', 'update_inventory_item']);
+
+const TREASURY_DENOMS = ['pp', 'gp', 'ep', 'sp', 'cp'] as const;
+
+/** Human-readable combat-log detail for a successful driver loot/treasury grant. */
+export function formatDriverLootCombatLogDetail(toolName: string, args: Record<string, unknown>): string | null {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return 'Granted treasury';
+    const rec = delta as Record<string, unknown>;
+    const parts = TREASURY_DENOMS.filter((d) => typeof rec[d] === 'number' && (rec[d] as number) > 0).map(
+      (d) => `+${rec[d] as number} ${d}`,
+    );
+    return parts.length > 0 ? `Granted treasury (${parts.join(', ')})` : 'Granted treasury';
+  }
+  if (toolName === 'add_inventory_item') {
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'item';
+    const qty = typeof args.qty === 'number' && Number.isFinite(args.qty) ? args.qty : 1;
+    return `Granted item: ${name} ×${qty}`;
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : null;
+    if (qtyDelta != null && qtyDelta > 0) return `Increased party item quantity by +${qtyDelta}`;
+    return 'Updated party inventory';
+  }
+  return null;
+}
+
+/**
+ * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
+ * hidden) and arbitrary map linkage are stripped at execution so hidden handouts cannot be
+ * exposed without update_attachment.
+ */
+const DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS = new Set([
+  'encounterId',
+  'expectedUpdatedAt',
+  'mapAttachmentId',
+  'gridSize',
+  'gridScale',
+  'gridUnit',
+  'gridSnap',
+  'gridType',
+  // Grid calibration (issue #417) — overlay geometry only, same VTT class as the fields above.
+  'gridOffsetX',
+  'gridOffsetY',
+  'gridCellHeight',
+  'gridRotation',
+  'gridOpacity',
+  'fog',
+  'aoe',
+]);
+
+export type DriverLivePlayArgGuardResult =
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; code: string; message: string };
+
+/** Reset per-turn live-play counters at the start of each driver turn. */
+export function resetDriverTurnCounters(session: AiDmSessionState): void {
+  session.generateMapCallsThisTurn = 0;
+}
+
+/** Record a generate_map quota consumption for the current turn. */
+export function noteDriverGenerateMapCall(session: AiDmSessionState): void {
+  session.generateMapCallsThisTurn = (session.generateMapCallsThisTurn ?? 0) + 1;
+}
+
+/** Track an attachment id produced by generate_map so update_encounter may link it. */
+export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId: number): void {
+  session.driverGeneratedMapIds = session.driverGeneratedMapIds ?? [];
+  if (!session.driverGeneratedMapIds.includes(attachmentId)) session.driverGeneratedMapIds.push(attachmentId);
+}
+
+/**
+ * Execution-time guards for battle-map live-play tools (#488 / #474 policy-lite):
+ *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
+ *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
+ *    session-generated map id.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
+ *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
+ *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
+ */
+export function guardDriverLivePlayArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  session: Pick<AiDmSessionState, 'driverGeneratedMapIds' | 'generateMapCallsThisTurn'>,
+): DriverLivePlayArgGuardResult {
+  // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
+  // budget so an autonomous seat cannot burn provider/image cost by spamming generation.
+  if (toolName === 'generate_map' || toolName === 'generate_ai_map' || toolName === 'refine_ai_map') {
+    const calls = session.generateMapCallsThisTurn ?? 0;
+    if (calls >= DRIVER_GENERATE_MAP_BUDGET_PER_TURN) {
+      return {
+        ok: false,
+        code: 'generate_map_budget_exhausted',
+        message: `The driver may call map-generation tools at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
+      };
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'update_encounter') {
+    const rejected = Object.keys(args).filter((key) => !DRIVER_UPDATE_ENCOUNTER_VTT_FIELDS.has(key));
+    if (rejected.length > 0) {
+      return {
+        ok: false,
+        code: 'forbidden_encounter_field',
+        message:
+          `The driver may only set VTT fields on update_encounter (fog, grid, aoe, mapAttachmentId). Rejected: ${rejected.join(', ')}.`,
+      };
+    }
+    if ('mapAttachmentId' in args && args.mapAttachmentId !== null && args.mapAttachmentId !== undefined) {
+      const id = Number(args.mapAttachmentId);
+      const allowed = session.driverGeneratedMapIds ?? [];
+      if (!Number.isFinite(id) || !allowed.includes(id)) {
+        return {
+          ok: false,
+          code: 'forbidden_map_link',
+          message:
+            'The driver may only link mapAttachmentId to a map it generated this session, or pass null to detach.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'adjust_treasury') {
+    if ('set' in args && args.set !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
+      };
+    }
+    if (!('delta' in args) || typeof args.delta !== 'object' || args.delta === null || Array.isArray(args.delta)) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide a treasury delta object with positive grant values.',
+      };
+    }
+    const delta = args.delta as Record<string, unknown>;
+    const entries = Object.entries(delta).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide at least one treasury denomination delta.',
+      };
+    }
+    for (const [denom, value] of entries) {
+      if (!['cp', 'sp', 'ep', 'gp', 'pp'].includes(denom)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: `Unsupported treasury denomination "${denom}".`,
+        };
+      }
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: 'Treasury delta values must be integers.',
+        };
+      }
+      if (value <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_spend',
+          message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+        };
+      }
+      if (value > DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_grant_limit',
+          message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'update_inventory_item') {
+    // Only grant-only quantity operations are allowed: positive qtyDelta (atomic increment).
+    // Any absolute qty write (even a positive value can reduce below current), zero/negative
+    // qtyDelta, and owner moves (ownerType/characterId) are all refused to preserve the
+    // no-destruction boundary.
+    if ('qty' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not set an absolute qty on update_inventory_item; use a positive qtyDelta to grant.',
+      };
+    }
+    if ('ownerType' in args || 'characterId' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not move inventory items between owners (ownerType/characterId are not allowed).',
+      };
+    }
+    if ('qtyDelta' in args) {
+      const delta = args.qtyDelta;
+      if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_inventory_reduction',
+          message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  return { ok: true, args: { ...args } };
+}
 
 /**
  * DM-only AGGREGATE read tools — never driveable by the autonomous seat (issue #557). These
@@ -317,6 +655,8 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   // attachments (metadata only; hidden dropped for non-DM; bytes never served over MCP)
   'list_attachments',
   'get_attachment',
+  // AI map generation job status (#410) — no campaign secrets; DM-role gated at the tool
+  'get_map_generation',
   // inventory / treasury / timeline / comments (secrecy-aware at the tool layer)
   'list_inventory',
   'get_inventory_item',
@@ -425,6 +765,7 @@ export function classifyDriverRead(toolName: string): DriverReadDisposition {
 export function wrapUntrustedPlayerInput(input: string): string {
   const neutralized = (input ?? '')
     // Drop control chars (keep normal whitespace) that could scramble the framing.
+    // eslint-disable-next-line no-control-regex -- deliberate control-char strip, not a typo
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, ' ')
     .replace(/\[\s*player_message_(start|end)\s*\]/gi, (_m, g: string) => `(player_message_${g.toLowerCase()})`);
   return `${PLAYER_INPUT_START}\n${neutralized}\n${PLAYER_INPUT_END}`;
@@ -468,10 +809,43 @@ export class AiDriverService {
     private readonly notifications: NotificationsService,
     private readonly supportPreferences: SupportPreferencesService,
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
-  ) {}
+    private readonly campaigns: CampaignsService,
+    private readonly rules: RulesService,
+    private readonly encounters: EncountersService,
+  ) {
+    // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
+    this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
+  }
 
   getSession(campaignId: number): AiDmSessionState {
     return this.sessions.get(campaignId) ?? this.freshSession(campaignId);
+  }
+
+  /**
+   * Reset the in-memory driver session to fresh idle when the seat leaves Driver mode (#1071).
+   * Clears actingDm / vote / stuck / status / state (and the rest of the session snapshot) so a
+   * later re-select of Driver starts clean — not stranded behind a human_control handback.
+   * Emits a lifecycle `state` SSE so open stream clients refetch.
+   *
+   * Coordinates with the #381 turn lock: if a `runTurn` still owns the previous object with
+   * `status === 'running'`, mark that object `detached` (and clear `running`) BEFORE replacing
+   * the map entry. The orphaned turn checks `detached` between steps / stream chunks and stops,
+   * so a driver→off/co_dm→driver cycle cannot interleave narration from the old turn with a new
+   * one on the fresh idle session.
+   */
+  teardownSession(campaignId: number): AiDmSessionState {
+    const existing = this.sessions.get(campaignId);
+    if (existing) {
+      existing.detached = true;
+      // Release the turn slot on the detached object so its finally compare-and-set no-ops,
+      // and so any late status reads on the orphaned reference do not look "still running".
+      if (existing.status === 'running') existing.status = 'idle';
+    }
+    const fresh = this.freshSession(campaignId);
+    this.sessions.set(campaignId, fresh);
+    this.lastInputs.delete(campaignId);
+    this.stream.emit({ type: 'state', campaignId, state: fresh.state });
+    return fresh;
   }
 
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
@@ -650,7 +1024,11 @@ export class AiDriverService {
       .filter((t) => isDriverToolAllowed(t) && !DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name))
       .map((t) => ({
         name: t.name,
-        description: t.description,
+        description:
+          t.name === 'update_encounter'
+            ? 'DM only: adjust battle-map VTT overlays for an encounter — fog, grid config, AoE templates, and mapAttachmentId ' +
+              '(session-generated maps only; null detaches). Prep fields (name, location/quest/session links, hidden) are NOT available to the driver seat.'
+            : t.description,
         parameters: t.inputSchema,
       }));
 
@@ -661,6 +1039,7 @@ export class AiDriverService {
 
     // status is already 'running' (reserved synchronously above, #381).
     if (opts.scene !== undefined) session.scene = opts.scene;
+    resetDriverTurnCounters(session);
     this.stream.emit({ type: 'turn.start', campaignId });
 
     const maxSteps = clamp(opts.maxSteps ?? DEFAULT_MAX_STEPS, 1, HARD_MAX_STEPS);
@@ -676,36 +1055,160 @@ export class AiDriverService {
 
     try {
       for (let step = 0; step < maxSteps; step++) {
+        // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
+        // before the next provider call so we cannot interleave with a replacement session.
+        if (session.detached) {
+          stopReason = 'aborted';
+          break;
+        }
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'. Distinct from `'aborted'` (mode-switch teardown): the
+        // stuck ladder must not park on top of the human's explicit freeze.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
+          break;
+        }
         if (budgetRemaining <= 0) {
           stopReason = 'budget_exhausted';
           break;
         }
-        steps = step + 1;
+        const stepNumber = step + 1;
 
-        const maxTokens = Math.min(perStepCap, budgetRemaining);
-        const { text, result } = await this.streamStep(campaignId, provider, {
-          system,
-          messages,
-          // Issue #564: the executable model derives ONLY from the effective provider
-          // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
-          model: execModel,
-          maxTokens,
-          tools: toolSchemas,
+        // Driver and scribe share the same campaign mutex (#1058). Re-read the
+        // seat after ownership, then keep provider streaming and metering in one
+        // critical section. A scribe that spent while this turn waited can
+        // exhaust the budget without this driver making another provider call.
+        const spend = await this.aiDm.withSpendLock(campaignId, async () => {
+          const currentSeat = await this.aiDm.getSeat(campaignId);
+          const currentRemaining = currentSeat.tokenBudget - currentSeat.tokensUsed;
+          if (currentRemaining <= 0) {
+            return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
+          }
+          // Detach (#1071) vs freeze (#1057) must stay distinct — `frozen` keeps the stuck
+          // ladder from parking on top of an explicit human pause/takeover.
+          if (session.detached) {
+            return {
+              kind: 'aborted' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
+          }
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
+          }
+          // assertRunnable's server-cap check happened before this turn entered
+          // the queue. Repeat it under ownership so a preceding Scribe spend
+          // cannot make that admission stale while the Driver waits.
+          try {
+            await this.aiDm.assertWithinServerTokenCap();
+          } catch {
+            return { kind: 'server_cap' as const, seat: currentSeat, budgetRemaining: currentRemaining };
+          }
+
+          const maxTokens = Math.min(perStepCap, currentRemaining);
+          steps = stepNumber;
+          const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
+            system,
+            messages,
+            // Issue #564: the executable model derives ONLY from the effective provider
+            // config (allowlist-validated at resolution above), NEVER from legacy seat.model.
+            model: execModel,
+            maxTokens,
+            tools: toolSchemas,
+          });
+
+          // Meter this step's REAL usage before releasing the mutex, including
+          // a completed/partial stream that was frozen before narration/tool
+          // delivery. The SQL clamp remains defense in depth; another local
+          // spender cannot pass a stale budget gate while this call is billed.
+          let usage = result?.usage.totalTokens ?? 0;
+          // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
+          // omit streaming usage. When that happens usage is 0 despite real content. Estimate
+          // rather than silently fail-open on budget enforcement.
+          const outputText = text || result?.text || '';
+          if (usage === 0 && (outputText.length > 0 || (result?.toolCalls?.length ?? 0) > 0)) {
+            const outputChars = outputText.length + JSON.stringify(result?.toolCalls ?? []).length;
+            // ~4 chars per token is a conservative English-language estimate.
+            usage = Math.max(1, Math.ceil(outputChars / 4));
+            this.logger.warn(
+              `Provider did not report streaming usage for step ${stepNumber} (model=${result?.model || execModel}); estimating ${usage} tokens from ${outputChars} output chars`,
+            );
+          }
+          const servedModel = result?.model || execModel;
+          const metered = await this.aiDm.meterTurn(campaignId, usage, {
+            actor,
+            action: 'ai-dm.driver.turn',
+            detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
+          });
+          // streamStep sets `aborted` only on mode-switch detach mid-stream (#1071).
+          if (aborted || session.detached) {
+            return {
+              kind: 'aborted' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
+          // #1057: re-check after streaming — a pause/takeover can land while we streamed.
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
+          return { kind: 'metered' as const, text, result, metered };
         });
 
-        // Meter this step's REAL usage against the budget (atomic; hard cap). Every step
-        // is audited via AiDmService.meterTurn (actor = the seat). The audit records the
-        // EXACT model sent (the resolved, allowlist-validated one) — not the legacy label.
-        const usage = result?.usage.totalTokens ?? 0;
-        const servedModel = result?.model || execModel;
-        const metered = await this.aiDm.meterTurn(campaignId, usage, {
-          actor,
-          action: 'ai-dm.driver.turn',
-          detail: `step ${steps} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
-        });
+        if (spend.kind === 'budget_exhausted' || spend.kind === 'server_cap') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          stopReason = 'budget_exhausted';
+          break;
+        }
+        if (spend.kind === 'aborted') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'aborted';
+          if (spend.text) finalNarration = spend.text;
+          break;
+        }
+        if (spend.kind === 'frozen') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'frozen';
+          if (spend.text) finalNarration = spend.text;
+          break;
+        }
+
+        const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
+
+        if (session.detached) {
+          stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
+          if (text) finalNarration = text;
+          break;
+        }
 
         if (text) {
           finalNarration = text;
@@ -731,6 +1234,15 @@ export class AiDriverService {
           messages,
           executed,
         );
+        if (session.detached) {
+          stopReason = 'aborted';
+          break;
+        }
+        // #1057: re-check after tool execution — a pause/takeover can land between steps.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
+          break;
+        }
         if (toolErrored) {
           stopReason = 'tool_error';
           break;
@@ -738,15 +1250,51 @@ export class AiDriverService {
 
         if (step === maxSteps - 1) stopReason = 'max_steps';
       }
+    } catch (err) {
+      // Provider throw / idle timeout (#1046 / #1063): if streamStep throws, do NOT rethrow
+      // past `finally` — that would skip `turn.end` and leave every SSE client's composer
+      // locked forever, even though the seat slot is released. Catch here so we still emit
+      // turn.end with provider_error and park the ladder in awaiting_players for recovery.
+      stopReason = 'provider_error';
+      const detail = err instanceof Error ? err.message : String(err);
+      this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'ai-dm.driver.provider_error',
+        entityType: 'ai-dm',
+        campaignId,
+        detail: `${detail} (triggered by ${triggeredBy.id})`,
+      });
     } finally {
       // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
       // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
       // silently accept new input, defeating the freeze the table just asked for.
+      // Teardown (#1071) already cleared `running` on this detached object; the CAS no-ops.
       if (session.status === 'running') session.status = 'idle';
-      session.lastNarration = finalNarration || session.lastNarration;
-      session.lastTurnAt = nowIso();
-      session.turnCount += 1;
+      // Never write ladder counters onto a detached (replaced) session object.
+      if (!session.detached) {
+        session.lastNarration = finalNarration || session.lastNarration;
+        session.lastTurnAt = nowIso();
+        session.turnCount += 1;
+      }
+    }
+
+    // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
+    // just signal turn.end so open stream clients close the orphaned bubble cleanly.
+    if (session.detached) {
+      this.stream.emit({ type: 'turn.end', campaignId, stopReason: 'aborted', steps, tokensUsed: totalTokens, budgetRemaining });
+      return {
+        narration: finalNarration,
+        stopReason: 'aborted',
+        steps,
+        toolCalls: executed,
+        tokensUsed: totalTokens,
+        tokenBudget: seat.tokenBudget,
+        budgetRemaining,
+        seat: latestSeat,
+      };
     }
 
     // #314 — stuck detection: classify the turn's outcome and move the ladder. A stuck turn
@@ -772,32 +1320,75 @@ export class AiDriverService {
     };
   }
 
-  /** Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated text + result. */
+  /**
+   * Stream one provider call, forwarding text deltas to the SSE channel; returns the aggregated
+   * text + result. Passes an AbortSignal so a stalled mid-body stream (no chunk within
+   * {@link DRIVER_STREAM_IDLE_TIMEOUT_MS}) aborts instead of wedging the campaign (#1063).
+   */
   private async streamStep(
     campaignId: number,
     provider: AiProvider,
+    session: AiDmSessionState,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
-  ): Promise<{ text: string; result: AiGenerateResult | undefined }> {
+  ): Promise<{ text: string; result: AiGenerateResult | undefined; aborted: boolean }> {
     let text = '';
     let result: AiGenerateResult | undefined;
-    for await (const ev of provider.stream({
-      system: req.system,
-      messages: req.messages,
-      model: req.model,
-      maxTokens: req.maxTokens,
-      tools: req.tools,
-      toolChoice: req.tools.length > 0 ? 'auto' : undefined,
-    })) {
-      if (ev.type === 'text') {
-        text += ev.delta;
-        this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
-      } else if (ev.type === 'done') {
-        result = ev.result;
+    let aborted = false;
+    const ac = new AbortController();
+    const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdle = () => {
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
       }
+    };
+    const armIdle = () => {
+      clearIdle();
+      if (idleMs <= 0) return;
+      idleTimer = setTimeout(() => {
+        ac.abort(
+          new AiProviderError('timeout', `AI provider stream idle for ${idleMs}ms`, {
+            provider: provider.name,
+          }),
+        );
+      }, idleMs);
+    };
+    armIdle();
+    try {
+      for await (const ev of provider.stream(
+        {
+          system: req.system,
+          messages: req.messages,
+          model: req.model,
+          maxTokens: req.maxTokens,
+          tools: req.tools,
+          toolChoice: req.tools.length > 0 ? 'auto' : undefined,
+        },
+        { signal: ac.signal },
+      )) {
+        // Mode-switch teardown detached this session mid-stream (#1071): stop forwarding
+        // deltas so an orphaned turn cannot splice narration onto the live SSE channel.
+        if (session.detached) {
+          aborted = true;
+          ac.abort();
+          break;
+        }
+        armIdle(); // reset idle watchdog on every chunk (#1063)
+        if (ev.type === 'text') {
+          text += ev.delta;
+          this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
+        } else if (ev.type === 'done') {
+          result = ev.result;
+        }
+      }
+    } finally {
+      // Idle timer must not outlive the step — clear only when the stream completes or aborts.
+      clearIdle();
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { text, result };
+    return { text, result, aborted };
   }
 
   /**
@@ -830,12 +1421,24 @@ export class AiDriverService {
       // forbidden call never reaches a service. A known tool that fails the allow-list is a
       // security anomaly (audited + logged); an unknown tool falls through to a plain 404 below.
       if (tool && !isDriverToolAllowed(tool)) {
-        const text = JSON.stringify({
-          error: { status: 403, code: 'forbidden_tool', message: `The AI DM seat is not permitted to call ${call.name}.` },
-        });
+        const text = JSON.stringify(
+          buildMcpEnvelope(
+            new ForbiddenException({
+              code: 'forbidden_tool',
+              message: `The AI DM seat is not permitted to call ${call.name}.`,
+            }),
+          ),
+        );
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const blockedIdentity = await this.resolveToolResourceIdentity(
+          campaignId,
+          call.name,
+          call.arguments ?? {},
+          undefined,
+          true,
+        );
+        this.emitToolEvent(campaignId, call.name, true, false, blockedIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(blockedIdentity) });
         this.logger.warn(`Blocked out-of-scope tool ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
         await this.audit.log({
           actor,
@@ -857,14 +1460,51 @@ export class AiDriverService {
       // are rejected at the tool's own requireRole for any other campaign. This arg-level guard is
       // the belt for tools that DO carry campaignId — an explicit mismatch never even dispatches.
       if ('campaignId' in args && Number(args.campaignId) !== campaignId) {
-        const text = JSON.stringify({
-          error: { status: 403, code: 'forbidden', message: `This AI DM seat is scoped to campaign ${campaignId}.` },
-        });
+        const text = JSON.stringify(
+          buildMcpEnvelope(
+            new ForbiddenException(`This AI DM seat is scoped to campaign ${campaignId}.`),
+          ),
+        );
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+        this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(crossIdentity) });
         toolErrored = true;
         continue;
+      }
+
+      // (1b) Battle-map live-play guards (#488 / #474 policy-lite): bounded generate_map budget,
+      // VTT-only update_encounter fields, map linkage restricted to session-generated maps.
+      if (tool?.mutating) {
+        const liveGuard = guardDriverLivePlayArgs(call.name, args, session);
+        if (!liveGuard.ok) {
+          const text = JSON.stringify(
+            buildMcpEnvelope(
+              new ForbiddenException({ code: liveGuard.code, message: liveGuard.message }),
+            ),
+          );
+          messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+          const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
+          this.logger.warn(`Blocked live-play guard on ${call.name} for ${actor} (triggered by ${triggeredBy.id}): ${liveGuard.code}`);
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.blocked',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `blocked ${call.name}: ${liveGuard.code} (triggered by ${triggeredBy.id})`,
+          });
+          toolErrored = true;
+          continue;
+        }
+        const guardedArgs = { ...liveGuard.args };
+        for (const key of Object.keys(args)) delete args[key];
+        Object.assign(args, guardedArgs);
+        if (call.name === 'generate_map' || call.name === 'generate_ai_map' || call.name === 'refine_ai_map') {
+          noteDriverGenerateMapCall(session);
+        }
       }
 
       // (2) Secrecy policy (#557): pick the principal this read runs under. Writes always run
@@ -888,8 +1528,9 @@ export class AiDriverService {
             },
           });
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-          executed.push({ name: call.name, isError: true, proposed: false });
+          const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
           this.logger.warn(`Blocked secret-bearing read ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
           await this.audit.log({
             actor,
@@ -927,10 +1568,22 @@ export class AiDriverService {
       const toolset = useSeatPrincipal ? seatToolset : contextToolset;
       const res = await toolset.call(call.name, args);
 
+      if (call.name === 'generate_map' && !res.isError) {
+        try {
+          const parsed = JSON.parse(res.text) as { attachmentId?: unknown };
+          if (typeof parsed.attachmentId === 'number') recordDriverGeneratedMap(session, parsed.attachmentId);
+        } catch {
+          // Non-JSON tool payload — skip tracking.
+        }
+      }
+
       // (4) #557 — consume the approval (single-use) the moment the DM-scoped read succeeds,
       // so a grant for get_npc:42 can't be replayed to re-leak the same secret across turns.
       if (approvedSecret) {
-        approvedSecret.consumed = true;
+        // Single-use: remove the approval the moment its DM-scoped read completes, so it can't be
+        // replayed to re-leak the secret AND so consumed approvals don't accumulate unboundedly in
+        // the in-memory session map over a long campaign (#1059).
+        this.consumeApproval(session, approvedSecret);
         await this.audit.log({
           actor,
           actorRole: 'dm',
@@ -956,22 +1609,97 @@ export class AiDriverService {
       const content =
         approvedSecret && !res.isError ? `${cleanedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : cleanedText;
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });
-      this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: res.isError, proposed });
-      executed.push({ name: call.name, isError: res.isError, proposed });
+      const identity = await this.resolveToolResourceIdentity(
+        campaignId,
+        call.name,
+        args,
+        cleanedText,
+        res.isError,
+      );
+      this.emitToolEvent(campaignId, call.name, res.isError, proposed, identity);
+      executed.push({ name: call.name, isError: res.isError, proposed, ...pickExecutedIdentity(identity) });
 
       // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
+      // #1072: include a redaction-safe args summary so the DM can inspect WHY the AI acted,
+      // not just WHICH tool it called. Secrets/apiKeys/passwords are always redacted; long
+      // strings are truncated; nested objects/arrays are shown as shape-only placeholders.
+      const argsSummary = summarizeToolArgs(args);
       await this.audit.log({
         actor,
         actorRole: 'dm',
         action: 'ai-dm.driver.tool',
         entityType: 'ai-dm',
         campaignId,
-        detail: `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
+        detail:
+          `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''}` +
+          `${identity.encounterId !== undefined ? ` encounter=${identity.encounterId}` : ''}` +
+          `${argsSummary ? ` args={${argsSummary}}` : ''}` +
+          ` by ${triggeredBy.id}`,
       });
+
+      // (7) #1021 — persist successful loot/treasury grants on the active encounter's
+      // combat log so awards survive reload (toast alone is not enough). Best-effort:
+      // a log failure must not fail the grant that already committed.
+      if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        const detail = formatDriverLootCombatLogDetail(call.name, args);
+        if (detail) {
+          try {
+            await this.encounters.appendActiveEncounterNote(campaignId, detail);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to append loot combat-log note after ${call.name} for campaign ${campaignId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      }
 
       if (res.isError) toolErrored = true;
     }
     return { toolErrored };
+  }
+
+  /**
+   * Derive + authoritatively resolve encounter resource identity for a tool SSE/turn
+   * summary entry (#825). Args/result text yield a candidate id; the encounter row
+   * confirms campaign scope and `hidden` so role projection can strip prep ids.
+   */
+  private async resolveToolResourceIdentity(
+    campaignId: number,
+    toolName: string,
+    args: Record<string, unknown>,
+    resultText: string | undefined,
+    isError: boolean,
+  ): Promise<ToolResourceIdentity> {
+    const extracted = extractToolResourceIdentity(toolName, args, resultText, isError);
+    if (extracted.encounterId === undefined) return {};
+    try {
+      const row = await this.encounters.getRowOrThrow(extracted.encounterId);
+      if (row.campaignId !== campaignId) return {};
+      return { encounterId: row.id, encounterHidden: row.hidden };
+    } catch {
+      // Missing/inaccessible row — do not advertise an unverified id on the shared stream.
+      return {};
+    }
+  }
+
+  private emitToolEvent(
+    campaignId: number,
+    name: string,
+    isError: boolean,
+    proposed: boolean,
+    identity: ToolResourceIdentity,
+  ): void {
+    this.stream.emit({
+      type: 'tool',
+      campaignId,
+      name,
+      isError,
+      proposed,
+      ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
+      ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
+    });
   }
 
   // ===================================================================================
@@ -1083,7 +1811,21 @@ export class AiDriverService {
     }
     const session = this.ensureSession(campaignId);
     session.secretReadApprovals = session.secretReadApprovals ?? {};
+    const approvals = session.secretReadApprovals;
     const key = approvalKey(tool, entityId);
+    // Bound the active approvals per campaign (#1059): a NEW key that would exceed the cap evicts
+    // the oldest approval (by grant time) so a DM stacking distinct grants can't grow memory without
+    // limit. Re-granting an existing {tool, entityId} replaces in place and never trips the cap.
+    if (!(key in approvals)) {
+      const keysByAge = Object.keys(approvals).sort((a, b) => approvals[a].grantedAt.localeCompare(approvals[b].grantedAt));
+      while (keysByAge.length >= MAX_ACTIVE_SECRET_READ_APPROVALS) {
+        const oldest = keysByAge.shift()!;
+        delete approvals[oldest];
+        this.logger.warn(
+          `secret-read approvals at cap (${MAX_ACTIVE_SECRET_READ_APPROVALS}) for campaign ${campaignId}; evicted oldest ${oldest}`,
+        );
+      }
+    }
     // Replace any prior approval for the same {tool, entityId} (the new one is unconsumed).
     const approval: AiDmSecretReadApproval = {
       tool,
@@ -1133,6 +1875,16 @@ export class AiDriverService {
       this.stream.emit({ type: 'secret-approval', campaignId, action: 'revoked', tool, entityId });
     }
     return session;
+  }
+
+  /**
+   * Consume a single-use secret-read approval (#557): mark it consumed AND remove it from the
+   * session map so it can neither be replayed nor accumulate as dead state over time (#1059).
+   */
+  private consumeApproval(session: AiDmSessionState, approval: AiDmSecretReadApproval): void {
+    approval.consumed = true;
+    const approvals = session.secretReadApprovals;
+    if (approvals) delete approvals[approvalKey(approval.tool, approval.entityId)];
   }
 
   /** Look up an unconsumed approval for {tool, entityId}, or null (issue #557). */
@@ -1186,22 +1938,45 @@ export class AiDriverService {
   }
 
   /**
-   * Rules lookup (#314): route a rules question to the compendium (retrieval) instead of the
-   * generative model — cheaper and authoritative. Reads through the SAME permission-checked
-   * tool layer (lookup_rule) the AI itself uses, so nothing the seat can't see leaks.
+   * Rules lookup (#314 / #717): route a rules question to the compendium (retrieval) instead
+   * of the generative model — cheaper and authoritative. The answer is bound to the
+   * campaign's active rule system (its `ruleSystem` slug) so a multi-pack server never
+   * answers a D&D 5e question from a Pathfinder pack, and rendered as a concise, human-
+   * readable Markdown answer (system, source, pack, compendium link) — never the raw
+   * serialized tool payload that used to be injected verbatim into the table transcript.
+   *
+   * The compendium is server-wide reference content (open to any authenticated user via
+   * GET /rules/search), so this reads `RulesService.search` directly for clean domain
+   * objects rather than round-tripping through the MCP tool's JSON serialization. A
+   * campaign with no rule system configured (homebrew / empty slug) gets a plain-language
+   * note that no authoritative source is available, instead of cross-system noise.
    */
   async rulesLookup(campaignId: number, user: RequestUser, query: string, role: Role = 'player'): Promise<{ query: string; result: string }> {
-    const toolset = this.mcpTools.buildToolset(this.seatPrincipal(campaignId));
-    const res = await toolset.call('lookup_rule', { query });
+    const campaign = await this.campaigns.getOrThrow(campaignId);
+    const slug = campaign.ruleSystem ?? '';
+    const pack = slug ? await this.rules.getPackBySlug(slug) : undefined;
+
+    const auditDetail = `rules lookup by ${user.id}: ${excerpt(query, 120)}` + (pack ? ` (pack ${pack.slug})` : ' (no rule system)');
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
       action: 'ai-dm.driver.rules_lookup',
       entityType: 'ai-dm',
       campaignId,
-      detail: `rules lookup by ${user.id}: ${excerpt(query, 120)}`,
+      detail: auditDetail,
     });
-    return { query, result: res.text };
+
+    // Homebrew / no rule system: say so plainly rather than searching every installed pack
+    // and answering from whichever happens to match first (#717).
+    if (!pack) {
+      return { query, result: renderNoRuleSystem(query) };
+    }
+
+    const page = await this.rules.search({ q: query, pack: pack.slug }, 5);
+    if (page.items.length === 0) {
+      return { query, result: renderNoMatch(query, pack) };
+    }
+    return { query, result: renderRulesAnswer(query, pack, page.items) };
   }
 
   /**
@@ -1512,6 +2287,34 @@ export class AiDriverService {
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
 
+    // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
+    // AI can narrate coherently without needing to chain read tools every turn. All reads go
+    // through the player-scoped contextToolset so hidden entities / dmSecret / unexplored
+    // locations stay excluded (same secrecy guarantee as the campaign summary above).
+    //
+    // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
+    // the turn. The system prompt is read fresh every turn, so world-state changes propagate
+    // to the next player interaction without a cache-invalidation step. Calendar / encounters /
+    // party are fetched in parallel; location/environment is derived from the summary payload
+    // (currentLocation + dangerLevel) to avoid a redundant tool round-trip.
+    const [calendarRaw, activeEncountersRaw, partyRaw] = await Promise.all([
+      safeRead(contextToolset, 'get_calendar', { campaignId }),
+      safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
+      safeRead(contextToolset, 'get_party', { campaignId }),
+    ]);
+
+    const calendar = formatCalendarForPrompt(calendarRaw);
+    if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
+
+    const activeEncounters = formatListForPrompt(activeEncountersRaw);
+    if (activeEncounters) parts.push(`## Running encounters\n${activeEncounters}`);
+
+    const party = formatListForPrompt(partyRaw);
+    if (party) parts.push(`## Party status\n${party}`);
+
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);
+
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
     // every turn, so revocation cannot linger in a cached prompt.
@@ -1625,18 +2428,99 @@ function approvalKey(tool: string, entityId: number): string {
 }
 
 /**
+ * Field names whose values are ALWAYS redacted in the audit-args summary (#1072).
+ * Case-insensitive substring match. This is a defense-in-depth belt for values that
+ * should never appear in a DM-visible audit line even though the DM has broad read
+ * access — the audit is queryable and searchable, so keeping raw secrets out of it
+ * limits blast radius if the audit itself is exported or copy-pasted.
+ */
+const REDACTED_ARG_KEYS = ['apikey', 'password', 'dmsecret', 'secret', 'token', 'authorization', 'bearer'];
+
+/** Battle-map coordinates — must not match the `token` secret substring (#1248). */
+const NON_SECRET_ARG_KEYS = new Set(['tokenx', 'tokeny']);
+
+function isSecretArgKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (NON_SECRET_ARG_KEYS.has(lower)) return false;
+  return REDACTED_ARG_KEYS.some((k) => lower.includes(k));
+}
+
+/** Keep well-formed identifier keys; redact model-controlled key names that embed secrets. */
+function auditArgKeyLabel(key: string, isSecret: boolean): string {
+  if (!isSecret) return key;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return key;
+  return '<redacted>';
+}
+
+/**
+ * Summarize a tool-call args object into a redaction-safe, DM-readable string (#1072).
+ * The summary is a compact `key=value` list where:
+ *   - primitive fields (number, boolean, null) render as-is
+ *   - string fields are truncated to 60 chars with a trailing "…"
+ *   - object/array fields render as `<object>` or `<array[N]>` (structure only, no content)
+ *   - any key matching {@link REDACTED_ARG_KEYS} renders as `<redacted>`
+ * The total output is bounded to ~400 characters so audit rows stay grep-friendly.
+ */
+export function summarizeToolArgs(args: Record<string, unknown> | undefined | null): string {
+  if (!args || typeof args !== 'object') return '';
+  const parts: string[] = [];
+  let totalLen = 0;
+  const MAX_TOTAL = 400;
+  const ELLIPSIS = '…';
+  for (const [key, value] of Object.entries(args)) {
+    const isSecret = isSecretArgKey(key);
+    let rendered: string;
+    if (isSecret) {
+      rendered = '<redacted>';
+    } else if (value === null || value === undefined) {
+      rendered = 'null';
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      rendered = String(value);
+    } else if (typeof value === 'string') {
+      rendered = value.length <= 60 ? JSON.stringify(value) : JSON.stringify(value.slice(0, 60) + '…');
+    } else if (Array.isArray(value)) {
+      rendered = `<array[${value.length}]>`;
+    } else {
+      rendered = '<object>';
+    }
+    const entry = `${auditArgKeyLabel(key, isSecret)}=${rendered}`;
+    // Only account for the ", " separator when appending after existing entries.
+    const separatorLen = parts.length === 0 ? 0 : 2;
+    // Check the *projected* length before pushing, so a large entry can't push
+    // the summary well past MAX_TOTAL (Copilot review, #1248).
+    if (totalLen + separatorLen + entry.length > MAX_TOTAL) {
+      // Reserve room for the ellipsis marker too.
+      const ellipsisSep = parts.length === 0 ? 0 : 2;
+      if (totalLen + ellipsisSep + ELLIPSIS.length <= MAX_TOTAL) {
+        parts.push(ELLIPSIS);
+      }
+      break;
+    }
+    totalLen += separatorLen + entry.length;
+    parts.push(entry);
+  }
+  return parts.join(', ');
+}
+
+/**
  * Map a finished turn onto a stuck reason, or null if the turn was healthy (#314). Order
  * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
  * narration / a verbatim loop) since it's the more actionable diagnosis.
  */
-function classifyStuck(ctx: {
+export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;
   prevNarration: string | null;
 }): AiDmStuckReason | null {
+  // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
+  if (ctx.stopReason === 'aborted') return null;
+  // #1057: a freeze (DM pause/takeover mid-turn) is not a stuck condition — the human
+  // deliberately froze the seat, so parking the ladder would conflict with their action.
+  if (ctx.stopReason === 'frozen') return null;
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
+  if (ctx.stopReason === 'provider_error') return 'provider_error';
   const narration = ctx.narration.trim();
   if (narration === '') return 'no_narration';
   if (ctx.prevNarration && narration === ctx.prevNarration.trim()) return 'loop';
@@ -1658,7 +2542,67 @@ function describeStuck(reason: AiDmStuckReason): string {
       return 'The AI repeated its previous narration verbatim (looping).';
     case 'dispute':
       return 'A player disputed the AI’s last ruling.';
+    case 'provider_error':
+      return 'The AI provider failed or stalled mid-response.';
     default:
       return 'The AI needs help.';
   }
+}
+
+/**
+ * Cap a block of rule text for inline display in the table transcript (#717). The
+ * compendium body can run long (multi-page spell descriptions); the transcript card is a
+ * concise answer, not the full SRD entry, so keep it to a readable excerpt and point at
+ * the compendium reader for the rest.
+ */
+const RULES_ANSWER_BODY_LIMIT = 600;
+
+function excerptRuleBody(body: string | undefined | null): string {
+  if (!body) return '';
+  const text = body.trim();
+  if (text.length <= RULES_ANSWER_BODY_LIMIT) return text;
+  return `${text.slice(0, RULES_ANSWER_BODY_LIMIT).trimEnd()}…`;
+}
+
+/**
+ * Render the top compendium match as a concise, human-readable Markdown answer for the AI
+ * table transcript (#717). Includes the entry type, the pack/system it came from, its
+ * source line, a trimmed body excerpt, and a compendium link so the table can read the
+ * full entry without the AI narrating raw JSON. Secondary matches are listed by name only.
+ */
+function renderRulesAnswer(query: string, pack: RulePack, results: RuleEntry[]): string {
+  const [top, ...rest] = results;
+  const lines: string[] = [];
+  lines.push(`**${top.name}**${top.type ? ` *(${top.type})*` : ''}`);
+  const body = excerptRuleBody(top.body);
+  if (body) {
+    lines.push('');
+    lines.push(body);
+  }
+  lines.push('');
+  lines.push(`*Source: ${pack.name}${pack.license ? ` · ${pack.license}` : ''}*`);
+  lines.push(`[Open in compendium](/compendium/${top.id})`);
+  if (rest.length > 0) {
+    lines.push('');
+    lines.push(`Other matches: ${rest.map((r) => r.name).join(', ')}.`);
+  }
+  return lines.join('\n');
+}
+
+/** No matches in the campaign's rule system — distinguish from failure and suggest refinements (#717). */
+function renderNoMatch(query: string, pack: RulePack): string {
+  return [
+    `No entry in **${pack.name}** matches “${query.trim()}”.`,
+    '',
+    'Try a broader term, the exact name (e.g. a spell or condition), or check the spelling.',
+  ].join('\n');
+}
+
+/** No rule system configured for the campaign — no authoritative source to look up against (#717). */
+function renderNoRuleSystem(query: string): string {
+  return [
+    `This campaign has no rule system configured, so I can’t look up “${query.trim()}” in a compendium.`,
+    '',
+    'A DM can pick a rule system in **Campaign Settings → Rule system** to scope rules lookups to an installed pack (e.g. the D&D 5e SRD).',
+  ].join('\n');
 }

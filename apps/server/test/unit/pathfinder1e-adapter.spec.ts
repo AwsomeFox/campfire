@@ -10,14 +10,17 @@ import {
   pf1eBaseAttackBonus,
   pf1eSavingThrow,
   pf1eArmorClass,
+  pf1eInitiativeBreakdown,
+  pf1eNativeInitiative,
 } from '@campfire/schema';
 
 /**
- * Unit tests for the Pathfinder 1e RuleSystemAdapter (issue #296). PF1e is 3.5e-derived, so
- * the shared-interface pieces (ability modifier, DEX-derived d20 initiative, ascending-AC
+ * Unit tests for the Pathfinder 1e RuleSystemAdapter (issue #296 / #764). PF1e is 3.5e-derived, so
+ * the shared-interface pieces (ability modifier, d20 initiative, ascending-AC
  * statblock mapping, HP resolution) mirror the 5e adapter, while the PF-specific 3.5e-family
  * math — good/poor save tracks, full/three-quarter/half BAB progressions, and the additive
  * ascending-AC breakdown — is verified against the Pathfinder Core Rulebook (OGL) tables.
+ * Issue #764: monster Init prefers the importer's native flat bonus over a DEX-only derive.
  */
 describe('Pathfinder1eAdapter — abilityModifier (floor((score-10)/2), same as 3.5e/5e)', () => {
   it.each([
@@ -43,26 +46,58 @@ describe('Pathfinder1eAdapter — abilityModifier (floor((score-10)/2), same as 
   });
 });
 
-describe('Pathfinder1eAdapter — initiative (DEX-derived d20)', () => {
+describe('Pathfinder1eAdapter — initiative (native bonus preferred, else DEX; issue #764)', () => {
   it('rolls a d20 for initiative', () => {
     expect(Pathfinder1eAdapter.initiativeDie).toBe(20);
   });
 
-  it('derives the init modifier from canonical character stats (DEX key)', () => {
+  it('prefers an explicit native Init bonus over the DEX modifier (Goblin fixture: +6, not DEX+2)', () => {
+    // Goblin (fake-pathfinder1e): init 6, dex 15 (+2). Improved Initiative (+4) is baked into Init.
+    expect(Pathfinder1eAdapter.initiativeModifier({ dex: 15, initiative: 6 })).toBe(6);
+    expect(Pathfinder1eAdapter.initiativeModifier({ dexterity: 15, init: 6 })).toBe(6);
+  });
+
+  it('uses the Owlbear fixture native Init (+1) even though it matches DEX', () => {
+    // Owlbear: init 1, dex 12 (+1) — native wins, provenance is still 'native'.
+    expect(Pathfinder1eAdapter.initiativeModifier({ dex: 12, initiative: 1 })).toBe(1);
+    expect(pf1eInitiativeBreakdown({ dex: 12, initiative: 1 })).toEqual({ source: 'native', bonus: 1 });
+  });
+
+  it('derives from canonical character stats (DEX key) when no native Init is present', () => {
     expect(Pathfinder1eAdapter.initiativeModifier({ STR: 10, DEX: 14, CON: 12 })).toBe(2);
     expect(Pathfinder1eAdapter.initiativeModifier({ DEX: 7 })).toBe(-2);
+    expect(pf1eInitiativeBreakdown({ DEX: 14 })).toEqual({ source: 'dex', bonus: 2, dexScore: 14 });
   });
 
-  it('derives the init modifier from a raw monster abilityScores object (dexterity key)', () => {
+  it('derives from a raw monster abilityScores object (dexterity/dex key) when Init is absent', () => {
     expect(Pathfinder1eAdapter.initiativeModifier({ strength: 11, dexterity: 15, constitution: 12 })).toBe(2);
+    expect(Pathfinder1eAdapter.initiativeModifier({ str: 11, dex: 15 })).toBe(2);
   });
 
-  it('returns 0 when the governing (DEX) score is absent or non-numeric', () => {
+  it('surfaces unavailable (null) instead of silently inventing +0 when neither Init nor DEX is present', () => {
+    expect(pf1eInitiativeBreakdown({ STR: 16 })).toEqual({ source: 'unavailable', bonus: null });
+    expect(pf1eInitiativeBreakdown({ DEX: 'nope' as unknown as number })).toEqual({ source: 'unavailable', bonus: null });
+    expect(pf1eInitiativeBreakdown({})).toEqual({ source: 'unavailable', bonus: null });
+    expect(pf1eInitiativeBreakdown(null)).toEqual({ source: 'unavailable', bonus: null });
+    expect(pf1eInitiativeBreakdown(undefined)).toEqual({ source: 'unavailable', bonus: null });
+    expect(pf1eNativeInitiative({})).toBeNull();
+    // Production callers (encounter add) use initiativeModifierOrNull so unavailable is not
+    // silently stored as +0; the numeric seam still defaults for rollInitiative.
+    expect(Pathfinder1eAdapter.initiativeModifierOrNull!({ STR: 16 })).toBeNull();
+    expect(Pathfinder1eAdapter.initiativeModifierOrNull!(null)).toBeNull();
     expect(Pathfinder1eAdapter.initiativeModifier({ STR: 16 })).toBe(0);
-    expect(Pathfinder1eAdapter.initiativeModifier({ DEX: 'nope' as unknown as number })).toBe(0);
-    expect(Pathfinder1eAdapter.initiativeModifier({})).toBe(0);
     expect(Pathfinder1eAdapter.initiativeModifier(null)).toBe(0);
-    expect(Pathfinder1eAdapter.initiativeModifier(undefined)).toBe(0);
+  });
+
+  it('distinguishes a genuine native +0 from unavailable', () => {
+    expect(pf1eInitiativeBreakdown({ initiative: 0 })).toEqual({ source: 'native', bonus: 0 });
+    expect(Pathfinder1eAdapter.initiativeModifier({ initiative: 0, dex: 18 })).toBe(0);
+  });
+
+  it('skips invalid-but-present keys and accepts numeric strings (SRD-shaped inputs)', () => {
+    expect(pf1eNativeInitiative({ initiative: '', init: 6 })).toBe(6);
+    expect(pf1eNativeInitiative({ initiative: '6' })).toBe(6);
+    expect(pf1eInitiativeBreakdown({ DEX: '', dexterity: '14' })).toEqual({ source: 'dex', bonus: 2, dexScore: 14 });
   });
 });
 
@@ -195,6 +230,62 @@ describe('Pathfinder1eAdapter — statblock mapping', () => {
     expect(mapped.challengeRating).toBe(10);
     expect(mapped.armorClass).toBe(24);
     expect(mapped.hitPoints).toBe(115);
+  });
+
+  it('folds the importer native Init into abilityScores so the encounter path preserves it (#764)', () => {
+    // Shape the PF1e importer writes into dataJson (see pathfinder1e-importer mapMonster).
+    const goblinData = {
+      type: 'humanoid',
+      size: 'Small',
+      challengeRating: '1/3',
+      armorClass: 16,
+      hitPoints: 6,
+      speed: '30 ft.',
+      initiative: 6,
+      abilityScores: { str: 11, dex: 15, con: 12, int: 10, wis: 9, cha: 6 },
+    };
+    const mapped = Pathfinder1eAdapter.mapStatblock(goblinData);
+    expect(mapped.abilityScores).toEqual({
+      str: 11,
+      dex: 15,
+      con: 12,
+      int: 10,
+      wis: 9,
+      cha: 6,
+      initiative: 6,
+    });
+    // Encounter service: initiativeModifier(mapStatblock(data).abilityScores)
+    expect(Pathfinder1eAdapter.initiativeModifier(mapped.abilityScores)).toBe(6);
+    expect(pf1eInitiativeBreakdown(mapped.abilityScores)).toEqual({ source: 'native', bonus: 6 });
+  });
+
+  it('fixture Owlbear maps to native Init +1 (not dropped to a silent zero)', () => {
+    const mapped = Pathfinder1eAdapter.mapStatblock({
+      initiative: 1,
+      abilityScores: { str: 21, dex: 12, con: 17, int: 2, wis: 12, cha: 10 },
+    });
+    expect(Pathfinder1eAdapter.initiativeModifier(mapped.abilityScores)).toBe(1);
+  });
+
+  it('reads native Init nested in ability_scores when the top-level row omits it', () => {
+    const mapped = Pathfinder1eAdapter.mapStatblock({
+      ability_scores: { dex: 15, init: 6 },
+    });
+    expect(mapped.abilityScores).toEqual({ dex: 15, init: 6, initiative: 6 });
+    expect(Pathfinder1eAdapter.initiativeModifier(mapped.abilityScores)).toBe(6);
+  });
+
+  it('does not invent a native Init when the statblock omits it (DEX derive / unavailable)', () => {
+    const dexOnly = Pathfinder1eAdapter.mapStatblock({
+      abilityScores: { dex: 15 },
+      initiative: null,
+    });
+    expect(dexOnly.abilityScores).toEqual({ dex: 15 });
+    expect(Pathfinder1eAdapter.initiativeModifier(dexOnly.abilityScores)).toBe(2);
+
+    const empty = Pathfinder1eAdapter.mapStatblock({});
+    expect(empty.abilityScores).toBeUndefined();
+    expect(pf1eInitiativeBreakdown(empty.abilityScores)).toEqual({ source: 'unavailable', bonus: null });
   });
 
   it('resolves monster max HP (rounded), or null when unavailable/non-positive', () => {

@@ -1,12 +1,13 @@
 /**
  * Tool-event → query-invalidation + activity-chip map (#338 foundation, design point 5).
  *
- * `tool` SSE events are id-only by design (`{name, isError, proposed}`) so DM-only data
- * can't leak through the stream — clients refetch through the permission-checked REST
- * reads. This single map is the seam that turns each tool name into (a) the TanStack
- * Query keys to invalidate (so every open surface — the combat tracker, the party sheet,
- * the map, the proposal queue — refreshes live off the AI's actions, #344) and (b) the
- * inline chip shown in the transcript.
+ * `tool` SSE events stay thin (`{name, isError, proposed, encounterId?}`) so DM-only
+ * payloads can't leak through the stream — clients refetch through the permission-checked
+ * REST reads. Optional `encounterId` (#825) is server-derived resource identity so an open
+ * fight never deep-links an action that actually hit a different encounter. This single map
+ * turns each tool name into (a) the TanStack Query keys to invalidate (so every open
+ * surface — the combat tracker, the party sheet, the map, the proposal queue — refreshes
+ * live off the AI's actions, #344) and (b) the inline chip shown in the transcript.
  *
  * Pure + data-only (no React, no query client held) so it is unit-testable and reusable.
  * `resolveToolActivity` classifies an event; `invalidateForToolEvent` performs the
@@ -71,6 +72,7 @@ const RESOURCE_BY_NAME: Record<string, ToolResource> = {
   set_character_conditions: 'party',
   level_up_character: 'party',
   award_xp: 'party',
+  adjust_treasury: 'party',
   add_inventory_item: 'party',
   update_inventory_item: 'party',
   // map / fog / reveal → the map
@@ -117,10 +119,19 @@ const RESOURCE_ICON: Record<ToolResource, string> = {
 /**
  * Resolve a `tool` event into its transcript chip. Precedence (design point 5):
  *   `proposed` (canon edit filed for review) > `isError` (subdued failure) > resource activity.
+ *
+ * Encounter deep-links prefer the event's server-derived `encounterId` (#825) over the
+ * page context, so a chip never claims the currently-open fight when the tool hit another.
+ * When both are present and disagree, the label marks the row as another encounter.
  */
 export function resolveToolActivity(event: ToolStreamEvent, ctx: ToolActivityContext): ToolChip {
   const resource = toolResource(event.name);
   const human = humanizeToolName(event.name);
+  const encounterId = event.encounterId ?? ctx.encounterId;
+  const crossEncounter =
+    event.encounterId !== undefined &&
+    ctx.encounterId !== undefined &&
+    event.encounterId !== ctx.encounterId;
 
   if (event.proposed) {
     return {
@@ -133,17 +144,27 @@ export function resolveToolActivity(event: ToolStreamEvent, ctx: ToolActivityCon
   }
 
   if (event.isError) {
-    return { resource, variant: 'error', icon: 'alert-triangle', label: `${human} failed` };
+    return {
+      resource,
+      variant: 'error',
+      icon: 'alert-triangle',
+      label: crossEncounter ? `${human} failed (other encounter)` : `${human} failed`,
+      href:
+        resource === 'encounter' && event.encounterId !== undefined
+          ? `/c/${ctx.campaignId}/encounters/${event.encounterId}`
+          : undefined,
+    };
   }
 
   const href =
-    resource === 'encounter' && ctx.encounterId !== undefined
-      ? `/c/${ctx.campaignId}/encounters/${ctx.encounterId}`
+    resource === 'encounter' && encounterId !== undefined
+      ? `/c/${ctx.campaignId}/encounters/${encounterId}`
       : resource === 'party'
         ? `/c/${ctx.campaignId}/party`
         : undefined;
 
-  return { resource, variant: 'default', icon: RESOURCE_ICON[resource], label: human, href };
+  const label = crossEncounter ? `${human} (other encounter)` : human;
+  return { resource, variant: 'default', icon: RESOURCE_ICON[resource], label, href };
 }
 
 // ---- Invalidation ---------------------------------------------------------
@@ -188,7 +209,12 @@ export function invalidationKeysForResource(resource: ToolResource, ctx: ToolAct
  */
 export function invalidateForToolEvent(client: QueryClient, event: ToolStreamEvent, ctx: ToolActivityContext): void {
   const resource = toolResource(event.name);
-  const keys = invalidationKeysForResource(resource, ctx);
+  // Prefer the event's resource identity so query invalidation hits the fight that
+  // actually changed — not whichever encounter page happens to be mounted (#825).
+  const keys = invalidationKeysForResource(resource, {
+    ...ctx,
+    encounterId: event.encounterId ?? ctx.encounterId,
+  });
   // A canon edit routed to the proposal queue: refresh proposals too, regardless of resource.
   if (event.proposed) keys.push(queryKeys.campaignProposals(ctx.campaignId));
   for (const key of keys) {

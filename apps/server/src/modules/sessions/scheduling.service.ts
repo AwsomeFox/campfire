@@ -1,14 +1,29 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, or, sql } from 'drizzle-orm';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
-import { ScheduledSessionCreate, ScheduledSessionUpdate, RsvpSet } from '@campfire/schema';
+import {
+  ScheduledSessionCreate,
+  ScheduledSessionUpdate,
+  RsvpSet,
+  partitionSchedules,
+  diffScheduleNotificationFields,
+  shouldNotifyScheduleUpdate,
+  scheduleNotificationChangeType,
+  scheduleNotificationFallbackTitle,
+  scheduleNotificationFallbackBody,
+  scheduleNotificationLabel,
+  type ScheduleNotificationData,
+} from '@campfire/schema';
 import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { generateIcsFeedToken, looksLikeIcsFeedToken } from '../../common/crypto';
 import { resolveIcsFeedTokenTtlDays } from '../../common/throttle.constants';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
+import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
+import { RevisionsService } from '../revisions/revisions.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
@@ -77,6 +92,7 @@ export class SchedulingService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
     private readonly events: CampaignEventsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /** Push one permission-safe invalidation signal for every schedule projection change. */
@@ -85,8 +101,46 @@ export class SchedulingService {
   }
 
   /** Human label for a scheduled game night — its title, or a date fallback. */
-  private scheduleLabel(row: typeof scheduledSessions.$inferSelect): string {
-    return row.title?.trim() ? row.title.trim() : 'the next session';
+  private scheduleLabel(row: { title?: string | null }): string {
+    return scheduleNotificationLabel(row.title);
+  }
+
+  /** Build structured schedule lifecycle notification payload (issue #820). */
+  private scheduleNotificationData(input: {
+    scheduleId: number;
+    scheduledAt: string;
+    durationMinutes: number;
+    title: string;
+    changeType: ScheduleNotificationData['changeType'];
+    changedFields?: ScheduleNotificationData['changedFields'];
+  }): ScheduleNotificationData {
+    return {
+      kind: 'schedule',
+      scheduleId: input.scheduleId,
+      scheduledAt: input.scheduledAt,
+      durationMinutes: input.durationMinutes,
+      changeType: input.changeType,
+      changedFields: input.changedFields ?? [],
+      label: (input.title ?? '').trim(),
+    };
+  }
+
+  private async notifyScheduleLifecycle(
+    campaignId: number,
+    user: RequestUser,
+    data: ScheduleNotificationData,
+  ): Promise<void> {
+    await this.notifications.notifyCampaign(campaignId, user, {
+      type: 'session_scheduled',
+      title: scheduleNotificationFallbackTitle(data),
+      body: scheduleNotificationFallbackBody(data),
+      // entityId alone (no EntityType for scheduled_session) — the bell routes
+      // session_scheduled to the Schedule tab and focuses this card (#446), or a
+      // cancelled-event detail when changeType is cancelled (#820).
+      entityId: data.scheduleId,
+      actorName: user.name,
+      data,
+    });
   }
 
   // ----- scheduled sessions -----
@@ -117,31 +171,53 @@ export class SchedulingService {
    */
   async searchForCampaign(campaignId: number, needle: string, limit: number): Promise<ScheduledSession[]> {
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    needle = needle.trim().toLowerCase();
-    if (!needle) return [];
+    // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
+    const folded = foldForSearch(needle.trim());
+    if (!folded) return [];
+    // Fold-match in JS — SQLite lower()/instr is ASCII-only (#624).
     const rows = await this.db
       .select()
       .from(scheduledSessions)
-      .where(and(
-        eq(scheduledSessions.campaignId, campaignId),
-        or(
-          sql`instr(lower(${scheduledSessions.title}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.scheduledAt}), ${needle}) > 0`,
-          sql`instr(lower(${scheduledSessions.notes}), ${needle}) > 0`,
-        ),
-      ))
-      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id))
-      .limit(boundedLimit);
-    return rows.map(toDomain);
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
+    return rows
+      .filter(
+        (r) =>
+          foldedIncludes(r.title, folded)
+          || foldedIncludes(r.scheduledAt, folded)
+          || foldedIncludes(r.notes, folded),
+      )
+      .slice(0, boundedLimit)
+      .map(toDomain);
   }
 
-  /** The campaign's "next session": earliest schedule not yet in the past, or null. */
+  /**
+   * The campaign's active schedule card: earliest in-progress game night, else the
+   * soonest not-yet-started one. A session stays "current" from scheduledAt through
+   * scheduledAt+durationMinutes (issue #818) so /schedule/next does not go blank at
+   * the start of play.
+   */
   async nextForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps | null> {
+    const { inProgressSession, nextSession } = await this.currentAndNextForCampaign(campaignId);
+    return inProgressSession ?? nextSession;
+  }
+
+  /**
+   * Split the live schedule projection into the in-progress game (if any) and the
+   * next not-yet-started night. Overlapping in-progress rows prefer the earliest
+   * start; list order from listForCampaign is soonest-first.
+   */
+  async currentAndNextForCampaign(campaignId: number): Promise<{
+    inProgressSession: ScheduledSessionWithRsvps | null;
+    nextSession: ScheduledSessionWithRsvps | null;
+  }> {
     const all = await this.listForCampaign(campaignId);
     const now = Date.now();
-    // scheduledAt is normalized ISO UTC (see normalizeScheduledAt), but compare
-    // via Date.parse rather than string order to be robust to legacy rows.
-    return all.find((s) => Date.parse(s.scheduledAt) >= now) ?? null;
+    const { inProgress, upcoming } = partitionSchedules(all, now);
+    return {
+      inProgressSession: inProgress[0] ?? null,
+      nextSession: upcoming[0] ?? null,
+    };
   }
 
   async getRowOrThrow(id: number) {
@@ -186,25 +262,62 @@ export class SchedulingService {
       campaignId,
     });
     this.emitScheduleUpdated(campaignId, row.id);
-    // Tell the party a game night was put on the calendar (issue #263). Best-effort;
-    // no entity deep-link (scheduled sessions aren't an EntityType — the bell routes
-    // session_scheduled to the sessions page, which hosts the schedule panel).
-    await this.notifications.notifyCampaign(campaignId, user, {
-      type: 'session_scheduled',
-      title: `${this.scheduleLabel(row)} scheduled for ${row.scheduledAt.slice(0, 10)}`,
-      actorName: user.name,
-    });
+    // Tell the party a game night was put on the calendar (issues #263/#820).
+    // Structured `data` carries the UTC instant; clients localize for the viewer.
+    await this.notifyScheduleLifecycle(
+      campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: row.id,
+        scheduledAt: row.scheduledAt,
+        durationMinutes: row.durationMinutes,
+        title: row.title,
+        changeType: 'created',
+      }),
+    );
     return { ...toDomain(row), rsvps: [] };
   }
 
-  async update(id: number, input: ScheduledSessionUpdateInput, user: RequestUser, role: Role): Promise<ScheduledSessionWithRsvps> {
+  async update(
+    id: number,
+    input: ScheduledSessionUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<ScheduledSessionWithRsvps> {
     const existing = await this.getRowOrThrow(id);
     const patch = { ...input };
     if (patch.scheduledAt !== undefined) patch.scheduledAt = this.normalizeScheduledAt(patch.scheduledAt);
-    await this.db
+    const next = {
+      scheduledAt: patch.scheduledAt ?? existing.scheduledAt,
+      durationMinutes: patch.durationMinutes ?? existing.durationMinutes,
+      title: patch.title ?? existing.title,
+      location: patch.location ?? existing.location,
+      notes: patch.notes ?? existing.notes,
+    };
+    const updated = await this.db
       .update(scheduledSessions)
-      .set({ ...patch, updatedAt: nowIso() })
-      .where(eq(scheduledSessions.id, id));
+      .set({ ...patch, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(scheduledSessions.id, id), eq(scheduledSessions.updatedAt, opts.expectedUpdatedAt))
+          : eq(scheduledSessions.id, id),
+      )
+      .returning();
+    if (!updated[0]) {
+      const current = await this.getRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    if (patch.notes !== undefined && patch.notes !== existing.notes) {
+      await this.revisions.commitProseVersion({
+        entityType: 'scheduled_session',
+        entityId: id,
+        campaignId: existing.campaignId,
+        priorProse: existing.notes,
+        nextProse: patch.notes,
+        user,
+      });
+    }
 
     await this.audit.log({
       actor: auditActor(user),
@@ -215,15 +328,23 @@ export class SchedulingService {
       campaignId: existing.campaignId,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
-    // Re-notify the party only when the game night actually MOVES (issue #263) —
-    // a title/location/notes tweak isn't worth a ping. Mirrors sessions.service's
-    // playedAt-changed guard so an unrelated edit doesn't spam the schedule.
-    if (patch.scheduledAt !== undefined && patch.scheduledAt !== existing.scheduledAt) {
-      await this.notifications.notifyCampaign(existing.campaignId, user, {
-        type: 'session_scheduled',
-        title: `${this.scheduleLabel(existing)} rescheduled for ${patch.scheduledAt.slice(0, 10)}`,
-        actorName: user.name,
-      });
+    // Issue #820: one coalesced ping per update for time/duration/venue/notes —
+    // never drop those lifecycle changes, but skip title-only edits (spam).
+    const changedFields = diffScheduleNotificationFields(existing, next);
+    if (shouldNotifyScheduleUpdate(changedFields)) {
+      const changeType = scheduleNotificationChangeType(changedFields);
+      await this.notifyScheduleLifecycle(
+        existing.campaignId,
+        user,
+        this.scheduleNotificationData({
+          scheduleId: id,
+          scheduledAt: next.scheduledAt,
+          durationMinutes: next.durationMinutes,
+          title: next.title,
+          changeType,
+          changedFields,
+        }),
+      );
     }
     return this.getWithRsvps(id);
   }
@@ -241,6 +362,19 @@ export class SchedulingService {
       campaignId: existing.campaignId,
     });
     this.emitScheduleUpdated(existing.campaignId, id);
+    // Issue #820: cancellation is a lifecycle event — notify with a snapshot of
+    // the removed night so the bell can still show a localized cancelled detail.
+    await this.notifyScheduleLifecycle(
+      existing.campaignId,
+      user,
+      this.scheduleNotificationData({
+        scheduleId: existing.id,
+        scheduledAt: existing.scheduledAt,
+        durationMinutes: existing.durationMinutes,
+        title: existing.title,
+        changeType: 'cancelled',
+      }),
+    );
   }
 
   // ----- RSVPs (availability) -----
@@ -255,18 +389,41 @@ export class SchedulingService {
       .where(and(eq(sessionRsvps.scheduledSessionId, scheduleId), eq(sessionRsvps.userId, user.id)))
       .limit(1);
 
+    const persistedNote =
+      input.note !== undefined ? input.note.trim() : (existing?.note ?? '');
+    const nextStatus = input.status ?? existing?.status;
+    if (!nextStatus) {
+      throw new BadRequestException('status is required for the first RSVP submission');
+    }
+
+    const statusChanged = input.status !== undefined && (!existing || existing.status !== input.status);
+    const noteChanged =
+      input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
+
     if (existing) {
+      const update: {
+        status?: SessionRsvp['status'];
+        userName: string;
+        updatedAt: string;
+        note?: string;
+      } = { userName: user.name, updatedAt: ts };
+      if (input.status !== undefined) {
+        update.status = input.status;
+      }
+      if (input.note !== undefined) {
+        update.note = input.note.trim();
+      }
       await this.db
         .update(sessionRsvps)
-        .set({ status: input.status, note: input.note ?? existing.note, userName: user.name, updatedAt: ts })
+        .set(update)
         .where(eq(sessionRsvps.id, existing.id));
     } else {
       await this.db.insert(sessionRsvps).values({
         scheduledSessionId: scheduleId,
         userId: user.id,
         userName: user.name,
-        status: input.status,
-        note: input.note ?? '',
+        status: nextStatus,
+        note: persistedNote,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -279,20 +436,29 @@ export class SchedulingService {
       entityType: 'session',
       entityId: scheduleId,
       campaignId: schedule.campaignId,
-      detail: input.status,
+      detail: nextStatus,
     });
     this.emitScheduleUpdated(schedule.campaignId, scheduleId);
     // Let the DM(s) know availability changed (issue #263) — they own scheduling, so
     // an RSVP is theirs to see. Fan out to every dm-role member except the actor (a DM
     // marking their own availability shouldn't ping themselves). Best-effort.
     const roles = await this.notifications.memberRoles(schedule.campaignId);
-    for (const [memberId, memberRole] of roles) {
-      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
-      await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
-        type: 'session_rsvp',
-        title: `${user.name || 'A player'} RSVP'd ${input.status} for ${this.scheduleLabel(schedule)}`,
-        actorName: user.name,
-      });
+    if (statusChanged || noteChanged) {
+      for (const [memberId, memberRole] of roles) {
+        if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+        const title =
+          noteChanged && !statusChanged
+            ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
+            : noteChanged && statusChanged
+              ? `${user.name || 'A player'} RSVP'd ${nextStatus} and updated their note for ${this.scheduleLabel(schedule)}`
+              : `${user.name || 'A player'} RSVP'd ${nextStatus} for ${this.scheduleLabel(schedule)}`;
+        await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
+          type: 'session_rsvp',
+          title,
+          entityId: scheduleId,
+          actorName: user.name,
+        });
+      }
     }
     return this.getWithRsvps(scheduleId);
   }
@@ -375,6 +541,9 @@ export class SchedulingService {
     const [campaign] = await this.db.select().from(campaigns).where(eq(campaigns.icsToken, token)).limit(1);
     if (!campaign) throw new NotFoundException('Unknown calendar feed');
     if (icsTokenIsExpired(campaign.icsTokenExpiresAt)) throw new NotFoundException('Unknown calendar feed');
+    // Issue #867: a trashed campaign's public calendar feed must look identical to
+    // an unknown/rotated token — no schedule disclosure after Trash.
+    if (campaign.deletedAt != null) throw new NotFoundException('Unknown calendar feed');
     const schedules = await this.listForCampaign(campaign.id);
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }

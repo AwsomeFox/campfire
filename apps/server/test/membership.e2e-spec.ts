@@ -274,6 +274,215 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
     });
   });
 
+  // Issue #819: exclusive character seat — a second member link must not silently
+  // steal ownership. Transfer requires confirmTransfer and atomically unlinks the
+  // previous seat while moving characters.ownerUserId.
+  describe('Issue #819: exclusive character seat assignment', () => {
+    let aliceId: number;
+    let bobId: number;
+    let carolId: number;
+    let aliceMemberId: number;
+    let bobMemberId: number;
+    let carolMemberId: number;
+    let aliceAgent: ReturnType<typeof request.agent>;
+    let bobAgent: ReturnType<typeof request.agent>;
+    let ariaId: number;
+    let borinId: number;
+
+    beforeAll(async () => {
+      const createAlice = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'alice-819', password: 'password-alice-819', serverRole: 'user' });
+      const createBob = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'bob-819', password: 'password-bob-819', serverRole: 'user' });
+      const createCarol = await adminAgent
+        .post('/api/v1/users')
+        .send({ username: 'carol-819', password: 'password-carol-819', serverRole: 'user' });
+      aliceId = createAlice.body.id;
+      bobId = createBob.body.id;
+      carolId = createCarol.body.id;
+
+      aliceAgent = request.agent(ctx.app.getHttpServer());
+      await aliceAgent.post('/api/v1/auth/login').send({ username: 'alice-819', password: 'password-alice-819' });
+      bobAgent = request.agent(ctx.app.getHttpServer());
+      await bobAgent.post('/api/v1/auth/login').send({ username: 'bob-819', password: 'password-bob-819' });
+
+      const addAlice = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: aliceId, role: 'player' });
+      const addBob = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: bobId, role: 'player' });
+      const addCarol = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: carolId, role: 'player' });
+      expect(addAlice.status).toBe(201);
+      expect(addBob.status).toBe(201);
+      expect(addCarol.status).toBe(201);
+      aliceMemberId = addAlice.body.id;
+      bobMemberId = addBob.body.id;
+      carolMemberId = addCarol.body.id;
+
+      const aria = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Aria 819' });
+      const borin = await userA.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: 'Borin 819' });
+      expect(aria.status).toBe(201);
+      expect(borin.status).toBe(201);
+      ariaId = aria.body.id;
+      borinId = borin.body.id;
+    });
+
+    it('sequential assignment without confirmTransfer rejects and leaves the first seat intact', async () => {
+      const linkAlice = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${aliceMemberId}`)
+        .send({ characterId: ariaId });
+      expect(linkAlice.status).toBe(200);
+      expect(linkAlice.body.characterId).toBe(ariaId);
+
+      const steal = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`)
+        .send({ characterId: ariaId });
+      expect(steal.status).toBe(409);
+      expect(steal.body.code).toBe('CHARACTER_SEAT_TAKEN');
+      expect(steal.body.holderUserId).toBe(aliceId);
+
+      const roster = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      const aliceSeat = roster.body.find((m: { id: number }) => m.id === aliceMemberId);
+      const bobSeat = roster.body.find((m: { id: number }) => m.id === bobMemberId);
+      expect(aliceSeat.characterId).toBe(ariaId);
+      expect(bobSeat.characterId).toBeNull();
+
+      const sheet = await userA.get(`/api/v1/characters/${ariaId}`);
+      expect(sheet.body.ownerUserId).toBe(String(aliceId));
+      expect((await aliceAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'still mine' })).status).toBe(200);
+      expect((await bobAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'stolen?' })).status).toBe(403);
+    });
+
+    it('confirmTransfer atomically moves the seat and ownership from Alice to Bob', async () => {
+      const transfer = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`)
+        .send({ characterId: ariaId, confirmTransfer: true });
+      expect(transfer.status).toBe(200);
+      expect(transfer.body.characterId).toBe(ariaId);
+
+      const roster = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(roster.body.find((m: { id: number }) => m.id === aliceMemberId).characterId).toBeNull();
+      expect(roster.body.find((m: { id: number }) => m.id === bobMemberId).characterId).toBe(ariaId);
+
+      const sheet = await userA.get(`/api/v1/characters/${ariaId}`);
+      expect(sheet.body.ownerUserId).toBe(String(bobId));
+      expect((await bobAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'bob owns aria' })).status).toBe(200);
+      expect((await aliceAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'alice lost' })).status).toBe(403);
+
+      const aliceNotes = await aliceAgent.get('/api/v1/notifications');
+      expect(aliceNotes.status).toBe(200);
+      expect(
+        aliceNotes.body.some(
+          (n: { type: string; entityId: number | null }) =>
+            n.type === 'character_reassigned' && n.entityId === ariaId,
+        ),
+      ).toBe(true);
+    });
+
+    it('multi-character ownership: transferring Aria does not disturb Borin', async () => {
+      const linkAliceBorin = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${aliceMemberId}`)
+        .send({ characterId: borinId });
+      expect(linkAliceBorin.status).toBe(200);
+
+      // Bob still holds Aria; transfer Aria to Carol without touching Borin.
+      const transfer = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${carolMemberId}`)
+        .send({ characterId: ariaId, confirmTransfer: true });
+      expect(transfer.status).toBe(200);
+
+      const roster = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(roster.body.find((m: { id: number }) => m.id === aliceMemberId).characterId).toBe(borinId);
+      expect(roster.body.find((m: { id: number }) => m.id === carolMemberId).characterId).toBe(ariaId);
+      expect(roster.body.find((m: { id: number }) => m.id === bobMemberId).characterId).toBeNull();
+
+      expect((await userA.get(`/api/v1/characters/${borinId}`)).body.ownerUserId).toBe(String(aliceId));
+      expect((await userA.get(`/api/v1/characters/${ariaId}`)).body.ownerUserId).toBe(String(carolId));
+    });
+
+    it('transfer during combat keeps the combatant and flips sheet controls', async () => {
+      const encounter = await userA
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .send({ name: '819 Transfer Fight' });
+      expect(encounter.status).toBe(201);
+      // Encounter create may auto-seat linked PCs; ensure Aria is on the board either way.
+      const addCombatant = await userA
+        .post(`/api/v1/encounters/${encounter.body.id}/combatants`)
+        .send({ kind: 'character', characterId: ariaId });
+      expect([201, 409]).toContain(addCombatant.status);
+
+      const transfer = await userA
+        .patch(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`)
+        .send({ characterId: ariaId, confirmTransfer: true });
+      expect(transfer.status).toBe(200);
+
+      const fight = await userA.get(`/api/v1/encounters/${encounter.body.id}`);
+      expect(fight.status).toBe(200);
+      expect(fight.body.combatants.some((c: { characterId: number | null }) => c.characterId === ariaId)).toBe(true);
+
+      expect((await bobAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'mid-combat owner' })).status).toBe(200);
+      expect((await aliceAgent.patch(`/api/v1/characters/${ariaId}`).send({ notes: 'nope' })).status).toBe(403);
+    });
+
+    it('removing the seat holder clears ownership without resurrecting a stale dual claim', async () => {
+      // Ensure Bob holds Aria (prior transfer), then remove that seat.
+      expect(
+        (
+          await userA
+            .patch(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`)
+            .send({ characterId: ariaId, confirmTransfer: true })
+        ).status,
+      ).toBe(200);
+
+      const removeBob = await userA.delete(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`);
+      expect(removeBob.status).toBe(204);
+
+      const roster = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      expect(roster.body.find((m: { id: number }) => m.id === bobMemberId)).toBeUndefined();
+      expect(roster.body.filter((m: { characterId: number | null }) => m.characterId === ariaId)).toHaveLength(0);
+
+      const sheet = await userA.get(`/api/v1/characters/${ariaId}`);
+      expect(sheet.body.ownerUserId).toBeNull();
+    });
+
+    it('simultaneous confirmed transfers leave exactly one seat holder', async () => {
+      // Re-add Bob (removed above) and park Aria on Alice so both racers must transfer.
+      const readdBob = await userA
+        .post(`/api/v1/campaigns/${campaignId}/members`)
+        .send({ userId: bobId, role: 'player' });
+      expect(readdBob.status).toBe(201);
+      bobMemberId = readdBob.body.id;
+
+      expect(
+        (await userA
+          .patch(`/api/v1/campaigns/${campaignId}/members/${aliceMemberId}`)
+          .send({ characterId: ariaId, confirmTransfer: true })).status,
+      ).toBe(200);
+
+      const [r1, r2] = await Promise.all([
+        userA
+          .patch(`/api/v1/campaigns/${campaignId}/members/${bobMemberId}`)
+          .send({ characterId: ariaId, confirmTransfer: true }),
+        userA
+          .patch(`/api/v1/campaigns/${campaignId}/members/${carolMemberId}`)
+          .send({ characterId: ariaId, confirmTransfer: true }),
+      ]);
+      expect([r1.status, r2.status].filter((s) => s === 200).length).toBeGreaterThanOrEqual(1);
+      expect([r1.status, r2.status].every((s) => s === 200 || s === 409)).toBe(true);
+
+      const roster = await userA.get(`/api/v1/campaigns/${campaignId}/members`);
+      const holders = roster.body.filter((m: { characterId: number | null }) => m.characterId === ariaId);
+      expect(holders).toHaveLength(1);
+      const sheet = await userA.get(`/api/v1/characters/${ariaId}`);
+      expect(sheet.body.ownerUserId).toBe(String(holders[0].userId));
+    });
+  });
+
   // Issue #88: GET /users/lookup used to expose the entire server user table to ANY
   // authenticated principal (a directory-enumeration oracle feeding the login/timing
   // attack). It now only serves the flow it exists for — a dm resolving a username to

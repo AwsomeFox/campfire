@@ -83,8 +83,11 @@ salt), stored as `scrypt:N:r:p:saltHex:hashHex`; compared with
 `timingSafeEqual`. No new native dependency. Sessions: 32 random bytes hex as
 the bearer token, cookie `campfire_session` (httpOnly, `sameSite=lax`,
 `path=/`, 30-day maxAge, `secure` only when `NODE_ENV=production`); the DB
-stores only `sha256(token)`. `lastSeenAt` slides forward at most once/hour on
-use (`AuthService.resolveSessionUser`).
+stores only `sha256(token)`. On use, `AuthService.resolveSessionUser` slides both
+`lastSeenAt` and `expiresAt` forward at most once/hour (`expiresAt =
+max(expiresAt, now + 30d)`, capped at `createdAt + 90d` absolute lifetime so a
+stolen cookie cannot live forever under continuous activity). The session cookie
+is re-issued on each slide so browser `maxAge` tracks the idle extension.
 
 **Expired session sweep.** `AuthService.purgeExpiredSessions()` deletes every
 `user_sessions` row past its `expiresAt`. `AuthService` implements
@@ -456,17 +459,23 @@ domain modules. If the domain modules imported `ProposalsModule` directly
   (no password/session data ever lived on `CampaignMember`). Imports and clones
   never replay exported memberships: only the authenticated caller becomes the
   new campaign's enabled DM, through the same FK-checked membership path used by
-  normal campaign creation. `audit` is capped at the latest 500 entries.
+  normal campaign creation. `audit` carries every retained row in a stable
+  snapshot (`auditMeta` reports total/exported/truncated/cutoff — not capped at
+  500; `truncated` counts snapshot gaps and post-ceiling appends). This is campaign
+  portability, not a full-server DB backup (see `auditNote` in the JSON).
   `Content-Disposition: attachment; filename="campfire-<slug>-<date>.json"`.
-- **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown —
-  `campaign.md` (+ visible notes), `quests/<slug>.md` (objectives rendered as
-  a `- [ ]`/`- [x]` checklist, `dmSecret` as a trailing section),
-  `npcs/<slug>.md`, `locations/<slug>.md`, `sessions/<slug-or-number>.md`,
-  `characters/<slug>.md` — same dm-secret/notes-visibility rules as the json
-  export. `Content-Type: application/zip`, same `Content-Disposition`
-  pattern (`.zip` extension). Filenames are slugified (`slugify()` in
-  `export.service.ts`) from each entity's display name; collisions within a
-  folder simply overwrite (not deduped — acceptable for an export snapshot).
+- **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown for every
+  first-class export module (or an explicit exclusion in
+  `archive-manifest.json`). Entity files use collision-proof
+  `{displayStem}__{type}-{id}.md` paths that preserve Unicode stems (CJK,
+  Arabic, emoji, case) while embedding a stable record id — duplicate /
+  case-only / punctuation-only names never overwrite. The zip also carries
+  `campaign.json` (machine round-trip), `archive-manifest.json` (app/schema
+  version, secrecy profile `dm-full`, per-type counts, checksums,
+  exclusions/truncations), and `attachments.md` (campaign map + character
+  portraits + encounter battle maps). Same dm-secret/notes-visibility rules
+  as the json export. `Content-Type: application/zip`, same
+  `Content-Disposition` pattern (`.zip` extension).
 - Both formats write the response manually via `@Res() res` +
   `res.end()`/`res.send()` (not Nest's default return-value handling) —
   returning a `Buffer`/pre-serialized string through Nest's normal
@@ -644,6 +653,30 @@ may select.
 | Env var | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `AI_CONFIG_KEY` | no | auto-generated keyfile | The secret protecting stored API keys. A **64-char hex** string is used as raw 32-byte key material; anything else is treated as a **passphrase** and stretched with scrypt. When unset, a random key is generated once and persisted to `DATA_DIR/ai-config.key` (mode `0600`). **Back up whichever you use** — losing it makes stored provider keys unrecoverable (by design). Never hardcoded. |
+
+### Provider `baseUrl` host policy (issue #1064)
+
+Outbound AI provider requests honor a server-side SSRF host policy
+(`common/ai-provider-baseurl.ts`) on every save, test-connection, model list, and
+execution resolve:
+
+- **Always blocked:** cloud metadata / link-local (`169.254.0.0/16`, `fe80::/10`,
+  `metadata.google.internal`, Alibaba `100.100.100.200`, …). An allowlist entry
+  cannot override this.
+- **Blocked by default:** private / loopback hosts (RFC1918, `localhost`, ULA,
+  CGNAT `100.64/10`, …). A campaign DM therefore cannot point Test connection at
+  internal services unless the operator opts in.
+- **Public https hosts** (OpenAI, Anthropic, OpenRouter, …) work unchanged.
+
+| Env var | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | no | unset (blocked) | Set `1` / `true` to permit private/loopback `baseUrl`s for local model servers (Ollama / llama.cpp / LM Studio). Metadata / link-local stay blocked. Only enable on a trusted single-tenant host. |
+| `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | no | unset | Comma-separated hostname allowlist. When non-empty, only listed hosts are accepted (metadata still blocked). Prefer listing `localhost` (or your LAN hostname) over the blanket private opt-in. |
+| `AI_PROVIDER_BASEURL_DENY_HOSTS` | no | unset | Comma-separated hostname denylist — always rejected. |
+
+Test-connection failures for a blocked host return the generic
+`Provider connection failed.` message so the response does not differentiate
+internal-host reachability.
 
 ## Driving Campfire as an AI agent
 
@@ -1010,6 +1043,26 @@ exact same one-line-per-DTO pattern.
   predates auth; the new auth-session table is named `user_sessions` in SQL
   (`userSessions` in drizzle) to avoid a name collision.
 
+### Attachment publication and quota recovery
+
+Attachment rows have an internal `state` (`reserved` or `committed`). Uploads and
+server-generated maps reserve quota with one conditional SQLite `INSERT` whose
+sum includes both states, so concurrent boundary requests cannot both pass. A
+reserved row is excluded from attachment reads, references, exports, and MCP.
+
+Bytes are written to `<final>.stage` in the destination directory, fsynced, then
+published with a no-clobber hard-link to the immutable final name (`link` fails
+with `EEXIST` if that path already exists) followed by unlinking the stage name
+and a directory fsync. Only then does one SQLite transaction insert the
+attachment audit record and change the row to `committed`. A crash between link
+and unlink can leave both names on the same inode; recovery removes the stage
+name. Handled failures synchronously remove staged and final artifacts before
+deleting the reservation. On startup, and immediately after whole-server restore,
+any remaining reservation is treated as an interrupted request and rolled back;
+committed rows are never reconstructed from partial files. `GET /admin/storage`
+reports committed and reserved bytes/counts separately while retaining
+`totalBytes` as the committed-byte compatibility alias.
+
 ### Data retention env vars
 
 Per-campaign dice-roll history is retained under a *disclosed, configurable*
@@ -1143,8 +1196,8 @@ against realistic payloads with no network dependency in CI. It also backs
 the `lookup_rule` smoke test in `mcp.e2e-spec.ts`.
 
 Run with `npm run test -w apps/server` (repo root) or `npm test` from this
-directory. Jest is configured `maxWorkers: 1` since every suite opens its own
-SQLite file — safe to parallelize later if it becomes a bottleneck.
+directory. Jest is configured `maxWorkers: '50%'` to parallelize execution across
+available CPU cores, with each suite isolated to its own temporary SQLite directory.
 
 ## Deviations from spec
 

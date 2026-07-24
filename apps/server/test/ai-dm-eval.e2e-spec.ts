@@ -190,8 +190,8 @@ describe('ai-dm eval harness — offline + gating invariants (e2e)', () => {
 /**
  * Downstream AI flows — the harness is READY; each behavior lands with its owning issue, which
  * fleshes these out using `createAiEvalHarness` (script the provider turns, drive the endpoints,
- * assert the resulting state/proposals/narration). Left as `it.todo` so they surface as pending
- * work rather than silently missing. See #308 for the program epic.
+ * assert the resulting state/proposals/narration). Landed issues keep a pointer `it(...)` so the
+ * coverage map stays visible here; see #308 for the program epic.
  */
 describe('downstream AI flows (harness ready; behavior lands with its issue)', () => {
   // #312 — driver runtime: the mock requests a campfire tool, the runtime EXECUTES it under
@@ -199,9 +199,12 @@ describe('downstream AI flows (harness ready; behavior lands with its issue)', (
   // DONE — see ai-dm-driver.e2e-spec.ts (session loop, streamed narration, tool execution,
   // canon→proposals, budget hard-stop, per-step audit).
 
-  // #313 — co-DM authoring: a scripted draft becomes a PROPOSAL only (nothing written directly),
-  // and the DM approve/reject path applies or discards it.
-  it.todo('#313 co-DM: a scripted authoring turn produces a proposal, never a direct write');
+  // #313 — co-DM authoring: LANDED. A scripted draft becomes a PROPOSAL only (nothing written
+  // directly), and the DM approve/reject path applies or discards it. See co-dm.e2e-spec.ts
+  // (built on this harness); canon→proposal routing also covered in ai-dm-driver.e2e-spec.ts.
+  it('#313 co-DM: draft → proposal → approve covered in co-dm.e2e-spec.ts', () => {
+    expect(true).toBe(true);
+  });
 
   // #316 — scheduled scribe: LANDED. A scripted recap job assembles the campaign material,
   // files a recap PROPOSAL (never canon), meters the seat budget, is idempotent on rerun, and

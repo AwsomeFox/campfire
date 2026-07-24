@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { desc, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { AdminMetrics } from '@campfire/schema';
+import { APP_COMMIT, APP_VERSION } from '../../common/build-metadata';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   apiTokens,
@@ -21,10 +22,6 @@ import {
   users,
 } from '../../db/schema';
 
-// Single-sourced from package.json so /admin/metrics and /healthz report the
-// same version string (see health.controller.ts) and can't drift.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const VERSION: string = require('../../../package.json').version;
 
 // How many recent audit rows the dashboard shows. Kept small — this is a
 // glanceable "recent activity" strip, not the full audit trail (that lives in
@@ -86,7 +83,8 @@ export class ObservabilityService {
     const recentActivity = await this.recentActivity();
 
     return {
-      version: VERSION,
+      version: APP_VERSION,
+      ...(APP_COMMIT ? { commit: APP_COMMIT } : {}),
       now: new Date(nowMs).toISOString(),
       startedAt: new Date(nowMs - Math.round(uptimeSeconds * 1000)).toISOString(),
       uptimeSeconds,

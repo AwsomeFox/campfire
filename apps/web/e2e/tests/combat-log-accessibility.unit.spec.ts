@@ -15,6 +15,8 @@ function event(id: number, type: EncounterEventType, patch: Partial<EncounterEve
     type,
     actor: null,
     target: null,
+    actorId: null,
+    targetId: null,
     detail: '',
     createdAt: `2026-07-22T12:00:${String(id).padStart(2, '0')}.000Z`,
     ...patch,

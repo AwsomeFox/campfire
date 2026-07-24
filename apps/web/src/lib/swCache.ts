@@ -1,18 +1,20 @@
 /**
  * Service-worker runtime-cache housekeeping (issue #268) + offline-identity
- * survival (issue #579) + restore-safety namespacing (issue #723).
+ * survival (issue #579) + restore-safety namespacing (issue #723) + bounded
+ * cache buckets (issue #879) + sensitive-entry purge (issue #730).
  *
- * The PWA service worker (see apps/web/vite.config.ts) caches `/api` GETs under a
- * single global bucket so read-only campaign data survives going offline. That
- * bucket is NOT scoped per user, so on a shared device the previous session's (or
- * a pre-seed) responses linger. Under NetworkFirst the live response normally
- * wins, but the moment a request can't reach the network the SW would serve those
- * stale bytes as truth — a since-removed member, an old HP, a quest shown done.
+ * The PWA service worker (see apps/web/vite.config.ts) caches safe `/api` JSON
+ * GETs (and optional attachment thumbs) under bounded global buckets so
+ * read-only campaign data survives going offline. Those buckets are NOT scoped
+ * per user, so on a shared device the previous session's (or a pre-seed)
+ * responses linger. Under NetworkFirst the live response normally wins, but the
+ * moment a request can't reach the network the SW would serve those stale bytes
+ * as truth — a since-removed member, an old HP, a quest shown done.
  *
- * We therefore purge this cache at every proven-live auth-identity change (fresh
- * sign-in, account switch, logout). After a purge the first reads simply refill
- * from the live API, so nothing from a prior identity can render as truth for
- * the next.
+ * We therefore purge these caches at every proven-live auth-identity change
+ * (fresh sign-in, account switch, logout). After a purge the first reads simply
+ * refill from the live API, so nothing from a prior identity can render as truth
+ * for the next.
  *
  * #579 — STALE VS LOGGED OUT: `/me` is excluded from the SW cache (see
  * vite.config.ts) so a successful `/me` is always proven-live. The last-known
@@ -42,16 +44,11 @@
  */
 
 import type { ServerInstance } from '@campfire/schema';
+import { clearAllOfflineManifestMeta } from './offlineCampaignManifest';
+import { MANAGED_API_CACHE_NAMES, purgeSensitiveApiCacheEntries } from './pwaCachePolicy';
 
 /** localStorage key under which the last-known Me snapshot is persisted. */
 const ME_SNAPSHOT_KEY = 'cf.meSnapshot';
-
-/**
- * MUST match `cacheName` in the workbox `runtimeCaching` entry in
- * apps/web/vite.config.ts. Kept as a literal (rather than shared) because the
- * Vite config is build-time and this runs in the browser.
- */
-const API_CACHE_NAME = 'campfire-api';
 
 /**
  * BroadcastChannel name used to fan a cache purge out to OTHER tabs of the same
@@ -116,13 +113,26 @@ function openPurgeChannel(): BroadcastChannel | null {
  * purge immediate instead of waiting for each tab's next `/me` to notice.
  */
 export async function clearApiCache(): Promise<void> {
-  if (typeof caches !== 'undefined') {
+  if (typeof globalThis.caches !== 'undefined') {
+    // Issue #730: scrub sensitive URLs first (covers partial / in-flight writes),
+    // then wipe JSON + image buckets and the pre-#879 legacy name so logout /
+    // account switch cannot leave export/backup/credential entries behind.
     try {
-      await caches.delete(API_CACHE_NAME);
+      await purgeSensitiveApiCacheEntries(globalThis.caches);
     } catch {
-      // Purging the cache is defensive hygiene, never a hard dependency of auth.
+      /* best-effort */
+    }
+    for (const name of MANAGED_API_CACHE_NAMES) {
+      try {
+        await globalThis.caches.delete(name);
+      } catch {
+        // Purging the cache is defensive hygiene, never a hard dependency of auth.
+      }
     }
   }
+  // Offline-pack bookkeeping is identity-scoped too — drop it with the caches so
+  // a later account never inherits "ready" indicators for another user's pack.
+  clearAllOfflineManifestMeta();
   // Fan the purge out to other tabs AFTER the shared SW cache is cleared, so a
   // peer that reacts by refetching reads from the network into an empty cache
   // rather than re-poisoning a just-cleared one. Best-effort: a peer with no

@@ -11,7 +11,7 @@ async function openRuleSystemStep(page: import('@playwright/test').Page) {
     await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
   });
   await page.goto('/?newCampaign=1');
-  await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
+  await expect(page.getByRole('heading', { level: 1, name: 'New campaign' })).toBeVisible();
   await page.getByLabel('Name').fill('Rules navigation test');
   await page.getByRole('button', { name: /Next: rule system/ }).click();
   await expect(page.getByText('No rule systems are installed on this server yet.')).toBeVisible();
@@ -34,7 +34,7 @@ test.describe('empty rule-system navigation', () => {
     await expect(returnLink).toBeVisible();
     await returnLink.click();
     await expect(page).toHaveURL(/\?newCampaign=1$/);
-    await expect(page.getByRole('heading', { name: 'New campaign' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: 'New campaign' })).toBeVisible();
 
     await page.getByLabel('Name').fill('Rules navigation success cleanup');
     await page.getByRole('button', { name: /Next: rule system/ }).click();

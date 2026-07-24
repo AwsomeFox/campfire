@@ -15,7 +15,16 @@
  * compendium reader and in-combat card share the complete presentation.
  */
 import { Fragment, useId, type CSSProperties } from 'react';
-import { ruleSystemAdapter } from '@campfire/schema';
+import {
+  resolveAbilityModifier,
+  ruleSystemAdapter,
+  statblockPresentation,
+  type AbilityRepresentation,
+  type StatblockPresentation,
+  type StatblockPresentationLabel,
+} from '@campfire/schema';
+
+const SPEED_LABEL = { full: 'Speed' } as const;
 
 interface NamedEntry {
   name: string;
@@ -34,12 +43,23 @@ export interface MonsterStatblock {
   armorClass: string | null;
   hitPoints: string | null;
   speed: string | null;
-  /** [label, score, modifier] per ability, only for abilities that were present. */
-  abilities: Array<{ label: string; score: number; mod: string }>;
+  /**
+   * Per-ability display values. `value` is the stored number from the adapter;
+   * `mod` is the signed modifier string used for rolls/display. `representation`
+   * controls whether the UI shows score+mod (5e), signed mod only (PF2e), or the
+   * native value (Open Legend) — see issue #767.
+   */
+  abilities: Array<{ label: string; value: number; mod: string; representation: AbilityRepresentation }>;
   specialAbilities: NamedEntry[];
   actions: NamedEntry[];
   legendaryActions: NamedEntry[];
   reactions: NamedEntry[];
+  /**
+   * Adapter-native field labels for this block's rule system (issue #763). Carried on the
+   * parsed block so compendium and encounter surfaces stay in lockstep — both render from
+   * the same parse result rather than re-deriving labels independently.
+   */
+  presentation: StatblockPresentation;
 }
 
 const ABILITIES: Array<{ label: string; keys: string[] }> = [
@@ -160,15 +180,27 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
   // rather than defaulted at the call site. Default (5e) reproduces the prior behavior
   // exactly for imported/Open5e monsters, which store camelCase fields.
   const adapter = ruleSystemAdapter(ruleSystem);
+  // Presentation is resolved separately from mechanical mapping so unknown/homebrew packs
+  // keep 5e-shaped field mapping but show neutral Rating/Defense labels (issue #763).
+  const presentation = statblockPresentation(ruleSystem);
   const mapped = adapter.mapStatblock(d);
+  const representation: AbilityRepresentation = mapped.abilityRepresentation ?? 'score';
 
   const scores = mapped.abilityScores;
   const abilities: MonsterStatblock['abilities'] = [];
   if (scores && typeof scores === 'object') {
     for (const { label, keys } of ABILITIES) {
       const raw = keys.map((k) => scores[k]).find((v) => v !== undefined && v !== null);
-      const score = typeof raw === 'number' ? raw : Number(raw);
-      if (Number.isFinite(score)) abilities.push({ label, score, mod: signed(adapter.abilityModifier(score)) });
+      const value = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(value)) continue;
+      // Consume the stored value exactly once: scores convert; modifiers/native stay as-is.
+      const modValue = resolveAbilityModifier(adapter, value, representation);
+      abilities.push({
+        label,
+        value,
+        mod: representation === 'native' ? String(modValue) : signed(modValue),
+        representation,
+      });
     }
   }
 
@@ -184,6 +216,7 @@ export function parseMonsterStatblock(data: unknown, ruleSystem?: string | null)
     actions: namedEntries(mapped.actions),
     legendaryActions: namedEntries(mapped.legendaryActions),
     reactions: namedEntries(mapped.reactions),
+    presentation,
   };
 
   const hasAnything =
@@ -207,12 +240,38 @@ export function hasMonsterStatblock(data: unknown, ruleSystem?: string | null): 
   return parseMonsterStatblock(data, ruleSystem) !== null;
 }
 
+/**
+ * Snapshot-friendly visible labels for a parsed block (issue #763). Compendium and
+ * encounter both render via {@link StatBlock} / {@link parseMonsterStatblock}, so the
+ * same helper is the parity check between those surfaces.
+ */
+export function statblockVisibleLabels(block: MonsterStatblock) {
+  const { presentation } = block;
+  return {
+    rating: presentation.rating.full,
+    ratingShort: presentation.rating.short ?? null,
+    defense: presentation.defense.full,
+    defenseShort: presentation.defense.short ?? null,
+    hitPoints: presentation.hitPoints.full,
+    hitPointsShort: presentation.hitPoints.short ?? null,
+    abilities: presentation.abilities.full,
+    actions: presentation.actions.full,
+    creatureType: presentation.creatureType.full,
+    ratingLine: block.challengeRating ? `${presentation.rating.full} ${block.challengeRating}` : null,
+  };
+}
+
 const dividerRule: CSSProperties = { borderTop: '1px solid var(--color-divider)', paddingTop: 10, marginTop: 2 };
 
-function KeyLine({ label, value }: { label: string; value: string }) {
+/**
+ * Labeled stat line using adapter presentation metadata (issue #763). Full accessible
+ * terms are the visual default; optional `short` abbreviations live on the label object
+ * for compact surfaces that opt into them.
+ */
+function KeyLine({ label, value }: { label: StatblockPresentationLabel; value: string }) {
   return (
     <p style={{ margin: 0, fontSize: 13 }}>
-      <span style={{ fontWeight: 600 }}>{label}</span> {value}
+      <span style={{ fontWeight: 600 }}>{label.full}</span> {value}
     </p>
   );
 }
@@ -275,33 +334,41 @@ function NamedSection({ title, entries, headingLevel }: { title: string; entries
  * fields, so callers can fall back to a markdown body. Pass either the raw
  * `dataJson` string or an already-parsed object. `ruleSystem` is the active
  * campaign's rule system (issue #234) — it selects the adapter that maps the
- * statblock fields and ability modifiers; omit for the 5e default.
+ * statblock fields and ability modifiers. Unrecognized / empty rule systems
+ * keep 5e-shaped field mapping but use neutral Rating/Defense labels (#763).
  */
 export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknown; ruleSystem?: string | null; headingLevel?: 2 | 3 | 4 }) {
   const block = parseMonsterStatblock(data, ruleSystem);
   if (!block) return null;
 
-  const metaBits = [block.size, block.creatureType].filter(Boolean).join(' ');
-  const cr = block.challengeRating;
+  const { presentation } = block;
+  const sizeText = block.size || '';
+  const creatureTypeText = block.creatureType
+    ? `${presentation.creatureType.full}: ${block.creatureType}`
+    : '';
+  const metaBits = [sizeText, creatureTypeText].filter(Boolean).join(' · ');
+  const ratingText = statblockVisibleLabels(block).ratingLine ?? '';
 
   return (
     <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
-      {(metaBits || cr) && (
+      {(metaBits || ratingText) && (
         <p className="text-muted" style={{ margin: 0, fontSize: 12.5, fontStyle: 'italic' }}>
           {metaBits}
-          {metaBits && cr ? ' · ' : ''}
-          {cr ? `Challenge ${cr}` : ''}
+          {metaBits && ratingText ? ' · ' : ''}
+          {ratingText}
         </p>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {block.armorClass && <KeyLine label="Armor Class" value={block.armorClass} />}
-        {block.hitPoints && <KeyLine label="Hit Points" value={block.hitPoints} />}
-        {block.speed && <KeyLine label="Speed" value={block.speed} />}
+        {block.armorClass && <KeyLine label={presentation.defense} value={block.armorClass} />}
+        {block.hitPoints && <KeyLine label={presentation.hitPoints} value={block.hitPoints} />}
+        {block.speed && <KeyLine label={SPEED_LABEL} value={block.speed} />}
       </div>
 
       {block.abilities.length > 0 && (
         <div
+          role="group"
+          aria-label={presentation.abilities.full}
           style={{
             ...dividerRule,
             display: 'grid',
@@ -314,8 +381,15 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
             <Fragment key={a.label}>
               <div>
                 <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', color: 'var(--color-accent-300, var(--color-text))' }}>{a.label}</div>
-                <div style={{ fontSize: 14 }}>{a.score}</div>
-                <div className="text-muted" style={{ fontSize: 12 }}>{a.mod}</div>
+                {a.representation === 'modifier' || a.representation === 'native' ? (
+                  // PF2e creatures list signed modifiers; Open Legend lists native attribute values.
+                  <div style={{ fontSize: 14 }}>{a.mod}</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 14 }}>{a.value}</div>
+                    <div className="text-muted" style={{ fontSize: 12 }}>{a.mod}</div>
+                  </>
+                )}
               </div>
             </Fragment>
           ))}
@@ -323,7 +397,7 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
       )}
 
       <NamedSection title="Traits" entries={block.specialAbilities} headingLevel={headingLevel} />
-      <NamedSection title="Actions" entries={block.actions} headingLevel={headingLevel} />
+      <NamedSection title={presentation.actions.full} entries={block.actions} headingLevel={headingLevel} />
       <NamedSection title="Reactions" entries={block.reactions} headingLevel={headingLevel} />
       <NamedSection title="Legendary Actions" entries={block.legendaryActions} headingLevel={headingLevel} />
     </section>

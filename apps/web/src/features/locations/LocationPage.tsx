@@ -6,15 +6,27 @@
  * move pin (numeric X/Y -> PATCH), dmSecret panel, delete.
  * Everyone: header, mini pin map, markdown body, here & connected, notes.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
-import { useAuth } from '../../app/auth';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
-import { LocationStatusLabel } from '../../components/LocationStatusLabel';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Field } from '../../components/Field';
+import {
+  LOCATION_BODY_HELP,
+  LOCATION_BODY_LABEL,
+  LOCATION_DM_SECRET_HELP,
+  LOCATION_DM_SECRET_LABEL,
+  LOCATION_EDIT_PREFIX,
+  LOCATION_FIELD,
+  LOCATION_KIND_LABEL,
+  LOCATION_NAME_LABEL,
+  LOCATION_PARENT_LABEL,
+} from '../../components/formFieldLabels';
+import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/LocationStatusLabel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
@@ -24,7 +36,15 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
+import { StatusMenuButton } from '../../components/StatusMenuButton';
+import { useAnnounce } from '../../components/Announcer';
 import { entityTargetProps } from '../../lib/entityLinks';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
 
 
 /** Design's primary "discover" action advances one step: unexplored -> explored -> current. */
@@ -48,14 +68,16 @@ export default function LocationPage() {
   // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
   const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { role, isDm, canDmWrite } = useCampaignAccess();
+  const announce = useAnnounce();
 
   const [location, setLocation] = useState<Location | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  // Issue #853: generation-token loads so a slow A response cannot paint (or leave
+  // mutation controls armed) after the route has moved to B.
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   // Auxiliary panels (issue #697): the full location list (breadcrumb/children/
   // parent-picker), the NPC roster (the "Here" card), the quest list (connected
@@ -104,7 +126,6 @@ export default function LocationPage() {
   const [conflict, setConflict] = useState(false);
   const [historyNonce, setHistoryNonce] = useState(0);
 
-  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [statusSaving, setStatusSaving] = useState(false);
 
   const [movingPin, setMovingPin] = useState(false);
@@ -112,29 +133,66 @@ export default function LocationPage() {
   const [pinY, setPinY] = useState('50');
   const [pinSaving, setPinSaving] = useState(false);
 
+  // Reset editor chrome tied to the prior record whenever the route identity changes
+  // (issue #853) — parent/child links reuse this component instance.
+  function resetEditorChrome() {
+    setEditing(false);
+    setProposeMode(false);
+    setProposeDone(false);
+    setForm({ name: '', kind: '', body: '', dmSecret: '', parentId: '' });
+    setSaving(false);
+    setSaveError(null);
+    setDeleting(false);
+    setConfirmingDelete(false);
+    setPendingUndo(false);
+    setConflict(false);
+    setMovingPin(false);
+    setPinX('50');
+    setPinY('50');
+    setPinSaving(false);
+    setStatusSaving(false);
+  }
+
   // Core fetch: ONLY the location can set the page-level error/not-found state.
   // The auxiliary panels above own their own error/retry and never reach here (#697).
   const load = useCallback(async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(id);
     setLoading(true);
     setError(null);
     setNotFound(false);
+    // Clear immediately so A's canon/dmSecret never stays painted on B's URL while
+    // B loads — and so mutation controls unmount until the new record matches.
+    setLocation(null);
+    resetEditorChrome();
     try {
-      const locData = await api.get<Location>(`${API}/locations/${id}`);
-      setLocation(locData);
+      const locData = await api.get<Location>(`${API}/locations/${id}`, { signal });
+      const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, id, locData);
+      if (decision.kind !== 'commit') return;
+      setLocation(decision.record);
     } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, id)) return;
+      setLocation(null);
       if (err instanceof ApiError && err.status === 404) {
         setNotFound(true);
+      } else if ((err as { name?: string } | undefined)?.name === 'AbortError') {
+        // Superseded by a newer navigation — ignore.
       } else {
         setError(err instanceof ApiError ? err.message : "Couldn't load this location.");
       }
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, id)) setLoading(false);
     }
   }, [id]);
 
   useEffect(() => {
-    if (Number.isFinite(cid) && Number.isFinite(id)) void load();
+    if (!Number.isFinite(cid) || !Number.isFinite(id)) return;
+    void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [cid, id, load]);
+
+  // Block every mutation until the painted record is the route's record (#853).
+  const recordReady = mutationsEnabledForRoute(location, id, loading);
 
   const hereNpcs = useMemo(() => npcs.filter((n) => n.locationId === id), [npcs, id]);
   const hereNpcIds = useMemo(() => new Set(hereNpcs.map((n) => n.id)), [hereNpcs]);
@@ -225,6 +283,9 @@ export default function LocationPage() {
 
   async function save() {
     if (!form.name.trim()) return;
+    // Issue #853: never write form values loaded for A into B's route id.
+    const gate = assertMutationTarget(location?.id, id);
+    if (!gate.ok) return;
     setSaving(true);
     setSaveError(null);
     setConflict(false);
@@ -286,6 +347,7 @@ export default function LocationPage() {
   }
 
   async function remove() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setDeleting(true);
     try {
       // Soft-delete (issue #116) — reversible; offer an Undo instead of navigating away.
@@ -306,13 +368,19 @@ export default function LocationPage() {
   }
 
   async function setStatus(status: Location['status']) {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     setStatusSaving(true);
-    setStatusMenuOpen(false);
     try {
       const updated = await api.post<Location>(`${API}/locations/${id}/discover`, { status });
       setLocation(updated);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update status.");
+      announce(`Location status set to ${LOCATION_STATUS_LABEL[status]}.`);
+    } catch {
+      // Selection is preserved (location.status is unchanged). Surface the
+      // failure both visually (page-level ErrorNote) and to the screen reader
+      // so the user learns the save did not stick. Use the stable generic
+      // message so the assertion holds regardless of the server's response.
+      setError("Couldn't update status.");
+      throw new Error('status save failed');
     } finally {
       setStatusSaving(false);
     }
@@ -326,16 +394,25 @@ export default function LocationPage() {
   }
 
   async function savePin() {
+    if (!assertMutationTarget(location?.id, id).ok) return;
     const x = Number(pinX);
     const y = Number(pinY);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const clampedX = Math.max(0, Math.min(100, x));
+    const clampedY = Math.max(0, Math.min(100, y));
+    // Keep the form in sync with the clamped values that will be submitted.
+    setPinX(String(clampedX));
+    setPinY(String(clampedY));
     setPinSaving(true);
     try {
-      const updated = await api.patch<Location>(`${API}/locations/${id}`, { mapX: x, mapY: y });
+      const updated = await api.patch<Location>(`${API}/locations/${id}`, { mapX: clampedX, mapY: clampedY });
       setLocation(updated);
       setMovingPin(false);
+      announce(`Pin saved at ${clampedX}% horizontal, ${clampedY}% vertical.`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      const msg = err instanceof ApiError ? err.message : "Couldn't move the pin.";
+      setError(msg);
+      announce(`Failed to save pin position: ${msg}`, { assertive: true });
     } finally {
       setPinSaving(false);
     }
@@ -375,7 +452,20 @@ export default function LocationPage() {
     );
   }
 
-  if (!location) return null;
+  // After a route change we clear `location` immediately; until the new record
+  // matches the route, never paint prior content or arm mutation controls (#853).
+  if (!location || !recordReady) {
+    if (loading) {
+      return (
+        <div className="max-w-5xl mx-auto px-4 mt-5">
+          <Card>
+            <Skeleton lines={6} />
+          </Card>
+        </div>
+      );
+    }
+    return null;
+  }
 
   const px = location.mapX ?? 50;
   const py = location.mapY ?? 50;
@@ -428,7 +518,7 @@ export default function LocationPage() {
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
-            {isDm && nextStatus && (
+            {canDmWrite && nextStatus && (
               <Btn
                 className="!min-h-0 !py-1.5 text-xs"
                 disabled={statusSaving}
@@ -450,36 +540,26 @@ export default function LocationPage() {
                 </Btn>
               </div>
             )}
-            {isDm && (
-              <div className="flex gap-2 shrink-0 relative ml-auto">
+            {canDmWrite && (
+              <div className="flex gap-2 shrink-0 ml-auto">
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
+                <StatusMenuButton
+                  className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs"
+                  triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
+                  triggerDescription="DM: set status directly"
+                  value={location.status}
+                  options={(LocationStatus.options as Location['status'][]).map((s) => ({
+                    value: s,
+                    label: <LocationStatusLabel status={s} />,
+                  }))}
                   disabled={statusSaving}
-                  onClick={() => setStatusMenuOpen((v) => !v)}
-                  title="DM: set status directly"
-                >
-                  Status ▾
-                </Btn>
-                {statusMenuOpen && (
-                  <div className="absolute right-0 top-full mt-1 z-10 cf-card p-1.5 space-y-1 min-w-[160px]">
-                    {(LocationStatus.options as Location['status'][]).map((s) => (
-                      <button
-                        key={s}
-                        type="button"
-                        onClick={() => setStatus(s)}
-                        className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold hover:bg-slate-700 ${
-                          s === location.status ? 'text-amber-400' : 'text-slate-300'
-                        }`}
-                      >
-                        <LocationStatusLabel status={s} />
-                      </button>
-                    ))}
-                  </div>
-                )}
+                  triggerText="Status ▾"
+                  onSelect={(s) => setStatus(s)}
+                  announceFailure={announce}
+                  failureMessage="Couldn't update status."
+                />
               </div>
             )}
           </div>
@@ -511,41 +591,57 @@ export default function LocationPage() {
                   >
                     {location.name}
                   </span>
-                  {isDm && !movingPin && (
+                  {canDmWrite && !movingPin && (
                     <Btn ghost className="absolute bottom-2 right-2 !min-h-0 !py-1 text-[10px]" onClick={startMovePin}>
                       Move pin (DM)
                     </Btn>
                   )}
-                  {isDm && movingPin && (
-                    <div className="absolute bottom-2 right-2 cf-card p-2 flex items-end gap-2">
-                      <div className="space-y-0.5">
-                        <label className="text-[9px] text-slate-500 font-bold uppercase">X</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          className="cf-input !min-h-0 !py-1 !w-16 text-xs"
-                          value={pinX}
-                          onChange={(e) => setPinX(e.target.value)}
-                        />
+                  {canDmWrite && movingPin && (
+                    <div className="absolute bottom-2 right-2 cf-card p-2 flex flex-col gap-1.5" role="group" aria-labelledby="pin-position-heading">
+                      <span id="pin-position-heading" className="text-[9px] text-slate-400 font-bold uppercase">
+                        Move {location.name} pin
+                      </span>
+                      <div className="flex items-end gap-2">
+                        <div className="space-y-0.5">
+                          <label htmlFor="pin-x-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                            Horizontal position (%)
+                          </label>
+                          <input
+                            id="pin-x-input"
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            value={pinX}
+                            onChange={(e) => setPinX(e.target.value)}
+                            aria-describedby="pin-position-help"
+                          />
+                        </div>
+                        <div className="space-y-0.5">
+                          <label htmlFor="pin-y-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                            Vertical position (%)
+                          </label>
+                          <input
+                            id="pin-y-input"
+                            type="number"
+                            min={0}
+                            max={100}
+                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            value={pinY}
+                            onChange={(e) => setPinY(e.target.value)}
+                            aria-describedby="pin-position-help"
+                          />
+                        </div>
+                        <Btn ghost className="!min-h-0 !py-1 text-[10px]" onClick={() => setMovingPin(false)}>
+                          Cancel
+                        </Btn>
+                        <Btn className="!min-h-0 !py-1 text-[10px]" disabled={pinSaving} onClick={savePin}>
+                          {pinSaving ? '…' : 'Save'}
+                        </Btn>
                       </div>
-                      <div className="space-y-0.5">
-                        <label className="text-[9px] text-slate-500 font-bold uppercase">Y</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          className="cf-input !min-h-0 !py-1 !w-16 text-xs"
-                          value={pinY}
-                          onChange={(e) => setPinY(e.target.value)}
-                        />
-                      </div>
-                      <Btn ghost className="!min-h-0 !py-1 text-[10px]" onClick={() => setMovingPin(false)}>
-                        Cancel
-                      </Btn>
-                      <Btn className="!min-h-0 !py-1 text-[10px]" disabled={pinSaving} onClick={savePin}>
-                        {pinSaving ? '…' : 'Save'}
-                      </Btn>
+                      <p id="pin-position-help" className="text-[9px] text-slate-500 m-0">
+                        0% = left/top edge, 100% = right/bottom edge
+                      </p>
                     </div>
                   )}
                 </div>
@@ -562,6 +658,7 @@ export default function LocationPage() {
                   entityType="location"
                   entityId={id}
                   currentSnapshot={{ body: location.body }}
+                  expectedUpdatedAt={location.updatedAt}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
@@ -601,7 +698,7 @@ export default function LocationPage() {
                           e.preventDefault();
                           navigate(`/c/${cid}/npcs/${npc.id}`);
                         }}
-                        className="cf-inset p-3 hover:border-amber-500/50"
+                        className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-purple-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
                         <p className="text-xs text-slate-400">{npc.role || 'NPC'}</p>
@@ -615,7 +712,7 @@ export default function LocationPage() {
                           e.preventDefault();
                           navigate(`/c/${cid}/quests/${q.id}`);
                         }}
-                        className="cf-inset p-3 hover:border-amber-500/50"
+                        className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="scroll-unfurled" size={13} /> {q.title}</p>
                         <QuestStatusBadge status={q.status} className="mt-1" />
@@ -637,7 +734,7 @@ export default function LocationPage() {
                           e.preventDefault();
                           navigate(`/c/${cid}/locations/${child.id}`);
                         }}
-                        className="cf-inset p-3 hover:border-amber-500/50"
+                        className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="treasure-map" size={13} /> {child.name}</p>
                         <p className="text-xs text-slate-400">{child.kind || 'Location'}</p>
@@ -672,7 +769,7 @@ export default function LocationPage() {
       )}
 
       {editing && (
-        <Card className="space-y-3">
+        <Card className="space-y-3" data-testid="location-editor-fields">
           {proposeMode && (
             <p className="text-xs text-slate-400 m-0 rounded-[var(--radius-md)] bg-[var(--color-accent)]/10 border border-[var(--color-accent-700)] px-3 py-2">
               <GameIcon slug="light-bulb" size={12} className="inline align-text-bottom mr-1" />You're suggesting an edit. Your changes go to the DM as a proposal — nothing changes until they approve it.
@@ -680,40 +777,72 @@ export default function LocationPage() {
           )}
           {saveError && <ErrorNote message={saveError} />}
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Name</label>
-              <TextInput value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] text-slate-500 font-bold uppercase">Kind</label>
-              <TextInput value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.name}
+              label={LOCATION_NAME_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.kind}
+              label={LOCATION_KIND_LABEL}
+              labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+              value={form.kind}
+              onChange={(e) => setForm({ ...form, kind: e.target.value })}
+              optional
+            />
           </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Parent location</label>
-            <select
-              aria-label="Parent location"
-              className="cf-input text-sm w-full"
-              value={form.parentId}
-              onChange={(e) => setForm({ ...form, parentId: e.target.value })}
-            >
-              <option value="">No parent (top level)</option>
-              {parentOptions.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  Inside: {loc.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] text-slate-500 font-bold uppercase">Description (markdown)</label>
-            <TextArea style={{ minHeight: 140 }} value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} />
-          </div>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.parentId}
+            as="select"
+            label={LOCATION_PARENT_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            selectClassName="cf-input text-sm w-full"
+            value={form.parentId}
+            onChange={(e) => setForm({ ...form, parentId: e.target.value })}
+            optional
+          >
+            <option value="">No parent (top level)</option>
+            {parentOptions.map((loc) => (
+              <option key={loc.id} value={loc.id}>
+                Inside: {loc.name}
+              </option>
+            ))}
+          </Field>
+          <Field
+            idPrefix={LOCATION_EDIT_PREFIX}
+            name={LOCATION_FIELD.body}
+            as="textarea"
+            label={LOCATION_BODY_LABEL}
+            labelClassName="text-[10px] text-slate-300 font-bold uppercase tracking-wide"
+            value={form.body}
+            onChange={(e) => setForm({ ...form, body: e.target.value })}
+            help={LOCATION_BODY_HELP}
+            minHeight={140}
+            optional
+          />
           {!proposeMode && (
-            <div className="space-y-1">
-              <label className="flex items-center gap-1 text-[10px] text-amber-500 font-bold uppercase"><GameIcon slug="padlock" size={11} /> DM secret</label>
-              <TextArea style={{ minHeight: 90 }} value={form.dmSecret} onChange={(e) => setForm({ ...form, dmSecret: e.target.value })} />
-            </div>
+            <Field
+              idPrefix={LOCATION_EDIT_PREFIX}
+              name={LOCATION_FIELD.dmSecret}
+              as="textarea"
+              label={
+                <span className="inline-flex items-center gap-1">
+                  <GameIcon slug="padlock" size={11} /> {LOCATION_DM_SECRET_LABEL}
+                </span>
+              }
+              labelClassName="text-[10px] text-amber-400 font-bold uppercase tracking-wide"
+              value={form.dmSecret}
+              onChange={(e) => setForm({ ...form, dmSecret: e.target.value })}
+              help={LOCATION_DM_SECRET_HELP}
+              minHeight={90}
+              optional
+            />
           )}
           <div className="flex items-center justify-between gap-2">
             {!proposeMode ? (
@@ -743,7 +872,7 @@ export default function LocationPage() {
         <ConfirmDialog
           title={`Delete ${location?.name}?`}
           body="This moves the location to the Trash — you can undo it, or restore it from the campaign Trash."
-          confirmLabel={deleting ? 'Deleting…' : 'Delete location'}
+          confirmLabel="Delete location"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}

@@ -1,8 +1,11 @@
+node_modules
 node_modules/
 dist/
+dist-subpath/
 build/
 coverage/
 data/
+/test-results/
 *.db
 *.db-*
 .env

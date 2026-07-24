@@ -12,6 +12,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { EncountersService } from '../encounters/encounters.service';
@@ -97,6 +98,35 @@ export class CampaignMapsController {
     if (!file) throw new BadRequestException('Missing file (multipart field "file")');
     const role = await this.access.requireRole(user, campaignId, 'dm');
     return this.maps.importAttributedMap(campaignId, body, { buffer: file.buffer }, user, role);
+  }
+
+  /**
+   * Preview a procedural map WITHOUT saving it (issue #409) — backs the web generation
+   * wizard's preview/reroll. dm-only. Returns the rendered SVG markup plus the seed +
+   * grid metadata, but creates NO attachment, so previewing/rerolling never leaves an
+   * orphan attachment or consumes storage quota. Because generation is deterministic by
+   * seed, "Use this map" replays the returned seed through POST .../maps/generate (or
+   * POST /encounters/:id/generate-map) to attach the exact same map. Marked
+   * WriteModeExempt: a preview is non-mutating (no DB/disk write), so a read-only /
+   * propose-mode token may still render one.
+   */
+  @Post('generate/preview')
+  @WriteModeExempt()
+  @ApiOperation({
+    summary: 'Preview a procedural battle map without saving it',
+    description:
+      'dm role required. Renders a deterministic procedural map (issue #306) and returns its SVG markup + seed + grid ' +
+      'config WITHOUT creating an attachment or touching the storage quota (issue #409). Use the same seed with POST ' +
+      '.../maps/generate or POST /encounters/:id/generate-map to attach the identical map.',
+  })
+  @ApiResponse({ status: 201, description: 'svg + seed + gridConfig for the previewed (unsaved) map.' })
+  async preview(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: GenerateMapDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, campaignId, 'dm');
+    return this.maps.previewForCampaign(body);
   }
 
   @Post('generate')

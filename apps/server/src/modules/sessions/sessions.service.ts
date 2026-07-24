@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, PageParams } from '@campfire/schema';
+import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -51,7 +51,11 @@ function attendeeToDomain(row: typeof sessionAttendees.$inferSelect): SessionAtt
  */
 export interface RecapDraftSource {
   resolvedInbox: Pick<Note, 'body' | 'resolvedNote' | 'entityName'>[];
-  encounters: Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'>[];
+  // `events` (issue #1068) is the persisted per-encounter combat log — the round-by-round
+  // damage/heal/condition/death/turn trail — so a recap can narrate WHAT HAPPENED in the
+  // fight, not just who was in it. Optional so pure buildRecapDraft callers/tests that only
+  // seed the roster line stay valid; assembled sources (scribe + draft_session_recap) carry it.
+  encounters: (Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'> & { events?: EncounterEvent[] })[];
 }
 
 /** One line summarising an encounter for the Recap section seed. */
@@ -293,6 +297,19 @@ export class SessionsService {
 
     await this.recomputeSessionCount(campaignId);
 
+    // Open the initial prose tip so the first overwrite attributes this version to
+    // the creator rather than inventing legacy "Replaced by…" authorship (#813).
+    if (row.recap !== '') {
+      await this.revisions.commitProseVersion({
+        entityType: 'session',
+        entityId: row.id,
+        campaignId,
+        priorProse: '',
+        nextProse: row.recap,
+        user,
+      });
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -338,14 +355,15 @@ export class SessionsService {
     if (input.number !== undefined) {
       await this.assertNumberAvailable(existing.campaignId, input.number, id);
     }
-    // Snapshot the PRIOR recap into revision history when the recap actually changes,
-    // so a subsequent overwrite is recoverable (#157). Bounded to committed edits.
+    // Commit an immutable prose version when the recap actually changes (#157/#813):
+    // close the prior tip (real author preserved) and open a tip for the new prose.
     if (input.recap !== undefined && input.recap !== existing.recap) {
-      await this.revisions.record({
+      await this.revisions.commitProseVersion({
         entityType: 'session',
         entityId: id,
         campaignId: existing.campaignId,
         priorProse: existing.recap,
+        nextProse: input.recap,
         user,
       });
     }

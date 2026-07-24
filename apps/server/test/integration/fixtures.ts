@@ -358,7 +358,9 @@ export async function seedFullCampaign(
   const quest = await request(server)
     .post(`/api/v1/campaigns/${campaignId}/quests`)
     .set(dm)
-    .send({ title: 'Cascade Quest' });
+    // #754: player-visible so the seeded player proposal below (PATCH ?proposed=true)
+    // isn't rejected 404 against a private-by-default quest.
+    .send({ title: 'Cascade Quest', hidden: false });
   const questId = quest.body.id as number;
   // A quest objective — cascades off the quest id, not campaign_id directly.
   await request(server)

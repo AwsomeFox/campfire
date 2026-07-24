@@ -1,11 +1,18 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { BadRequestException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { and, count, eq, inArray, isNotNull } from 'drizzle-orm';
 import JSZip from 'jszip';
 import type { z } from 'zod';
-import { CampaignClone, CampaignCreate, CampaignImport, CampaignUpdate } from '@campfire/schema';
+import {
+  CAMPAIGN_PURGE_CONFIRM_TOKEN,
+  CampaignClone,
+  CampaignCreate,
+  CampaignImport,
+  CampaignPurge,
+  CampaignUpdate,
+} from '@campfire/schema';
 import type { Campaign, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
@@ -43,12 +50,15 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiScribeConfigs,
   encounterEvents,
   auditLog,
   participantSupportPreferences,
+  campaignPurgeTombstones,
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
+import { persistedFogConcealsPixels } from '../../common/fog';
 import { AuditService } from '../audit/audit.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -62,15 +72,17 @@ import { TimelineService } from '../timeline/timeline.service';
 import { CommentsService } from '../comments/comments.service';
 import { RoleResolver } from '../membership/role-resolver.service';
 import { MembersService } from '../membership/members.service';
+import { InvitesService } from '../membership/invites.service';
+import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
-
-/** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
-}
+import { copyAttachmentBytes, remapAttachmentFileUrl } from '../attachments/attachment-copy';
+import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
+import { uploadsRoot } from '../attachments/uploads-path';
+import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
+import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
+import { sanitizeAttachmentFilename } from '../attachments/filename';
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -209,6 +221,13 @@ const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Numbe
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
+/**
+ * Secrecy flag (`hidden`) coercion for import — fails CLOSED (#754). Only an explicit
+ * boolean `false` reveals an entity; a missing flag OR any non-boolean value (e.g. a
+ * hand-edited export carrying `"true"` or `1`) stays hidden, so a malformed export can
+ * never accidentally reveal a private prep entity to players.
+ */
+const hiddenOf = (v: unknown): boolean => v !== false;
 /** Serialize a JSON-ish export field (object/array) back to the TEXT the column stores. */
 const jsonCol = (v: unknown, fallback: string): string => {
   if (v === undefined || v === null) return fallback;
@@ -228,7 +247,10 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     currentLocationId: row.currentLocationId,
     dangerLevel: row.dangerLevel as Campaign['dangerLevel'],
     dmControlsProgression: row.dmControlsProgression,
+    dmControlsTurns: row.dmControlsTurns,
+    requireDmTurnConfirmation: row.requireDmTurnConfirmation,
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
+    publicInvitesEnabled: row.publicInvitesEnabled,
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -241,6 +263,8 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
 
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
+
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
@@ -256,6 +280,9 @@ export class CampaignsService {
     private readonly comments: CommentsService,
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
+    private readonly invites: InvitesService,
+    private readonly fsDeletion: FsDeletionService,
+    private readonly events: CampaignEventsService,
   ) {}
 
   /**
@@ -342,7 +369,7 @@ export class CampaignsService {
   async getOrThrow(id: number, opts?: { includeDeleted?: boolean }): Promise<Campaign> {
     const [row] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
     if (!row || (!opts?.includeDeleted && row.deletedAt != null)) {
-      throw new NotFoundException(`Campaign ${id} not found`);
+      throw new NotFoundException('Campaign not found');
     }
     return toDomain(row);
   }
@@ -386,7 +413,13 @@ export class CampaignsService {
     const [row] = await this.db
       .select({ id: attachments.id })
       .from(attachments)
-      .where(and(eq(attachments.id, attachmentId), eq(attachments.campaignId, campaignId)))
+      .where(
+        and(
+          eq(attachments.id, attachmentId),
+          eq(attachments.campaignId, campaignId),
+          eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+        ),
+      )
       .limit(1);
     if (!row) throw new BadRequestException(`mapAttachmentId ${attachmentId} does not exist in this campaign`);
   }
@@ -412,7 +445,12 @@ export class CampaignsService {
         currentLocationId: input.currentLocationId ?? null,
         dangerLevel: input.dangerLevel ?? 'low',
         dmControlsProgression: input.dmControlsProgression ?? false,
+        dmControlsTurns: input.dmControlsTurns ?? false,
+        requireDmTurnConfirmation: input.requireDmTurnConfirmation ?? false,
         publicRecapSharingEnabled: true,
+        // Brand-new campaigns that start archived cannot accept joins until the
+        // DM both unarchives and deliberately re-enables invites (#857).
+        publicInvitesEnabled: (input.status ?? 'active') === 'active',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -439,7 +477,12 @@ export class CampaignsService {
     return toDomain(row);
   }
 
-  async update(id: number, input: CampaignUpdateInput, user: RequestUser): Promise<Campaign> {
+  async update(
+    id: number,
+    input: CampaignUpdateInput,
+    user: RequestUser,
+    opts?: { revokeInvites?: boolean },
+  ): Promise<Campaign> {
     const existing = await this.getOrThrow(id);
     // Archived (paused/completed) campaigns are read-only (issue #16). The one
     // campaign-level PATCH still allowed is flipping `status` itself (un-archive,
@@ -460,12 +503,93 @@ export class CampaignsService {
     // Attachments now default to DM-only (issue #97), so reveal the newly-wired
     // map here, otherwise players would 404 on the background image they're meant
     // to see. (Clearing the map to null doesn't re-hide — reveal is one-way here.)
+    // Fog-protected encounter maps cannot be the region background: players load
+    // RegionMap via /attachments/:id/file, which must stay a full-source URL.
     if (input.mapAttachmentId != null) {
+      const fogRows = await this.db
+        .select({ fog: encounters.fog })
+        .from(encounters)
+        .where(and(eq(encounters.mapAttachmentId, input.mapAttachmentId), eq(encounters.campaignId, id)));
+      if (fogRows.some((row) => persistedFogConcealsPixels(row.fog))) {
+        throw new ConflictException(
+          'This attachment is protecting a fogged encounter map — use a separate image for the campaign region map, or disable fog first',
+        );
+      }
       await this.db
         .update(attachments)
         .set({ hidden: false, updatedAt: nowIso() })
-        .where(and(eq(attachments.id, input.mapAttachmentId), eq(attachments.campaignId, id)));
+        .where(
+          and(
+            eq(attachments.id, input.mapAttachmentId),
+            eq(attachments.campaignId, id),
+            eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+          ),
+        );
     }
+
+    const archiving =
+      existing.status === 'active' && input.status !== undefined && input.status !== 'active';
+
+    // Atomic archive+revoke: status, invite suspension, and invite-row deletion
+    // commit together so a failed archive never leaves invites permanently gone
+    // while the campaign stays active (#857 Bugbot).
+    if (archiving && opts?.revokeInvites) {
+      const ts = nowIso();
+      const { row, revoked, wasEnabled } = this.db.transaction((tx) => {
+        const before = tx
+          .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        const row = tx
+          .update(campaigns)
+          .set({ ...input, publicInvitesEnabled: false, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .returning()
+          .get();
+        const deleted = tx
+          .delete(campaignInvites)
+          .where(eq(campaignInvites.campaignId, id))
+          .returning({ id: campaignInvites.id })
+          .all();
+        return {
+          row,
+          revoked: deleted.length,
+          wasEnabled: Boolean(before?.publicInvitesEnabled),
+        };
+      });
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.update',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+      });
+      if (wasEnabled) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'invite.suspend',
+          entityType: 'campaign',
+          entityId: id,
+          campaignId: id,
+          detail: JSON.stringify({ reason: 'archive' }),
+        });
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'invite.revoke_all',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ revoked }),
+      });
+      return toDomain(row);
+    }
+
     const [row] = await this.db
       .update(campaigns)
       .set({ ...input, updatedAt: nowIso() })
@@ -479,6 +603,13 @@ export class CampaignsService {
       entityId: id,
       campaignId: id,
     });
+    // Archive (active → paused/completed) suspends public invites. Restore/
+    // unarchive never flips the flag back — deliberate reactivation required (#857).
+    if (archiving) {
+      await this.invites.suspendForCampaign(id, user, 'archive');
+      const [fresh] = await this.db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+      return toDomain(fresh ?? row);
+    }
     return toDomain(row);
   }
 
@@ -487,22 +618,27 @@ export class CampaignsService {
    * campaign templates / cloning). Two modes:
    *
    *  - 'full' (default): faithful duplicate — quests (+objectives), npcs,
-   *    locations, characters, sessions, notes and encounters (+combatants),
-   *    with every intra-campaign reference (quest parent/giver, npc location,
-   *    combatant character, note entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids.
-   *  - 'template': prep only — quests/npcs/locations copied but play state
-   *    stripped: quest statuses reset to 'available', objectives unchecked,
-   *    locations back to 'unexplored', and sessions/notes/characters/
-   *    encounters/session-count/current-location not copied at all.
+   *    locations, factions, characters, sessions, notes, encounters
+   *    (+combatants), and discussion threads, with every intra-campaign
+   *    reference (quest parent/giver, npc location/faction, combatant
+   *    character, note/comment entity link, campaign currentLocationId)
+   *    remapped to the cloned rows' new ids. Encounter runtime combat state
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
+   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
+   *  - 'template': prep only — quests/npcs/locations/factions copied but play
+   *    state stripped: quest statuses reset to 'available', objectives
+   *    unchecked, locations back to 'unexplored', and sessions/notes/
+   *    characters/encounters/comments/session-count/current-location not
+   *    copied at all.
    *
    * Never copied in either mode: members (only the caller becomes dm — cloning
    * must not silently grant other users access to the new campaign), api
-   * tokens, audit history, proposals, and attachments (their bytes live on
-   * disk keyed by campaign id; mapAttachmentId is therefore reset to null).
-   * Other members' private notes are also excluded — same visibility rule as
-   * GET /notes and the export module: the cloning dm cannot read them, so the
-   * clone must not carry them either.
+   * tokens, audit history, proposals, and campaign/encounter map attachments
+   * (mapAttachmentId stays null). Character portrait attachments ARE copied
+   * and remapped (#524) so cloned sheets keep working when the source campaign
+   * is later deleted. Other members' private notes are also excluded — same
+   * visibility rule as GET /notes and the export module: the cloning dm cannot
+   * read them, so the clone must not carry them either.
    *
    * All inserts run in one synchronous db.transaction() (better-sqlite3 —
    * same pattern as remove()/RulesService.installOpen5eSrd), so a mid-clone
@@ -515,14 +651,16 @@ export class CampaignsService {
 
     // Read everything up front — only the writes need the transaction. Trashed
     // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
-    const [locationRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows] = await Promise.all([
+    const [locationRows, factionRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows, commentRows] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
+      this.db.select().from(factions).where(eq(factions.campaignId, id)),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
       this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
       this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+      this.db.select().from(comments).where(eq(comments.campaignId, id)),
     ]);
     const questIds = questRows.map((r) => r.id);
     const objectiveRows = questIds.length
@@ -533,7 +671,48 @@ export class CampaignsService {
       ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
       : [];
 
+    // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
+
+    // Issue #524: portrait attachments referenced by characters (and comment avatar
+    // snapshots of those same ids) are copied into the clone — collect their rows now
+    // so the tx can insert remapped attachment rows before character inserts.
+    const portraitSrcIds = new Set<number>();
+    if (!template) {
+      for (const c of characterRows) {
+        const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
+        if (aid != null) portraitSrcIds.add(aid);
+      }
+      for (const c of commentRows) {
+        const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
+        if (aid != null) portraitSrcIds.add(aid);
+      }
+    }
+    const portraitAttRows = portraitSrcIds.size
+      ? await this.db
+          .select()
+          .from(attachments)
+          .where(
+            and(
+              eq(attachments.campaignId, id),
+              inArray(attachments.id, [...portraitSrcIds]),
+              eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+            ),
+          )
+      : [];
+
     const ts = nowIso();
+    /** Portrait byte copies deferred until after the DB tx commits (#524 / #725 shape). */
+    const pendingPortraitCopies: {
+      srcCampaignId: number;
+      dstCampaignId: number;
+      srcAttachmentId: number;
+      dstAttachmentId: number;
+      mime: string;
+    }[] = [];
     const newId = this.db.transaction((tx) => {
       const [campaignRow] = tx
         .insert(campaigns)
@@ -544,7 +723,10 @@ export class CampaignsService {
           currentLocationId: null, // remapped below (full mode only)
           dangerLevel: source.dangerLevel,
           dmControlsProgression: source.dmControlsProgression,
+          dmControlsTurns: source.dmControlsTurns,
+          requireDmTurnConfirmation: source.requireDmTurnConfirmation,
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
+          publicInvitesEnabled: source.publicInvitesEnabled,
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // attachments (on-disk files) are not cloned
@@ -587,6 +769,30 @@ export class CampaignsService {
         }
       }
 
+      // Factions before npcs — an npc's factionId points at one, and comment/note
+      // anchors on factions need the remapped ids available for full-clone copy.
+      const factionMap = new Map<number, number>();
+      for (const f of factionRows) {
+        const [row] = tx
+          .insert(factions)
+          .values({
+            campaignId: cloneId,
+            name: f.name,
+            kind: f.kind,
+            body: f.body,
+            goals: f.goals,
+            dmSecret: f.dmSecret,
+            hidden: f.hidden,
+            reputation: f.reputation,
+            standing: f.standing,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        factionMap.set(f.id, row.id);
+      }
+
       const npcMap = new Map<number, number>();
       for (const n of npcRows) {
         const [row] = tx
@@ -597,6 +803,7 @@ export class CampaignsService {
             role: n.role,
             disposition: n.disposition,
             locationId: n.locationId != null ? (locMap.get(n.locationId) ?? null) : null,
+            factionId: n.factionId != null ? (factionMap.get(n.factionId) ?? null) : null,
             body: n.body,
             dmSecret: n.dmSecret,
             hidden: n.hidden, // entity-level secrecy (issue #42) is preserved on clone
@@ -648,26 +855,67 @@ export class CampaignsService {
       }
 
       if (!template) {
+        // Issue #524: recreate portrait attachment rows under the clone and remap
+        // every character.portraitUrl / comment avatar that pointed at them. Bytes
+        // are published after the tx commits (pendingPortraitCopies) via the shared
+        // copyAttachmentBytes helper — same remap shape as importCampaign.
+        const attMap = new Map<number, number>();
+        for (const a of portraitAttRows) {
+          const [row] = tx
+            .insert(attachments)
+            .values({
+              campaignId: cloneId,
+              uploaderUserId: a.uploaderUserId,
+              kind: a.kind,
+              filename: a.filename,
+              mime: a.mime,
+              size: a.size,
+              hidden: a.hidden,
+              state: ATTACHMENT_STATE_COMMITTED,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          attMap.set(a.id, row.id);
+          pendingPortraitCopies.push({
+            srcCampaignId: id,
+            dstCampaignId: cloneId,
+            srcAttachmentId: a.id,
+            dstAttachmentId: row.id,
+            mime: a.mime,
+          });
+        }
+        /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
+        const remapClonedPortraitUrl = (url: string | null): string | null => {
+          if (url == null) return null;
+          const remapped = remapAttachmentFileUrl(url, attMap);
+          if (remapped != null) return remapped;
+          // Dangling local attachment ref (bytes not copied) — drop rather than orphan.
+          if (historicalAvatarAttachmentId(url) != null) return null;
+          return url;
+        };
+
         const charMap = new Map<number, number>();
         for (const c of characterRows) {
+          // Spread every persisted column (#524) so NOT NULL fields with defaults
+          // (xp, status, skills, actions, spellSlots, dmSecret, hpTemp, death_*)
+          // cannot silently reset — only id/campaignId/timestamps/deletedAt are replaced.
+          const {
+            id: _srcId,
+            campaignId: _srcCampaignId,
+            createdAt: _createdAt,
+            updatedAt: _updatedAt,
+            deletedAt: _deletedAt,
+            portraitUrl: srcPortraitUrl,
+            ...characterFields
+          } = c;
           const [row] = tx
             .insert(characters)
             .values({
+              ...characterFields,
               campaignId: cloneId,
-              ownerUserId: c.ownerUserId,
-              name: c.name,
-              species: c.species,
-              className: c.className,
-              level: c.level,
-              background: c.background,
-              stats: c.stats,
-              ac: c.ac,
-              hpCurrent: c.hpCurrent,
-              hpMax: c.hpMax,
-              conditions: c.conditions,
-              portraitUrl: c.portraitUrl,
-              ddbId: c.ddbId,
-              notes: c.notes,
+              portraitUrl: remapClonedPortraitUrl(srcPortraitUrl),
               createdAt: ts,
               updatedAt: ts,
             })
@@ -697,6 +945,7 @@ export class CampaignsService {
         const entityMaps: Record<string, Map<number, number>> = {
           quest: questMap,
           npc: npcMap,
+          faction: factionMap,
           location: locMap,
           character: charMap,
           session: sessionMap,
@@ -731,40 +980,120 @@ export class CampaignsService {
             .run();
         }
 
+        const encounterMap = new Map<number, number>();
         for (const e of encounterRows) {
           const [row] = tx
             .insert(encounters)
             .values({
               campaignId: cloneId,
               name: e.name,
-              status: e.status,
-              round: e.round,
-              turnIndex: e.turnIndex,
-              endedAt: e.endedAt,
+              // Fresh fights only — never copy live/ended combat runtime (issue #548).
+              status: 'preparing',
+              round: 0,
+              turnIndex: 0,
+              currentCombatantId: null,
+              // Where/why/when links (issue #126/#864): remap through the clone maps.
+              // A dangling/cross-campaign source link drops to null rather than copying
+              // a stale foreign id into the new campaign.
+              locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
+              questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
+              sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              endedAt: null,
               createdAt: ts,
               updatedAt: ts,
             })
             .returning()
             .all();
+          encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
-                initiative: c.initiative,
+                initiative: null,
                 initMod: c.initMod,
-                hpCurrent: c.hpCurrent,
+                hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
-                conditions: c.conditions,
+                conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
+        }
+
+        // Full clones retain discussion history; templates deliberately strip it
+        // with the rest of play state. Anchor ids, reply parents, and live speaking
+        // character ids are remapped. Account/character display names stay as posted.
+        // Issue #524: attachment-backed avatars remap through attMap when that
+        // portrait was copied; otherwise drop the local ref. Safe remote HTTPS
+        // portraits are preserved. Campaign mapAttachmentId stays null (maps still
+        // not cloned). Every EntityType that clone materializes gets a remap map.
+        const commentEntityMaps: Record<string, Map<number, number>> = {
+          quest: questMap,
+          npc: npcMap,
+          faction: factionMap,
+          location: locMap,
+          character: charMap,
+          session: sessionMap,
+          encounter: encounterMap,
+        };
+        const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
+          const safe = safeHistoricalAvatarUrl(url);
+          if (!safe) return null;
+          const remapped = remapAttachmentFileUrl(safe, attMap);
+          if (remapped != null) return remapped;
+          if (historicalAvatarAttachmentId(safe) != null) return null;
+          return safe;
+        };
+        // Two linear passes (roots, then one-level replies) — comments nest at most
+        // one deep, so quadratic "scan until progressed" is unnecessary.
+        const commentMap = new Map<number, number>();
+        const insertClonedComment = (c: (typeof commentRows)[number], parentId: number | null) => {
+          const entityId = c.entityType === 'campaign'
+            ? cloneId
+            : commentEntityMaps[c.entityType]?.get(c.entityId);
+          if (entityId == null) return;
+          const [row] = tx
+            .insert(comments)
+            .values({
+              campaignId: cloneId,
+              entityType: c.entityType,
+              entityId,
+              parentId,
+              authorUserId: c.authorUserId,
+              authorName: c.authorName,
+              body: c.body,
+              inCharacter: c.inCharacter,
+              characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+              characterName: c.characterName,
+              characterAvatarUrl: remapClonedHistoricalAvatarUrl(c.characterAvatarUrl),
+              deletedAt: c.deletedAt,
+              deletedBy: c.deletedBy,
+              editedAt: c.editedAt,
+              editedBy: c.editedBy,
+              createdAt: c.createdAt,
+              updatedAt: c.updatedAt,
+            })
+            .returning()
+            .all();
+          commentMap.set(c.id, row.id);
+        };
+        for (const c of commentRows) {
+          if (c.parentId == null) insertClonedComment(c, null);
+        }
+        for (const c of commentRows) {
+          if (c.parentId == null) continue;
+          const parentId = commentMap.get(c.parentId) ?? null;
+          insertClonedComment(c, parentId);
         }
 
         if (source.currentLocationId != null) {
@@ -775,8 +1104,51 @@ export class CampaignsService {
         }
       }
 
+      // AI seat + scribe config (issue #1078): carry the DM's hand-authored steering
+      // and trigger settings across clone; reset runtime counters to zero.
+      if (aiSeatRow) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cloneId,
+          mode: aiSeatRow.mode,
+          enabled: aiSeatRow.enabled,
+          model: aiSeatRow.model,
+          instructions: aiSeatRow.instructions,
+          tokenBudget: aiSeatRow.tokenBudget,
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigRow) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cloneId,
+          postSession: aiScribeConfigRow.postSession,
+          cron: aiScribeConfigRow.cron,
+          budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+
       return cloneId;
     });
+
+    // Issue #524: publish portrait bytes after the entity rows committed, so a
+    // rolled-back clone never leaves half-written uploads. Missing source files
+    // degrade to the #84 row-without-file shape (GET 404s that one portrait).
+    for (const p of pendingPortraitCopies) {
+      try {
+        copyAttachmentBytes(p);
+      } catch (err) {
+        importLog.warn(
+          `clone portrait copy failed src=${p.srcCampaignId}/${p.srcAttachmentId} -> ${p.dstCampaignId}/${p.dstAttachmentId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     // Same membership rule as create(): the caller becomes the clone's dm.
     if (!user.devRole) {
@@ -863,6 +1235,7 @@ export class CampaignsService {
     const characterRows = asArr(doc.characters);
     const sessionRows = asArr(doc.sessions);
     const noteRows = asArr(doc.notes);
+    const commentRows = asArr(doc.comments);
     const encounterRows = asArr(doc.encounters);
     // Issue #266: entity types the export used to drop wholesale — now recreated with
     // fresh ids and intra-campaign refs remapped (npc→faction, beat→arc, branch→beat).
@@ -873,6 +1246,12 @@ export class CampaignsService {
     const timelineCalendarSrc = asRec(doc.timelineCalendar);
     const sessionZeroSrc = asRec(doc.sessionZero);
     const treasurySrc = asRec(doc.treasury);
+    // Issue #813: immutable prose versions (tips + superseded), remapped below.
+    const revisionRows = asArr(doc.revisions);
+
+    // Issue #1078: AI seat + scribe config from the export document.
+    const aiSeatSrc = asRec(doc.aiSeat);
+    const aiScribeConfigSrc = asRec(doc.aiScribeConfig);
 
     const importerId = String(user.id);
     const ts = nowIso();
@@ -908,13 +1287,25 @@ export class CampaignsService {
 
     // srcAttachmentId -> new attachment id, populated inside the tx.
     const attMap = new Map<number, number>();
-    /** Rewrite a source portraitUrl (…/attachments/<srcId>/file) to point at the freshly imported attachment. */
+    /**
+     * Rewrite a source portraitUrl through attMap (shared helper with clone — #524 / #236).
+     * Preserve safe remote HTTPS portraits; drop dangling local attachment refs.
+     */
     const remapPortraitUrl = (url: unknown): string | null => {
-      if (typeof url !== 'string') return null;
-      const m = url.match(/\/attachments\/(\d+)\/file(?:[?#].*)?$/);
-      if (!m) return null;
-      const newId = attMap.get(Number(m[1]));
-      return newId != null ? `/api/v1/attachments/${newId}/file` : null;
+      const safe = safeHistoricalAvatarUrl(url);
+      if (!safe) return null;
+      const remapped = remapAttachmentFileUrl(safe, attMap);
+      if (remapped != null) return remapped;
+      return historicalAvatarAttachmentId(safe) == null ? safe : null;
+    };
+    /** Preserve safe remote historical avatars; remap local attachment snapshots. */
+    const remapHistoricalAvatarUrl = (url: unknown): string | null => {
+      const safe = safeHistoricalAvatarUrl(url);
+      if (!safe) return null;
+      const remapped = remapAttachmentFileUrl(safe, attMap);
+      if (remapped != null) return remapped;
+      // Remote HTTPS (or other non-attachment) — keep; dangling local attachment — drop.
+      return historicalAvatarAttachmentId(safe) == null ? safe : null;
     };
 
     // STAGE: write each attachment's bytes into a unique staging dir now. The
@@ -961,9 +1352,12 @@ export class CampaignsService {
           currentLocationId: null, // remapped below
           dangerLevel: str(campaignSrc.dangerLevel, 'low'),
           dmControlsProgression: boolOf(campaignSrc.dmControlsProgression),
+          dmControlsTurns: boolOf(campaignSrc.dmControlsTurns),
+          requireDmTurnConfirmation: boolOf(campaignSrc.requireDmTurnConfirmation),
           // Older exports predate the policy field and retain the historical
           // enabled default. Explicitly disabled campaigns stay disabled.
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
+          publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids
@@ -1019,7 +1413,8 @@ export class CampaignsService {
             body: str(f.body),
             goals: str(f.goals),
             dmSecret: str(f.dmSecret),
-            hidden: boolOf(f.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(f.hidden),
             reputation: intOr(f.reputation, 0),
             standing: str(f.standing, 'neutral'),
             createdAt: ts,
@@ -1084,7 +1479,8 @@ export class CampaignsService {
             factionId: factionSrc != null ? (factionMap.get(factionSrc) ?? null) : null,
             body: str(n.body),
             dmSecret: str(n.dmSecret),
-            hidden: boolOf(n.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(n.hidden),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -1109,7 +1505,8 @@ export class CampaignsService {
             giverNpcId: giverSrc != null ? (npcMap.get(giverSrc) ?? null) : null,
             reward: str(q.reward),
             dmSecret: str(q.dmSecret),
-            hidden: boolOf(q.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(q.hidden),
             sortOrder: intOr(q.sortOrder, 0),
             createdAt: ts,
             updatedAt: ts,
@@ -1235,6 +1632,7 @@ export class CampaignsService {
         character: charMap,
         session: sessionMap,
       };
+      const noteMap = new Map<number, number>();
       for (const n of noteRows) {
         let entityType = typeof n.entityType === 'string' ? n.entityType : null;
         let entityId: number | null = null;
@@ -1245,7 +1643,9 @@ export class CampaignsService {
           entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
           if (entityId == null) entityType = null; // dangling link in the source — drop it
         }
-        tx.insert(notes)
+        const noteSrcId = intOrNull(n.id);
+        const [noteRow] = tx
+          .insert(notes)
           .values({
             campaignId: cid,
             authorUserId: importerId, // author ids are per-install — the importer owns imported notes
@@ -1260,10 +1660,14 @@ export class CampaignsService {
             createdAt: ts,
             updatedAt: ts,
           })
-          .run();
+          .returning()
+          .all();
+        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
       }
 
+      const encounterMap = new Map<number, number>();
       for (const e of encounterRows) {
+        const encounterSrcId = intOrNull(e.id);
         const [row] = tx
           .insert(encounters)
           .values({
@@ -1273,6 +1677,20 @@ export class CampaignsService {
             round: intOr(e.round, 0),
             turnIndex: intOr(e.turnIndex, 0),
             currentCombatantId: null, // remapped below once combatants have fresh ids
+            // Where/why/when links (issue #126/#864): remap through the import maps.
+            // A missing/foreign source id drops to null — never a stale cross-campaign link.
+            locationId: (() => {
+              const src = intOrNull(e.locationId);
+              return src != null ? (locMap.get(src) ?? null) : null;
+            })(),
+            questId: (() => {
+              const src = intOrNull(e.questId);
+              return src != null ? (questMap.get(src) ?? null) : null;
+            })(),
+            sessionId: (() => {
+              const src = intOrNull(e.sessionId);
+              return src != null ? (sessionMap.get(src) ?? null) : null;
+            })(),
             // Battle map (issue #39/#236): remap the map attachment to its imported id so an
             // exported VTT encounter re-imports WITH its map, not as a mapless initiative list.
             // The grid + fog overlay travel with the map (coordinate/scale data — no remap needed).
@@ -1284,13 +1702,23 @@ export class CampaignsService {
             gridScale: realOrNull(e.gridScale),
             gridUnit: typeof e.gridUnit === 'string' ? e.gridUnit : null,
             gridSnap: boolOf(e.gridSnap),
+            // Grid calibration (issue #417) travels with the map so a cloned/imported
+            // encounter keeps its printed-grid alignment. Missing → column defaults.
+            gridOffsetX: realOrNull(e.gridOffsetX) ?? 0,
+            gridOffsetY: realOrNull(e.gridOffsetY) ?? 0,
+            gridCellHeight: realOrNull(e.gridCellHeight),
+            gridRotation: realOrNull(e.gridRotation) ?? 0,
+            gridOpacity: realOrNull(e.gridOpacity) ?? 0.35,
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(e.hidden),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,
           })
           .returning()
           .all();
+        if (encounterSrcId != null) encounterMap.set(encounterSrcId, row.id);
         // Map each source combatant id to its fresh id so the encounter's current-turn
         // pointer (identity-based, issue #49) can be remapped.
         const combatantIdMap = new Map<number, number>();
@@ -1325,6 +1753,135 @@ export class CampaignsService {
             tx.update(encounters).set({ currentCombatantId }).where(eq(encounters.id, row.id)).run();
           }
         }
+      }
+
+      // Discussion history (issue #787): rebuild anchors and one-level parent
+      // pointers with fresh ids. Imported account ids are install-local and could
+      // alias an unrelated destination user, so ownership is assigned to the
+      // importer (matching imported notes) while the source authorName remains the
+      // visible posted-by provenance. Character labels stay immutable snapshots;
+      // only their soft ids and local attachment avatar routes are remapped.
+      const commentEntityMaps: Record<string, Map<number, number>> = {
+        quest: questMap,
+        npc: npcMap,
+        faction: factionMap,
+        location: locMap,
+        character: charMap,
+        session: sessionMap,
+        encounter: encounterMap,
+      };
+      // Two linear passes (roots, then one-level replies). Orphaned parent refs
+      // become roots in the second pass.
+      const commentMap = new Map<number, number>();
+      const insertImportedComment = (c: (typeof commentRows)[number], parentId: number | null) => {
+        const srcId = intOrNull(c.id);
+        if (srcId == null) return;
+        const entityType = str(c.entityType);
+        const sourceEntityId = intOrNull(c.entityId);
+        const entityId = entityType === 'campaign'
+          ? cid
+          : sourceEntityId != null
+            ? commentEntityMaps[entityType]?.get(sourceEntityId)
+            : undefined;
+        if (entityId == null) return;
+        const sourceCharacterId = intOrNull(c.characterId);
+        const [row] = tx
+          .insert(comments)
+          .values({
+            campaignId: cid,
+            entityType,
+            entityId,
+            parentId,
+            authorUserId: importerId,
+            authorName: str(c.authorName).slice(0, 120),
+            body: str(c.body, '[deleted]').slice(0, 20_000),
+            inCharacter: boolOf(c.inCharacter),
+            characterId: sourceCharacterId != null ? (charMap.get(sourceCharacterId) ?? null) : null,
+            characterName: typeof c.characterName === 'string' ? c.characterName.slice(0, 120) : null,
+            characterAvatarUrl: remapHistoricalAvatarUrl(c.characterAvatarUrl),
+            deletedAt: typeof c.deletedAt === 'string' ? c.deletedAt : null,
+            deletedBy: typeof c.deletedBy === 'string' ? c.deletedBy.slice(0, 120) : null,
+            editedAt: typeof c.editedAt === 'string' ? c.editedAt : null,
+            editedBy: typeof c.editedBy === 'string' ? c.editedBy.slice(0, 120) : null,
+            createdAt: typeof c.createdAt === 'string' ? c.createdAt : ts,
+            updatedAt: typeof c.updatedAt === 'string' ? c.updatedAt : ts,
+          })
+          .returning()
+          .all();
+        commentMap.set(srcId, row.id);
+      };
+      for (const c of commentRows) {
+        if (intOrNull(c.parentId) == null) insertImportedComment(c, null);
+      }
+      for (const c of commentRows) {
+        const parentSrc = intOrNull(c.parentId);
+        if (parentSrc == null) continue;
+        insertImportedComment(c, commentMap.get(parentSrc) ?? null);
+      }
+
+      // Issue #813: prose revision versions (author + replacer provenance). Entity ids and
+      // restoredFromRevisionId are remapped; dangling entity links are dropped. Author
+      // user ids are install-local provenance strings and travel as-is (like comment names).
+      const revisionEntityMaps: Record<string, Map<number, number>> = {
+        session: sessionMap,
+        quest: questMap,
+        npc: npcMap,
+        location: locMap,
+        faction: factionMap,
+        note: noteMap,
+      };
+      const revisionSourceKinds = new Set(['human', 'ai', 'tool']);
+      const revisionSource = (value: unknown): 'human' | 'ai' | 'tool' =>
+        typeof value === 'string' && revisionSourceKinds.has(value) ? (value as 'human' | 'ai' | 'tool') : 'human';
+      const revisionIdMap = new Map<number, number>();
+      // Two passes so restoredFromRevisionId can point at a sibling imported later.
+      for (const rev of revisionRows) {
+        const srcId = intOrNull(rev.id);
+        const entityType = str(rev.entityType);
+        const sourceEntityId = intOrNull(rev.entityId);
+        const entityId = sourceEntityId != null ? revisionEntityMaps[entityType]?.get(sourceEntityId) : undefined;
+        if (entityId == null) continue;
+        const snapshot =
+          rev.snapshot && typeof rev.snapshot === 'object' && !Array.isArray(rev.snapshot)
+            ? (rev.snapshot as Record<string, unknown>)
+            : {};
+        const snapshotText: Record<string, string> = {};
+        for (const [key, value] of Object.entries(snapshot)) {
+          if (typeof value === 'string') snapshotText[key] = value;
+        }
+        const [row] = tx
+          .insert(entityRevisions)
+          .values({
+            campaignId: cid,
+            entityType,
+            entityId,
+            snapshot: JSON.stringify(snapshotText),
+            authorUserId: str(rev.authorUserId).slice(0, 120),
+            authorName: str(rev.authorName).slice(0, 120),
+            authorSource: revisionSource(rev.authorSource),
+            authorSourceDetail: str(rev.authorSourceDetail).slice(0, 200),
+            createdAt: typeof rev.createdAt === 'string' ? rev.createdAt : '',
+            replacedByUserId: str(rev.replacedByUserId).slice(0, 120),
+            replacedByName: str(rev.replacedByName).slice(0, 120),
+            replacedBySource: revisionSource(rev.replacedBySource),
+            replacedBySourceDetail: str(rev.replacedBySourceDetail).slice(0, 200),
+            replacedAt: typeof rev.replacedAt === 'string' ? rev.replacedAt : null,
+            restoredFromRevisionId: null, // remapped in the second pass
+            authorshipKnown: rev.authorshipKnown !== false && rev.authorshipKnown !== 0,
+          })
+          .returning()
+          .all();
+        if (srcId != null) revisionIdMap.set(srcId, row.id);
+      }
+      for (const rev of revisionRows) {
+        const srcId = intOrNull(rev.id);
+        const newId = srcId != null ? revisionIdMap.get(srcId) : undefined;
+        if (newId == null) continue;
+        const sourceRestoredFrom = intOrNull(rev.restoredFromRevisionId);
+        if (sourceRestoredFrom == null) continue;
+        const remapped = revisionIdMap.get(sourceRestoredFrom);
+        if (remapped == null) continue;
+        tx.update(entityRevisions).set({ restoredFromRevisionId: remapped }).where(eq(entityRevisions.id, newId)).run();
       }
 
       // Storylines (issue #27/#266): the arc→beat→branch graph. Arcs first (arcMap),
@@ -1400,7 +1957,8 @@ export class CampaignsService {
             era: str(ev.era),
             sortIndex: intOr(ev.sortIndex, 0),
             dmSecret: str(ev.dmSecret),
-            hidden: boolOf(ev.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(ev.hidden),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -1456,6 +2014,33 @@ export class CampaignsService {
         if (mapAttachmentId != null) {
           tx.update(campaigns).set({ mapAttachmentId }).where(eq(campaigns.id, cid)).run();
         }
+      }
+
+      // AI seat + scribe config (issue #1078): restore from export with counters zeroed.
+      if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cid,
+          mode: str(aiSeatSrc.mode, 'off'),
+          enabled: boolOf(aiSeatSrc.enabled),
+          model: str(aiSeatSrc.model),
+          instructions: str(aiSeatSrc.instructions),
+          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigSrc && Object.keys(aiScribeConfigSrc).length > 0) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cid,
+          postSession: boolOf(aiScribeConfigSrc.postSession),
+          cron: boolOf(aiScribeConfigSrc.cron),
+          budgetPerRun: Math.max(0, intOr(aiScribeConfigSrc.budgetPerRun, 2000)),
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
       }
 
       // Issue #725: fold the importer's dm membership AND the import audit row
@@ -1564,7 +2149,6 @@ export class CampaignsService {
       // files were renamed away (consumed); on failure the tx rolled back and
       // the staged files are orphans. Either way nothing should remain here.
       cleanupStagingDir(stagingDir);
-      stagingDir = null;
     }
   }
 
@@ -1652,7 +2236,7 @@ export class CampaignsService {
       attachmentFiles.push({
         srcId,
         kind: str(a.kind, 'image'),
-        filename: str(a.filename, `attachment-${srcId}`).slice(0, 255),
+        filename: sanitizeAttachmentFilename(str(a.filename, `attachment-${srcId}`)),
         mime,
         bytes,
       });
@@ -1674,9 +2258,71 @@ export class CampaignsService {
    * second step purge() runs the real cascade + fs.rm. A no-op if already trashed
    * (getOrThrow without includeDeleted 404s a trashed campaign).
    */
-  async remove(id: number, user: RequestUser): Promise<void> {
+  async remove(id: number, user: RequestUser, opts?: { revokeInvites?: boolean }): Promise<void> {
     await this.getOrThrow(id);
-    await this.db.update(campaigns).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(campaigns.id, id));
+    const ts = nowIso();
+
+    // Atomic trash+revoke: suspension, trash stamp, and invite-row deletion
+    // commit together so a failed trash never leaves invites permanently gone
+    // while the campaign stays live (#857 Bugbot).
+    if (opts?.revokeInvites) {
+      const { revoked, wasEnabled } = this.db.transaction((tx) => {
+        const before = tx
+          .select({ publicInvitesEnabled: campaigns.publicInvitesEnabled })
+          .from(campaigns)
+          .where(eq(campaigns.id, id))
+          .limit(1)
+          .get();
+        tx.update(campaigns)
+          .set({ publicInvitesEnabled: false, deletedAt: ts, updatedAt: ts })
+          .where(eq(campaigns.id, id))
+          .run();
+        const deleted = tx
+          .delete(campaignInvites)
+          .where(eq(campaignInvites.campaignId, id))
+          .returning({ id: campaignInvites.id })
+          .all();
+        return {
+          revoked: deleted.length,
+          wasEnabled: Boolean(before?.publicInvitesEnabled),
+        };
+      });
+      if (wasEnabled) {
+        await this.audit.log({
+          actor: auditActor(user),
+          actorRole: 'dm',
+          action: 'invite.suspend',
+          entityType: 'campaign',
+          entityId: id,
+          campaignId: id,
+          detail: JSON.stringify({ reason: 'trash' }),
+        });
+      }
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'invite.revoke_all',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: JSON.stringify({ revoked }),
+      });
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: 'dm',
+        action: 'campaign.delete',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: id,
+        detail: 'soft-delete (trashed)',
+      });
+      return;
+    }
+
+    // Suspend invites before stamping deletedAt so a concurrent preview/accept
+    // that races the trash stamp still fails the publicInvitesEnabled gate (#857).
+    await this.invites.suspendForCampaign(id, user, 'trash');
+    await this.db.update(campaigns).set({ deletedAt: ts, updatedAt: ts }).where(eq(campaigns.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -1686,21 +2332,26 @@ export class CampaignsService {
       campaignId: id,
       detail: 'soft-delete (trashed)',
     });
+    // Issue #867: tear down open SSE / AI narration streams so a stale tab cannot
+    // keep receiving ticks for a frozen campaign. Control signal only.
+    this.events.emit({ type: 'campaign.trashed', campaignId: id });
   }
 
   /**
    * Restore a trashed campaign (issue #116) — clears `deleted_at` so it returns to
    * normal listings with every child row + upload intact. 404 if the campaign
    * doesn't exist or isn't actually trashed (restoring a live campaign is a no-op error).
+   *
+   * Issue #867: the UPDATE is predicated on `deleted_at IS NOT NULL` so a concurrent
+   * purge that commits first leaves restore as 404 (never resurrects a wiped row).
    */
   async restore(id: number, user: RequestUser): Promise<Campaign> {
-    const existing = await this.getOrThrow(id, { includeDeleted: true });
-    if (existing.deletedAt == null) throw new NotFoundException(`Campaign ${id} is not in the trash`);
     const [row] = await this.db
       .update(campaigns)
       .set({ deletedAt: null, updatedAt: nowIso() })
-      .where(eq(campaigns.id, id))
+      .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
       .returning();
+    if (!row) throw new NotFoundException(`Campaign ${id} is not in the trash`);
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',
@@ -1713,27 +2364,55 @@ export class CampaignsService {
   }
 
   /**
-   * Permanently purge a campaign (issue #116) — the deliberate, irreversible second
-   * step that the old one-click DELETE used to be. Full cascade delete across EVERY
-   * campaign-scoped table (issue #235): a pre-#69 DB carries no FK constraints (SQLite
-   * can't ALTER-ADD one) so this hand cascade is its ONLY teardown, and it previously
-   * covered only ~12 of the ~30 child tables — leaving story_arcs/beats/branches,
-   * timeline_events/calendars, session_zero, factions, session_shares/attendees,
-   * scheduled_sessions/rsvps, comments, entity_revisions, campaign_invites, dice_rolls,
-   * notifications, inventory_items, party_treasury, ai_dm_seats and encounter_events
-   * orphaned. The list is now complete (see the in-body comment + the db-cascades test).
-   * All DB rows are removed in one db.transaction() (better-sqlite3 synchronous transaction
-   * API — same pattern as QuestsService.remove()/RulesService.uninstall()), with the
-   * campaigns row cleared last so a mid-transaction failure never leaves an
-   * orphaned-but-still-"deleted"-looking campaign.
-   * The on-disk upload directory is removed after the transaction commits (best-effort,
-   * mirroring AttachmentsService.remove()'s fs.rm — the DB is the source of truth for what
-   * exists; a stray directory is harmless, but we still try synchronously here since this is
-   * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
-   * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
+   * Permanently purge a trashed campaign (issue #116 / #867) — the deliberate,
+   * irreversible second step. Refused unless `deletedAt IS NOT NULL` and the caller
+   * supplied `{ confirm: "PURGE" }`. Full cascade delete across EVERY campaign-scoped
+   * table (issue #235). A concurrent restore that clears deletedAt first makes the
+   * in-transaction gate fail closed (404). Retains a sanitized server-level tombstone
+   * plus a campaignId-null admin audit row so purge evidence survives membership loss.
    */
-  async purge(id: number, user: RequestUser): Promise<void> {
-    await this.getOrThrow(id, { includeDeleted: true });
+  async purge(id: number, user: RequestUser, body: CampaignPurge): Promise<FsDeletionOutcome> {
+    if (body.confirm !== CAMPAIGN_PURGE_CONFIRM_TOKEN) {
+      throw new BadRequestException(
+        `Purge is destructive — resend with the confirmation token "${CAMPAIGN_PURGE_CONFIRM_TOKEN}" in the "confirm" field`,
+      );
+    }
+
+    const existing = await this.getOrThrow(id, { includeDeleted: true });
+    if (existing.deletedAt == null) {
+      throw new NotFoundException(`Campaign ${id} is not in the trash`);
+    }
+
+    const actor = auditActor(user);
+    const requestedAt = nowIso();
+    const campaignNameHash = crypto.createHash('sha256').update(existing.name).digest('hex');
+    const [tombstone] = await this.db
+      .insert(campaignPurgeTombstones)
+      .values({
+        campaignId: id,
+        campaignNameHash,
+        actor,
+        status: 'requested',
+        detail: '',
+        requestedAt,
+        completedAt: null,
+      })
+      .returning();
+
+    const auditCtx = {
+      scope: 'campaign_purge' as const,
+      auditPrefix: 'campaign.purge',
+      actor,
+      actorRole: 'dm' as const,
+      campaignId: id,
+      entityType: 'campaign',
+      entityId: id,
+    };
+    await this.fsDeletion.auditRequested(auditCtx);
+
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    const plannedFsCleanup = await this.fsDeletion.reserveUploadPaths([campaignUploadsDir], auditCtx);
+
 
     // This hand-rolled cascade is the ONLY teardown mechanism on databases created
     // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
@@ -1746,6 +2425,7 @@ export class CampaignsService {
     // campaign-scoped table, add it here too, and extend the db-cascades orphan test.
     //
     // audit_log is deliberately excluded (it must outlive the campaign — see bootstrap.sql).
+    // campaign_purge_tombstones is also excluded (server-level evidence, issue #867).
     // The user/auth/oauth/rule-pack graphs are not campaign-scoped and are left untouched.
 
     // Two-hop children keyed off a parent id, not campaign_id — collect the parent ids
@@ -1758,82 +2438,163 @@ export class CampaignsService {
     ).map((r) => r.id);
     const storyBeatIds = (await this.db.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.campaignId, id))).map((r) => r.id);
 
-    this.db.transaction((tx) => {
-      // ---- two-hop children first (keyed off a parent id, no campaign_id of their own).
-      // Guard the empty case: `inArray(col, [])` is a degenerate/invalid IN clause and
-      // there is nothing to delete anyway.
-      if (questIds.length > 0) {
-        tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
-      }
-      if (encounterIds.length > 0) {
-        tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
-        tx.delete(encounterEvents).where(inArray(encounterEvents.encounterId, encounterIds)).run();
-      }
-      if (sessionIds.length > 0) {
-        tx.delete(sessionAttendees).where(inArray(sessionAttendees.sessionId, sessionIds)).run();
-      }
-      if (scheduledSessionIds.length > 0) {
-        tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
-      }
-      if (storyBeatIds.length > 0) {
-        tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
-      }
+    try {
+      this.db.transaction((tx) => {
+        // Atomic trash gate (issue #867): refuse if a concurrent restore cleared
+        // deletedAt (or the row is already gone). Checked inside the same transaction
+        // that destroys children so restore-vs-purge cannot interleave mid-cascade.
+        const stillTrashed = tx
+          .select({ id: campaigns.id })
+          .from(campaigns)
+          .where(and(eq(campaigns.id, id), isNotNull(campaigns.deletedAt)))
+          .limit(1)
+          .all();
+        if (stillTrashed.length === 0) {
+          throw new NotFoundException(`Campaign ${id} is not in the trash`);
+        }
 
-      // ---- everything keyed directly off campaign_id.
-      tx.delete(quests).where(eq(quests.campaignId, id)).run();
-      tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
-      tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
-      tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
-      tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
-      tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
-      tx.delete(participantSupportPreferences).where(eq(participantSupportPreferences.campaignId, id)).run();
-      tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
-      tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
-      tx.delete(factions).where(eq(factions.campaignId, id)).run();
-      tx.delete(locations).where(eq(locations.campaignId, id)).run();
-      tx.delete(characters).where(eq(characters.campaignId, id)).run();
-      tx.delete(notes).where(eq(notes.campaignId, id)).run();
-      tx.delete(comments).where(eq(comments.campaignId, id)).run();
-      tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
-      tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
-      tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
-      tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
-      tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
-      tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
-      tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
-      tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
-      tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
-      tx.delete(diceRolls).where(eq(diceRolls.campaignId, id)).run();
-      tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
-      tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
-      tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
-      tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
+        // ---- two-hop children first (keyed off a parent id, no campaign_id of their own).
+        // Guard the empty case: `inArray(col, [])` is a degenerate/invalid IN clause and
+        // there is nothing to delete anyway.
+        if (questIds.length > 0) {
+          tx.delete(questObjectives).where(inArray(questObjectives.questId, questIds)).run();
+        }
+        if (encounterIds.length > 0) {
+          tx.delete(combatants).where(inArray(combatants.encounterId, encounterIds)).run();
+          tx.delete(encounterEvents).where(inArray(encounterEvents.encounterId, encounterIds)).run();
+        }
+        if (sessionIds.length > 0) {
+          tx.delete(sessionAttendees).where(inArray(sessionAttendees.sessionId, sessionIds)).run();
+        }
+        if (scheduledSessionIds.length > 0) {
+          tx.delete(sessionRsvps).where(inArray(sessionRsvps.scheduledSessionId, scheduledSessionIds)).run();
+        }
+        if (storyBeatIds.length > 0) {
+          tx.delete(storyBranches).where(inArray(storyBranches.beatId, storyBeatIds)).run();
+        }
 
-      tx.delete(campaigns).where(eq(campaigns.id, id)).run();
-    });
+        // ---- everything keyed directly off campaign_id.
+        tx.delete(quests).where(eq(quests.campaignId, id)).run();
+        tx.delete(storyBeats).where(eq(storyBeats.campaignId, id)).run();
+        tx.delete(storyArcs).where(eq(storyArcs.campaignId, id)).run();
+        tx.delete(timelineEvents).where(eq(timelineEvents.campaignId, id)).run();
+        tx.delete(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).run();
+        tx.delete(sessionZero).where(eq(sessionZero.campaignId, id)).run();
+        tx.delete(participantSupportPreferences).where(eq(participantSupportPreferences.campaignId, id)).run();
+        tx.delete(encounters).where(eq(encounters.campaignId, id)).run();
+        tx.delete(npcs).where(eq(npcs.campaignId, id)).run();
+        tx.delete(factions).where(eq(factions.campaignId, id)).run();
+        tx.delete(locations).where(eq(locations.campaignId, id)).run();
+        tx.delete(characters).where(eq(characters.campaignId, id)).run();
+        tx.delete(notes).where(eq(notes.campaignId, id)).run();
+        tx.delete(comments).where(eq(comments.campaignId, id)).run();
+        tx.delete(entityRevisions).where(eq(entityRevisions.campaignId, id)).run();
+        tx.delete(sessionShares).where(eq(sessionShares.campaignId, id)).run();
+        tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
+        tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
+        tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
+        tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
+        tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
+        tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();
+        tx.delete(attachments).where(eq(attachments.campaignId, id)).run();
+        tx.delete(diceRolls).where(eq(diceRolls.campaignId, id)).run();
+        tx.delete(notifications).where(eq(notifications.campaignId, id)).run();
+        tx.delete(inventoryItems).where(eq(inventoryItems.campaignId, id)).run();
+        tx.delete(partyTreasury).where(eq(partyTreasury.campaignId, id)).run();
+        tx.delete(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).run();
 
-    // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
-    // are already gone (source of truth), so a failure here just leaves an orphaned
-    // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
-    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    fs.rm(campaignUploadsDir, { recursive: true, force: true }, () => {
-      /* best-effort — DB rows are already gone; a stray directory is harmless */
-    });
+        tx.delete(campaigns).where(eq(campaigns.id, id)).run();
+      });
+    } catch (err) {
+      const completedAt = nowIso();
+      const detail = err instanceof Error ? err.message : String(err);
+      await this.db
+        .update(campaignPurgeTombstones)
+        .set({ status: 'failed', detail: detail.slice(0, 500), completedAt })
+        .where(eq(campaignPurgeTombstones.id, tombstone.id));
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'campaign.purge',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: null,
+        detail: JSON.stringify({
+          tombstoneId: tombstone.id,
+          campaignId: id,
+          campaignNameHash,
+          status: 'failed',
+          requestedAt,
+          completedAt,
+        }),
+      });
+      throw err;
+    }
 
+    await this.fsDeletion.auditMetadataComplete(auditCtx);
+
+    let outcome;
+    let fsDetail = '';
+    try {
+      outcome = await this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
+    } catch (err) {
+      fsDetail = err instanceof Error ? err.message : String(err);
+      const completedAt = nowIso();
+      await this.audit.log({
+        actor,
+        actorRole: 'dm',
+        action: 'campaign.purge',
+        entityType: 'campaign',
+        entityId: id,
+        campaignId: null,
+        detail: JSON.stringify({
+          tombstoneId: tombstone.id,
+          campaignId: id,
+          campaignNameHash,
+          status: 'failed',
+          requestedAt,
+          completedAt,
+          fsError: fsDetail.slice(0, 500),
+        }),
+      });
+      await this.db
+        .update(campaignPurgeTombstones)
+        .set({ status: 'failed', detail: fsDetail.slice(0, 500), completedAt })
+        .where(eq(campaignPurgeTombstones.id, tombstone.id));
+      throw err;
+    }
+
+    const completedAt = nowIso();
+    // Server-level audit (campaignId null) so the purge remains discoverable after
+    // memberships — and therefore GET /campaigns/:id/audit — are gone (issue #867).
     await this.audit.log({
-      actor: auditActor(user),
+      actor,
       actorRole: 'dm',
       action: 'campaign.purge',
       entityType: 'campaign',
       entityId: id,
-      campaignId: id,
+      campaignId: null,
+      detail: JSON.stringify({
+        tombstoneId: tombstone.id,
+        campaignId: id,
+        campaignNameHash,
+        status: 'completed',
+        requestedAt,
+        completedAt,
+      }),
     });
+    await this.db
+      .update(campaignPurgeTombstones)
+      .set({ status: 'completed', completedAt })
+      .where(eq(campaignPurgeTombstones.id, tombstone.id));
+
+    return outcome;
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {
     const campaign = await this.getOrThrow(id);
 
-    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryList, commentList, nextSession] =
+    const [questList, npcList, locationList, characterList, sessionList, encounterDigest, timelineList, treasury, inventoryList, commentList, scheduleNow] =
       await Promise.all([
         this.quests.listForCampaignWithObjectives(id, role),
         this.npcs.listForCampaign(id, role),
@@ -1847,7 +2608,8 @@ export class CampaignsService {
         this.inventory.getTreasury(id),
         this.inventory.listForCampaign(id),
         this.comments.listForCampaign(id, role),
-        this.scheduling.nextForCampaign(id),
+        // Issue #818: keep the in-progress game night separate from the later upcoming one.
+        this.scheduling.currentAndNextForCampaign(id),
       ]);
 
     const currentLocation = campaign.currentLocationId
@@ -1874,7 +2636,8 @@ export class CampaignsService {
       treasury: { cp: treasury.cp, sp: treasury.sp, ep: treasury.ep, gp: treasury.gp, pp: treasury.pp },
       inventoryCount: inventoryList.length,
       commentCount: commentList.length,
-      nextSession,
+      inProgressSession: scheduleNow.inProgressSession,
+      nextSession: scheduleNow.nextSession,
       openInboxCount,
     };
   }

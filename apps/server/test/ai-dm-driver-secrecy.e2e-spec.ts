@@ -130,7 +130,7 @@ describe('ai-dm driver — #557 secret-bearing read tools cannot feed public nar
     const quest = await request(h.server)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'The Heir Apparent', dmSecret: 'THE_INNKEEPER_IS_THE_HEIR' });
+      .send({ title: 'The Heir Apparent', dmSecret: 'THE_INNKEEPER_IS_THE_HEIR', hidden: false });
     expect(quest.status).toBe(201);
     const questId = quest.body.id as number;
 

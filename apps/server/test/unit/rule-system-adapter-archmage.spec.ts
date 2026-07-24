@@ -130,7 +130,10 @@ describe('Archmage13aAdapter — statblock mapping', () => {
     expect(mapped.challengeRating).toBe(4); // 13th Age level occupies the CR slot
     expect(mapped.armorClass).toBe(19);
     expect(mapped.hitPoints).toBe(130);
-    expect(mapped.creatureType).toBe('Beast');
+    // The creatureType slot is labeled "Role" for 13th Age (see ARCHMAGE_STATBLOCK_PRESENTATION),
+    // so mapStatblock prefers the native `role` over `type`/`creatureType` to keep the rendered
+    // value in lockstep with its label (issue #763). Here that means "Troop", not "Beast".
+    expect(mapped.creatureType).toBe('Troop');
     expect(mapped.actions).toBe('Bite +8 vs. AC');
   });
 

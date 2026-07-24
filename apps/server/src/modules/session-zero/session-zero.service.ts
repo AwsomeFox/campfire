@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionZeroUpdate } from '@campfire/schema';
 import type { SessionZero, Role } from '@campfire/schema';
@@ -10,6 +10,8 @@ import { fromJsonText, toJsonText } from '../../common/json';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { MISSING_REVISION, nextUpdatedAt, staleWrite } from '../../common/stale-write';
+import { RevisionsService } from '../revisions/revisions.service';
 
 type UpdateInput = z.infer<typeof SessionZeroUpdate>;
 
@@ -41,12 +43,12 @@ export class SessionZeroService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   async get(campaignId: number): Promise<SessionZero> {
     const [row] = await this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, campaignId)).limit(1);
     if (!row) {
-      const ts = nowIso();
       return {
         campaignId,
         lines: [],
@@ -54,15 +56,20 @@ export class SessionZeroService {
         safetyTools: [],
         houseRules: '',
         toneAndExpectations: '',
-        createdAt: ts,
-        updatedAt: ts,
+        createdAt: MISSING_REVISION,
+        updatedAt: MISSING_REVISION,
       };
     }
     return toDomain(row);
   }
 
-  async update(campaignId: number, input: UpdateInput, user: RequestUser, role: Role): Promise<SessionZero> {
-    const ts = nowIso();
+  async update(
+    campaignId: number,
+    input: UpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<SessionZero> {
     const [existing] = await this.db
       .select()
       .from(sessionZero)
@@ -71,7 +78,11 @@ export class SessionZeroService {
 
     let row: typeof sessionZero.$inferSelect;
     if (!existing) {
-      [row] = await this.db
+      if (opts?.expectedUpdatedAt && opts.expectedUpdatedAt !== MISSING_REVISION) {
+        throw staleWrite(opts.expectedUpdatedAt, MISSING_REVISION);
+      }
+      const ts = nowIso();
+      const inserted = await this.db
         .insert(sessionZero)
         .values({
           campaignId,
@@ -83,19 +94,57 @@ export class SessionZeroService {
           createdAt: ts,
           updatedAt: ts,
         })
+        .onConflictDoNothing()
         .returning();
+      if (!inserted[0]) {
+        const current = await this.get(campaignId);
+        throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+      }
+      row = inserted[0];
     } else {
-      const patch: Partial<typeof sessionZero.$inferInsert> = { updatedAt: ts };
+      const patch: Partial<typeof sessionZero.$inferInsert> = { updatedAt: nextUpdatedAt(existing.updatedAt) };
       if (input.lines !== undefined) patch.lines = toJsonText(input.lines);
       if (input.veils !== undefined) patch.veils = toJsonText(input.veils);
       if (input.safetyTools !== undefined) patch.safetyTools = toJsonText(input.safetyTools);
       if (input.houseRules !== undefined) patch.houseRules = input.houseRules;
       if (input.toneAndExpectations !== undefined) patch.toneAndExpectations = input.toneAndExpectations;
-      [row] = await this.db
+      const updated = await this.db
         .update(sessionZero)
         .set(patch)
-        .where(eq(sessionZero.campaignId, campaignId))
+        .where(
+          opts?.expectedUpdatedAt
+            ? and(eq(sessionZero.campaignId, campaignId), eq(sessionZero.updatedAt, opts.expectedUpdatedAt))
+            : eq(sessionZero.campaignId, campaignId),
+        )
         .returning();
+      if (!updated[0]) {
+        const current = await this.get(campaignId);
+        throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+      }
+      row = updated[0];
+      const before = toDomain(existing);
+      const after = toDomain(row);
+      if (
+        JSON.stringify(before.lines) !== JSON.stringify(after.lines) ||
+        JSON.stringify(before.veils) !== JSON.stringify(after.veils) ||
+        JSON.stringify(before.safetyTools) !== JSON.stringify(after.safetyTools) ||
+        before.houseRules !== after.houseRules ||
+        before.toneAndExpectations !== after.toneAndExpectations
+      ) {
+        await this.revisions.recordSnapshot({
+          entityType: 'session_zero',
+          entityId: campaignId,
+          campaignId,
+          snapshot: {
+            lines: before.lines,
+            veils: before.veils,
+            safetyTools: before.safetyTools,
+            houseRules: before.houseRules,
+            toneAndExpectations: before.toneAndExpectations,
+          },
+          user,
+        });
+      }
     }
 
     await this.audit.log({

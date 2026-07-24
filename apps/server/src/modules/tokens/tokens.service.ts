@@ -9,6 +9,7 @@ import { nowIso } from '../../common/time';
 import { generateApiToken, hashApiToken, apiTokenPrefix } from '../../common/crypto';
 import { hasServerAdminPower, minRole, minWriteScope, type RequestUser, type TokenContext } from '../../common/user.types';
 import { RoleResolver } from '../membership/role-resolver.service';
+import { CampaignAccessService } from '../membership/campaign-access.service';
 
 type ApiTokenCreateInput = z.infer<typeof ApiTokenCreate>;
 
@@ -72,6 +73,7 @@ export class TokensService {
   constructor(
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly roleResolver: RoleResolver,
+    private readonly campaignAccess: CampaignAccessService,
   ) {}
 
   async listOwn(userId: number): Promise<ApiToken[]> {
@@ -151,6 +153,10 @@ export class TokensService {
       const base = await this.roleResolver.baseEffectiveRole(caller, campaignId);
       if (!base) {
         throw new ForbiddenException('You do not have access to this campaign');
+      }
+      const lifecycle = await this.campaignAccess.getLifecycle(campaignId);
+      if (!lifecycle || lifecycle.deletedAt != null) {
+        throw new NotFoundException(`Campaign ${campaignId} not found`);
       }
     }
 

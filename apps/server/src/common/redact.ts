@@ -24,3 +24,12 @@ export function isVisibleTo<T extends { hidden?: boolean }>(entity: T, role: Rol
 export function filterHidden<T extends { hidden?: boolean }>(entities: T[], role: Role): T[] {
   return entities.filter((e) => isVisibleTo(e, role));
 }
+
+/**
+ * Create-time secrecy for prep entities (issue #754).
+ * Omitted / undefined → DM-only (`true`). Pass `false` only for an intentional public create.
+ * Mirrors attachment map/image uploads and generated-encounter commit defaults.
+ */
+export function resolveCreateHidden(hidden: boolean | undefined): boolean {
+  return hidden ?? true;
+}

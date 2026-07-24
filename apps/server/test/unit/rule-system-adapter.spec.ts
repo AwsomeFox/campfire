@@ -3,6 +3,7 @@ import {
   DND5E_ADAPTER_ID,
   ruleSystemAdapter,
   CONDITIONS,
+  isKnownCondition,
   Pf2eAdapter,
   OpenLegendAdapter,
   OPEN_LEGEND_ADAPTER_ID,
@@ -61,9 +62,60 @@ describe('RuleSystemAdapter — 5e initiative derivation', () => {
   });
 });
 
+describe('RuleSystemAdapter — 5e initiativeTiebreak (issue #611)', () => {
+  it('orders higher initMod (DEX) before lower on a tie', () => {
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 1, sortOrder: 0 },
+        { initMod: 3, sortOrder: 1 },
+      ),
+    ).toBeGreaterThan(0);
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 4, sortOrder: 5 },
+        { initMod: 2, sortOrder: 0 },
+      ),
+    ).toBeLessThan(0);
+  });
+
+  it('falls back to sortOrder ascending when initMod is equal (stable / no roll-off UI)', () => {
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 2, sortOrder: 0 },
+        { initMod: 2, sortOrder: 3 },
+      ),
+    ).toBeLessThan(0);
+    expect(
+      Dnd5eAdapter.initiativeTiebreak(
+        { initMod: 2, sortOrder: 3 },
+        { initMod: 2, sortOrder: 0 },
+      ),
+    ).toBeGreaterThan(0);
+  });
+});
+
 describe('RuleSystemAdapter — 5e condition vocabulary', () => {
   it('is the canonical schema CONDITIONS list (single source of truth, issue #234)', () => {
     expect(Dnd5eAdapter.conditions).toEqual(CONDITIONS);
+  });
+});
+
+describe('isKnownCondition (issue #495)', () => {
+  it('matches adapter vocabulary case-insensitively and rejects arbitrary labels', () => {
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'Prone')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'prone')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '  POISONED  ')).toBe(true);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'god_mode')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'invulnerable')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, '   ')).toBe(false);
+  });
+
+  it('uses the active system vocabulary (PF2e Off-Guard is known; 5e Charmed is not)', () => {
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'Off-Guard')).toBe(true);
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'off-guard')).toBe(true);
+    expect(isKnownCondition(Pf2eAdapter.conditions, 'Charmed')).toBe(false);
+    expect(isKnownCondition(Dnd5eAdapter.conditions, 'Off-Guard')).toBe(false);
   });
 });
 
@@ -85,6 +137,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(17);
     expect(mapped.hitPoints).toBe(84);
     expect(mapped.abilityScores).toEqual({ dexterity: 14 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('falls back to snake_case / short raw-Open5e keys', () => {
@@ -101,6 +154,7 @@ describe('RuleSystemAdapter — 5e statblock mapping', () => {
     expect(mapped.armorClass).toBe(13);
     expect(mapped.hitPoints).toBe(22);
     expect(mapped.abilityScores).toEqual({ dexterity: 12 });
+    expect(mapped.abilityRepresentation).toBe('score');
   });
 
   it('resolves a monster max HP (rounded), or null when unavailable/non-positive', () => {

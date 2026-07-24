@@ -11,6 +11,47 @@
  *  - Create/Update input schemas are derived from the entity schema
  */
 import { z } from 'zod';
+import {
+  DifficultyBand,
+  EncounterDifficulty,
+  EncounterDifficultyStatus,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
+  type EncounterDifficultyInput,
+} from './encounter-difficulty';
+import {
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
+  type InitiativeTiebreakCombatant,
+} from './initiative-tiebreak';
+
+export {
+  DifficultyBand,
+  EncounterDifficultyStatus,
+  EncounterDifficulty,
+  DIFFICULTY_BAND_LABELS,
+  UNKNOWN_DIFFICULTY_LABEL,
+  parseCr,
+  crToXp,
+  xpThresholdsForLevel,
+  encounterMultiplier,
+  computeDnd5eEncounterDifficulty,
+  unsupportedEncounterDifficulty,
+  EncounterDifficultyExplanation,
+  buildDifficultyExplanation,
+  initModDescThenSortOrderAsc,
+  sortOrderAscTiebreak,
+};
+export type { EncounterDifficultyInput };
+export type { InitiativeTiebreakCombatant };
 
 // ---------- shared ----------
 export const Role = z.enum(['dm', 'player', 'viewer']);
@@ -68,11 +109,27 @@ export const Campaign = z.object({
   // When true, only the DM may award XP / level up characters (issue #270); when false
   // (default) any character owner may self-progress, preserving the original behavior.
   dmControlsProgression: z.boolean().default(false),
+  // When true, only the DM may advance combat turns (issue #413) — a player's "End turn"
+  // on their own active combatant is rejected, preserving the classic DM-only "Next turn"
+  // control. When false (default) a player may end their OWN combatant's turn (server still
+  // validates ownership + that it is that combatant's turn, and advancement is serialized).
+  dmControlsTurns: z.boolean().default(false),
+  // When true, a player's "End turn" is staged as a request the DM confirms rather than
+  // advancing immediately (issue #413). When false (default) an authorized player end-turn
+  // advances directly. Independent of dmControlsTurns (which forbids player end-turn entirely).
+  requireDmTurnConfirmation: z.boolean().default(false),
   // Campaign-level privacy kill switch for unauthenticated recap links. This is
   // mutated through the dedicated session-share policy endpoint so disabling it
   // can atomically revoke every active capability rather than leaving old URLs
   // ready to spring back to life when the setting is re-enabled.
   publicRecapSharingEnabled: z.boolean().default(true),
+  // Campaign-level join-link kill switch (issue #857). Archive/trash auto-clears
+  // this so paused/completed/trashed campaigns stop disclosing via bearer invite
+  // links; restoring the campaign does NOT flip it back — the DM must deliberately
+  // re-enable via PUT /campaigns/:id/invites/policy. Distinct from revoke-all
+  // (row delete): suspension keeps invite rows so a deliberate reactivation can
+  // restore the same codes.
+  publicInvitesEnabled: z.boolean().default(true),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -84,12 +141,26 @@ export const Campaign = z.object({
   // trash: excluded from normal listings but its rows + on-disk uploads survive for a
   // grace period, restorable via POST /campaigns/:id/restore. A deliberate second
   // step (DELETE /campaigns/:id/purge) is what finally hard-cascades + wipes the disk.
+  // Issue #867: trash freezes EVERY child API (REST/MCP/AI/streams/jobs); only Trash
+  // list + restore + purge (with confirm) are exempt. Live purge is refused.
   deletedAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
+
+/**
+ * DELETE /campaigns/:id/purge body (issue #867). Purge is irreversible and refused
+ * unless the campaign is already trashed (`deletedAt IS NOT NULL`). Callers must
+ * echo the exact confirmation token so a stray DELETE (replay, stale tab, MCP)
+ * cannot destroy a campaign without an explicit destructive acknowledgement.
+ */
+export const CAMPAIGN_PURGE_CONFIRM_TOKEN = 'PURGE' as const;
+export const CampaignPurge = z.object({
+  confirm: z.literal(CAMPAIGN_PURGE_CONFIRM_TOKEN),
+});
+export type CampaignPurge = z.infer<typeof CampaignPurge>;
 
 // Clone/template input — POST /campaigns/:id/clone.
 //  - 'full': faithful duplicate (everything except members, attachments and audit/proposals/tokens)
@@ -122,6 +193,7 @@ export const CampaignImport = z
     characters: z.array(ImportedEntity).optional(),
     sessions: z.array(ImportedEntity).optional(),
     notes: z.array(ImportedEntity).optional(),
+    comments: z.array(ImportedEntity).optional(),
     encounters: z.array(ImportedEntity).optional(),
     // Issue #266: entity types the export previously dropped and now round-trips.
     // Arrays are loose objects (remapped defensively in the service); the two
@@ -133,6 +205,9 @@ export const CampaignImport = z
     sessionZero: ImportedEntity.optional(),
     inventory: z.array(ImportedEntity).optional(),
     treasury: ImportedEntity.optional(),
+    // Issue #813: immutable prose versions (author + replacer provenance) round-trip
+    // with remapped entity / restoredFrom ids. Loose objects — the importer is defensive.
+    revisions: z.array(ImportedEntity).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -319,9 +394,10 @@ export const ConditionsPatch = z.object({
 /**
  * Canonical 5e condition vocabulary — the single source of truth shared across
  * the character sheet, the encounter tracker, and the compendium (issue #111).
- * Conditions stay free-text on the wire (homebrew is allowed), but these are the
- * standard names surfaced as suggestions so the three surfaces speak the same
- * vocabulary instead of each hardcoding its own list.
+ * The wire schema stays `string` (DM homebrew is allowed), but non-DM combatant
+ * adds are validated against the active adapter's list (issue #495). These are
+ * also the standard names surfaced as suggestions so the three surfaces speak
+ * the same vocabulary instead of each hardcoding its own list.
  */
 export const CONDITIONS = [
   'Blinded',
@@ -341,6 +417,16 @@ export const CONDITIONS = [
   'Unconscious',
 ] as const;
 export type ConditionName = (typeof CONDITIONS)[number];
+
+/**
+ * Case-insensitive membership check against a rule-system condition vocabulary
+ * (issue #495). Trims the candidate; empty strings never match.
+ */
+export function isKnownCondition(vocab: readonly string[], name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  return vocab.some((c) => c.toLowerCase() === needle);
+}
 /** Spend (+delta) or restore (-delta) slots at one level; `used` is clamped to [0, max]. Slot maxima are edited via PATCH `spellSlots`. */
 export const SpellSlotPatch = z.object({
   level: z.number().int().min(1).max(9),
@@ -425,14 +511,21 @@ export const Quest = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
   // every non-DM read (list/get/summary/export) — not merely dmSecret-redacted.
-  // Default false = visible; the DM sets it true to prep future content, then
-  // "reveals" by patching it back to false.
+  // Stored default false = visible when present; CREATE paths default omitted
+  // `hidden` to DM-only (issue #754) — pass false only for an intentional public create.
   hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
   ...timestamps,
 });
 export type Quest = z.infer<typeof Quest>;
-export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+// Create: `hidden` stays optional with NO Zod default so omit≠false. Service
+// `resolveCreateHidden` then applies issue #754 (omit → DM-only). A `.default(false)`
+// here would materialize false before the service and bypass private-by-default
+// on MCP/proposal/DTO parse paths.
+export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export const QuestUpdate = QuestCreate.partial();
 export const QuestStatusPatch = z.object({ status: QuestStatus });
 export const ObjectiveCreate = z.object({ text: z.string().min(1).max(500), sortOrder: z.number().int().optional() });
@@ -582,11 +675,16 @@ export const Npc = z.object({
   iconSlug: z.string().max(80).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Npc = z.infer<typeof Npc>;
-export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const NpcUpdate = NpcCreate.partial();
 
 // ---------- faction / organization (issue #221) ----------
@@ -595,7 +693,8 @@ export const NpcUpdate = NpcCreate.partial();
 // wholesale `hidden` gating) and adds a party-reputation model: a numeric
 // `reputation` score the DM (or the AI scribe) can bump, plus a human `standing`
 // label on the hostile→allied scale. NPCs link to a faction via npcs.factionId.
-export const FactionStanding = z.enum(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied']);
+export const FACTION_STANDINGS = Object.freeze(['hostile', 'unfriendly', 'neutral', 'friendly', 'allied'] as const);
+export const FactionStanding = z.enum(FACTION_STANDINGS);
 export type FactionStanding = z.infer<typeof FactionStanding>;
 
 export const Faction = z.object({
@@ -609,6 +708,7 @@ export const Faction = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42) — see Npc.hidden. A hidden faction is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   // Party standing/reputation. `reputation` is a numeric score (-100 hostile →
   // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
@@ -617,7 +717,11 @@ export const Faction = z.object({
   ...timestamps,
 });
 export type Faction = z.infer<typeof Faction>;
-export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const FactionUpdate = FactionCreate.partial();
 
 // A faction with its member NPCs embedded (the detail read — issue #221 "surface
@@ -777,15 +881,32 @@ export const ScheduledSession = z.object({
   id: Id,
   campaignId: Id,
   scheduledAt: IsoDateTime, // when the session starts (stored as ISO UTC)
-  durationMinutes: z.number().int().min(15).max(24 * 60).default(240), // drives DTEND in the ICS feed
+  // min 0 allows mid-session "End session" to shrink the window immediately
+  // (issue #818). Create still requires ≥15 via ScheduledSessionCreate.
+  durationMinutes: z.number().int().min(0).max(24 * 60).default(240), // drives DTEND in the ICS feed
   title: z.string().max(200).default(''),
   location: z.string().max(200).default(''), // "Sam's place", a VTT link…
   notes: z.string().max(5000).default(''),
   ...timestamps,
 });
 export type ScheduledSession = z.infer<typeof ScheduledSession>;
-export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ scheduledAt: true });
-export const ScheduledSessionUpdate = ScheduledSessionCreate.partial();
+export const ScheduledSessionCreate = ScheduledSession.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ scheduledAt: true })
+  .extend({
+    // Planned game nights stay at least 15 minutes; keep the 240-minute default when
+    // callers omit the field (updates may shrink to 0 via ScheduledSessionUpdate).
+    durationMinutes: z.number().int().min(15).max(24 * 60).default(240),
+  });
+// Explicit optional fields without `.default()` so PATCH bodies that omit a key
+// do not materialize create-time defaults (Zod applies defaults on undefined).
+export const ScheduledSessionUpdate = z.object({
+  scheduledAt: IsoDateTime.optional(),
+  durationMinutes: z.number().int().min(0).max(24 * 60).optional(),
+  title: z.string().max(200).optional(),
+  location: z.string().max(200).optional(),
+  notes: z.string().max(5000).optional(),
+});
 
 export const RsvpStatus = z.enum(['yes', 'no', 'maybe']);
 export type RsvpStatus = z.infer<typeof RsvpStatus>;
@@ -800,11 +921,25 @@ export const SessionRsvp = z.object({
   ...timestamps,
 });
 export type SessionRsvp = z.infer<typeof SessionRsvp>;
-export const RsvpSet = z.object({ status: RsvpStatus, note: z.string().max(500).optional() });
+export const RsvpSetBody = z.object({ status: RsvpStatus.optional(), note: z.string().max(500).optional() });
+export const RSVP_SET_REQUIRED_MESSAGE = 'status or note is required';
+export function hasAnyRsvpSetField(value: z.infer<typeof RsvpSetBody>): boolean {
+  return value.status !== undefined || value.note !== undefined;
+}
+export const RsvpSet = RsvpSetBody
+  .refine(hasAnyRsvpSetField, {
+    message: RSVP_SET_REQUIRED_MESSAGE,
+  });
 export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+// Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
+export * from './scheduleWindow';
+
+// Schedule notification metadata + locale-aware copy (issue #820).
+export * from './scheduleNotifications';
 
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
@@ -848,13 +983,16 @@ export const TimelineEvent = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
   // from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type TimelineEvent = z.infer<typeof TimelineEvent>;
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
 export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
   .partial()
-  .required({ title: true });
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
 export const TimelineEventUpdate = TimelineEventCreate.partial();
 export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
@@ -1025,32 +1163,95 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
-// ---------- entity revisions (issue #157) ----------
-// A revision-history layer for the prose entities most at risk of a blind
-// last-write-wins clobber (a co-DM polishing a recap while a connected AI saves its
-// own edit). On every committed prose update the server snapshots the PRIOR content
-// here; the history can then be listed and any prior snapshot RESTORED (re-applied as
-// a new update, itself recorded). Covers the DM-authored world-building prose whose
-// edit path is uniformly dm-gated — sessions (recap), quests/npcs/locations/factions
-// (body) — AND notes (body), which #157 cited by line as the destroyed prose. Notes
-// carry their own per-note visibility/author-only-edit model, so their revision reads
-// are gated on the note's OWN visibility (not a blanket dm-gate) and restore is
-// author-only — see RevisionsController — so history is never a redaction back-door.
-export const RevisionEntityType = z.enum(['session', 'quest', 'npc', 'location', 'faction', 'note']);
+/** Default page size for notes + inbox list endpoints (issue #608). */
+export const NOTES_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on notes/inbox lists — clients page with `cursor`, not a huge page. */
+export const NOTES_LIST_MAX_LIMIT = 200;
+/** Dashboard NotesQuickRail asks for exactly this many newest notes (issue #608). */
+export const NOTES_RECENT_LIMIT = 5;
+
+/**
+ * Paginated notes / inbox list response (issue #608).
+ *
+ * Replaces the historical bare `Note[]` (unbounded when `limit` was omitted).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true. Order is newest-first.
+ *
+ * `nextCursor` is ALWAYS present and is `null` on the terminal page (not omitted), so
+ * REST/MCP consumers see a stable, observable shape rather than a disappearing field.
+ */
+export const NoteListPage = z.object({
+  items: z.array(Note),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type NoteListPage = z.infer<typeof NoteListPage>;
+
+// ---------- entity revisions (issue #157 / #813) ----------
+// Immutable prose versions for the entities most at risk of a blind last-write-wins
+// clobber (a co-DM polishing a recap while a connected AI saves its own edit). Each
+// row is a version of the prose itself (not merely "content being overwritten"):
+// `author*` + `createdAt` are who/when that version became authoritative, while
+// `replacedBy*` + `replacedAt` record who later superseded it. A null `replacedAt`
+// marks the current tip (live content); history listings omit tips. Restoring a
+// prior version opens a NEW tip attributed to the restorer and linked via
+// `restoredFromRevisionId`. Legacy rows migrated from the pre-#813 shape (where
+// author/time were the replacing editor) set `authorshipKnown=false` so the UI can
+// label them honestly as "Replaced by …" instead of inventing an author.
+// Covers DM-authored world-building prose — sessions (recap), quests/npcs/locations/
+// factions (body) — AND notes (body). Notes carry their own per-note visibility/
+// author-only-edit model, so revision reads are gated on the note's OWN visibility
+// and restore is author-only — see RevisionsController.
+export const RevisionEntityType = z.enum([
+  'session',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'note',
+  'timeline_event',
+  'timeline_calendar',
+  'scheduled_session',
+  'session_zero',
+  'comment',
+  'story_beat',
+]);
 export type RevisionEntityType = z.infer<typeof RevisionEntityType>;
+
+/** How the version's prose was produced — human editor, AI seat, or tool/PAT. */
+export const RevisionAuthorSource = z.enum(['human', 'ai', 'tool']);
+export type RevisionAuthorSource = z.infer<typeof RevisionAuthorSource>;
 
 export const EntityRevision = z.object({
   id: Id,
   campaignId: Id,
   entityType: RevisionEntityType,
   entityId: Id,
-  // The snapshotted PRIOR prose, keyed by the entity's prose field ('recap' for a
+  // The prose OF THIS VERSION, keyed by the entity's prose field ('recap' for a
   // session, 'body' for quest/npc/location/faction/note). A plain string map so the
   // shape is uniform across entity types and the web can render whichever key is present.
   snapshot: z.record(z.string(), z.string()).default({}),
+  // Version author (who wrote this snapshot). Empty when authorshipKnown is false.
   authorUserId: z.string().max(120).default(''),
   authorName: z.string().max(120).default(''),
+  authorSource: RevisionAuthorSource.default('human'),
+  // Token name / AI seat id / provider hint — empty for ordinary human cookie sessions.
+  authorSourceDetail: z.string().max(200).default(''),
+  // When this version became authoritative. Empty string for legacy rows whose
+  // original authored-at is unknowable (authorshipKnown=false).
   createdAt: IsoDate,
+  // Who/when superseded this version. Null replacedAt = current tip (still live).
+  replacedByUserId: z.string().max(120).default(''),
+  replacedByName: z.string().max(120).default(''),
+  replacedBySource: RevisionAuthorSource.default('human'),
+  replacedBySourceDetail: z.string().max(200).default(''),
+  replacedAt: z.string().nullable().default(null),
+  // Set when this version was created by restoring another revision.
+  restoredFromRevisionId: Id.nullable().default(null),
+  // false for pre-#813 rows: author fields must not be presented as provenance.
+  authorshipKnown: z.boolean().default(true),
 });
 export type EntityRevision = z.infer<typeof EntityRevision>;
 
@@ -1085,6 +1286,13 @@ export const Comment = z.object({
   authorName: z.string().max(120).default(''),
   body: z.string().min(1).max(20_000), // markdown (redacted to a placeholder when tombstoned)
   inCharacter: z.boolean().default(false),
+  // Immutable creation-time persona attribution (issue #787). characterId is a
+  // soft reference to the selected owned character; the name/avatar snapshots are
+  // authoritative for display so a later rename or character deletion cannot
+  // rewrite old dialogue. Legacy/OOC comments carry nulls.
+  characterId: Id.nullable().default(null),
+  characterName: z.string().max(120).nullable().default(null),
+  characterAvatarUrl: z.string().max(500).nullable().default(null),
   // Tombstone (issue #503). null = live; an ISO timestamp means the comment was
   // deleted by its author / a DM and its body has been redacted. The row remains so
   // replies keep their parent. Cleared on restore.
@@ -1112,6 +1320,8 @@ export const CommentCreate = Comment.omit({
   campaignId: true,
   authorUserId: true,
   authorName: true,
+  characterName: true,
+  characterAvatarUrl: true,
   deletedAt: true,
   deletedBy: true,
   editedAt: true,
@@ -1123,6 +1333,8 @@ export const CommentCreate = Comment.omit({
   .required({ entityType: true, entityId: true, body: true });
 export const CommentUpdate = z.object({
   body: z.string().min(1).max(20_000).optional(),
+  // Kept for wire compatibility, but changing it after creation is rejected by
+  // the service because persona attribution is immutable historical provenance.
   inCharacter: z.boolean().optional(),
 });
 
@@ -1135,7 +1347,8 @@ export const CommentUpdate = z.object({
 // campaign, the next session gets scheduled (session_scheduled) or a member
 // RSVPs to one (session_rsvp), a quest is completed or revealed to the party
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
-// the DM approves/rejects it (proposal_resolved). Read via
+// the DM approves/rejects it (proposal_resolved), or a member posts to the DM
+// scribe inbox (inbox_submitted, issue #832). Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
 export const NotificationType = z.enum([
@@ -1146,11 +1359,19 @@ export const NotificationType = z.enum([
   'note_shared',
   'comment_reply',
   'added_to_campaign',
+  // Issue #819: exclusive character seat transferred away from (or onto) this member.
+  'character_reassigned',
   'session_scheduled',
   'session_rsvp',
+  // Issue #789: deduplicated pre-session reminder and the optional unanswered-RSVP
+  // nudge. Both belong to the `schedule` notification category (see notificationCategory).
+  'session_reminder',
+  'rsvp_nudge',
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
+  // Issue #832: a player (or any member) posted to the DM scribe inbox.
+  'inbox_submitted',
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
@@ -1166,6 +1387,17 @@ export const Notification = z.object({
   body: z.string().max(1000).default(''), // short excerpt/context, plain text
   entityType: EntityType.nullable().default(null), // deep-link target (e.g. session), if any
   entityId: Id.nullable().default(null),
+  /**
+   * Issue #446: when set (typically `comment_reply`), the UI focuses this comment
+   * inside the parent entity's discussion thread (`entityType`/`entityId`).
+   */
+  commentId: Id.nullable().default(null),
+  /**
+   * Issue #820: optional structured event payload (JSON object). Schedule
+   * lifecycle pings store {@link ScheduleNotificationData} here so clients can
+   * localize the start instant instead of trusting a UTC date baked into title.
+   */
+  data: z.record(z.string(), z.unknown()).nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -1174,6 +1406,124 @@ export type Notification = z.infer<typeof Notification>;
 
 export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
 export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
+
+// ---------- notification preferences (issue #789) ----------
+// Per-user, per-campaign control over which notification CATEGORIES are delivered
+// and how. Every NotificationType maps to exactly one category (see
+// notificationCategory below); users tune preferences by category, not by the
+// finer-grained type. Preferences are consulted during fan-out
+// (NotificationsService.dispatch) BEFORE a row is written — except the ALWAYS-ON
+// critical categories (`access`, `security`), which ignore preferences AND quiet
+// hours so a member can never silence a security/access notice.
+
+/** Coarse grouping a NotificationType belongs to — the unit users actually tune. */
+export const NotificationCategory = z.enum([
+  'recaps', // recap_posted, recap_share_enabled, recap_share_extended
+  'notes', // note_reply, note_shared
+  'comments', // comment_reply
+  'schedule', // session_scheduled, session_rsvp, session_reminder, rsvp_nudge
+  'quests', // quest_updated
+  'proposals', // proposal_submitted, proposal_resolved
+  'inbox', // inbox_submitted
+  'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
+  'security', // ai_dm_alert — ALWAYS ON (security/recovery)
+]);
+export type NotificationCategory = z.infer<typeof NotificationCategory>;
+
+/** How a (non-critical) category is delivered. */
+export const NotificationDeliveryMode = z.enum([
+  'immediate', // write the row now (subject to quiet hours)
+  'digest', // defer; flushed in a batch on the digest cadence
+  'muted', // drop entirely
+]);
+export type NotificationDeliveryMode = z.infer<typeof NotificationDeliveryMode>;
+
+/** Every category value, in display order. */
+export const NOTIFICATION_CATEGORIES = NotificationCategory.options;
+
+/**
+ * Critical categories are ALWAYS delivered immediately regardless of stored
+ * preferences or quiet hours — silencing access-control or security/recovery
+ * notices would be a footgun (issue #789). The UI renders these as locked.
+ */
+export const CRITICAL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = ['access', 'security'];
+
+export function isCriticalNotificationCategory(category: NotificationCategory): boolean {
+  return CRITICAL_NOTIFICATION_CATEGORIES.includes(category);
+}
+
+/** Static NotificationType -> NotificationCategory map (single source of truth). */
+export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCategory> = {
+  recap_posted: 'recaps',
+  recap_share_enabled: 'recaps',
+  recap_share_extended: 'recaps',
+  note_reply: 'notes',
+  note_shared: 'notes',
+  comment_reply: 'comments',
+  added_to_campaign: 'access',
+  character_reassigned: 'access',
+  session_scheduled: 'schedule',
+  session_rsvp: 'schedule',
+  session_reminder: 'schedule',
+  rsvp_nudge: 'schedule',
+  quest_updated: 'quests',
+  proposal_submitted: 'proposals',
+  proposal_resolved: 'proposals',
+  inbox_submitted: 'inbox',
+  ai_dm_alert: 'security',
+};
+
+/** Resolve the category a notification type belongs to. */
+export function notificationCategory(type: NotificationType): NotificationCategory {
+  return NOTIFICATION_TYPE_CATEGORY[type];
+}
+
+/** Sensible default mode for a category — everything is `immediate` out of the box. */
+export function defaultNotificationMode(_category: NotificationCategory): NotificationDeliveryMode {
+  // Critical categories are effectively immediate-and-locked; everything else
+  // defaults to immediate so behavior matches the pre-preferences fan-out until a
+  // user opts into digest/muted.
+  return 'immediate';
+}
+
+// Quiet hours are a per-user, per-campaign local-time window during which
+// non-critical IMMEDIATE notifications are held (deferred) instead of delivered,
+// then flushed once the window passes. Stored as minutes-of-day in the member's
+// chosen IANA timezone; the window may wrap past midnight (start > end).
+export const QuietHours = z.object({
+  enabled: z.boolean().default(false),
+  startMinute: z.number().int().min(0).max(1439).default(1320), // 22:00 local
+  endMinute: z.number().int().min(0).max(1439).default(420), // 07:00 local
+  timezone: z.string().min(1).max(64).default('UTC'), // IANA tz id
+});
+export type QuietHours = z.infer<typeof QuietHours>;
+
+/** Fully-resolved preferences for a single campaign (defaults filled in). */
+export const NotificationCampaignPreferences = z.object({
+  campaignId: Id,
+  campaignName: z.string().default(''),
+  // one mode per category (critical categories always report 'immediate')
+  categories: z.record(NotificationCategory, NotificationDeliveryMode),
+  quietHours: QuietHours,
+});
+export type NotificationCampaignPreferences = z.infer<typeof NotificationCampaignPreferences>;
+
+/** GET /notifications/preferences — one entry per campaign the caller belongs to. */
+export const NotificationPreferences = z.object({
+  campaigns: z.array(NotificationCampaignPreferences),
+});
+export type NotificationPreferences = z.infer<typeof NotificationPreferences>;
+
+/**
+ * PUT /notifications/preferences/:campaignId body. Additive/partial: only the
+ * provided categories/quiet-hours fields are changed. Attempts to set a critical
+ * category to anything other than 'immediate' are ignored server-side.
+ */
+export const NotificationPreferencesUpdate = z.object({
+  categories: z.record(NotificationCategory, NotificationDeliveryMode).optional(),
+  quietHours: QuietHours.partial().optional(),
+});
+export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferencesUpdate>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from
@@ -1196,7 +1546,7 @@ export const RulePack = z.object({
 });
 export type RulePack = z.infer<typeof RulePack>;
 
-export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
+export const RuleEntryType = z.enum(['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
 export type RuleEntryType = z.infer<typeof RuleEntryType>;
 
 export const RuleEntry = z.object({
@@ -1269,6 +1619,10 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  *   - 'archmage'    — 13th Age / Archmage Engine SRD (issue #298)
  *   - 'open-legend' — Open Legend community codex (issue #299)
  *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
+ *   - 'cepheus'     — Cepheus Engine SRD (2D6 sci-fi; mdBook Markdown, issue #406)
+ *   - 'datasworn'   — Ironsworn: Starforged, via the canonical rsek/datasworn CC-BY-4.0
+ *                     JSON dataset (issue #405; a PbtA reference-text pack — one real
+ *                     statblock section, NPCs, the rest reference text)
  *   - 'other'       — generic/placeholder (routes to the Open5e path for back-compat)
  * The existing Open5e/PF2e request shape is unchanged: callers still pass `source: 'open5e'`
  * (or 'pf2e'). Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.
@@ -1282,6 +1636,8 @@ export const RulePackInstallSource = z.enum([
   'archmage',
   'open-legend',
   'osr',
+  'cepheus',
+  'datasworn',
   'other',
 ]);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
@@ -1311,7 +1667,8 @@ export type OsrInstallSystem = z.infer<typeof OsrInstallSystem>;
  * because Zod alone can't express the per-source subset without a discriminated union.
  */
 export const RulePackInstallSection = z.enum([
-  // 5e-shaped (Open5e, Pathfinder 1e; PF2e ignores the filter, OSR uses a subset)
+  // 5e-shaped (Open5e, Pathfinder 1e; OSR uses a subset). PF2e/SF2e now honor their
+  // own native section keys (below) rather than ignoring the filter.
   'spells',
   'monsters',
   'items',
@@ -1323,10 +1680,26 @@ export const RulePackInstallSection = z.enum([
   'equipment',
   'starships',
   'vehicles',
-  // Open Legend
+  // PF2e / SF2e Archives of Nethys native sections
   'creatures',
+  'ancestries',
+  'backgrounds',
+  'hazards',
+  'deities',
+  'rituals',
+  'planes',
+  'curses',
+  'diseases',
+  // Open Legend
   'banes',
   'boons',
+  // Datasworn / Ironsworn: Starforged (issue #405). A PbtA/narrative game whose native model
+  // is oracles/moves/assets — only `npcs` maps cleanly to a statblock; the rest is reference text.
+  'npcs',
+  'assets',
+  'moves',
+  'oracles',
+  'truths',
 ]);
 export type RulePackInstallSection = z.infer<typeof RulePackInstallSection>;
 
@@ -1395,7 +1768,7 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'api',
     installableWithoutUrl: true,
     license: 'OGL / ORC',
-    note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
+    note: 'Live per-section import of open rules/reference content from Archives of Nethys; adventure, scenario, and story publications are excluded.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
   sf2e: {
@@ -1404,7 +1777,7 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'api',
     installableWithoutUrl: true,
     license: 'ORC / OGL',
-    note: 'Live import from the Archives of Nethys SF2e Elasticsearch backend (aonsf index).',
+    note: 'Live per-section import of open rules/reference content from the Archives of Nethys SF2e backend; adventure, scenario, and story publications are excluded.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
   'open-legend': {
@@ -1452,6 +1825,24 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     note: 'Basic Fantasy is CC-BY-SA but published only as PDF/ODT — not machine-readable — and the OGL retroclones have no JSON API. Upload a converted pack, or pass `url`.',
     candidateSourceUrl: 'https://basicfantasy.org/downloads.html',
   },
+  cepheus: {
+    source: 'cepheus',
+    label: 'Cepheus Engine SRD',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'Open Game License v1.0a',
+    note: 'Live import of the section-level SRD text (2D6 sci-fi) from the first-party mdBook Markdown at orffen/cepheus-srd (raw GitHub). Open Game Content only; the "Cepheus Engine"/"Samardan Press" trademarks are not claimed.',
+    candidateSourceUrl: 'https://github.com/orffen/cepheus-srd',
+  },
+  datasworn: {
+    source: 'datasworn',
+    label: 'Ironsworn: Starforged (datasworn)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'CC-BY-4.0',
+    note: 'Live import of the canonical rsek/datasworn Starforged JSON (a single CC-BY-4.0 data file). A PbtA reference-text pack: NPCs import as monster statblocks; assets, moves, oracles, and truths import as reference sections.',
+    candidateSourceUrl: 'https://raw.githubusercontent.com/rsek/datasworn/main/datasworn/starforged/starforged.json',
+  },
   other: {
     source: 'other',
     label: 'Other (Open5e-compatible)',
@@ -1485,6 +1876,15 @@ export function listRulePackSources(): RulePackSourceMeta[] {
 // rule-pack slug — resolves to the exact same behavior it has today. A future system is
 // one adapter object registered in ADAPTERS, not a sweep across the combat code.
 
+/**
+ * How values in a monster `abilityScores` map (or a character ability map) should be
+ * interpreted before rolling or rendering (issue #767):
+ * - `score` — classic 3–18 ability scores; convert with `abilityModifier` (5e/PF1e/…).
+ * - `modifier` — already signed modifiers as listed on PF2e creature statblocks; use as-is.
+ * - `native` — system-native values used directly (Open Legend attributes).
+ */
+export type AbilityRepresentation = 'score' | 'modifier' | 'native';
+
 /** Raw statblock fields picked out of a monster rule-entry's `dataJson` (pre-formatting). */
 export interface MonsterStatblockData {
   size: unknown;
@@ -1495,6 +1895,11 @@ export interface MonsterStatblockData {
   speed: unknown;
   /** The ability-score sub-object (5e: `{ strength, dexterity, … }`), or undefined. */
   abilityScores: Record<string, unknown> | undefined;
+  /**
+   * How to interpret `abilityScores` for this mapped monster. Defaults are applied by each
+   * adapter's `mapStatblock` (5e → score, PF2e creatures → modifier, Open Legend → native).
+   */
+  abilityRepresentation: AbilityRepresentation;
   specialAbilities: unknown;
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
@@ -1502,15 +1907,183 @@ export interface MonsterStatblockData {
   reactions?: unknown;
 }
 
+/**
+ * One user-facing statblock label (issue #763). `full` is the accessible term shown by
+ * default; `short` is an optional visual abbreviation (e.g. AC, HD, CR) for compact
+ * surfaces that still expose `full` via tooltip / screen-reader text.
+ */
+export interface StatblockPresentationLabel {
+  /** Full accessible term (e.g. "Armor Class", "Guard", "Hit Dice"). */
+  readonly full: string;
+  /** Optional short visual form (e.g. "AC", "HD"). Omit when the full term is always shown. */
+  readonly short?: string;
+}
+
+/**
+ * Adapter-native presentation metadata for the shared StatBlock renderer (issue #763).
+ * Mechanical fields stay generic (`challengeRating` / `armorClass`); labels are what the
+ * UI says — Level / Hit Dice / Guard instead of hardcoded "Challenge" / "Armor Class".
+ */
+export interface StatblockPresentation {
+  /** Difficulty / threat rating (Challenge, Level, Hit Dice, Rating, …). */
+  readonly rating: StatblockPresentationLabel;
+  /** Primary defense number (Armor Class, Guard, Kinetic Armor Class, Defense, …). */
+  readonly defense: StatblockPresentationLabel;
+  /** Hit-point / vitality pool label. */
+  readonly hitPoints: StatblockPresentationLabel;
+  /** Ability-score / attribute block label. */
+  readonly abilities: StatblockPresentationLabel;
+  /** Actions / attacks section heading. */
+  readonly actions: StatblockPresentationLabel;
+  /** Creature-type / traits / descriptor / role label. */
+  readonly creatureType: StatblockPresentationLabel;
+}
+
+/**
+ * Neutral labels for unknown / homebrew rule systems (issue #763). Mechanical mapping may
+ * still fall back to the 5e adapter, but the UI must not claim "Challenge" / "Armor Class"
+ * for a pack that never defined those terms.
+ */
+export const NEUTRAL_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Rating' },
+  defense: { full: 'Defense' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** D&D 5e / Open5e SRD presentation — Challenge + Armor Class. */
+export const DND5E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Challenge', short: 'CR' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Type' },
+};
+
+/** Pick the visible form of a presentation label (`short` when requested and present). */
+export function statblockLabelText(label: StatblockPresentationLabel, preferShort = false): string {
+  return preferShort && label.short ? label.short : label.full;
+}
+
+// ---------- adapter-defined action economy (issue #413) ----------
+// The turn-workspace surfaces "what can I do now?" as a set of ACTION-ECONOMY SLOTS —
+// but the shape of a turn is a per-system decision, not a 5e constant. 5e is
+// action / bonus action / reaction / movement; PF2e is a three-action economy plus a
+// reaction; a dice-pool / narrative system may have none. This capability lives on the
+// RuleSystemAdapter (like `conditions` and `presentation`) so the run-session code reads
+// the slots from the campaign's adapter instead of hardcoding the 5e four. Adapters that
+// don't define one fall back to {@link NEUTRAL_ACTION_ECONOMY} (a single generic "Action"
+// slot), never to 5e's — so a non-5e fight never mislabels its turn as bonus-action-shaped.
+
+/** How an action-economy slot behaves for the tracker + when its usage counter refreshes. */
+export type ActionEconomySlotKind = 'action' | 'movement' | 'reaction' | 'resource';
+
+/**
+ * One adapter-defined slot in a turn's action economy (issue #413). `key` is a stable id
+ * the tracker counts usage against; `max` is how many are available fresh each turn (or
+ * round, per `resetsAt`). `help` is plain-language guidance shown to a new player. A
+ * `movement` slot's `max` is a speed in feet (0 when the system is gridless / undefined);
+ * a `reaction` slot refreshes at the START of the owner's turn (5e: one reaction per round,
+ * refreshed at your turn), so its `resetsAt` is 'turn'.
+ */
+export interface ActionEconomySlot {
+  readonly key: string;
+  readonly label: string;
+  readonly help: string;
+  readonly kind: ActionEconomySlotKind;
+  /** Fresh count each period. For a movement slot this is a distance (ft); 0 = system default/none. */
+  readonly max: number;
+  /** When the used-counter refreshes: at the owner's turn start, or at the top of each round. */
+  readonly resetsAt: 'turn' | 'round';
+}
+
+/** An ordered set of action-economy slots for one rule system (issue #413). */
+export interface ActionEconomyModel {
+  readonly slots: readonly ActionEconomySlot[];
+}
+
+/** Neutral fallback for adapters that don't define an action economy — one generic Action. */
+export const NEUTRAL_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'action', label: 'Action', help: 'Take one action on your turn.', kind: 'action', max: 1, resetsAt: 'turn' },
+  ],
+};
+
+/** D&D 5e action economy: action, bonus action, reaction, and movement (issue #413). */
+export const DND5E_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'action', label: 'Action', help: 'Attack, Cast a Spell, Dash, Dodge, Disengage, Help, Hide, Ready, Search, or Use an Object.', kind: 'action', max: 1, resetsAt: 'turn' },
+    { key: 'bonus', label: 'Bonus Action', help: 'Only when a feature, spell, or item specifically grants one this turn.', kind: 'action', max: 1, resetsAt: 'turn' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round, e.g. an opportunity attack or a readied trigger. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'turn' },
+    { key: 'movement', label: 'Movement', help: 'Move up to your speed; you can split it around your action.', kind: 'movement', max: 30, resetsAt: 'turn' },
+  ],
+};
+
+/** Pathfinder 2e action economy: three actions plus one reaction (issue #413). */
+export const PF2E_ACTION_ECONOMY: ActionEconomyModel = {
+  slots: [
+    { key: 'actions', label: 'Actions', help: 'You have three actions each turn; most activities cost 1–3 of them.', kind: 'action', max: 3, resetsAt: 'turn' },
+    { key: 'reaction', label: 'Reaction', help: 'One per round when its trigger occurs. Refreshes at the start of your turn.', kind: 'reaction', max: 1, resetsAt: 'turn' },
+  ],
+};
+
+/**
+ * Resolve the action-economy model for an adapter (issue #413). Falls back to the
+ * neutral single-Action model when the adapter doesn't define one — never to 5e's, so a
+ * non-5e system that hasn't opted in isn't given bonus-action / reaction slots it lacks.
+ */
+export function actionEconomyForAdapter(adapter: Pick<RuleSystemAdapter, 'actionEconomy'>): ActionEconomyModel {
+  return adapter.actionEconomy ?? NEUTRAL_ACTION_ECONOMY;
+}
+
+// ---------- adapter-defined initiative model (issue #765) ----------
+// OSR retroclones vary between individual d6+DEX and group d6-per-side initiative.
+// This optional capability on RuleSystemAdapter lets encounter rollers and the UI
+// show the exact variant's initiative mode without hardcoding Basic Fantasy defaults.
+
+/** How initiative is rolled for a rule system (issue #765). */
+export type InitiativeMode = 'individual' | 'group';
+
+/** Per-system initiative configuration (issue #765). */
+export interface InitiativeModel {
+  readonly mode: InitiativeMode;
+  /** Whether DEX modifier is added to the initiative roll (individual mode only). */
+  readonly usesDexModifier: boolean;
+}
+
+/** Default individual d20+DEX model (5e/PF1e). Adapters that omit `initiativeModel` are treated as individual. */
+export const DEFAULT_INITIATIVE_MODEL: InitiativeModel = { mode: 'individual', usesDexModifier: true };
+
+/** Resolve the initiative model for an adapter (issue #765). */
+export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'initiativeModel'>): InitiativeModel {
+  return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
+}
+
 export interface RuleSystemAdapter {
-  /** Stable family id for this adapter (not a pack slug), e.g. 'dnd5e'. */
+  /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
   /** Human-readable label. */
   readonly label: string;
-  /** Ability-score → modifier (5e: floor((score - 10) / 2)). */
+  /**
+   * User-facing statblock field labels for this system (issue #763). The shared StatBlock
+   * renderer reads these instead of hardcoding "Challenge" / "Armor Class".
+   * Optional for external / custom adapters — {@link statblockPresentation} falls back to
+   * {@link NEUTRAL_STATBLOCK_PRESENTATION} when omitted.
+   */
+  readonly presentation?: StatblockPresentation;
+  /** Ability-score → modifier (5e: floor((score - 10) / 2)). Character sheets always use this. */
   abilityModifier(score: number): number;
   /** Die size for an initiative roll (5e: d20). Keeps the d20 assumption out of the generic roller. */
   readonly initiativeDie: number;
+  /**
+   * OPTIONAL — how initiative is rolled for this system (issue #765). OSR variants use
+   * individual d6+DEX or group d6-per-side; 5e/PF1e omit this and default to individual d20+DEX.
+   * Encounter rollers and the UI read this via {@link initiativeModelForAdapter}.
+   */
+  readonly initiativeModel?: InitiativeModel;
   /**
    * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
    * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
@@ -1520,14 +2093,51 @@ export interface RuleSystemAdapter {
    */
   readonly maxLevel: number;
   /**
-   * Derive a combatant's initiative modifier from an ability-score map (5e: the DEX
-   * modifier). Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster
-   * `abilityScores` object (`{ dexterity: 14 }`); returns 0 when the governing score is
-   * absent or non-numeric.
+   * Derive a combatant's initiative modifier from an ability map (5e: the DEX modifier).
+   * Accepts either canonical character stats (`{ DEX: 14 }`) or a raw monster `abilityScores`
+   * object (`{ dexterity: 14 }`); returns 0 when the governing value is absent or non-numeric.
+   * Pass `representation` from `mapStatblock().abilityRepresentation` for monsters so
+   * already-modifier / native values are not converted a second time (issue #767).
+   * Optional `level` is for systems whose initiative check includes a level/proficiency
+   * term (PF2e Perception = WIS mod + proficiency; issue #491). Callers pass the
+   * character's level on the character-sheet path; monster/statblock paths omit it.
    */
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number;
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+    level?: number,
+  ): number;
+  /**
+   * OPTIONAL — resolve an initiative modifier, or `null` when it cannot be derived
+   * (issue #764). Systems that implement this (PF1e) let encounter/generator callers
+   * surface "unavailable" instead of inventing a silent +0; the numeric
+   * {@link initiativeModifier} seam remains for rollers that need a default. Other
+   * adapters leave this undefined and keep returning 0 from `initiativeModifier`.
+   */
+  initiativeModifierOrNull?(
+    abilities: Record<string, unknown> | null | undefined,
+    representation?: AbilityRepresentation,
+    level?: number,
+  ): number | null;
+  /**
+   * Compare two combatants with equal initiative totals for running-order sort (issue #611).
+   * Return negative if `a` should act before `b`. Called only after initiative totals match
+   * (or both are null). 5e: higher DEX/`initMod` first, then `sortOrder` ascending as a
+   * stable fallback (no roll-off prompt — DM may manually reorder). PF2e: preserve
+   * roll/add order via `sortOrder` only (do not re-sort by DEX).
+   */
+  initiativeTiebreak(a: InitiativeTiebreakCombatant, b: InitiativeTiebreakCombatant): number;
   /** The condition vocabulary offered in the combat UI (5e: the run-session chip list). */
   readonly conditions: readonly string[];
+  /**
+   * OPTIONAL — the action-economy model for this system's turn workspace (issue #413):
+   * the ordered slots (action / bonus / reaction / movement, or PF2e's three actions,
+   * or a system with none) a player consults to answer "what can I do now?". Omit it and
+   * {@link actionEconomyForAdapter} falls back to {@link NEUTRAL_ACTION_ECONOMY} — a single
+   * generic Action — never to 5e's, so a non-5e fight never inherits bonus-action / reaction
+   * slots it doesn't have. This is the seam that keeps the turn tracker from hardcoding 5e.
+   */
+  readonly actionEconomy?: ActionEconomyModel;
   /** Map a monster rule-entry's `dataJson` to canonical statblock fields (AC/HP/CR/abilities/…). */
   mapStatblock(data: Record<string, unknown>): MonsterStatblockData;
   /** Resolve a monster's numeric max HP from its `dataJson`, or null when unavailable. */
@@ -1554,6 +2164,29 @@ export interface RuleSystemAdapter {
    * affordance and the server checks to REJECT a direct-API request that bypasses the UI.
    */
   readonly supportsDdbImport?: boolean;
+  /**
+   * Whether this adapter owns encounter-difficulty math (issue #429). Only D&D 5e opts in;
+   * other systems omit it so `encounterDifficultySupported()` / getDifficulty return an
+   * explicit unsupported result instead of a misleading 5e "Trivial" band.
+   */
+  readonly supportsEncounterDifficulty?: boolean;
+  /**
+   * Estimate encounter difficulty for this ruleset. Required when
+   * `supportsEncounterDifficulty` is true; unsupported adapters omit it.
+   */
+  estimateEncounterDifficulty?(input: EncounterDifficultyInput): EncounterDifficulty;
+  /**
+   * OPTIONAL — the encounter/sheet ROLL CATALOG for a character (issue #415): every rollable
+   * check (ability checks, skills — proficient AND unproficient — saves/defenses, initiative)
+   * with the modifier already computed by this system's authoritative math and a transparent
+   * breakdown. Adapters that model their own proficiency (5e's fixed bonus, PF2e's level+rank)
+   * implement it; every other adapter omits it and {@link checkCatalogForAdapter} falls back to
+   * the honest, configurable {@link neutralCheckCatalog} derived from the character's own data.
+   * This is the single source of truth the character sheet, the encounter card, the server
+   * roll resolver, and the MCP tools all read — so a sheet roll and an encounter roll are
+   * identical by construction and no surface reinvents proficiency math.
+   */
+  buildCheckCatalog?(character: CheckCatalogCharacter): RollCheckDefinition[];
 }
 
 /**
@@ -1566,6 +2199,22 @@ export interface AttributeDicePool {
   score: number;
   dice: number[];
   disadvantage: boolean;
+}
+
+/**
+ * Convert a stored ability value into the modifier used for rolls/display (issue #767).
+ * Character sheets always pass `score` (or omit representation) so PF2e/5e keep
+ * `floor((score-10)/2)`. Monster statblocks pass the representation from `mapStatblock`
+ * so PF2e creature modifiers and Open Legend attributes are consumed exactly once.
+ */
+export function resolveAbilityModifier(
+  adapter: Pick<RuleSystemAdapter, 'abilityModifier'>,
+  value: number,
+  representation: AbilityRepresentation = 'score',
+): number {
+  if (!Number.isFinite(value)) return 0;
+  if (representation === 'score') return adapter.abilityModifier(value);
+  return Math.trunc(value);
 }
 
 /** Read the governing (DEX) score from either a canonical or raw ability map, if numeric. */
@@ -1588,6 +2237,7 @@ export const DND5E_PACK_SLUG = 'open5e-srd';
 export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
+  presentation: DND5E_STATBLOCK_PRESENTATION,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -1595,14 +2245,23 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number {
     const dex = dnd5eDexScore(abilities);
-    return dex === null ? 0 : this.abilityModifier(dex);
+    return dex === null ? 0 : resolveAbilityModifier(this, dex, representation);
   },
+  // Issue #611: on equal initiative totals, higher DEX (stored as initMod) goes first.
+  // Equal DEX falls back to sortOrder (stable insertion order). A DM roll-off / reorder
+  // UI is out of scope for this PR — the DM can manually set initiative or reorder.
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   // The combat-UI condition vocabulary is the canonical 5e list (issue #111's single
   // source of truth), not a separate hand-maintained subset. This is what every 5e
   // surface — character sheet, encounter tracker, compendium — offers as suggestions.
   conditions: CONDITIONS,
+  // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
+  actionEconomy: DND5E_ACTION_ECONOMY,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
@@ -1613,6 +2272,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       hitPoints: d.hitPoints ?? d.hit_points ?? d.hp,
       speed: d.speed,
       abilityScores: abilityScores && typeof abilityScores === 'object' ? abilityScores : undefined,
+      abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       legendaryActions: d.legendaryActions ?? d.legendary_actions,
@@ -1626,6 +2286,16 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   // The D&D Beyond importer produces a 5e-shaped character (5e abilities/AC/HP/conditions),
   // so 5e is the one system that is field-compatible with it (issue #714).
   supportsDdbImport: true,
+  // 5e owns the DMG XP-budget difficulty estimate (issues #58 + #429).
+  supportsEncounterDifficulty: true,
+  estimateEncounterDifficulty(input: EncounterDifficultyInput): EncounterDifficulty {
+    return computeDnd5eEncounterDifficulty(input);
+  },
+  // 5e roll catalog (issue #415): all six ability checks/saves, EVERY skill (incl. unproficient),
+  // and initiative — fixed proficiency bonus, with a transparent breakdown for each.
+  buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
+    return dnd5eCheckCatalog(this, character);
+  },
 };
 
 // ---------- Open Legend adapter (issue #299) ----------
@@ -1764,9 +2434,20 @@ function openLegendAgility(abilities: Record<string, unknown> | null | undefined
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
+/** Open Legend presentation — Level + Guard (not Challenge / Armor Class). */
+export const OPEN_LEGEND_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Guard' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Attributes' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Descriptor' },
+};
+
 export const OpenLegendAdapter: RuleSystemAdapter = {
   id: OPEN_LEGEND_ADAPTER_ID,
   label: 'Open Legend',
+  presentation: OPEN_LEGEND_STATBLOCK_PRESENTATION,
   // Open Legend attributes are used directly (no floor((score-10)/2) offset) — an attribute
   // both indexes the dice table and, where a flat value is wanted, IS that value.
   abilityModifier(score: number): number {
@@ -1780,9 +2461,16 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
   // adapter reports Infinity — `levelUp` never rejects on the cap (issue #535). A campaign that
   // models "level" as a loose progression tier is free to advance without a synthetic 5e ceiling.
   maxLevel: Infinity,
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    _representation: AbilityRepresentation = 'native',
+  ): number {
+    // Agility is already the native attribute value (no score→mod conversion).
     return openLegendAgility(abilities);
   },
+  // Open Legend initiative is Agility-monotonic; on a tied total, higher Agility (initMod)
+  // goes first, then sortOrder — same shape as the 5e DEX-desc default (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: OPEN_LEGEND_BANES_BOONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const attributes = (d.attributes ?? d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
@@ -1799,6 +2487,7 @@ export const OpenLegendAdapter: RuleSystemAdapter = {
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed,
       abilityScores: attributes && typeof attributes === 'object' ? attributes : undefined,
+      abilityRepresentation: 'native',
       specialAbilities: d.specialAbilities ?? d.special_abilities ?? d.actions,
       actions: d.actions,
     };
@@ -1872,6 +2561,477 @@ export function rollActionDice(score: number, roll: (sides: number) => number): 
 
   const dice = rollPool();
   return { score: pool.score, pool: pool.dice, dice, disadvantage: false, total: sum(dice) };
+}
+
+// ---------- encounter / character-sheet roll catalog (issue #415) ----------
+// The encounter character card used to bake in the fixed 5e skill list and proficiency-bonus
+// math, and only surfaced PROFICIENT skills — so an ordinary unproficient check could not be
+// rolled inline, and a non-5e system displayed or rolled the wrong modifier. The ROLL CATALOG
+// moves that decision onto the adapter: every rollable check a character can make (ability
+// checks, skills, saves/defenses, initiative, and custom checks) is described once, with a
+// transparent server-computable breakdown ("DEX +3, proficient +2 = +5"). The character sheet
+// AND the encounter card read the SAME catalog, so a sheet roll and an encounter roll are
+// identical by construction — there is no second proficiency formula for either to drift from.
+//
+// The catalog is pure and deterministic (no RNG, no I/O), so the server resolves the roll
+// expression from it authoritatively and clients never invent proficiency math — they render
+// what the catalog already computed. Adapters that model their own proficiency (5e's fixed
+// bonus, PF2e's level+rank) implement `buildCheckCatalog`; every other adapter falls back to
+// an honest, configurable catalog derived from the character's own stored data.
+
+/** The kind of a rollable check in the catalog. */
+export type RollCheckCategory = 'ability' | 'skill' | 'save' | 'initiative' | 'custom';
+
+/** One transparent term of a check's modifier, e.g. `{ label: 'DEX', value: 3 }`. */
+export interface RollBreakdownComponent {
+  /** Short human label ("DEX", "proficient", "trained", "armor"). */
+  readonly label: string;
+  /** Signed integer contribution to the total modifier. */
+  readonly value: number;
+}
+
+/**
+ * A single rollable check for a character (issue #415). Everything a surface needs to render,
+ * search, and roll it — with the modifier already computed by the authoritative adapter math
+ * and a transparent breakdown of how it was reached. `id` is stable within a character's
+ * catalog (e.g. `skill:Athletics`, `save:DEX`, `ability:STR`, `initiative`) so the server can
+ * resolve "roll this check" from an id alone.
+ */
+export interface RollCheckDefinition {
+  readonly id: string;
+  readonly label: string;
+  readonly category: RollCheckCategory;
+  /** Governing ability key (STR/DEX/… or a system-native attribute), or null when none applies. */
+  readonly ability: string | null;
+  /** Proficiency / training / rank label ("proficient", "expertise", "trained", "expert"…) or null when untrained. */
+  readonly proficiency: string | null;
+  /** True when the character is trained/proficient in this check — surfaced FIRST (favorites). */
+  readonly favorite: boolean;
+  /** Flat modifier applied to the check die. */
+  readonly modifier: number;
+  /** Ordered, transparent breakdown of how `modifier` was computed. */
+  readonly breakdown: readonly RollBreakdownComponent[];
+  /** The check die (5e/PF2e/d20 systems: 20). Kept explicit so a non-d20 system can differ. */
+  readonly die: number;
+  /** Whether advantage/disadvantage (roll-two-keep) applies to this check in this system. */
+  readonly supportsAdvantage: boolean;
+  /** Whether the system reports degrees of success (PF2e) for this check. */
+  readonly supportsDegrees: boolean;
+  /**
+   * True when the catalog could not compute this check from complete data (missing ability
+   * score, an unmodeled system) and the surface should flag it rather than trust a silent 0.
+   */
+  readonly incomplete?: boolean;
+}
+
+/** Format a signed integer with an explicit leading sign ("+3", "-1", "+0"). */
+export function signedModifier(n: number): string {
+  return n >= 0 ? `+${n}` : `${n}`;
+}
+
+/**
+ * Render a check's transparent breakdown, e.g. "DEX +3, proficient +2, armor -1 = +4"
+ * (issue #415). This is the SAME text the sheet, the encounter card, and the combat log show.
+ */
+export function formatCheckBreakdown(def: Pick<RollCheckDefinition, 'breakdown' | 'modifier'>): string {
+  const parts = def.breakdown.map((c) => `${c.label} ${signedModifier(c.value)}`);
+  const lhs = parts.length > 0 ? parts.join(', ') : signedModifier(def.modifier);
+  return `${lhs} = ${signedModifier(def.modifier)}`;
+}
+
+/** The three roll modes a d20-style check can be taken with (mirrors the sheet's chooser). */
+export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
+
+/**
+ * Build the restricted dice expression for a catalog check + roll mode (issue #415). Uses the
+ * keep-highest / keep-lowest advantage grammar the shared roller already understands. A system
+ * that does not support advantage always rolls a single die regardless of the requested mode.
+ */
+export function checkRollExpr(
+  def: Pick<RollCheckDefinition, 'modifier' | 'die' | 'supportsAdvantage'>,
+  mode: CheckRollMode = 'flat',
+): string {
+  const die = def.die > 0 ? def.die : 20;
+  const tail = def.modifier === 0 ? '' : signedModifier(def.modifier);
+  if (def.supportsAdvantage && mode === 'advantage') return `2d${die}kh1${tail}`;
+  if (def.supportsAdvantage && mode === 'disadvantage') return `2d${die}kl1${tail}`;
+  return `1d${die}${tail}`;
+}
+
+/** Case-insensitive substring search over a catalog's labels / ability keys (issue #415). */
+export function filterCheckCatalog(catalog: readonly RollCheckDefinition[], query: string): RollCheckDefinition[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...catalog];
+  return catalog.filter(
+    (c) => c.label.toLowerCase().includes(q) || (c.ability ?? '').toLowerCase().includes(q) || c.category.includes(q),
+  );
+}
+
+/**
+ * Order a catalog for display: favorites (trained/proficient) first, then by category, then by
+ * label (issue #415). Stable and pure so the sheet and encounter card show the same order.
+ */
+export function sortCheckCatalog(catalog: readonly RollCheckDefinition[]): RollCheckDefinition[] {
+  const categoryOrder: Record<RollCheckCategory, number> = { initiative: 0, save: 1, ability: 2, skill: 3, custom: 4 };
+  return [...catalog].sort((a, b) => {
+    if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+    if (categoryOrder[a.category] !== categoryOrder[b.category]) return categoryOrder[a.category] - categoryOrder[b.category];
+    return a.label.localeCompare(b.label);
+  });
+}
+
+/** The six 5e ability keys, in canonical order. */
+export const DND5E_ABILITY_KEYS = ['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA'] as const;
+export type Dnd5eAbilityKey = (typeof DND5E_ABILITY_KEYS)[number];
+
+/** SRD 5e skill list with the ability each is governed by (single source of truth, issue #415). */
+export const DND5E_SKILLS: ReadonlyArray<{ readonly name: string; readonly ability: Dnd5eAbilityKey }> = [
+  { name: 'Acrobatics', ability: 'DEX' },
+  { name: 'Animal Handling', ability: 'WIS' },
+  { name: 'Arcana', ability: 'INT' },
+  { name: 'Athletics', ability: 'STR' },
+  { name: 'Deception', ability: 'CHA' },
+  { name: 'History', ability: 'INT' },
+  { name: 'Insight', ability: 'WIS' },
+  { name: 'Intimidation', ability: 'CHA' },
+  { name: 'Investigation', ability: 'INT' },
+  { name: 'Medicine', ability: 'WIS' },
+  { name: 'Nature', ability: 'INT' },
+  { name: 'Perception', ability: 'WIS' },
+  { name: 'Performance', ability: 'CHA' },
+  { name: 'Persuasion', ability: 'CHA' },
+  { name: 'Religion', ability: 'INT' },
+  { name: 'Sleight of Hand', ability: 'DEX' },
+  { name: 'Stealth', ability: 'DEX' },
+  { name: 'Survival', ability: 'WIS' },
+];
+
+/** 5e proficiency bonus by level: +2 at 1–4 up to +6 at 17–20 (single source of truth, issue #415). */
+export function dnd5eProficiencyBonus(level: number): number {
+  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
+}
+
+/** Read an ability score from a stats record tolerantly (uppercase-folded; default 10). */
+function readAbilityScore(stats: Record<string, number>, ability: string): number {
+  const up = ability.toUpperCase();
+  const raw = stats[up] ?? stats[ability] ?? stats[ability.toLowerCase()];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 10;
+}
+
+/** The minimal character shape the catalog reads — the full {@link Character} satisfies it. */
+export interface CheckCatalogCharacter {
+  readonly level: number;
+  readonly stats: Record<string, number>;
+  readonly saveProficiencies: readonly string[];
+  readonly skills: Record<string, SkillRank>;
+}
+
+/**
+ * Build the full D&D 5e roll catalog for a character (issue #415): initiative, all six ability
+ * checks and saves, and EVERY skill — proficient or not — so an unproficient skill rolls inline
+ * with the correct DEX/… modifier instead of being hidden. Proficiency adds the fixed bonus
+ * (expertise doubles it); each entry carries a transparent breakdown. Pure and deterministic.
+ */
+export function dnd5eCheckCatalog(adapter: Pick<RuleSystemAdapter, 'abilityModifier'>, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const pb = dnd5eProficiencyBonus(character.level);
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  const out: RollCheckDefinition[] = [];
+
+  const dex = readAbilityScore(stats, 'DEX');
+  const dexMod = adapter.abilityModifier(dex);
+  out.push({
+    id: 'initiative',
+    label: 'Initiative',
+    category: 'initiative',
+    ability: 'DEX',
+    proficiency: null,
+    favorite: true,
+    modifier: dexMod,
+    breakdown: [{ label: 'DEX', value: dexMod }],
+    die: 20,
+    supportsAdvantage: true,
+    supportsDegrees: false,
+  });
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const proficient = saveProfs.has(ability);
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (proficient) breakdown.push({ label: 'proficient', value: pb });
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: proficient ? 'proficient' : null,
+      favorite: proficient,
+      modifier: mod + (proficient ? pb : 0),
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const { name, ability } of DND5E_SKILLS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank = character.skills?.[name];
+    const profTerm = rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0;
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (rank === 'expertise') breakdown.push({ label: 'expertise', value: profTerm });
+    else if (rank === 'proficient') breakdown.push({ label: 'proficient', value: profTerm });
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability,
+      proficiency: rank ?? null,
+      favorite: rank != null,
+      modifier: mod + profTerm,
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Map the app's stored 5e-shaped skill rank onto the closest PF2e rank so a PF2e character
+ * (whose sheet stores `proficient`/`expertise`) gets honest level-based math. `proficient`
+ * → trained, `expertise` → expert; absent → untrained.
+ */
+function pf2eRankFromSkillRank(rank: SkillRank | undefined): Pf2eProficiencyRank {
+  if (rank === 'expertise') return 'expert';
+  if (rank === 'proficient') return 'trained';
+  return 'untrained';
+}
+
+/**
+ * Build a PF2e roll catalog for a character (issue #415). PF2e proficiency ADDS YOUR LEVEL on
+ * top of a rank bonus, so the breakdown is "ability + level + rank". The app stores 5e-shaped
+ * ranks, so they are mapped to PF2e ranks (trained/expert); untrained adds nothing (no level).
+ * Degrees of success apply; PF2e has no generic advantage/disadvantage, so roll modes collapse
+ * to a single die.
+ */
+export function pf2eCheckCatalog(adapter: Pf2eRuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const level = Math.max(0, Math.trunc(character.level));
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  const out: RollCheckDefinition[] = [];
+
+  const buildProfBreakdown = (ability: string, abilityMod: number, rank: Pf2eProficiencyRank): { modifier: number; breakdown: RollBreakdownComponent[] } => {
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: abilityMod }];
+    let modifier = abilityMod;
+    if (rank !== 'untrained') {
+      breakdown.push({ label: 'level', value: level });
+      const rankBonus = adapter.proficiencyBonus(0, rank); // rank bonus only (level term added separately)
+      breakdown.push({ label: rank, value: rankBonus });
+      modifier += adapter.proficiencyBonus(level, rank);
+    }
+    return { modifier, breakdown };
+  };
+
+  // Initiative is a Perception check in PF2e (WIS, at least trained for PCs).
+  const wisMod = adapter.abilityModifier(readAbilityScore(stats, 'WIS'));
+  const perc = buildProfBreakdown('WIS', wisMod, 'trained');
+  out.push({
+    id: 'initiative',
+    label: 'Initiative (Perception)',
+    category: 'initiative',
+    ability: 'WIS',
+    proficiency: 'trained',
+    favorite: true,
+    modifier: perc.modifier,
+    breakdown: perc.breakdown,
+    die: 20,
+    supportsAdvantage: false,
+    supportsDegrees: true,
+  });
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  for (const ability of DND5E_ABILITY_KEYS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank: Pf2eProficiencyRank = saveProfs.has(ability) ? 'trained' : 'untrained';
+    const built = buildProfBreakdown(ability, mod, rank);
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: rank === 'untrained' ? null : rank,
+      favorite: rank !== 'untrained',
+      modifier: built.modifier,
+      breakdown: built.breakdown,
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  for (const { name, ability } of DND5E_SKILLS) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const rank = pf2eRankFromSkillRank(character.skills?.[name]);
+    const built = buildProfBreakdown(ability, mod, rank);
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability,
+      proficiency: rank === 'untrained' ? null : rank,
+      favorite: rank !== 'untrained',
+      modifier: built.modifier,
+      breakdown: built.breakdown,
+      die: 20,
+      supportsAdvantage: false,
+      supportsDegrees: true,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Honest, configurable fallback catalog for adapters that do not model their own proficiency
+ * (issue #415). Everything is derived from the character's OWN stored data rather than a fixed
+ * 5e list, so it never claims skills or math a homebrew/unknown system doesn't have:
+ *  - ability checks for every attribute the sheet actually stores;
+ *  - saves for every attribute the sheet stores, +2 flat when the ability is save-proficient;
+ *  - skills for every skill the character has recorded (with a flat proficiency term);
+ *  - initiative via the adapter's own `initiativeModifier`.
+ * Modes: advantage is offered (harmless d20 keep grammar); degrees are not (only PF2e reports them).
+ */
+export function neutralCheckCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  const stats = normalizeStats(character.stats);
+  const abilityKeys = Object.keys(stats);
+  const saveProfs = new Set((character.saveProficiencies ?? []).map((a) => String(a).toUpperCase()));
+  // A neutral, flat proficiency term. Systems in this bucket vary, so we use a modest +2 and
+  // label it plainly; the breakdown makes the assumption visible rather than hidden.
+  const FLAT_PROFICIENCY = 2;
+  const out: RollCheckDefinition[] = [];
+
+  const initMod = adapter.initiativeModifier(stats, 'score', character.level);
+  out.push({
+    id: 'initiative',
+    label: 'Initiative',
+    category: 'initiative',
+    ability: null,
+    proficiency: null,
+    favorite: true,
+    modifier: initMod,
+    breakdown: [{ label: 'initiative', value: initMod }],
+    die: adapter.initiativeDie > 0 ? adapter.initiativeDie : 20,
+    supportsAdvantage: true,
+    supportsDegrees: false,
+  });
+
+  for (const ability of abilityKeys) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    out.push({
+      id: `ability:${ability}`,
+      label: `${ability} check`,
+      category: 'ability',
+      ability,
+      proficiency: null,
+      favorite: false,
+      modifier: mod,
+      breakdown: [{ label: ability, value: mod }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const ability of abilityKeys) {
+    const mod = adapter.abilityModifier(readAbilityScore(stats, ability));
+    const proficient = saveProfs.has(ability.toUpperCase());
+    const breakdown: RollBreakdownComponent[] = [{ label: ability, value: mod }];
+    if (proficient) breakdown.push({ label: 'proficient', value: FLAT_PROFICIENCY });
+    out.push({
+      id: `save:${ability}`,
+      label: `${ability} save`,
+      category: 'save',
+      ability,
+      proficiency: proficient ? 'proficient' : null,
+      favorite: proficient,
+      modifier: mod + (proficient ? FLAT_PROFICIENCY : 0),
+      breakdown,
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+    });
+  }
+
+  for (const [name, rank] of Object.entries(character.skills ?? {})) {
+    const profTerm = rank === 'expertise' ? FLAT_PROFICIENCY * 2 : FLAT_PROFICIENCY;
+    out.push({
+      id: `skill:${name}`,
+      label: name,
+      category: 'skill',
+      ability: null,
+      proficiency: rank,
+      favorite: true,
+      modifier: profTerm,
+      breakdown: [{ label: rank, value: profTerm }],
+      die: 20,
+      supportsAdvantage: true,
+      supportsDegrees: false,
+      incomplete: true, // no governing-ability math for a homebrew skill — flag it honestly
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Resolve the roll catalog for a campaign's adapter + a character (issue #415). Adapters that
+ * implement `buildCheckCatalog` (5e, PF2e) own their math; every other adapter gets the honest
+ * configurable {@link neutralCheckCatalog}. This is the single entry point the server, the MCP
+ * tools, the character sheet, and the encounter card all call — so the math is identical.
+ */
+export function checkCatalogForAdapter(adapter: RuleSystemAdapter, character: CheckCatalogCharacter): RollCheckDefinition[] {
+  return adapter.buildCheckCatalog?.(character) ?? neutralCheckCatalog(adapter, character);
+}
+
+/** Find a single check by its stable id within a character's catalog, or null. */
+export function findCheckInCatalog(adapter: RuleSystemAdapter, character: CheckCatalogCharacter, checkId: string): RollCheckDefinition | null {
+  return checkCatalogForAdapter(adapter, character).find((c) => c.id === checkId) ?? null;
 }
 
 // ---------- Pathfinder 2e adapter (issue #295) ----------
@@ -2024,10 +3184,22 @@ export interface Pf2eRuleSystemAdapter extends RuleSystemAdapter {
   degreeOfSuccess(total: number, dc: number, naturalRoll?: number): Pf2eDegreeOfSuccess;
 }
 
+/** PF2e / SF2e presentation — Level + Armor Class; creature type is Traits. */
+export const PF2E_STATBLOCK_PRESENTATION: StatblockPresentation = {
+  rating: { full: 'Level' },
+  defense: { full: 'Armor Class', short: 'AC' },
+  hitPoints: { full: 'Hit Points', short: 'HP' },
+  abilities: { full: 'Abilities' },
+  actions: { full: 'Actions' },
+  creatureType: { full: 'Traits' },
+};
+
 export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   id: PF2E_ADAPTER_ID,
   label: 'Pathfinder 2e',
-  // PF2e ability modifiers use the same floor((score-10)/2) mapping as 5e.
+  presentation: PF2E_STATBLOCK_PRESENTATION,
+  // Character ability SCORES still use the same floor((score-10)/2) mapping as 5e.
+  // Creature statblocks store modifiers separately (`abilityRepresentation: 'modifier'`).
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -2035,23 +3207,49 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e initiative is a SKILL CHECK — Perception by default — rolled on a d20, not a flat
-  // DEX modifier (the 5e assumption). A monster statblock carries a flat Perception
-  // modifier, which IS the initiative bonus, so a numeric `perception` is used directly.
-  // Otherwise (a character sheet of ability SCORES) Perception is Wisdom-based, so we fall
-  // back to the WIS modifier. Returns 0 when neither is present/numeric.
-  initiativeModifier(abilities: Record<string, unknown> | null | undefined): number {
+  // DEX modifier (the 5e assumption). A numeric `perception` is already the full
+  // Perception modifier and is LEVEL-INCLUSIVE (monster statblocks publish Perception
+  // with level baked in; a character sheet that stores a computed Perception number is
+  // the same). Otherwise (a character sheet of ability SCORES) Perception is
+  // Wisdom-based and at least trained for every PC (Player Core), so the fallback is
+  // `WIS mod + pf2eProficiencyBonus(level, 'trained')` — never the bare 5e-style WIS
+  // mod alone (issue #491). When `representation` is `modifier` (mapped creatures),
+  // WIS is already a modifier and must not be converted again (issue #767); that path
+  // does not add proficiency (creatures expose Perception instead).
+  initiativeModifier(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+    level?: number,
+  ): number {
     if (!abilities) return 0;
     const perception = abilities.perception ?? abilities.Perception;
+    // Level-inclusive: return as-is (do not add proficiency a second time).
     if (typeof perception === 'number') return perception;
     const wisScore = abilities.WIS ?? abilities.wisdom ?? abilities.wis;
-    if (typeof wisScore === 'number') return this.abilityModifier(wisScore);
-    return 0;
+    if (typeof wisScore !== 'number') return 0;
+    const wisMod = resolveAbilityModifier(this, wisScore, representation);
+    // Character-sheet fallback only: ability scores + known level → trained Perception.
+    if (
+      representation === 'score' &&
+      typeof level === 'number' &&
+      Number.isFinite(level)
+    ) {
+      return wisMod + pf2eProficiencyBonus(Math.max(0, Math.trunc(level)), 'trained');
+    }
+    return wisMod;
   },
+  // Issue #611: PF2e keeps tied combatants in preserved roll/add order (sortOrder).
+  // Do NOT re-sort by DEX/initMod after equal initiative totals.
+  initiativeTiebreak: sortOrderAscTiebreak,
   conditions: PF2E_CONDITIONS,
+  // PF2e turn workspace (issue #413): the three-action economy plus a reaction — a
+  // concrete demonstration that action economy is adapter-defined, not the 5e four.
+  actionEconomy: PF2E_ACTION_ECONOMY,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     // PF2e statblocks list ability MODIFIERS (Str +4), not scores; the importer stores them
-    // under `abilityMods`. Surface those under the seam's `abilityScores` field, and fold in
-    // the flat Perception modifier so initiativeModifier (above) can read it back out.
+    // under `abilityMods`. Surface those under the seam's `abilityScores` field with
+    // `abilityRepresentation: 'modifier'`, and fold in the flat Perception modifier so
+    // initiativeModifier (above) can read it back out without a second conversion.
     const mods = (d.abilityMods ?? d.ability_mods ?? d.abilityScores ?? d.abilities) as
       | Record<string, unknown>
       | undefined;
@@ -2064,16 +3262,21 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
         : typeof perception === 'number'
           ? { perception }
           : undefined;
+    // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits). An
+    // empty traits array joins to "" — treat that (and a blank string) as absent so the
+    // creatureType/type fallback still applies instead of surfacing an empty label.
+    const traitsRaw = Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits;
+    const traits = typeof traitsRaw === 'string' && traitsRaw.trim() === '' ? undefined : traitsRaw;
     return {
       size: d.size,
-      // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
-      creatureType: d.creatureType ?? d.type ?? (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits),
+      creatureType: traits ?? d.creatureType ?? d.type,
       // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
       challengeRating: d.level ?? d.challengeRating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,
       speed: d.speed ?? d.speeds,
       abilityScores,
+      abilityRepresentation: 'modifier',
       specialAbilities: d.specialAbilities ?? d.special ?? d.abilities_special,
       actions: d.actions ?? d.attacks,
     };
@@ -2086,6 +3289,11 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
   levelBasedDC: pf2eLevelBasedDC,
   simpleDC: pf2eSimpleDC,
   degreeOfSuccess: pf2eDegreeOfSuccess,
+  // PF2e roll catalog (issue #415): proficiency adds your LEVEL plus a rank bonus, and checks
+  // report degrees of success — a concrete demonstration that the catalog math is adapter-owned.
+  buildCheckCatalog(character: CheckCatalogCharacter): RollCheckDefinition[] {
+    return pf2eCheckCatalog(this, character);
+  },
 };
 
 /** Stable family id of the Starfinder 2e adapter. */
@@ -2110,8 +3318,10 @@ import { StarfinderAdapter, STARFINDER_ADAPTER_ID } from './starfinder-adapter';
 export * from './starfinder-adapter';
 import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
-import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
+import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS, OSR_VARIANT_ADAPTERS } from './osr-adapter';
 export * from './osr-adapter';
+import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
+export * from './adapters/starforged';
 
 /**
  * Registry of rule-system adapters, keyed by family id (and, for a system with its own
@@ -2139,9 +3349,18 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
   'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
+  // Ironsworn: Starforged (issue #405). Registered under BOTH its family id and the datasworn
+  // pack slug a campaign's `ruleSystem` holds (matching the sibling adapters), so this
+  // PbtA/narrative pack resolves to the neutral Starforged adapter instead of silently
+  // inheriting 5e combat via the unknown-slug fallback. STARFORGED_PACK_SLUG mirrors the
+  // importer's DATASWORN_PACK_SLUG ('ironsworn-starforged').
+  [STARFORGED_ADAPTER_ID]: StarforgedAdapter,
+  [STARFORGED_PACK_SLUG]: StarforgedAdapter,
 };
-// OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
-for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
+// OSR pack (issue #300, #765): each retroclone slug resolves to its own native adapter.
+for (const slug of OSR_RULE_SYSTEM_SLUGS) {
+  ADAPTERS[slug] = OSR_VARIANT_ADAPTERS[slug] ?? OsrAdapter;
+}
 
 /**
  * Resolve the adapter for a campaign's `ruleSystem`. `ruleSystem` is a rule-pack slug
@@ -2152,6 +3371,38 @@ for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
 export function ruleSystemAdapter(ruleSystem?: string | null): RuleSystemAdapter {
   if (ruleSystem && ADAPTERS[ruleSystem]) return ADAPTERS[ruleSystem];
   return Dnd5eAdapter;
+}
+
+/**
+ * Resolve statblock presentation labels for a campaign's `ruleSystem` (issue #763).
+ *
+ * Unlike {@link ruleSystemAdapter}, unknown / empty / homebrew slugs do **not** inherit
+ * the 5e "Challenge" / "Armor Class" copy — they return {@link NEUTRAL_STATBLOCK_PRESENTATION}
+ * ("Rating" / "Defense") so a homebrew pack isn't mislabeled with 5e jargon. Registered
+ * adapters (including explicit 5e) return their native `presentation`.
+ */
+export function statblockPresentation(ruleSystem?: string | null): StatblockPresentation {
+  if (ruleSystem && ADAPTERS[ruleSystem]) {
+    return ADAPTERS[ruleSystem].presentation ?? NEUTRAL_STATBLOCK_PRESENTATION;
+  }
+  return NEUTRAL_STATBLOCK_PRESENTATION;
+}
+
+/**
+ * Unique registered adapters (by family id), stable order — for snapshot / parity tests
+ * that must cover every system once (issue #763).
+ */
+export function listRuleSystemAdapters(): RuleSystemAdapter[] {
+  const seen = new Set<string>();
+  const out: RuleSystemAdapter[] = [];
+  for (const adapter of Object.values(ADAPTERS)) {
+    if (seen.has(adapter.id)) continue;
+    seen.add(adapter.id);
+    out.push(adapter);
+  }
+  // Sort by id so snapshot order does not depend on ADAPTERS insertion order.
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
 }
 
 /**
@@ -2171,6 +3422,40 @@ export function ddbImportSupported(ruleSystem?: string | null): boolean {
   const adapter = ADAPTERS[ruleSystem];
   if (!adapter) return false; // unrecognized slug — don't trust an unknown pack
   return adapter.supportsDdbImport === true;
+}
+
+/**
+ * Whether encounter-difficulty estimation should run for a campaign whose `ruleSystem`
+ * is the given slug (issue #429).
+ *
+ * - Empty / unrecognized slugs fall back to the 5e estimator (same default as combat math)
+ *   so homebrew tables still get XP guidance — zero-data fights surface as `unknown`, not
+ *   a fake Trivial band.
+ * - A registered non-5e adapter (PF2e, OSR, …) that does not opt in returns unsupported.
+ */
+export function encounterDifficultySupported(ruleSystem?: string | null): boolean {
+  if (!ruleSystem) return true; // homebrew → 5e fallback
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter) return true; // unrecognized → 5e fallback
+  return adapter.supportsEncounterDifficulty === true;
+}
+
+/**
+ * Resolve difficulty for a campaign rule-system slug (issue #429). Supported adapters own
+ * the math/labels; registered non-supporting systems return an explicit unsupported result.
+ */
+export function estimateEncounterDifficultyForRuleSystem(
+  ruleSystem: string | null | undefined,
+  input: EncounterDifficultyInput,
+): EncounterDifficulty {
+  if (!ruleSystem || !ADAPTERS[ruleSystem]) {
+    return Dnd5eAdapter.estimateEncounterDifficulty!(input);
+  }
+  const adapter = ADAPTERS[ruleSystem];
+  if (!adapter.supportsEncounterDifficulty || !adapter.estimateEncounterDifficulty) {
+    return unsupportedEncounterDifficulty(adapter.label, input);
+  }
+  return adapter.estimateEncounterDifficulty(input);
 }
 
 // ---------- generic uploaded rule packs (issue #19) ----------
@@ -2281,7 +3566,12 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'upload']),
+  // Derived from RulePackInstallSource so the two lists can't drift: a new install source
+  // automatically becomes a valid job source. 'other' is excluded — it's a back-compat install
+  // alias that routes through the Open5e path (newJob('open5e', …)), so a job's source is never
+  // literally 'other'. 'upload' is added — it's the one source that only ever exists as a job
+  // (RulePackUpload), never as a RulePackInstall.source.
+  source: z.enum([...RulePackInstallSource.exclude(['other']).options, 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
@@ -2295,11 +3585,36 @@ export const RulePackInstallJob = z.object({
 });
 export type RulePackInstallJob = z.infer<typeof RulePackInstallJob>;
 
+/** Default page size for GET /rules/search (issue #613). */
+export const RULE_SEARCH_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on rule search — clients page with `cursor`, not a huge page. */
+export const RULE_SEARCH_MAX_LIMIT = 100;
+
 export const RuleSearchQuery = z.object({
   q: z.string().max(200).default(''),
   type: RuleEntryType.optional(),
   pack: z.string().max(80).optional(), // pack slug
+  /** Page size (default 50, max 100). Omitted → default; never silently returns a truncated array. */
+  limit: z.number().int().positive().max(RULE_SEARCH_MAX_LIMIT).optional(),
+  /** Opaque stable cursor from a previous page's `nextCursor` (issue #613). */
+  cursor: z.string().max(512).optional(),
 });
+
+/**
+ * Paginated rule-search response (issue #613).
+ *
+ * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true.
+ */
+export const RuleSearchPage = z.object({
+  items: z.array(RuleEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).optional(),
+  limit: z.number().int().positive(),
+});
+export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an
@@ -2317,7 +3632,12 @@ export const EncounterDigest = z.object({
   questId: Id.nullable(),
   sessionId: Id.nullable(),
   combatantCount: z.number().int().nonnegative(),
-  downCount: z.number().int().nonnegative(), // combatants at 0 HP / down / dead
+  // Issue #625: the "down" tally used to sum EVERY combatant at 0 HP / dead — including
+  // every dead monster — which inflated a glance at the summary. It now counts only
+  // PCs (and NPCs) who fell; defeated monsters are reported separately so each number
+  // is meaningful on its own.
+  downCount: z.number().int().nonnegative(), // kind='character'|'npc' at 0 HP / down / dead
+  monstersDefeated: z.number().int().nonnegative(), // kind='monster' at 0 HP / dead
 });
 export type EncounterDigest = z.infer<typeof EncounterDigest>;
 export const CampaignSummary = z.object({
@@ -2341,7 +3661,12 @@ export const CampaignSummary = z.object({
   }),
   inventoryCount: z.number().int().nonnegative(), // number of loot/inventory items tracked
   commentCount: z.number().int().nonnegative(), // discussion comments the caller may see (anchor-visibility redacted)
-  nextSession: ScheduledSessionWithRsvps.nullable(), // the soonest not-yet-past game night (with RSVPs), or null
+  // Issue #818: split "happening now" from "next" so an in-progress game night stays
+  // visible without hiding the later upcoming event. `nextSession` is the soonest
+  // not-yet-started night (scheduledAt >= now); `inProgressSession` is the soonest
+  // still inside its [scheduledAt, scheduledAt+duration) window.
+  inProgressSession: ScheduledSessionWithRsvps.nullable(),
+  nextSession: ScheduledSessionWithRsvps.nullable(),
   openInboxCount: z.number().int().nonnegative(),
 });
 export type CampaignSummary = z.infer<typeof CampaignSummary>;
@@ -2437,6 +3762,8 @@ export const AuthStatus = z.object({
   // the UI must use neutral "SSO" copy; no issuer/client/group details belong here.
   oidcProviderName: z.string().max(80).nullable(),
   version: z.string(),
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
 });
 export type AuthStatus = z.infer<typeof AuthStatus>;
 
@@ -2485,6 +3812,18 @@ export const SettingsUpdate = ServerSettings.partial();
 const OidcField = z.string().trim().max(2048);
 const OidcProviderNameField = z.string().trim().max(80);
 
+/** Non-secret origin of a single OIDC field value used during a diagnostic probe (issue #848). */
+export const OidcConfigValueSource = z.enum(['draft', 'stored', 'environment', 'default']);
+export type OidcConfigValueSource = z.infer<typeof OidcConfigValueSource>;
+
+/** Last successful (or attempted) admin end-to-end OIDC diagnostic — never includes secrets. */
+export const OidcLastE2eTest = z.object({
+  testedAt: IsoDate,
+  fingerprint: z.string(), // non-secret fingerprint of the config that was tested
+  ok: z.boolean(),
+});
+export type OidcLastE2eTest = z.infer<typeof OidcLastE2eTest>;
+
 /** OIDC settings as returned to admins (GET). Never includes the client secret. */
 export const OidcSettings = z.object({
   providerName: z.string(),
@@ -2500,6 +3839,10 @@ export const OidcSettings = z.object({
   enabled: z.boolean(), // effective config is complete (issuer + clientId + clientSecret all resolve)
   envKeys: z.array(z.string()), // OIDC_* env vars currently set — these override the stored values
   effectiveRedirectUri: z.string(), // the callback URL the flow will actually use
+  /** Non-secret fingerprint of the effective (env-over-stored) config — compare to lastE2eTest.fingerprint. */
+  configFingerprint: z.string(),
+  /** Most recent admin end-to-end diagnostic result, if any. */
+  lastE2eTest: OidcLastE2eTest.nullable().default(null),
 });
 export type OidcSettings = z.infer<typeof OidcSettings>;
 
@@ -2517,19 +3860,83 @@ export const OidcSettingsUpdate = z.object({
 });
 export type OidcSettingsUpdate = z.infer<typeof OidcSettingsUpdate>;
 
-/** Test-connection request. Optional issuer lets an admin validate before saving; omitted = test the effective issuer. */
-export const OidcTestRequest = z.object({ issuer: OidcField.optional() });
+/**
+ * Diagnostic probe request (issue #848). Optional draft fields let an admin
+ * validate before saving; omitted fields resolve from env-over-stored effective
+ * config. `clientSecret` is write-only: omit/blank reuses the effective secret.
+ */
+export const OidcTestRequest = z.object({
+  issuer: OidcField.optional(),
+  clientId: OidcField.optional(),
+  clientSecret: z.string().max(2048).optional(),
+  redirectUri: OidcField.optional(),
+  adminGroup: OidcField.optional(),
+  allowedGroup: OidcField.optional(),
+  groupsClaim: OidcField.optional(),
+  scope: OidcField.optional(),
+});
 export type OidcTestRequest = z.infer<typeof OidcTestRequest>;
 
-/** Result of fetching + validating the issuer's OIDC discovery document. */
+/** Per-check status for OIDC diagnostics. `skip` = not exercised by this probe kind. */
+export const OidcCheckStatus = z.enum(['pass', 'fail', 'skip']);
+export type OidcCheckStatus = z.infer<typeof OidcCheckStatus>;
+
+export const OidcCheckResult = z.object({
+  status: OidcCheckStatus,
+  message: z.string(),
+});
+export type OidcCheckResult = z.infer<typeof OidcCheckResult>;
+
+export const OidcDiagnosticChecks = z.object({
+  discovery: OidcCheckResult,
+  redirectClient: OidcCheckResult,
+  tokenExchange: OidcCheckResult,
+  requiredClaims: OidcCheckResult,
+  groupPolicy: OidcCheckResult,
+});
+export type OidcDiagnosticChecks = z.infer<typeof OidcDiagnosticChecks>;
+
+/** Which diagnostic probe produced the result. */
+export const OidcDiagnosticKind = z.enum(['discovery', 'e2e']);
+export type OidcDiagnosticKind = z.infer<typeof OidcDiagnosticKind>;
+
+/**
+ * Result of an OIDC diagnostic probe (discovery-only or end-to-end test login).
+ * Never echoes secrets. `message` for a successful discovery probe is
+ * "Discovery reachable." (issue #848) — not a claim that login works.
+ */
 export const OidcTestResult = z.object({
   ok: z.boolean(),
+  kind: OidcDiagnosticKind,
   issuer: z.string(),
   message: z.string(),
   authorizationEndpoint: z.string().nullable().default(null),
   tokenEndpoint: z.string().nullable().default(null),
+  testedAt: IsoDate,
+  /** Non-secret fingerprint of the config values that were tested. */
+  fingerprint: z.string(),
+  /** Per-field non-secret origin of each value used in the probe. */
+  fieldSources: z.object({
+    issuer: OidcConfigValueSource,
+    clientId: OidcConfigValueSource,
+    clientSecret: OidcConfigValueSource,
+    redirectUri: OidcConfigValueSource,
+    adminGroup: OidcConfigValueSource,
+    allowedGroup: OidcConfigValueSource,
+    groupsClaim: OidcConfigValueSource,
+    scope: OidcConfigValueSource,
+  }),
+  checks: OidcDiagnosticChecks,
 });
 export type OidcTestResult = z.infer<typeof OidcTestResult>;
+
+/** Response from starting an admin-only end-to-end OIDC test login (issue #848). */
+export const OidcTestLoginStart = z.object({
+  authorizationUrl: z.string(),
+  fingerprint: z.string(),
+  fieldSources: OidcTestResult.shape.fieldSources,
+});
+export type OidcTestLoginStart = z.infer<typeof OidcTestLoginStart>;
 
 export const CampaignMember = z.object({
   id: Id,
@@ -2543,8 +3950,24 @@ export const CampaignMember = z.object({
   ...timestamps,
 });
 export type CampaignMember = z.infer<typeof CampaignMember>;
-export const MemberCreate = z.object({ userId: Id, role: Role, characterId: Id.nullable().optional() });
-export const MemberUpdate = z.object({ role: Role.optional(), characterId: Id.nullable().optional() });
+/**
+ * Issue #819 — exclusive character seat model: at most one campaign_members row may
+ * link a given characterId. Reassigning a seated (or otherwise owned) character to
+ * another member requires an explicit `confirmTransfer: true` so the server can
+ * atomically unlink the previous seat and move ownership; without it the write is
+ * rejected with 409 CHARACTER_SEAT_TAKEN instead of silently stealing controls.
+ */
+export const MemberCreate = z.object({
+  userId: Id,
+  role: Role,
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
+export const MemberUpdate = z.object({
+  role: Role.optional(),
+  characterId: Id.nullable().optional(),
+  confirmTransfer: z.boolean().optional(),
+});
 
 // Server-admin-only membership integrity diagnostics/recovery (#849). These
 // shapes expose operational metadata only: campaign identity/name, account ids,
@@ -2617,6 +4040,14 @@ export const InviteCreate = z.object({
   maxUses: z.number().int().min(1).max(1000).nullable().optional(),
 });
 export type InviteCreate = z.infer<typeof InviteCreate>;
+
+// DM kill-switch for public invite links (issue #857) — mirrors SessionSharePolicyUpdate.
+// Disabling suspends every outstanding code without deleting rows; re-enabling is a
+// deliberate act and is refused while the campaign is archived or trashed.
+export const InvitePolicyUpdate = z.object({ enabled: z.boolean() });
+export type InvitePolicyUpdate = z.infer<typeof InvitePolicyUpdate>;
+export const InviteMutationResult = z.object({ revoked: z.number().int().nonnegative() });
+export type InviteMutationResult = z.infer<typeof InviteMutationResult>;
 
 // Public preview of a valid invite (GET /invites/:code) — just enough for the
 // join page to say what you're joining and as what. campaignId is included so
@@ -2833,9 +4264,12 @@ export const Proposal = z.object({
   entityId: Id.nullable().default(null),
   action: ProposalAction,
   payload: z.record(z.string(), z.unknown()), // the Create/Update body that would have been applied
-  // The target entity's state captured at propose time (update proposals only; null for
+  // The target entity's state captured at propose time (update/delete proposals; null for
   // creates) — lets the DM review UI render a real before/after diff even if the entity
-  // changes between propose and review.
+  // changes between propose and review. Persisted as the full DM-review snapshot
+  // (dmSecret included). Non-DM proposer egress (create response, self-view list, MCP,
+  // member export) projects a redacted/omitted view so dmSecret and unrevealed entities
+  // never leak through the approval queue (issue #817).
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
   // Human-readable attribution: the display name of the USER who submitted, even when
   // the write came in over a PAT (resolved to the token's owning user — issue #124).
@@ -2962,6 +4396,92 @@ export const AI_DM_MODE_CAPABILITIES: Readonly<
   },
 };
 
+/**
+ * Canonical privacy boundary for optional external AI providers (issue #455).
+ * Campfire is local-by-default: campaign data lives on your server. When an admin
+ * or DM configures an OpenAI-compatible, Anthropic, or Gemini provider, selected
+ * campaign context is sent to that endpoint for AI DM turns, Co-DM drafts, scribe
+ * recaps, and map generation. Trust copy (login page, provider settings, docs) and
+ * the policy-backed unit test both read from here so the words stay anchored to
+ * what the server actually sends.
+ */
+export interface AiExternalProviderContextCategory {
+  /** Short label for UI lists. */
+  label: string;
+  /** One-line description of what may leave the server when a provider is enabled. */
+  description: string;
+  /**
+   * A keyword the privacy notice must mention so a copy edit cannot quietly drop a
+   * category the server may send (mirrors AI_DM_MODE_CAPABILITIES.copyKeyword).
+   */
+  copyKeyword: string;
+}
+
+export const AI_EXTERNAL_PROVIDER_PRIVACY = {
+  /** Deep-link anchor for the provider privacy notice in settings / admin UI. */
+  settingsAnchorId: 'ai-provider-privacy',
+  loginTagline:
+    'Open-source and free to self-host · your campaign data stays on your server by default; enabling an external AI provider sends only the context listed in its privacy notice.',
+  loginFeatureTitle: 'Self-hosted & private',
+  loginFeatureBody:
+    'Your table, your server, your data. Campaign content stays local unless you opt in to an external AI provider — then only the disclosed context leaves for generation. Export the whole campaign to JSON or Markdown anytime.',
+  noticeTitle: 'External AI provider privacy',
+  localByDefault:
+    'By default Campfire stores your campaign on this server and does not contact any LLM vendor. Connected MCP agents read through the API; their traffic stays between your agent and your server unless you point the agent at an external model.',
+  externalException:
+    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in (map generation only).',
+  contextCategories: [
+    {
+      label: 'Campaign summary',
+      description: 'Player-visible campaign overview (hidden entities and dmSecret fields excluded).',
+      copyKeyword: 'summary',
+    },
+    {
+      label: 'Session-zero charter',
+      description: 'Agreed lines, veils, safety tools, and house rules.',
+      copyKeyword: 'charter',
+    },
+    {
+      label: 'Live world state',
+      description: 'Calendar, running encounters, party status, and current location/environment.',
+      copyKeyword: 'world',
+    },
+    {
+      label: 'DM steering',
+      description: 'Per-campaign persona and house rules you write in AI DM settings (DM-only).',
+      copyKeyword: 'steering',
+    },
+    {
+      label: 'Turn prompts & tool reads',
+      description: 'What players said, plus player-scoped tool results during AI turns (secrets redacted).',
+      copyKeyword: 'tool',
+    },
+    {
+      label: 'Co-DM / scribe source material',
+      description: 'Your brief or session notes sent for drafting proposals or recaps.',
+      copyKeyword: 'scribe',
+    },
+    {
+      label: 'Map generation prompts',
+      description: 'Your map prompt and theme; campaign secrets only if you check the explicit opt-in.',
+      copyKeyword: 'map',
+    },
+    {
+      label: 'Authorized supports',
+      description: 'Practical access supports a participant has explicitly consented to share with AI narration.',
+      copyKeyword: 'consent',
+    },
+  ] satisfies readonly AiExternalProviderContextCategory[],
+  exclusions: [
+    'Stored API keys (write-only; never sent to any provider)',
+    'DM-only secrets by default (hidden entities, dmSecret fields, unexplored locations)',
+    "Other campaigns' data",
+    'Map campaign secrets unless you explicitly opt in per request',
+  ],
+  retentionNote:
+    "Campfire does not control how your chosen provider stores or retains prompts, tool results, or model replies. Review that vendor's privacy policy and data-retention terms before saving a provider. Removing a provider stops new outbound calls; it does not erase data already held by the vendor.",
+} as const;
+
 // One AI-DM "seat" per campaign (created lazily on first configure/read).
 export const AiDmSeat = z.object({
   campaignId: Id,
@@ -3011,6 +4531,27 @@ export const AiDmTurnResult = z.object({
 });
 export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 
+// Per-turn usage history (issue #1060). One row per metered token spend
+// (driver step, co-DM draft, scribe run). Powers the DM's usage sparkline and
+// audit view. Returned by GET /campaigns/:id/ai-dm/usage-history newest-first.
+export const AiDmUsageHistoryEntry = z.object({
+  id: Id,
+  campaignId: Id,
+  tokensUsed: z.number().int().nonnegative(),
+  action: z.string(),   // e.g. 'ai-dm.driver.turn', 'ai-dm.scribe'
+  model: z.string(),
+  actor: z.string(),
+  createdAt: IsoDate,
+});
+export type AiDmUsageHistoryEntry = z.infer<typeof AiDmUsageHistoryEntry>;
+
+export const AiDmUsageHistoryResponse = z.object({
+  items: z.array(AiDmUsageHistoryEntry),
+  totalTokens: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative(),
+});
+export type AiDmUsageHistoryResponse = z.infer<typeof AiDmUsageHistoryResponse>;
+
 // ── Co-DM authoring: draft content for the approval queue (issue #313) ────────
 // The AI acts as a co-DM that DRAFTS content the human DM reviews. A `draft`
 // request is turned by the configured provider into structured entity content and
@@ -3019,7 +4560,7 @@ export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
@@ -3062,6 +4603,27 @@ export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
 export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'gemini', 'mock']);
 export type AiProviderConfigType = z.infer<typeof AiProviderConfigType>;
 
+// ── Provider CAPABILITIES model (issue #410) ──────────────────────────────────
+// Genuine AI map generation (#410) can only route honestly if it knows what each
+// configured provider can actually DO. A text-only model (Anthropic today) must NOT
+// be asked to "generate an image" and then have its prose passed off as one; an
+// OpenAI-compatible endpoint with an images model CAN. These booleans are declared
+// per provider TYPE (the server factory owns the concrete per-type table — see
+// providerCapabilities()) and surfaced to clients so the web wizard can show cost /
+// readiness and pick concept-art vs battle-map modes before spending anything.
+//
+//  - text            — chat/completions style narration + structured output.
+//  - toolCalling      — the model can request tool/function calls (drives the driver).
+//  - imageGeneration  — the provider exposes a text-to-image endpoint we can call.
+//  - imageEditing     — optional: it can edit/inpaint an existing image (mask/refine).
+export const AiProviderCapabilities = z.object({
+  text: z.boolean(),
+  toolCalling: z.boolean(),
+  imageGeneration: z.boolean(),
+  imageEditing: z.boolean().optional(),
+});
+export type AiProviderCapabilities = z.infer<typeof AiProviderCapabilities>;
+
 // Non-secret description of where the effective credential comes from. `server`
 // means a campaign override is borrowing the server-default stored credential;
 // `environment` means the matching OPENAI_API_KEY / ANTHROPIC_API_KEY is in use.
@@ -3094,7 +4656,10 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // The primary exfiltration fix binds the API key to its own scope's endpoint (see
 // AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
 // what an override endpoint may even look like. `http` is permitted so self-hosted
-// local model servers (e.g. http://localhost:11434) keep working.
+// local model servers (e.g. http://localhost:11434) can be expressed — but the server
+// applies a separate SSRF host policy (issue #1064): cloud metadata / link-local are
+// always blocked, and private/loopback hosts require an operator opt-in
+// (`AI_PROVIDER_ALLOW_PRIVATE_HOSTS`) or an explicit host allowlist.
 const AiProviderBaseUrl = z
   .string()
   .trim()
@@ -3538,6 +5103,26 @@ export const Encounter = z.object({
   // Grid geometry (issue #238). 'square' (default) or 'hex' — a pointy-top hex overlay. Older
   // DBs backfill to 'square' via migration, preserving the original square-only behaviour.
   gridType: GridType.default('square'),
+  // Grid CALIBRATION for aligning the overlay to a map's own printed grid (issue #417).
+  // Every field is expressed in the same isotropic unit — percent of the rendered map's
+  // WIDTH — so the overlay, snapping, and the ruler share ONE transform (see the web
+  // mapRenderedBounds module) that every viewport (DM cockpit + player views) renders
+  // identically. Defaults reproduce the pre-#417 behaviour exactly (origin at the map's
+  // top-left, square cells the width of gridSize, no rotation), so existing encounters are
+  // visually unchanged. All are DM-only PATCHes like the rest of the grid config.
+  //   - gridOffsetX/gridOffsetY: the grid origin, offset from the map's top-left corner
+  //     (percent of map width; a printed grid rarely starts exactly at the corner).
+  //   - gridCellHeight: independent cell HEIGHT (percent of map width); null = square, i.e.
+  //     the same as gridSize. Equal numeric values for gridSize/gridCellHeight => square px.
+  //   - gridRotation: overlay rotation in degrees (a scanned/printed grid is often slightly
+  //     skewed). Bounded to ±45 to keep the cell axes unambiguous.
+  //   - gridOpacity: overlay line opacity (0 = invisible, 1 = solid). Default 0.35 matches
+  //     the historical hardcoded line alpha.
+  gridOffsetX: z.number().min(-100).max(100).default(0),
+  gridOffsetY: z.number().min(-100).max(100).default(0),
+  gridCellHeight: z.number().min(1).max(100).nullable().default(null),
+  gridRotation: z.number().min(-45).max(45).default(0),
+  gridOpacity: z.number().min(0).max(1).default(0.35),
   // Fog of war (issue #40, phase 3). null = never configured (map fully visible). See FogState.
   fog: FogState.nullable().default(null),
   // Shared AoE templates (issue #238) — circle/cone/line shapes every client sees, unlike the
@@ -3558,7 +5143,7 @@ export const EncounterCreate = z.object({
   locationId: Id.nullable().optional(),
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
-  // Entity-level secrecy (issue #262) — start an encounter hidden (DM prep). Default false.
+  // Entity-level secrecy (issue #262/#754) — omit defaults to DM-only prep; pass false to create visible.
   hidden: z.boolean().optional(),
 });
 // Edit an encounter's name, its location/quest/session links (issue #126), and/or its
@@ -3578,6 +5163,15 @@ export const EncounterUpdate = z.object({
   gridSnap: z.boolean().optional(),
   // Grid geometry (issue #238) — dm only. 'square' | 'hex'.
   gridType: GridType.optional(),
+  // Grid calibration (issue #417) — dm only. Align the overlay to a map's printed grid:
+  // origin offset, independent cell height, rotation, and overlay opacity. Each field is
+  // independently settable; gridCellHeight: null restores square cells. Omitting a field
+  // leaves it unchanged (the whole endpoint is optimistic-concurrency + DM-gated as before).
+  gridOffsetX: z.number().min(-100).max(100).optional(),
+  gridOffsetY: z.number().min(-100).max(100).optional(),
+  gridCellHeight: z.number().min(1).max(100).nullable().optional(),
+  gridRotation: z.number().min(-45).max(45).optional(),
+  gridOpacity: z.number().min(0).max(1).optional(),
   // Fog of war (issue #40, phase 3) — dm only. Replace the whole fog state (enable/disable +
   // revealed rectangles); null clears it. The dedicated reveal_map_region MCP tool appends
   // a single rectangle for an AI DM without round-tripping the full mask.
@@ -3656,6 +5250,26 @@ export const GeneratedMapResult = z.object({
 });
 export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
 
+/**
+ * Result of a *preview* generate call (issue #409): the rendered SVG markup plus the
+ * same reproducibility/grid metadata a real generate returns — but with NO attachment.
+ * The map-generation wizard renders this to show the DM a candidate map (and lets them
+ * reroll the seed) WITHOUT persisting anything, so previewing/rerolling never leaves an
+ * orphan attachment or burns the campaign's storage quota. Because generation is
+ * deterministic by seed, "Use this map" reproduces the previewed map exactly by replaying
+ * the same seed through the normal (persisting) generate/attach endpoints.
+ */
+export const GeneratedMapPreview = z.object({
+  svg: z.string(),
+  seed: z.string(),
+  kind: MapKind,
+  widthCells: z.number().int().positive(),
+  heightCells: z.number().int().positive(),
+  roomCount: z.number().int().nonnegative(),
+  gridConfig: MapGridConfig,
+});
+export type GeneratedMapPreview = z.infer<typeof GeneratedMapPreview>;
+
 // ---------- open map SOURCES (issue #303) ----------
 // Complements the first-party procedural generator (#306) with EXTERNAL, license-clean
 // ways for a DM to get a map. The hard reality (#303): there is no bulk dataset of open
@@ -3718,29 +5332,231 @@ export const ImportMapAttribution = z.object({
 });
 export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
 
-// ---------- encounter difficulty (5e XP-budget estimation, issue #58) ----------
-// Computed (read-only) difficulty band for an encounter: the party's summed 5e XP
-// thresholds vs the total adjusted monster XP (monster CR->XP with the standard
-// number-of-monsters multiplier). `trivial` is below the party's Easy threshold.
-export const DifficultyBand = z.enum(['trivial', 'easy', 'medium', 'hard', 'deadly']);
-export type DifficultyBand = z.infer<typeof DifficultyBand>;
-export const EncounterDifficulty = z.object({
-  band: DifficultyBand,
-  // Party XP thresholds (sum across the PC combatants' per-level thresholds).
-  thresholds: z.object({
-    easy: z.number().int().nonnegative(),
-    medium: z.number().int().nonnegative(),
-    hard: z.number().int().nonnegative(),
-    deadly: z.number().int().nonnegative(),
-  }),
-  partySize: z.number().int().nonnegative(), // number of PC (character) combatants counted
-  partyLevels: z.array(z.number().int()), // the PC levels that fed the thresholds
-  monsterCount: z.number().int().nonnegative(), // number of monster combatants counted
-  totalMonsterXp: z.number().int().nonnegative(), // raw summed monster XP (pre-multiplier)
-  multiplier: z.number(), // 5e encounter multiplier for the monster count
-  adjustedXp: z.number().int().nonnegative(), // totalMonsterXp * multiplier, compared to thresholds
+// ---------- genuine AI map generation (issue #410) ----------
+// Turns a DM's free-form brief ("a fog-drowned crypt with a collapsed altar and two
+// flanking corridors") into map candidates. Unlike the deterministic procedural
+// generator (#306), this ROUTES through the configured AI provider when it can actually
+// make an image — and stays HONEST when it can't: a text-only provider (Anthropic) can
+// only produce a structured BLUEPRINT, which Campfire renders through its OWN procedural
+// renderer and labels as such (never "Anthropic generated this image"). The whole flow is
+// orphan-safe: previews live in memory and NOTHING is written to disk or the attachment
+// store until the DM explicitly attaches a chosen candidate.
+
+/**
+ * Coerce a free-form theme string to a valid {@link MapTheme}, or `undefined` when it
+ * can't be mapped (issue #410). The AI (or a chip) may propose any theme word
+ * ("volcanic", "sunless", "sylvan"); the procedural renderer only knows a fixed palette
+ * enum, so an un-normalized theme used to hard-FAIL `GenerateMapParams.parse`. This maps
+ * common synonyms onto the nearest palette and drops anything unknown (so generation
+ * proceeds with the kind's default theme instead of 400ing). Pure + deterministic.
+ */
+export function normalizeMapTheme(input: unknown): MapTheme | undefined {
+  if (typeof input !== 'string') return undefined;
+  const v = input.trim().toLowerCase();
+  if (v === '') return undefined;
+  // Exact enum match first.
+  const direct = MapTheme.safeParse(v);
+  if (direct.success) return direct.data;
+  // Synonym / keyword mapping onto the fixed palette (stone/cavern/forest/crypt).
+  const table: Array<[readonly string[], MapTheme]> = [
+    [['cave', 'cavern', 'underground', 'grotto', 'volcanic', 'lava', 'subterranean', 'mine', 'sunless'], 'cavern'],
+    [['forest', 'wood', 'woods', 'woodland', 'jungle', 'sylvan', 'grove', 'swamp', 'marsh', 'wilderness', 'outdoor', 'nature', 'grass'], 'forest'],
+    [['crypt', 'tomb', 'grave', 'graveyard', 'catacomb', 'undead', 'necro', 'ossuary', 'mausoleum', 'burial'], 'crypt'],
+    [['stone', 'dungeon', 'keep', 'castle', 'fortress', 'ruins', 'temple', 'brick', 'masonry', 'rock', 'gray', 'grey'], 'stone'],
+  ];
+  for (const [keys, theme] of table) {
+    if (keys.some((k) => v.includes(k))) return theme;
+  }
+  return undefined;
+}
+
+/** Concept art (illustrative, no grid guarantee) vs a tactical battle map (grid-aligned). */
+export const AiMapMode = z.enum(['battle-map', 'concept-art']);
+export type AiMapMode = z.infer<typeof AiMapMode>;
+
+/**
+ * How a candidate was actually produced — the honesty backbone of #410. `image-provider`
+ * means a real text-to-image provider drew it; `procedural-blueprint` means a text-only
+ * provider produced a structured blueprint that Campfire's OWN procedural renderer drew
+ * (labeled as such — we never claim the text model made an image); `external-instructions`
+ * means no capable provider was available and Campfire returned steps for a client-side
+ * external generator instead of a fabricated image.
+ */
+export const AiMapGenerationMethod = z.enum(['image-provider', 'procedural-blueprint', 'external-instructions']);
+export type AiMapGenerationMethod = z.infer<typeof AiMapGenerationMethod>;
+
+/** Lifecycle of an AI map generation job. */
+export const AiMapJobStatus = z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled']);
+export type AiMapJobStatus = z.infer<typeof AiMapJobStatus>;
+
+/**
+ * Structured "chips" the web UI offers so a brief is composable rather than a blank box
+ * (issue #410): pick terrain / encounter type / mood / hazards / landmarks / grid size.
+ * All optional; they are folded into the prompt AND used to seed the blueprint fallback.
+ */
+export const AiMapChips = z.object({
+  terrain: z.string().max(60).optional(),
+  encounterType: z.string().max(60).optional(),
+  mood: z.string().max(60).optional(),
+  hazards: z.array(z.string().max(40)).max(12).default([]),
+  landmarks: z.array(z.string().max(40)).max(12).default([]),
+  /** Grid size in cells (square), used for battle-map layout + calibration hints. */
+  gridSizeCells: z.number().int().min(4).max(60).optional(),
 });
-export type EncounterDifficulty = z.infer<typeof EncounterDifficulty>;
+export type AiMapChips = z.infer<typeof AiMapChips>;
+
+/** Pixel dimensions for an image-provider render (bounded; ignored for procedural SVG). */
+export const AiMapDimensions = z.object({
+  width: z.number().int().min(256).max(4096),
+  height: z.number().int().min(256).max(4096),
+});
+export type AiMapDimensions = z.infer<typeof AiMapDimensions>;
+
+/**
+ * The request to generate map candidates (issue #410). `theme` is a FREE-FORM string here
+ * (normalized server-side via {@link normalizeMapTheme}); `count` bounds the number of
+ * previews (2–4 typical). `includeCampaignSecrets` is false by default — campaign secrets
+ * are NEVER sent to a provider unless the DM explicitly opts in.
+ */
+export const AiMapGenerationRequest = z.object({
+  prompt: z.string().min(1).max(2000),
+  mode: AiMapMode.default('battle-map'),
+  chips: AiMapChips.optional(),
+  kind: MapKind.optional(),
+  size: MapSize.optional(),
+  theme: z.string().max(60).optional(),
+  dimensions: AiMapDimensions.optional(),
+  count: z.number().int().min(1).max(4).default(2),
+  seed: z.string().min(1).max(64).optional(),
+  complexity: z.number().min(0).max(1).optional(),
+  gridScale: z.number().positive().max(1000).optional(),
+  gridUnit: z.string().min(1).max(12).optional(),
+  /** Explicitly opt in to include DM-only campaign context in the prompt (default: never). */
+  includeCampaignSecrets: z.boolean().default(false),
+  /** Override the image model for this request (else the provider's configured default). */
+  imageModel: z.string().min(1).max(120).optional(),
+});
+export type AiMapGenerationRequest = z.infer<typeof AiMapGenerationRequest>;
+
+/** Result of the deterministic content-moderation gate run on the prompt before spending. */
+export const AiMapModeration = z.object({
+  flagged: z.boolean(),
+  categories: z.array(z.string().max(40)).default([]),
+  note: z.string().max(400).nullable().default(null),
+});
+export type AiMapModeration = z.infer<typeof AiMapModeration>;
+
+/** Honest provenance recorded for every candidate + persisted with the attachment audit. */
+export const AiMapProvenance = z.object({
+  method: AiMapGenerationMethod,
+  /** Provider type that served (or would have served) the request; null for external-instructions. */
+  providerType: z.string().nullable(),
+  model: z.string().nullable(),
+  /** Human-readable, HONEST label shown in the UI + stamped into the audit trail. */
+  label: z.string().max(300),
+  seed: z.string().nullable().default(null),
+});
+export type AiMapProvenance = z.infer<typeof AiMapProvenance>;
+
+/** Rough cost/usage surfaced BEFORE and after generation so the DM can decide to spend. */
+export const AiMapCost = z.object({
+  imageCount: z.number().int().nonnegative(),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  /** Best-effort estimate in USD when the provider/model pricing is known; else null. */
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+});
+export type AiMapCost = z.infer<typeof AiMapCost>;
+
+/** A single generated candidate the DM can select / refine / crop / attach. */
+export const AiMapPreview = z.object({
+  id: z.string(),
+  method: AiMapGenerationMethod,
+  /** Inline SVG markup (procedural-blueprint renders) — mutually exclusive with imageBase64. */
+  svg: z.string().nullable().default(null),
+  /** Base64-encoded raster bytes (image-provider renders) — mutually exclusive with svg. */
+  imageBase64: z.string().nullable().default(null),
+  mime: z.string().max(60),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  seed: z.string(),
+  gridConfig: MapGridConfig.nullable().default(null),
+  provenance: AiMapProvenance,
+  /** Per-candidate warnings (e.g. "grid not guaranteed on a concept-art render"). */
+  warnings: z.array(z.string().max(200)).default([]),
+});
+export type AiMapPreview = z.infer<typeof AiMapPreview>;
+
+/**
+ * Readiness hints shown BEFORE generating (issue #410): whether doors/corridors/grid are
+ * likely to work for the chosen mode/provider, plus warnings. Concept-art + raster image
+ * providers cannot guarantee a usable grid or connected corridors, so the UI warns.
+ */
+export const AiMapReadiness = z.object({
+  mode: AiMapMode,
+  method: AiMapGenerationMethod,
+  gridLikely: z.boolean(),
+  doorsLikely: z.boolean(),
+  corridorsLikely: z.boolean(),
+  warnings: z.array(z.string().max(200)).default([]),
+  cost: AiMapCost,
+  moderation: AiMapModeration,
+  /** Declared capabilities of the resolved provider (null when none configured). */
+  capabilities: AiProviderCapabilities.nullable().default(null),
+});
+export type AiMapReadiness = z.infer<typeof AiMapReadiness>;
+
+/**
+ * The full job view returned by create/status/refine (issue #410). Previews are in-memory
+ * only until attached; `externalInstructions` is populated for the external-instructions
+ * fallback so a DM without a capable provider still has a concrete next step.
+ */
+export const AiMapGenerationJob = z.object({
+  id: z.string(),
+  campaignId: Id,
+  status: AiMapJobStatus,
+  progress: z.number().int().min(0).max(100),
+  mode: AiMapMode,
+  method: AiMapGenerationMethod,
+  prompt: z.string(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  dimensions: AiMapDimensions.nullable().default(null),
+  moderation: AiMapModeration,
+  cost: AiMapCost,
+  previews: z.array(AiMapPreview).default([]),
+  externalInstructions: z.array(z.string().max(400)).default([]),
+  warnings: z.array(z.string().max(200)).default([]),
+  error: z.string().max(400).nullable().default(null),
+  createdBy: z.string(),
+  ...timestamps,
+});
+export type AiMapGenerationJob = z.infer<typeof AiMapGenerationJob>;
+
+/** Refine an existing job: tweak the prompt/chips and regenerate (issue #410). */
+export const AiMapRefineRequest = z.object({
+  prompt: z.string().min(1).max(2000).optional(),
+  chips: AiMapChips.optional(),
+  count: z.number().int().min(1).max(4).optional(),
+  /** Reuse this preview's seed as the base for the refined render (keeps continuity). */
+  fromPreviewId: z.string().optional(),
+});
+export type AiMapRefineRequest = z.infer<typeof AiMapRefineRequest>;
+
+/**
+ * Attach a chosen candidate as a real (DM-hidden) 'map' attachment (issue #410). Optional
+ * crop/rotation and grid-calibration overrides are applied before persisting. When
+ * `encounterId` is set the map is also linked to that encounter's battle map + grid — this
+ * is the "reveal/replace a live map" path the driver seat is NOT permitted to take without
+ * DM policy/approval.
+ */
+export const AttachGeneratedMapRequest = z.object({
+  previewId: z.string().min(1),
+  encounterId: Id.optional(),
+  filename: z.string().max(160).optional(),
+});
+export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
+
+// Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 
 // ---------- encounter generator (issue #304) ----------
 // First-party, offline & deterministic encounter builder. There is no open dataset of
@@ -3774,6 +5590,9 @@ export const EncounterGenerateFilters = z.object({
   // Restrict to a single installed rule pack by slug (list_rule_packs). Omitting spans
   // every installed pack.
   packSlug: z.string().min(1).max(160).optional(),
+  // Hazards are opt-in encounter building blocks. When true, first-class hazard entries
+  // join monsters in the same rating/XP budget search; false/omitted preserves legacy output.
+  includeHazards: z.boolean().optional(),
 });
 export type EncounterGenerateFilters = z.infer<typeof EncounterGenerateFilters>;
 
@@ -3789,7 +5608,7 @@ export const EncounterGenerate = z.object({
   // active characters (issue #115 lifecycle).
   party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
   filters: EncounterGenerateFilters.optional(),
-  // Upper bound on the number of monsters (before the shape's own bound). Defaults to 12.
+  // Upper bound on the number of monsters/hazards (before the shape's own bound). Defaults to 12.
   count: z.number().int().min(1).max(30).optional(),
   shape: EncounterShape.optional(),
   // Deterministic seed. Omit to have the server mint one (returned in the suggestion so
@@ -3805,14 +5624,15 @@ export const EncounterGenerate = z.object({
 });
 export type EncounterGenerate = z.infer<typeof EncounterGenerate>;
 
-/** One suggested monster line (a stack of `count` identical statblocks). */
+/** One suggested monster or hazard line (a stack of `count` identical entries). */
 export const EncounterSuggestionCombatant = z.object({
   ruleEntryId: Id, // compendium statblock id — feed straight to add_combatant
   name: z.string(),
-  cr: z.number().nullable(), // numeric CR (null if the statblock's CR was unparseable)
-  xp: z.number().int().nonnegative(), // per-monster XP (5e CR→XP table)
-  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it
-  count: z.number().int().min(1), // how many of this monster to add
+  entryType: z.enum(['monster', 'hazard']).default('monster'),
+  cr: z.number().nullable(), // numeric rating used by the active budget — CR for monsters, level-as-CR for PF2e/SF2e hazards (null if unparseable)
+  xp: z.number().int().nonnegative(), // per-entry XP (monster or hazard; 5e CR→XP table)
+  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it (null when unknown)
+  count: z.number().int().min(1), // how many of this entry (monster or hazard) to add
 });
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
@@ -3834,6 +5654,211 @@ export const EncounterSuggestion = z.object({
 });
 export type EncounterSuggestion = z.infer<typeof EncounterSuggestion>;
 
+// ---------- encounter preview / tune / idempotent commit wizard (issue #412) ----------
+// The generator (#304) produced a one-shot homogeneous suggestion. The DM wizard needs a
+// richer, INTERACTIVE contract: a non-mutating preview that returns a multi-slot roster with
+// per-creature inspection data + a difficulty EXPLANATION + actionable warnings, a set of
+// deterministic TUNE operations (reroll all / reroll one slot / swap / adjust count / pin) that
+// round-trip a plan so re-rolls are reproducible and pinned slots are preserved, and an
+// IDEMPOTENT commit that atomically creates the encounter + combatants (+ links/map/grid/tokens)
+// with no partial encounters or duplicate combatants. Preview stays read-only; commit is the
+// single write. All three are reused by REST and MCP.
+
+/**
+ * Per-creature inspection data lifted from a compendium statblock for the preview roster
+ * (issue #412): the AC/HP/actions/saves/traits a DM expands inline. Every field is best-effort
+ * and nullable — a manual/partial statblock simply omits what it lacks (surfaced as a warning),
+ * never fabricated. Labels come from the adapter's presentation metadata upstream; the values
+ * here are the raw mechanical facts.
+ */
+export const EncounterCreatureInspection = z.object({
+  /** True when the linked rule entry resolved to a usable statblock. */
+  hasStatblock: z.boolean(),
+  size: z.string().max(60).nullable().default(null),
+  creatureType: z.string().max(120).nullable().default(null),
+  armorClass: z.number().int().nullable().default(null),
+  hitPointsMax: z.number().int().nullable().default(null),
+  hitPointsText: z.string().max(80).nullable().default(null),
+  speed: z.string().max(200).nullable().default(null),
+  challengeRating: z.number().nullable().default(null),
+  xp: z.number().int().nonnegative(),
+  /** Ability scores/mods as the statblock lists them (raw, adapter representation applies). */
+  abilities: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  savingThrows: z.array(z.object({ name: z.string().max(40), value: z.string().max(20) })).max(24).default([]),
+  traits: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+  actions: z.array(z.object({ name: z.string().max(120), text: z.string().max(1200) })).max(50).default([]),
+});
+export type EncounterCreatureInspection = z.infer<typeof EncounterCreatureInspection>;
+
+/** Machine-readable warning category surfaced on a preview (issue #412). */
+export const EncounterWarningCode = z.enum([
+  'role-duplication', // the same statblock fills 2+ slots
+  'action-economy', // monster/PC action-count imbalance (solo vs party, or swarm)
+  'missing-statblock', // a slot's creature has no resolvable HP/CR
+  'unsupported-system', // the rule system has no encounter-budget math
+  'difficulty-unknown', // monsters present but carry no CR/XP to score
+  'swinginess', // high-variance fight (a lone big creature, or well over Deadly)
+  'empty-roster', // no monsters were selected
+  'no-candidates', // the compendium had nothing to pick from
+  'band-miss', // the requested band could not be assembled from the compendium
+]);
+export type EncounterWarningCode = z.infer<typeof EncounterWarningCode>;
+
+export const EncounterWarning = z.object({
+  code: EncounterWarningCode,
+  severity: z.enum(['info', 'warn']),
+  message: z.string().min(1).max(400),
+});
+export type EncounterWarning = z.infer<typeof EncounterWarning>;
+
+/**
+ * One resolved slot in a preview roster (issue #412). `slotId` is a stable handle the tune
+ * operations target; `seed` makes a per-slot reroll reproducible; `pinned` protects a slot from
+ * reroll-all. A slot is a stack of `count` identical creatures (maps cleanly onto add_combatant).
+ */
+export const EncounterRosterSlot = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  name: z.string(),
+  entryType: z.enum(['monster', 'hazard']).default('monster'),
+  cr: z.number().nullable(),
+  xp: z.number().int().nonnegative(),
+  hpMax: z.number().int().nullable(),
+  count: z.number().int().min(1),
+  pinned: z.boolean(),
+  seed: z.number().int().nonnegative(),
+  inspection: EncounterCreatureInspection,
+});
+export type EncounterRosterSlot = z.infer<typeof EncounterRosterSlot>;
+
+/**
+ * The slot state a client rounds-trips back into a preview/tune/commit request (issue #412) —
+ * just the plan (no resolved inspection). The server re-resolves creatures + difficulty from
+ * these, so tuning is stateless: reroll/pin/swap are pure functions of the plan + a seed.
+ */
+export const EncounterRosterSlotInput = z.object({
+  slotId: z.string().min(1).max(40),
+  ruleEntryId: Id,
+  count: z.number().int().min(1).max(50),
+  pinned: z.boolean().default(false),
+  seed: z.number().int().nonnegative().max(4294967295),
+  entryType: z.enum(['monster', 'hazard']).optional(),
+});
+export type EncounterRosterSlotInput = z.infer<typeof EncounterRosterSlotInput>;
+
+/**
+ * A single tune operation applied to the current plan (issue #412). Deterministic: `reroll-*`
+ * mint/accept a seed so the same seed reproduces the same pick; `pin` protects a slot from
+ * `reroll-all`; `swap-slot` replaces a slot's creature with an explicit compendium entry;
+ * `adjust-count` changes the stack size; add/remove grow or shrink the roster.
+ */
+export const EncounterTuneOp = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('reroll-all'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('reroll-slot'), slotId: z.string().min(1).max(40), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('swap-slot'), slotId: z.string().min(1).max(40), ruleEntryId: Id }),
+  z.object({ op: z.literal('adjust-count'), slotId: z.string().min(1).max(40), count: z.number().int().min(1).max(50) }),
+  z.object({ op: z.literal('pin'), slotId: z.string().min(1).max(40), pinned: z.boolean() }),
+  z.object({ op: z.literal('add-slot'), seed: z.number().int().nonnegative().max(4294967295).optional() }),
+  z.object({ op: z.literal('remove-slot'), slotId: z.string().min(1).max(40) }),
+]);
+export type EncounterTuneOp = z.infer<typeof EncounterTuneOp>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/preview (issue #412) and the preview_encounter
+ * MCP tool. A first call with just `difficulty` (+ optional filters/party/shape/count/seed)
+ * generates a fresh roster; passing back `roster` (the plan) with an optional `tune` op applies
+ * a deterministic tuning step. NON-MUTATING — nothing is persisted.
+ */
+export const EncounterPreviewRequest = z.object({
+  difficulty: DifficultyBand,
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  filters: EncounterGenerateFilters.optional(),
+  count: z.number().int().min(1).max(30).optional(),
+  shape: EncounterShape.optional(),
+  seed: z.number().int().nonnegative().max(4294967295).optional(),
+  /** The current plan being tuned; omit for a fresh generation. */
+  roster: z.array(EncounterRosterSlotInput).max(30).optional(),
+  /** A tuning operation to apply to `roster`. */
+  tune: EncounterTuneOp.optional(),
+});
+export type EncounterPreviewRequest = z.infer<typeof EncounterPreviewRequest>;
+
+/**
+ * Read-only preview result (issue #412): the resolved multi-slot roster, the adapter-owned
+ * difficulty + a human-readable explanation, actionable warnings, and, when the compendium or
+ * the rule system can't support the request, actionable `fallbacks` (never a dead end). The
+ * `plan` echoes the round-trippable slot inputs so a client can send them straight back into a
+ * tune/commit call.
+ */
+export const EncounterPreview = z.object({
+  roster: z.array(EncounterRosterSlot),
+  plan: z.array(EncounterRosterSlotInput),
+  targetBand: DifficultyBand,
+  difficulty: EncounterDifficulty,
+  explanation: EncounterDifficultyExplanation,
+  totalXp: z.number().int().nonnegative(),
+  shape: EncounterShape,
+  seed: z.number().int().nonnegative(),
+  matchedBand: z.boolean(),
+  party: z.array(z.number().int()),
+  warnings: z.array(EncounterWarning),
+  /** Actionable next steps when the compendium is empty or the system lacks budget math. */
+  fallbacks: z.array(z.string().max(400)),
+});
+export type EncounterPreview = z.infer<typeof EncounterPreview>;
+
+/** Optional per-slot token placement applied atomically at commit (issue #412). */
+export const EncounterCommitTokenPlacement = z.object({
+  slotId: z.string().min(1).max(40),
+  /** Base position (0–100 percent of the map). Copies in a stack fan out from here. */
+  tokenX: z.number().min(0).max(100),
+  tokenY: z.number().min(0).max(100),
+});
+export type EncounterCommitTokenPlacement = z.infer<typeof EncounterCommitTokenPlacement>;
+
+/** Optional map + grid to attach atomically at commit (issue #412). */
+export const EncounterCommitMap = z.object({
+  /** An existing campaign attachment (kind map|image) to set as the battle map. */
+  mapAttachmentId: Id,
+  gridSize: z.number().min(1).max(100).optional(),
+  gridScale: z.number().positive().optional(),
+  gridUnit: z.string().max(12).optional(),
+  gridType: GridType.optional(),
+});
+export type EncounterCommitMap = z.infer<typeof EncounterCommitMap>;
+
+/**
+ * Request body for POST /campaigns/:id/encounters/commit (issue #412) and the commit_encounter
+ * MCP tool. Commits a tuned roster to a real encounter in ONE atomic transaction. `idempotencyKey`
+ * makes a retried commit a no-op that returns the SAME encounter (never a duplicate). The
+ * encounter defaults hidden + preparing (DM prep, #262). Links/map/grid/token placement are all
+ * applied inside the same transaction — either everything lands or nothing does.
+ */
+export const EncounterCommit = z.object({
+  idempotencyKey: z.string().min(1).max(120),
+  name: z.string().min(1).max(120).optional(),
+  targetBand: DifficultyBand.optional(),
+  party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
+  roster: z.array(EncounterRosterSlotInput).min(1).max(30),
+  locationId: Id.nullable().optional(),
+  questId: Id.nullable().optional(),
+  sessionId: Id.nullable().optional(),
+  hidden: z.boolean().optional(),
+  map: EncounterCommitMap.optional(),
+  tokens: z.array(EncounterCommitTokenPlacement).max(30).optional(),
+  /** Provenance for the audit trail (which surface committed, and any manual edits). */
+  source: z.string().max(60).optional(),
+  manualEdits: z.array(z.string().max(200)).max(50).optional(),
+});
+export type EncounterCommit = z.infer<typeof EncounterCommit>;
+
+/** Result of a commit (issue #412): the created encounter + whether this was an idempotent replay. */
+export const EncounterCommitResult = z.object({
+  encounter: z.lazy(() => EncounterWithCombatants),
+  idempotent: z.boolean(),
+});
+export type EncounterCommitResult = z.infer<typeof EncounterCommitResult>;
+
 // 'npc' combatants are DM-controlled like monsters (exact HP redacted for non-DM
 // viewers, no death saves) but carry an `npcId` link to the campaign NPC for
 // identity, and may optionally borrow a compendium statblock via `ruleEntryId`.
@@ -3852,6 +5877,88 @@ export type HpBand = z.infer<typeof HpBand>;
 // DeathState is declared near the top of the file (ahead of Character) so the
 // persistent Character echo can reference it; see its full docblock there.
 
+// ---------- current-turn workspace: effects + per-turn action economy (issue #413) ----------
+
+/**
+ * When a repeating effect prompts a save or applies its tick (issue #413). 5e "save ends"
+ * effects repeat at the END of the affected creature's turn; ongoing damage / regeneration
+ * conventionally apply at the START. `none` = no timed prompt (a static condition/buff).
+ */
+export const EffectTiming = z.enum(['start-of-turn', 'end-of-turn', 'none']);
+export type EffectTiming = z.infer<typeof EffectTiming>;
+
+/** What an active effect does, so the workspace can raise the right start/end-turn prompt. */
+export const ActiveEffectKind = z.enum(['ongoing-damage', 'regeneration', 'condition', 'buff', 'other']);
+export type ActiveEffectKind = z.infer<typeof ActiveEffectKind>;
+
+/**
+ * One tracked active effect on a combatant (issue #413) — the structured counterpart to the
+ * free-text `conditions` list, carrying DURATION and SAVE TIMING so the turn workspace can
+ * prompt "ongoing 5 fire damage (start of turn)" or "repeat DC 13 CON save (ends at end of
+ * turn)" and expire it automatically. `roundsRemaining` null = until removed; the service
+ * decrements it at the owner's turn boundary and drops the effect at 0. Persisted as a JSON
+ * array on the combatant (same convention as `conditions`), so it needs no new column per field.
+ */
+export const ActiveEffect = z.object({
+  id: z.string().min(1).max(40),
+  name: z.string().min(1).max(120),
+  kind: ActiveEffectKind.default('other'),
+  timing: EffectTiming.default('none'),
+  // Rounds left before the effect expires; null = indefinite (until manually removed).
+  roundsRemaining: z.number().int().nonnegative().nullable().default(null),
+  // Ongoing damage / regeneration magnitude applied at `timing`; null = no automatic HP tick.
+  amount: z.number().int().nullable().default(null),
+  // Repeat-save context for "save ends" effects; null when the effect has no save.
+  saveAbility: z.string().max(24).nullable().default(null),
+  saveDc: z.number().int().nullable().default(null),
+  notes: z.string().max(300).default(''),
+});
+export type ActiveEffect = z.infer<typeof ActiveEffect>;
+
+/**
+ * Per-turn action-economy + resource tracking on a combatant (issue #413). `used` counts
+ * consumption against the adapter's {@link ActionEconomyModel} slot keys (e.g. `{ action: 1,
+ * bonus: 0 }`); `movementUsedFt` is feet moved this turn; `concentration` names the effect the
+ * combatant is concentrating on (null = none). `delaying` / `readied` capture the DM/table
+ * turn-order tools (a combatant who delayed, or a readied action + its trigger). The whole
+ * `used` map (including reaction) and movement reset at the START of the owner's turn by the
+ * service — a 5e reaction refreshes at the start of your turn — while `concentration` persists
+ * across turns until it is broken. Persisted as one JSON column on the combatant.
+ */
+export const CombatantTurnState = z.object({
+  // Factory default so each parse gets its OWN empty `used` map — the service mutates
+  // `turnState.used` in place, and a shared default object would leak usage between
+  // combatants (and could mutate the module-level EMPTY_TURN_STATE).
+  used: z.record(z.string().max(40), z.number().int().nonnegative()).default(() => ({})),
+  movementUsedFt: z.number().nonnegative().default(0),
+  concentration: z.string().max(160).nullable().default(null),
+  delaying: z.boolean().default(false),
+  readied: z.string().max(200).nullable().default(null),
+});
+export type CombatantTurnState = z.infer<typeof CombatantTurnState>;
+
+/** Default (empty) turn state — a combatant that has used nothing and holds no effects. */
+export const EMPTY_TURN_STATE: CombatantTurnState = {
+  used: {},
+  movementUsedFt: 0,
+  concentration: null,
+  delaying: false,
+  readied: null,
+};
+
+/** OSR group-initiative side label. Trims; empty/whitespace normalizes to null. */
+export const InitiativeGroup = z.preprocess(
+  (val) => {
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      return trimmed.length === 0 ? null : trimmed;
+    }
+    return val;
+  },
+  z.string().min(1).max(40).nullable(),
+);
+
 export const Combatant = z.object({
   id: Id,
   encounterId: Id,
@@ -3863,6 +5970,10 @@ export const Combatant = z.object({
   name: z.string().min(1).max(120),
   initiative: z.number().int().nullable().default(null),
   initMod: z.number().int().default(0),
+  // Initiative side/group for OSR group-initiative variants (issue #765). Combatants sharing
+  // the same group name (e.g. "party", "monsters") roll one d6 for the whole side. null =
+  // individual initiative (default for 5e and individual-mode OSR).
+  initiativeGroup: InitiativeGroup.default(null),
   // Nullable so a monster's exact HP can be redacted to `null` for non-DM viewers
   // (issue #43); `hpBand` then carries the coarse status instead.
   hpCurrent: z.number().int().nullable().default(10),
@@ -3888,6 +5999,24 @@ export const Combatant = z.object({
   // Token footprint size category (issue #40, phase 2) — scales the rendered token on the
   // battle map (tiny→gargantuan). Defaults to 'medium' (a 1×1 cell). No effect on combat math.
   tokenSize: TokenSize.default('medium'),
+  // Ephemeral fog redaction flag (issue #418): when fog withholds tokenX/tokenY for a
+  // non-DM viewer, this is true so the client can distinguish "placed but outside the
+  // revealed area" from a truly unplaced token — without leaking coordinates. Always
+  // false for DMs and for tokens whose position is visible (or truly null in storage).
+  tokenHiddenByFog: z.boolean().default(false),
+  // Current-turn workspace state (issue #413): per-turn action-economy usage, movement,
+  // concentration, and delay/ready flags. Factory default so each parsed combatant gets a
+  // FRESH turn-state (with its own `used` map) rather than sharing one mutable object.
+  turnState: CombatantTurnState.default(() => ({
+    used: {},
+    movementUsedFt: 0,
+    concentration: null,
+    delaying: false,
+    readied: null,
+  })),
+  // Structured active effects with duration + save timing (issue #413), alongside the
+  // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
+  activeEffects: z.array(ActiveEffect).max(50).default([]),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -3899,6 +6028,10 @@ export const CombatantCreate = z.object({
   ruleEntryId: Id.optional(),
   hpMax: z.number().int().min(1).optional(),
   initMod: z.number().int().optional(),
+  // OSR group-initiative side label (issue #765). When the campaign adapter uses group
+  // initiative, combatants on the same side share one d6 roll. Defaults to kind-based
+  // ("party" for characters, "monsters" for monsters) when omitted on a group-mode system.
+  initiativeGroup: InitiativeGroup.optional(),
   // Add N identical combatants in one call (issue #114). When >1 the names are
   // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
   // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.
@@ -3909,6 +6042,16 @@ export const CombatantUpdate = z.object({
   hpSet: z.number().int().nonnegative().optional(),
   // Temp HP absolute set (issue #57). 0 clears it.
   hpTemp: z.number().int().min(0).optional(),
+  // Issue #620: explicit attacker attribution for damage/heal/death log events. When
+  // set to a combatant id, the combat-log entry records that combatant as the actor
+  // ("Ember hit Goblin 3 for 8"). Omit it and the server falls back to the current-turn
+  // combatant when one is set and distinct from the target. Pass `null` to opt out of
+  // attribution entirely (no current-turn fallback) — useful when a caller wants the
+  // legacy target-only phrasing. Ignored for non-HP / non-death patches. The id must
+  // reference a combatant in the same encounter (validated server-side); an unknown id
+  // is ignored rather than 400ing so a stale client (e.g. one that removed the
+  // attacker) can still apply damage without a second round-trip.
+  actorId: Id.nullable().optional(),
   // Death-save counters, absolute set 0–3 (issue #57). Reaching 3 failures -> dead;
   // 3 successes -> stable. Cleared automatically when the combatant is healed above 0.
   deathSaveSuccesses: z.number().int().min(0).max(3).optional(),
@@ -3945,7 +6088,50 @@ export const CombatantUpdate = z.object({
   tokenSize: TokenSize.optional(),
 });
 
-export const EncounterWithCombatants = Encounter.extend({ combatants: z.array(Combatant) });
+/**
+ * Combat HP slice compared against the character sheet on reopen/re-end (issue #466).
+ * When the sheet advanced after /end, the DM must choose a resync direction before
+ * reopening — never silently overwrite intervening healing/rest.
+ */
+export const HpSyncSlice = z.object({
+  hpCurrent: z.number().int(),
+  hpTemp: z.number().int().min(0),
+  deathState: DeathState,
+  deathSaveSuccesses: z.number().int().min(0).max(3),
+  deathSaveFailures: z.number().int().min(0).max(3),
+});
+export type HpSyncSlice = z.infer<typeof HpSyncSlice>;
+
+export const HpSyncConflict = z.object({
+  combatantId: Id,
+  characterId: Id,
+  name: z.string(),
+  combatant: HpSyncSlice,
+  sheet: HpSyncSlice.extend({ updatedAt: IsoDate }),
+});
+export type HpSyncConflict = z.infer<typeof HpSyncConflict>;
+
+export const HpResyncDirection = z.enum(['keep_combatant', 'pull_sheet']);
+export type HpResyncDirection = z.infer<typeof HpResyncDirection>;
+
+/** Body for POST /encounters/:id/reopen — required when hpSyncConflicts is non-empty. */
+export const EncounterReopen = z.object({
+  hpResync: z
+    .array(
+      z.object({
+        combatantId: Id,
+        direction: HpResyncDirection,
+      }),
+    )
+    .optional(),
+});
+export type EncounterReopen = z.infer<typeof EncounterReopen>;
+
+export const EncounterWithCombatants = Encounter.extend({
+  combatants: z.array(Combatant),
+  /** Present for DM reads of an ended encounter when sheet HP diverged from the snapshot (#466). */
+  hpSyncConflicts: z.array(HpSyncConflict).optional(),
+});
 export type EncounterWithCombatants = z.infer<typeof EncounterWithCombatants>;
 
 // roll-initiative response (issue #702). The encounter (with combatants) is returned as
@@ -3963,7 +6149,10 @@ export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiati
 // add/remove, death, rolls, next-turn/round, notes, overrides, and corrections), so
 // the DM can reconstruct "round 2: Ember Hound took 8 damage" for a recap and a
 // refresh no longer wipes it.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction']);
+// 'effect' (issue #413) records a start/end-of-turn effect resolution (ongoing damage,
+// regeneration tick, an expired effect, a prompted repeat save). Appended alongside the
+// existing types by the turn-advancement path; free-text column, so older DBs are unaffected.
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
 
 export const EncounterEvent = z.object({
@@ -3975,15 +6164,162 @@ export const EncounterEvent = z.object({
   // Free-text names, denormalized so the log renders without joining combatants
   // (which may since have been removed). `actor` is who acted (turn events, or a
   // heal source when known); `target` is who it happened to. Either may be null.
+  // Issue #869: for non-DMs these are projected from current hidden-NPC visibility
+  // (names appear after reveal); prefer `actorId`/`targetId` for stable identity.
   actor: z.string().max(200).nullable().default(null),
   target: z.string().max(200).nullable().default(null),
-  // Human phrasing of the event, deliberately kept free of exact monster HP totals
-  // so listing the log to a non-DM viewer can't leak what issue #43 redacts on the
-  // combatant rows (only the damage/heal delta is recorded, never the resulting HP).
+  // Stable combatant ids for role-aware projection (issue #869). Nullable when the
+  // event has no actor/target, or for rows written before the columns existed.
+  // Survives rename; listing re-derives display names from current combatant/NPC
+  // secrecy so a later reveal unmasks historical log lines.
+  actorId: Id.nullable().default(null),
+  targetId: Id.nullable().default(null),
+  // Human phrasing of the event. Must stay free of exact monster HP totals (issue
+  // #43) AND of combatant names that could bypass actor/target redaction (issue
+  // #869) — store deltas/outcomes only ("took 8 damage", "Combat started"); the
+  // UI composes names from actor/target.
   detail: z.string().max(500).default(''),
   createdAt: IsoDate,
 });
 export type EncounterEvent = z.infer<typeof EncounterEvent>;
+
+// ---------- current-turn workspace read model (issue #413) ----------
+// The turn workspace answers "what can I do now?" for the active combatant: the
+// adapter-defined action-economy slots (with usage + plain-language help), movement /
+// resources / reaction / concentration / active effects, suggested actions, and the
+// start/end-of-turn prompts the player and DM should resolve before advancing. It is a
+// READ MODEL derived server-side from the encounter + combatant + campaign-adapter state;
+// GET /encounters/:id/turn returns it, and it re-derives on every read (no stored blob).
+
+/** One action-economy slot as presented in the workspace: the adapter's slot + live usage. */
+export const TurnActionSlot = z.object({
+  key: z.string(),
+  label: z.string(),
+  help: z.string(),
+  kind: z.enum(['action', 'movement', 'reaction', 'resource']),
+  max: z.number().int().nonnegative(),
+  used: z.number().nonnegative(),
+  resetsAt: z.enum(['turn', 'round']),
+});
+export type TurnActionSlot = z.infer<typeof TurnActionSlot>;
+
+/** A suggested action pulled from the active combatant's sheet / statblock (issue #413). */
+export const TurnSuggestedAction = z.object({
+  name: z.string().min(1).max(160),
+  // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
+  source: z.string().max(40),
+  summary: z.string().max(600).default(''),
+});
+export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
+
+/** What a turn prompt is about, so the client can group/iconify it. */
+export const TurnPromptKind = z.enum([
+  'death-save',
+  'ongoing-damage',
+  'regeneration',
+  'recharge',
+  'repeat-save',
+  'expiring-effect',
+  'unresolved-action',
+  'concentration',
+]);
+export type TurnPromptKind = z.infer<typeof TurnPromptKind>;
+
+/**
+ * A start- or end-of-turn prompt the active combatant / DM should resolve (issue #413):
+ * a death save for a dying PC, an ongoing-damage tick, a regeneration heal, a "save ends"
+ * repeat save, an expiring effect, or an unresolved action at end of turn. Derived from
+ * combatant state; carries the effect id when it maps to an ActiveEffect so a client can act on it.
+ */
+export const TurnPrompt = z.object({
+  id: z.string().min(1).max(80),
+  kind: TurnPromptKind,
+  timing: z.enum(['start', 'end']),
+  combatantId: Id,
+  combatantName: z.string(),
+  message: z.string().max(300),
+  effectId: z.string().max(40).nullable().default(null),
+});
+export type TurnPrompt = z.infer<typeof TurnPrompt>;
+
+/** The current active combatant's identity + who (if anyone) controls it, for "your turn". */
+export const TurnActor = z.object({
+  combatantId: Id,
+  name: z.string(),
+  kind: CombatantKind,
+  characterId: Id.nullable().default(null),
+  // The user who owns the linked character (null for monsters/NPCs, or an unlinked PC).
+  ownerUserId: z.string().nullable().default(null),
+});
+export type TurnActor = z.infer<typeof TurnActor>;
+
+export const TurnWorkspace = z.object({
+  encounterId: Id,
+  status: EncounterStatus,
+  round: z.number().int().nonnegative(),
+  // The current actor (null when not running / empty roster) and who acts next.
+  current: TurnActor.nullable(),
+  next: TurnActor.nullable(),
+  // True when the requesting user owns the current combatant's character (drives the
+  // "your turn" announcement + enabling the player End-turn control).
+  isYourTurn: z.boolean(),
+  // True when the requesting user is permitted to end the current turn right now
+  // (DM always; a player only on their own turn when dmControlsTurns is false).
+  canEndTurn: z.boolean(),
+  // Campaign turn-control settings echoed for the client (issue #413).
+  dmControlsTurns: z.boolean(),
+  requireDmTurnConfirmation: z.boolean(),
+  // Adapter-defined action-economy slots + live usage for the current combatant.
+  actionEconomy: z.array(TurnActionSlot),
+  // Movement summary (feet) for the current combatant, when the system tracks it.
+  movement: z.object({ maxFt: z.number().nonnegative(), usedFt: z.number().nonnegative() }).nullable(),
+  reactionAvailable: z.boolean(),
+  concentration: z.string().nullable(),
+  activeEffects: z.array(ActiveEffect),
+  suggestedActions: z.array(TurnSuggestedAction),
+  startPrompts: z.array(TurnPrompt),
+  endPrompts: z.array(TurnPrompt),
+});
+export type TurnWorkspace = z.infer<typeof TurnWorkspace>;
+
+/**
+ * Body for POST /encounters/:id/end-turn (issue #413). `expectedCurrentCombatantId` opts
+ * into double-advance protection: the server only advances when the live current combatant
+ * still matches (a stale/duplicate click after someone else advanced is a 409, not a second
+ * skipped turn). When the campaign requires DM confirmation, a player's end-turn is staged
+ * (409) and the DM advances it directly (a DM end-turn / next-turn IS the confirmation).
+ */
+export const EncounterEndTurn = z.object({
+  expectedCurrentCombatantId: Id.nullable().optional(),
+});
+export type EncounterEndTurn = z.infer<typeof EncounterEndTurn>;
+
+/**
+ * Body for POST /encounters/:id/combatants/:cid/turn-state (issue #413) — declare/resolve
+ * action economy and effects on a combatant. All fields optional and independent:
+ *  - useSlot / releaseSlot: increment / decrement usage of an action-economy slot by 1;
+ *  - setSlotUsed: set a slot's usage to an absolute count (movement uses moveFt instead);
+ *  - moveFt: add feet to movementUsedFt (negative to correct); resetMovement clears it;
+ *  - concentration: set/clear what the combatant is concentrating on;
+ *  - addEffect / removeEffectId: add or drop a structured ActiveEffect;
+ *  - delaying / readied: the delay/ready turn-order tools;
+ *  - resetTurn: clear the per-turn slice (the whole `used` map + movement; concentration is kept).
+ * DM may edit any combatant; a player only their own linked character's combatant.
+ */
+export const CombatantTurnStatePatch = z.object({
+  useSlot: z.string().max(40).optional(),
+  releaseSlot: z.string().max(40).optional(),
+  setSlotUsed: z.object({ key: z.string().max(40), used: z.number().int().nonnegative() }).optional(),
+  moveFt: z.number().optional(),
+  resetMovement: z.boolean().optional(),
+  concentration: z.string().max(160).nullable().optional(),
+  addEffect: ActiveEffect.optional(),
+  removeEffectId: z.string().max(40).optional(),
+  delaying: z.boolean().optional(),
+  readied: z.string().max(200).nullable().optional(),
+  resetTurn: z.boolean().optional(),
+});
+export type CombatantTurnStatePatch = z.infer<typeof CombatantTurnStatePatch>;
 
 // ---------- inventory & loot (party treasury + per-character items) ----------
 export const ItemOwnerType = z.enum(['party', 'character']);
@@ -4005,7 +6341,20 @@ export const InventoryItem = z.object({
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;
 export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
-export const InventoryItemUpdate = InventoryItemCreate.partial();
+// Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
+// +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
+// absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
+// form cannot clobber a concurrent increment. Other item fields (name/notes/icon/
+// owner move) stay on the same PATCH. Server enforces the qty/qtyDelta exclusivity
+// and the CAS / idempotency requirements — kept as optional fields here so MCP
+// `InventoryItemUpdate.shape` still spreads cleanly.
+export const InventoryItemUpdate = InventoryItemCreate.partial().extend({
+  qtyDelta: z.number().int().optional(),
+  expectedUpdatedAt: IsoDate.optional(),
+  // Client-generated per-action key (UUID). Required with qtyDelta; optional on an
+  // absolute qty set so a lost-response retry can replay the committed item.
+  idempotencyKey: z.string().min(1).max(128).optional(),
+});
 
 // Party treasury — one row of coin totals per campaign (cp/sp/ep/gp/pp).
 const Coin = z.number().int().nonnegative();
@@ -4131,7 +6480,23 @@ export const CampaignEventType = z.enum([
   'encounter.ping',
   'schedule.updated',
   'membership.revoked',
+  // Issue #437: a member's role changed (promote/demote). Thin invalidation so the
+  // affected client's open UI can refetch /me and drop or reveal role-gated chrome
+  // without a full reload. Forwarded on the data path (unlike membership.revoked).
+  'membership.updated',
   'treasury.updated',
+  // Issue #421: character sheet / member-resource writes (stats, actions, slots, …).
+  'character.updated',
+  // Issue #415: a DM asked one or more players to roll a check/save (check.requested), and a
+  // targeted player answered it (check.resolved). Both are THIN id-only signals like the
+  // encounter.* ticks — the payload (DC, consequence text, breakdown) is read back over the
+  // permission-checked REST endpoints, never carried on the wire.
+  'check.requested',
+  'check.resolved',
+  // Issue #867: campaign moved to Trash. SSE controllers tear down EVERY open
+  // stream on the campaign (control signal — filtered from the data path like
+  // membership.revoked). A reconnect hits requireMember and 404s.
+  'campaign.trashed',
 ]);
 export type CampaignEventType = z.infer<typeof CampaignEventType>;
 export const CampaignEvent = z.discriminatedUnion('type', [
@@ -4180,6 +6545,18 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     at: IsoDate,
   }),
   z.object({
+    // Issue #437: a member's campaign role changed. `role` is the NEW effective role so
+    // the affected client can refresh /me (and other tabs via BroadcastChannel) and
+    // immediately show or hide DM chrome without waiting for a reload. `userId` matches
+    // RequestUser.id / String(campaignMembers.userId).
+    type: z.literal('membership.updated'),
+    campaignId: Id,
+    userId: z.string().max(120),
+    memberId: Id,
+    role: Role,
+    at: IsoDate,
+  }),
+  z.object({
     // Issue #582: the party treasury changed. A thin invalidation signal like the
     // encounter.* ticks: no coin payload (permission-checked REST read is authoritative),
     // so an open editor that snapshotted stale balances can mark itself stale and refetch
@@ -4191,6 +6568,49 @@ export const CampaignEvent = z.discriminatedUnion('type', [
     type: z.literal('treasury.updated'),
     campaignId: Id,
     userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #421: a character sheet (or member-linked resource on that sheet) changed.
+    // Thin invalidation only — no stats/actions payload — so run-session inline cards
+    // refetch the permission-checked character list without requiring an encounterId
+    // (the old SSE filter dropped these as non-encounter frames). `userId` is the actor
+    // (String(users.id)); `characterId` identifies which sheet went stale.
+    type: z.literal('character.updated'),
+    campaignId: Id,
+    characterId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #415: a DM requested a check/save from a character. Thin invalidation only —
+    // `requestId` identifies the persisted request, `characterId` the target sheet, `userId`
+    // the requesting DM (String(users.id)). The targeted player's client refetches the pending
+    // request over GET /campaigns/:id/check-requests (permission-checked) to render the prompt;
+    // the DC + consequence text never ride the wire.
+    type: z.literal('check.requested'),
+    campaignId: Id,
+    requestId: Id,
+    characterId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #415: a targeted player answered a check request (rolled once). Thin signal so the
+    // DM's client can drop the pending row / refetch; the roll itself is already in the shared
+    // dice feed. `userId` is the roller (String(users.id)).
+    type: z.literal('check.resolved'),
+    campaignId: Id,
+    requestId: Id,
+    characterId: Id,
+    userId: z.string().max(120),
+    at: IsoDate,
+  }),
+  z.object({
+    // Issue #867: the campaign was soft-deleted (moved to Trash). Control signal only —
+    // SSE controllers complete every open stream; filtered from the data path.
+    type: z.literal('campaign.trashed'),
+    campaignId: Id,
     at: IsoDate,
   }),
 ]);
@@ -4224,6 +6644,90 @@ export const DiceRoll = RollResult.extend({
   createdAt: IsoDate,
 });
 export type DiceRoll = z.infer<typeof DiceRoll>;
+
+// ---------- catalog check roll (issue #415) ----------
+// A request to roll a catalog check for a character. The server resolves the authoritative
+// modifier + expression from the adapter's roll catalog (clients never send the math), rolls,
+// records the roll to the shared dice log, and returns the transparent breakdown + outcome.
+export const CheckRollRequest = z.object({
+  checkId: z.string().min(1).max(60).describe('Stable catalog id from GET .../checks, e.g. "skill:Athletics", "save:DEX", "initiative"'),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']).default('flat').describe('Roll mode; advantage/disadvantage apply only where the system supports them'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
+  consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text recorded with the roll label'),
+});
+export type CheckRollRequest = z.infer<typeof CheckRollRequest>;
+
+/** The resolved check + persisted roll returned by the check-roll endpoint / MCP tool (issue #415). */
+export const CheckRollResponse = z.object({
+  check: z.object({
+    id: z.string(),
+    label: z.string(),
+    category: z.string(),
+    ability: z.string().nullable(),
+    proficiency: z.string().nullable(),
+    modifier: z.number().int(),
+    breakdown: z.array(z.object({ label: z.string(), value: z.number().int() })),
+    breakdownText: z.string(),
+    incomplete: z.boolean().optional(),
+  }),
+  mode: z.enum(['flat', 'advantage', 'disadvantage']),
+  roll: DiceRoll,
+  // PF2e degree of success (only present when the system reports degrees AND a dc was given).
+  degree: z.enum(['criticalFailure', 'failure', 'success', 'criticalSuccess']).optional(),
+});
+export type CheckRollResponse = z.infer<typeof CheckRollResponse>;
+
+// ---------- DM-initiated check requests (issue #415) ----------
+// The interactive "DM asks selected players to roll a check/save with a DC + consequence"
+// loop. A DM POSTs one request naming a checkId and one or more target characters; the server
+// fans it out to one persisted row per character. Each targeted player reads their pending
+// request(s) over a permission-checked REST read (the thin `check.requested` SSE tick only
+// tells them to refetch), rolls ONCE via the existing catalog-roll path, and sees the DM's
+// consequence text alongside the outcome. The request is then marked resolved.
+export const CheckRequestMode = z.enum(['flat', 'advantage', 'disadvantage']);
+export type CheckRequestMode = z.infer<typeof CheckRequestMode>;
+export const CheckRequestStatus = z.enum(['pending', 'resolved']);
+export type CheckRequestStatus = z.infer<typeof CheckRequestStatus>;
+
+/** DM input: request `checkId` from one or more target characters, with an optional DC + consequence. */
+export const CheckRequestCreate = z.object({
+  characterIds: z.array(Id).min(1).max(20).describe('Target character ids — one persisted request is created per character'),
+  checkId: z.string().min(1).max(60).describe('Stable catalog id (e.g. "save:DEX", "skill:Perception") — must exist in each target\'s catalog'),
+  mode: CheckRequestMode.default('flat').describe('Suggested roll mode; advantage/disadvantage apply only where the system supports them'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side when the player rolls'),
+  consequence: z.string().max(500).optional().describe('Optional DM-authored consequence text surfaced to the player with the prompt/result'),
+  encounterId: Id.optional().describe('Optional encounter this request is tied to (context only)'),
+});
+export type CheckRequestCreate = z.infer<typeof CheckRequestCreate>;
+
+/** A persisted, permission-checked check request as read by the DM / targeted player. */
+export const CheckRequest = z.object({
+  id: Id,
+  campaignId: Id,
+  characterId: Id,
+  characterName: z.string(),
+  encounterId: Id.nullable(),
+  checkId: z.string(),
+  checkLabel: z.string(),
+  mode: CheckRequestMode,
+  dc: z.number().int().nullable(),
+  consequence: z.string().nullable(),
+  status: CheckRequestStatus,
+  requestedByUserId: z.string(),
+  requestedByName: z.string(),
+  // The persisted dice-log roll id once resolved (null while pending).
+  rollId: Id.nullable(),
+  createdAt: IsoDate,
+  resolvedAt: IsoDate.nullable(),
+});
+export type CheckRequest = z.infer<typeof CheckRequest>;
+
+/** The resolved request plus the roll result returned when a player answers a check request. */
+export const CheckRequestResolution = z.object({
+  request: CheckRequest,
+  result: CheckRollResponse,
+});
+export type CheckRequestResolution = z.infer<typeof CheckRequestResolution>;
 
 // ---------- audit ----------
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
@@ -4305,6 +6809,8 @@ export type AdminMetricsDatabase = z.infer<typeof AdminMetricsDatabase>;
 
 export const AdminMetrics = z.object({
   version: z.string(), // server package.json version (same source as /healthz)
+  /** Optional git SHA / build id when the image stamped one (issue #432). */
+  commit: z.string().min(1).optional(),
   now: IsoDate, // server clock when this snapshot was taken
   startedAt: IsoDate, // process start (now - uptime)
   uptimeSeconds: z.number().nonnegative(),
@@ -4324,10 +6830,13 @@ export type AdminMetrics = z.infer<typeof AdminMetrics>;
 export const StorageCampaignUsage = z.object({
   campaignId: Id,
   name: z.string(),
-  fileCount: z.number().int().nonnegative(), // attachment rows for this campaign
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size for this campaign
+  fileCount: z.number().int().nonnegative(), // committed attachment rows for this campaign
+  reservedFileCount: z.number().int().nonnegative(), // in-flight quota reservations
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable attachment bytes
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
   quotaBytes: z.number().int().nonnegative().nullable(), // per-campaign cap, or null for unlimited
-  overQuota: z.boolean(), // totalBytes > quotaBytes (always false when unlimited)
+  overQuota: z.boolean(), // committed + reserved > quotaBytes (always false when unlimited)
 });
 export type StorageCampaignUsage = z.infer<typeof StorageCampaignUsage>;
 
@@ -4339,12 +6848,44 @@ export const StorageOrphans = z.object({
 });
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
+export const FsCleanupPendingItem = z.object({
+  id: z.number().int().positive(),
+  relPath: z.string(),
+  scope: z.enum(['attachment', 'campaign_purge']),
+  // `held` = reserved before metadata commit; drain must not erase until armed.
+  status: z.enum(['held', 'pending', 'failed']),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  updatedAt: IsoDate,
+});
+export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
+
+export const FsCleanupSummary = z.object({
+  pendingCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  /** Total rows in fs_deletion_queue (items may be truncated for the admin UI). */
+  queueCount: z.number().int().nonnegative(),
+  items: z.array(FsCleanupPendingItem),
+});
+export type FsCleanupSummary = z.infer<typeof FsCleanupSummary>;
+
+/** Response when metadata is removed but filesystem erasure may still be in flight (issue #727). */
+export const PermanentDeletionResult = z.object({
+  filesPending: z.boolean(),
+  pendingPaths: z.array(z.string()).optional(),
+});
+export type PermanentDeletionResult = z.infer<typeof PermanentDeletionResult>;
+
 export const StorageStats = z.object({
-  totalBytes: z.number().int().nonnegative(), // sum of attachment.size across all campaigns (DB view)
-  fileCount: z.number().int().nonnegative(), // total attachment rows
+  totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
+  committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
+  reservedBytes: z.number().int().nonnegative(), // quota held by in-flight publications
+  fileCount: z.number().int().nonnegative(), // total committed attachment rows
+  reservedFileCount: z.number().int().nonnegative(), // total reservation rows
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,
+  fsCleanup: FsCleanupSummary,
 });
 export type StorageStats = z.infer<typeof StorageStats>;
 

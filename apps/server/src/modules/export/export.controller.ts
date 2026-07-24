@@ -17,7 +17,14 @@ export class ExportController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'Export a campaign', description: 'dm role required. Bundles the full campaign (quests, npcs, locations, characters, sessions, notes) as a downloadable file.' })
+  @ApiOperation({
+    summary: 'Export a campaign',
+    description:
+      'dm role required. Returns the full campaign portability JSON (campaign, quests, npcs, locations, ' +
+      'characters, sessions, notes, comments, members, encounters, attachments metadata, factions, storyArcs, ' +
+      'timelineEvents, timelineCalendar, sessionZero, inventory, treasury, revisions, proposals) plus audit ' +
+      'history with auditMeta disclosure — not a full-server backup (see auditNote in the JSON). Use format=mdzip for a markdown zip.',
+  })
   @ApiQuery({ name: 'format', required: false, enum: ['json', 'mdzip'], description: "'mdzip' for a markdown-per-entity zip; omitted/anything else defaults to a single JSON document." })
   @ApiResponse({ status: 200, description: 'File download (application/json or application/zip, with Content-Disposition attachment).' })
   async export(
@@ -44,6 +51,8 @@ export class ExportController {
         .set({
           'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${filename}"`,
+          // Issue #730: exports must not enter HTTP or PWA caches.
+          'Cache-Control': 'private, no-store',
         })
         .end(zipBuffer);
       return;
@@ -56,6 +65,8 @@ export class ExportController {
       .set({
         'Content-Type': 'application/json',
         'Content-Disposition': `attachment; filename="${filename}"`,
+        // Issue #730: exports must not enter HTTP or PWA caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(JSON.stringify(data));
   }
@@ -86,6 +97,8 @@ export class ExportController {
       .set({
         'Content-Type': 'application/json',
         'Content-Disposition': `attachment; filename="${filename}"`,
+        // Issue #730: member exports must not enter HTTP or PWA caches.
+        'Cache-Control': 'private, no-store',
       })
       .send(JSON.stringify(data));
   }

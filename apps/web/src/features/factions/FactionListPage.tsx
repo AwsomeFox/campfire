@@ -5,40 +5,24 @@
  * browse & open a detail page.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, Link } from 'react-router-dom';
-import type { Faction, FactionStanding } from '@campfire/schema';
+import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
+import { PageHeader } from '../../components/PageHeader';
 import { GameIcon } from '../../components/GameIcon';
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
-
-export function standingVariant(standing: FactionStanding) {
-  switch (standing) {
-    case 'allied':
-    case 'friendly':
-      return 'completed' as const;
-    case 'hostile':
-    case 'unfriendly':
-      return 'failed' as const;
-    default:
-      return 'active' as const;
-  }
-}
+import { initials } from '../../lib/avatarText';
+import { formatStandingChip, standingVariant } from './standing';
 
 export default function FactionListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [factions, setFactions] = useState<Faction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,6 +31,8 @@ export default function FactionListPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newKind, setNewKind] = useState('');
+  // #754: quick-create defaults to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -72,9 +58,15 @@ export default function FactionListPage() {
     setSaving(true);
     setCreateError(null);
     try {
-      const faction = await api.post<Faction>(`${API}/campaigns/${id}/factions`, { name: newName.trim(), kind: newKind.trim() });
+      const hidden = audienceToHidden(audience);
+      const faction = await api.post<Faction>(`${API}/campaigns/${id}/factions`, {
+        name: newName.trim(),
+        kind: newKind.trim(),
+        hidden,
+      });
       setNewName('');
       setNewKind('');
+      setAudience('dm');
       setCreating(false);
       await load();
       navigate(`/c/${id}/factions/${faction.id}`);
@@ -114,20 +106,25 @@ export default function FactionListPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
       <Card className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-          <h1 className="font-bold text-white text-lg flex items-center gap-2"><GameIcon slug="black-flag" size={18} /> Factions</h1>
-          {isDm && !creating && (
-            <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setCreating(true)}>
-              + New faction
-            </Btn>
-          )}
-        </div>
+        <PageHeader
+          variant="card"
+          icon={<GameIcon slug="black-flag" size={18} />}
+          title="Factions"
+          primaryAction={
+            canDmWrite && !creating ? (
+              <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
+                + New faction
+              </Btn>
+            ) : undefined
+          }
+        />
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Faction name" placeholder="Name (e.g. Thieves' Guild)" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
+            <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
             <div className="flex items-center justify-end gap-2">
               <Btn
                 ghost
@@ -136,6 +133,7 @@ export default function FactionListPage() {
                   setCreating(false);
                   setNewName('');
                   setNewKind('');
+                  setAudience('dm');
                   setCreateError(null);
                 }}
               >
@@ -156,7 +154,7 @@ export default function FactionListPage() {
               <Link
                 key={faction.id}
                 to={`/c/${id}/factions/${faction.id}`}
-                className="cf-card p-3.5 space-y-2 hover:border-amber-500/50"
+                className="cf-card cf-card-hover p-3.5 space-y-2"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
@@ -169,7 +167,7 @@ export default function FactionListPage() {
                 </div>
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <Chip variant={standingVariant(faction.standing)}>
-                    {faction.standing} · {faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}
+                    {formatStandingChip(faction.standing, faction.reputation, t)}
                   </Chip>
                   {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}

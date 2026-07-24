@@ -6,11 +6,12 @@
  * (see AppModule) with a loose default limit everywhere, and a much stricter
  * per-IP limit applied directly to the three auth routes via @Throttle(...).
  *
- * The tracker is IP-based (ThrottlerGuard's default `req.ip`), which respects
- * Express's `trust proxy` setting — enabled in main.ts's configureApp() so
- * this reads the real client IP from X-Forwarded-For behind the Traefik
- * reverse proxy in production, rather than bucketing every request under
- * Traefik's own IP.
+ * Strict AI buckets are user-based when a valid session/PAT/OAuth token is
+ * present, with unauthenticated requests falling back to IP. The IP fallback
+ * respects Express's `trust proxy` setting — enabled in main.ts's
+ * configureApp() so this reads the real client IP from X-Forwarded-For behind
+ * the Traefik reverse proxy in production, rather than bucketing every request
+ * under Traefik's own IP.
  */
 
 /** Named throttler config keys, matching ThrottlerModule.forRoot()'s `throttlers[].name`. */
@@ -21,13 +22,14 @@ export const THROTTLE_AI = 'ai';
 
 /**
  * Strict: AI invocation / generation / probe endpoints across ai-dm, scribe, ai-provider-config.
- * 10 requests/minute/IP prevents prompt injection loops, runaway client retries, or billing spikes
- * from exhausting provider quotas.
+ * 10 requests/minute per authenticated user (or IP for unauthenticated fallback)
+ * prevents prompt injection loops, runaway client retries, or billing spikes from exhausting
+ * provider quotas.
  *
  * Complementary Roles Note:
  * Rate throttling (@nestjs/throttler) and budget checks serve complementary roles:
- * - Rate throttling operates at the HTTP/network layer per-IP per-minute window to reject short-term
- *   burst DoS and API abuse immediately with 429 Too Many Requests before reaching LLM services.
+ * - Rate throttling operates at the HTTP/network layer per-user or per-IP per-minute window to reject
+ *   short-term burst DoS and API abuse immediately with 429 Too Many Requests before reaching LLM services.
  * - Budget checks (token budget, seat metering, server caps) operate at the application/domain layer
  *   per-campaign or server-wide to enforce cumulative financial and token usage limits over longer periods,
  *   returning 403 Forbidden or 503 Service Unavailable when limits are reached.

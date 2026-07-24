@@ -243,7 +243,11 @@ describe('issue #72 — batched hot paths (e2e)', () => {
       probe.reset();
       // The batched child DELETEs run on the deliberate purge (issue #116) — the default
       // DELETE is now a single-row soft-delete UPDATE.
-      const delRes = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+      await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
+      const delRes = await request(server)
+        .delete(`/api/v1/campaigns/${campaignId}/purge`)
+        .set(dm)
+        .send({ confirm: 'PURGE' });
       expect(delRes.status).toBe(200);
 
       // One DELETE for quest_objectives (was one per quest) and one for combatants

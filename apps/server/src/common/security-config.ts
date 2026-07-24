@@ -62,3 +62,81 @@ export function resolveCookieSecure(): boolean {
 export function isDevAuthActive(): boolean {
   return process.env.DEV_AUTH === '1' && process.env.NODE_ENV !== 'production';
 }
+
+/**
+ * Issue #798 — reverse-proxy subpath support.
+ *
+ * `PUBLIC_BASE` is the externally-visible path prefix the SPA is deployed under
+ * (e.g. `/campfire` when the public URL is `https://host/campfire/...`). The
+ * reverse proxy STRIPS this prefix before forwarding to the server, so all of
+ * the server's own routing still sees root-relative paths (`/api/v1/...`) and
+ * mostly does NOT need to know about the prefix. Two things DO need it, though:
+ *
+ *   1. Browser-facing redirects the server emits as bare paths. The OIDC
+ *      callback does `res.redirect('/')` on success and
+ *      `res.redirect('/login/sso-error')` on failure — under a subpath the
+ *      browser would follow that to `https://host/` and lose the prefix,
+ *      breaking the SPA load. These must be rewritten to `${PUBLIC_BASE}/`.
+ *
+ *   2. Cookie `path` scoping. A cookie set with `path: '/api/v1/auth/oidc'` is
+ *      only sent on requests whose URL-path starts with `/api/v1/auth/oidc`
+ *      FROM THE BROWSER'S POINT OF VIEW. The browser sees
+ *      `/campfire/api/v1/auth/oidc/...`, so the flow cookie would never be
+ *      sent back. Scoping to `${PUBLIC_BASE}/api/v1/auth/oidc` fixes this; the
+ *      session cookie's `path: '/'` already covers everything and needs no
+ *      change.
+ *
+ * Canonicalized to a leading-slash, no-trailing-slash form (except `/` for the
+ * root case), so `PUBLIC_BASE=campfire`, `/campfire/`, and `/campfire` all
+ * behave identically. `undefined`/empty/`/` all mean "root deployment" and the
+ * prefix is exactly `/` — every redirect/cookie path is then unchanged.
+ */
+export function resolvePublicBase(raw: string | undefined = process.env.PUBLIC_BASE): string {
+  const trimmed = (raw ?? '').trim();
+  if (trimmed === '') return '/';
+  let pathname = trimmed;
+  // Accept a full URL (operator pastes the public origin) by keeping only the
+  // pathname — PUBLIC_BASE is a path, never an origin. Only an explicit
+  // http(s):// scheme is parsed as a URL; a protocol-relative `//host/path` is
+  // intentionally treated as a PATH (the leading-// is collapsed by the
+  // normalize step below) because distinguishing `//host/path` (URL) from
+  // `//path` (typo'd path) is unreliable, and an operator who means a URL will
+  // write the scheme.
+  try {
+    if (/^https?:\/\//i.test(pathname)) {
+      pathname = new URL(pathname).pathname;
+    }
+  } catch {
+    // leave pathname as-is
+  }
+  if (!pathname.startsWith('/')) pathname = `/${pathname}`;
+  pathname = pathname.replace(/\/+/g, '/');
+  if (pathname.length > 1 && pathname.endsWith('/')) pathname = pathname.slice(0, -1);
+  return pathname === '' ? '/' : pathname;
+}
+
+/**
+ * Whether the deployment is under a non-root subpath (issue #798). Convenience
+ * for code that only needs to branch on "is a prefix configured at all".
+ */
+export function hasPublicBase(): boolean {
+  return resolvePublicBase() !== '/';
+}
+
+/**
+ * Prefix a bare path with the public base for a browser-facing redirect or
+ * cookie path (issue #798). The input is expected to start with `/`. Root
+ * deployments return the path unchanged.
+ *
+ *   joinPublicBase('/')                     with `/campfire` -> `/campfire/`
+ *   joinPublicBase('/login/sso-error')      with `/campfire` -> `/campfire/login/sso-error`
+ *   joinPublicBase('/api/v1/auth/oidc')     with `/campfire` -> `/campfire/api/v1/auth/oidc`
+ *   joinPublicBase('/anything')             with `/`         -> `/anything`
+ */
+export function joinPublicBase(path: string): string {
+  const base = resolvePublicBase();
+  if (base === '/') return path;
+  if (path === '/') return `${base}/`;
+  if (path.startsWith('/')) return `${base}${path}`;
+  return `${base}/${path}`;
+}

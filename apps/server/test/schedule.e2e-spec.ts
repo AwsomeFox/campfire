@@ -109,6 +109,78 @@ describe('session scheduling (e2e)', () => {
     expect(badStatus.status).toBe(400);
   });
 
+  it('members can update just their RSVP note without rewriting status', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    const initial = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'bringing snacks' });
+    expect(initial.status).toBe(200);
+
+    const noteOnly = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: 'running late' });
+    expect(noteOnly.status).toBe(200);
+    expect(noteOnly.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'yes', note: 'running late' }),
+      ]),
+    );
+  });
+
+  it('members can clear an RSVP note with an explicit empty string', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'bringing snacks' });
+
+    const cleared = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: '' });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'yes', note: '' }),
+      ]),
+    );
+  });
+
+  it('status-only RSVP updates preserve a note edited concurrently', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'old note' });
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: 'fresh note' });
+
+    const statusOnly = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'maybe' });
+    expect(statusOnly.status).toBe(200);
+    expect(statusOnly.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'maybe', note: 'fresh note' }),
+      ]),
+    );
+  });
+
   it('DM can update and cancel a scheduled session; players cannot', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)
@@ -133,6 +205,168 @@ describe('session scheduling (e2e)', () => {
 
     const list = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule`).set(dm);
     expect(list.body.some((s: { id: number }) => s.id === id)).toBe(false);
+  });
+
+  describe('in-progress schedule window (issue #818)', () => {
+    let liveCampaignId: number;
+
+    beforeAll(async () => {
+      const res = await request(ctx.app.getHttpServer()).post('/api/v1/campaigns').set(dm).send({ name: 'Live Schedule Campaign' });
+      liveCampaignId = res.body.id;
+    });
+
+    it('rejects zero and above-max durationMinutes (schema bounds)', async () => {
+      const server = ctx.app.getHttpServer();
+      const zero = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-01-01T18:00:00Z', durationMinutes: 0 });
+      expect(zero.status).toBe(400);
+
+      const tooLong = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-01-01T18:00:00Z', durationMinutes: 1441 });
+      expect(tooLong.status).toBe(400);
+
+      const maxOk = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: '2099-01-02T18:00:00Z', durationMinutes: 1440, title: 'Max length' });
+      expect(maxOk.status).toBe(201);
+      expect(maxOk.body.durationMinutes).toBe(1440);
+      await request(server).delete(`/api/v1/schedule/${maxOk.body.id}`).set(dm);
+    });
+
+    it('GET /schedule/next and summary keep an in-progress game; Next stays available separately', async () => {
+      const server = ctx.app.getHttpServer();
+      const now = Date.now();
+      const inProgressStart = new Date(now - 60 * 60_000).toISOString(); // started 1h ago
+      const upcomingStart = new Date(now + 3 * 60 * 60_000).toISOString(); // 3h from now
+
+      const live = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          scheduledAt: inProgressStart,
+          durationMinutes: 240,
+          title: 'Happening table',
+          location: 'VTT link',
+          notes: 'Stay muted until start',
+        });
+      expect(live.status).toBe(201);
+
+      const later = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: upcomingStart, durationMinutes: 180, title: 'Next week table' });
+      expect(later.status).toBe(201);
+
+      const next = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/schedule/next`).set(player);
+      expect(next.status).toBe(200);
+      expect(next.body.id).toBe(live.body.id);
+      expect(next.body.title).toBe('Happening table');
+
+      const summary = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/summary`).set(player);
+      expect(summary.status).toBe(200);
+      expect(summary.body.inProgressSession).toMatchObject({
+        id: live.body.id,
+        title: 'Happening table',
+        location: 'VTT link',
+        notes: 'Stay muted until start',
+      });
+      expect(summary.body.nextSession).toMatchObject({
+        id: later.body.id,
+        title: 'Next week table',
+      });
+
+      // Overlapping second in-progress night: /schedule/next prefers the earliest start.
+      const overlap = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          scheduledAt: new Date(now - 30 * 60_000).toISOString(),
+          durationMinutes: 120,
+          title: 'Overlap table',
+        });
+      expect(overlap.status).toBe(201);
+      const nextOverlap = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/schedule/next`).set(player);
+      expect(nextOverlap.body.id).toBe(live.body.id);
+
+      const summaryOverlap = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/summary`).set(player);
+      expect(summaryOverlap.body.inProgressSession.id).toBe(live.body.id);
+      expect(summaryOverlap.body.nextSession.id).toBe(later.body.id);
+
+      await request(server).delete(`/api/v1/schedule/${overlap.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${later.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${live.body.id}`).set(dm);
+    });
+
+    it('mid-session duration edit and end-now move the live projection (cache invalidation path)', async () => {
+      const server = ctx.app.getHttpServer();
+      const now = Date.now();
+      const started = new Date(now - 90 * 60_000).toISOString();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({ scheduledAt: started, durationMinutes: 240, title: 'Stretch night' });
+      expect(created.status).toBe(201);
+      const id = created.body.id as number;
+
+      expect((await request(server).get(`/api/v1/campaigns/${liveCampaignId}/schedule/next`).set(player)).body.id).toBe(id);
+
+      // Extend keeps it current.
+      const extended = await request(server).patch(`/api/v1/schedule/${id}`).set(dm).send({ durationMinutes: 300 });
+      expect(extended.status).toBe(200);
+      const afterExtend = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/summary`).set(player);
+      expect(afterExtend.body.inProgressSession?.id).toBe(id);
+      expect(afterExtend.body.inProgressSession?.durationMinutes).toBe(300);
+
+      // End by shrinking duration so end <= now — drops out of next/in-progress.
+      const ended = await request(server).patch(`/api/v1/schedule/${id}`).set(dm).send({ durationMinutes: 60 });
+      expect(ended.status).toBe(200);
+      const afterEnd = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/summary`).set(player);
+      expect(afterEnd.body.inProgressSession).toBeNull();
+      expect(afterEnd.body.nextSession).toBeNull();
+      const nextGone = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/schedule/next`).set(player);
+      expect(nextGone.status).toBe(200);
+      // Nest serializes a null controller return as an empty body object.
+      expect(nextGone.body?.id ?? null).toBeNull();
+
+      await request(server).delete(`/api/v1/schedule/${id}`).set(dm);
+    });
+
+    it('same-day events: ended earlier slot is past; later slot is next', async () => {
+      const server = ctx.app.getHttpServer();
+      const now = Date.now();
+      const morning = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          scheduledAt: new Date(now - 5 * 60 * 60_000).toISOString(),
+          durationMinutes: 60,
+          title: 'Morning one-shot',
+        });
+      const evening = await request(server)
+        .post(`/api/v1/campaigns/${liveCampaignId}/schedule`)
+        .set(dm)
+        .send({
+          scheduledAt: new Date(now + 2 * 60 * 60_000).toISOString(),
+          durationMinutes: 180,
+          title: 'Evening game',
+        });
+      expect(morning.status).toBe(201);
+      expect(evening.status).toBe(201);
+
+      const next = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/schedule/next`).set(player);
+      expect(next.body.id).toBe(evening.body.id);
+      const summary = await request(server).get(`/api/v1/campaigns/${liveCampaignId}/summary`).set(player);
+      expect(summary.body.inProgressSession).toBeNull();
+      expect(summary.body.nextSession.id).toBe(evening.body.id);
+
+      await request(server).delete(`/api/v1/schedule/${morning.body.id}`).set(dm);
+      await request(server).delete(`/api/v1/schedule/${evening.body.id}`).set(dm);
+    });
   });
 
   describe('ICS calendar feed', () => {

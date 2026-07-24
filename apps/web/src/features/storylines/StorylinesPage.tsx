@@ -10,7 +10,7 @@
  *
  * Data: GET/POST /api/v1/campaigns/:campaignId/arcs, plus /arcs/:id and /beats/:id routes.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type {
   StoryArc,
@@ -21,13 +21,19 @@ import type {
   ArcStatus,
   BeatStatus,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import {
+  compositionSafeFormSubmit,
+  createCompositionSubmitGate,
+} from '../../lib/compositionSafeSubmit';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
+import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { PageTitle } from '../../components/PageTitle';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -85,8 +91,7 @@ const BEAT_GLYPH: Record<BeatStatus, string> = {
 export default function StorylinesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
 
   const [arcs, setArcs] = useState<StoryArcWithBeats[]>([]);
@@ -97,6 +102,12 @@ export default function StorylinesPage() {
   const [arcCreateError, setArcCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const newArcTitleRef = useRef<HTMLInputElement>(null);
+  // Issue #854: Enter confirming IME composition must not create an arc.
+  const arcCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (arcCompositionGateRef.current === null) {
+    arcCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const arcCompositionGate = arcCompositionGateRef.current;
   const pendingFocusIdRef = useRef<string | null>(null);
   // Play-record link options (issue #264) — the sessions/quests/encounters a beat can
   // link to. Fetched once; empty lists just leave the pickers showing "— none —".
@@ -225,11 +236,18 @@ export default function StorylinesPage() {
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>Storylines</h3>
+        <PageTitle>Storylines</PageTitle>
         <span className="tag tag-outline" style={{ fontSize: 10 }} title="Visible only to the DM">
           DM only
         </span>
         <div style={{ flex: 1 }} />
+        {/*
+          Issue #639: beats are a Storylines entity, so "Draft a beat with AI" lives
+          here — on the surface that owns the content type — not on Quests. The button
+          self-gates (DM + AI-DM seat enabled, co_dm/driver mode), so it renders for the
+          only audience that can ever use it on this DM-only page.
+        */}
+        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
       </div>
 
       <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
@@ -237,14 +255,13 @@ export default function StorylinesPage() {
         labelled triggers.
       </p>
 
-      {isDm && (
+      {canDmWrite && (
         <form
           className="card elev-sm"
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}
-          onSubmit={(event) => {
-            event.preventDefault();
+          onSubmit={compositionSafeFormSubmit(arcCompositionGate, () => {
             void createArc();
-          }}
+          })}
         >
           <div className="field" style={{ flex: '1 1 180px', minWidth: 0 }}>
             <label htmlFor="storyline-new-arc-title">New arc title</label>
@@ -262,6 +279,7 @@ export default function StorylinesPage() {
                 setNewArcTitle(event.target.value);
                 setArcCreateError(null);
               }}
+              {...arcCompositionGate.inputProps}
             />
           </div>
           <button type="submit" className="btn btn-primary" style={{ fontSize: 13 }} disabled={busy || !newArcTitle.trim()}>
@@ -289,7 +307,7 @@ export default function StorylinesPage() {
             key={arc.id}
             arc={arc}
             cid={cid}
-            isDm={isDm}
+            canDmWrite={canDmWrite}
             allBeats={allBeats}
             linkOptions={linkOptions}
             linkOptionState={{ options: linkOptions, failed: linkOptionsError, loading: linkOptionsLoading, onRetry: () => void loadLinkOptions() }}
@@ -304,7 +322,7 @@ export default function StorylinesPage() {
 function ArcCard({
   arc,
   cid,
-  isDm,
+  canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
@@ -312,7 +330,7 @@ function ArcCard({
 }: {
   arc: StoryArcWithBeats;
   cid: number;
-  isDm: boolean;
+  canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
@@ -328,6 +346,12 @@ function ArcCard({
   const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const newBeatTitleRef = useRef<HTMLInputElement>(null);
+  // Issue #854: Enter confirming IME composition must not create a beat.
+  const beatCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (beatCompositionGateRef.current === null) {
+    beatCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const beatCompositionGate = beatCompositionGateRef.current;
   const announce = useAnnounce();
   const arcTitleId = `storyline-arc-${arc.id}-title`;
   const arcStatusId = `storyline-arc-${arc.id}-status`;
@@ -401,7 +425,7 @@ function ArcCard({
       {...entityTargetProps('arc', arc.id)}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h4
+        <h2
           id={arcTitleId}
           style={{
             fontFamily: 'var(--font-heading)',
@@ -415,8 +439,8 @@ function ArcCard({
           }}
         >
           {arc.title}
-        </h4>
-        {isDm ? (
+        </h2>
+        {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
             <select
@@ -441,7 +465,7 @@ function ArcCard({
             {arc.status}
           </span>
         )}
-        {isDm && (
+        {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
@@ -477,7 +501,7 @@ function ArcCard({
               key={beat.id}
               beat={beat}
               cid={cid}
-              isDm={isDm}
+              canDmWrite={canDmWrite}
               allBeats={allBeats}
               linkOptions={linkOptions}
               linkOptionState={linkOptionState}
@@ -487,13 +511,12 @@ function ArcCard({
         </div>
       )}
 
-      {isDm && (
+      {canDmWrite && (
         <form
           style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap', minWidth: 0 }}
-          onSubmit={(event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
+          onSubmit={compositionSafeFormSubmit(beatCompositionGate, () => {
             void addBeat();
-          }}
+          })}
         >
           <div className="field" style={{ flex: '1 1 160px', minWidth: 0 }}>
             <label htmlFor={newBeatTitleId} style={{ overflowWrap: 'anywhere' }}>New beat in {arc.title}</label>
@@ -512,6 +535,7 @@ function ArcCard({
                 setBeatCreateError(null);
               }}
               style={{ fontSize: 13 }}
+              {...beatCompositionGate.inputProps}
             />
           </div>
           <button type="submit" className="btn btn-ghost" style={{ fontSize: 12 }} disabled={busy || !newBeatTitle.trim()}>
@@ -531,7 +555,7 @@ function ArcCard({
 function BeatRow({
   beat,
   cid,
-  isDm,
+  canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
@@ -539,7 +563,7 @@ function BeatRow({
 }: {
   beat: StoryBeatWithBranches;
   cid: number;
-  isDm: boolean;
+  canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
@@ -566,6 +590,12 @@ function BeatRow({
   const [branchDeleteError, setBranchDeleteError] = useState<{ id: number; message: string } | null>(null);
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
+  // Issue #854: Enter confirming IME composition must not create a branch.
+  const branchCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
+  if (branchCompositionGateRef.current === null) {
+    branchCompositionGateRef.current = createCompositionSubmitGate();
+  }
+  const branchCompositionGate = branchCompositionGateRef.current;
   const announce = useAnnounce();
   const beatTitleId = `storyline-beat-${beat.id}-title`;
   const beatStatusId = `storyline-beat-${beat.id}-status`;
@@ -590,9 +620,14 @@ function BeatRow({
     setPendingLinkPatch(null);
     setBusy(true);
     try {
-      await api.patch(`${API}/beats/${beat.id}`, patch);
+      await api.patch(`${API}/beats/${beat.id}`, { ...patch, expectedUpdatedAt: beat.updatedAt });
       await onChange();
-    } catch {
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        await onChange();
+        setLinkError("This beat changed elsewhere. Links were refreshed — pick your link again.");
+        return;
+      }
       // Issue #688: the link didn't save. The beat keeps its server-known links (the select
       // is controlled by beat.<field>, which only changes on a successful refresh), and we
       // hold the attempted patch so Retry re-sends exactly the author's intent.
@@ -684,19 +719,19 @@ function BeatRow({
 
   return (
     <section
-      style={{ borderLeft: '2px solid var(--color-border)', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}
+      style={{ borderLeft: '2px solid var(--color-divider, rgba(255,255,255,0.08))', paddingLeft: 10, display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}
       aria-labelledby={beatTitleId}
       {...entityTargetProps('beat', beat.id)}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span aria-hidden="true" style={{ width: 14, flex: 'none', textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
-        <h5
+        <h3
           id={beatTitleId}
           style={{ fontWeight: 500, fontSize: 14, flex: '1 1 150px', minWidth: 0, margin: 0, overflowWrap: 'anywhere' }}
         >
           {beat.title}
-        </h5>
-        {isDm ? (
+        </h3>
+        {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>
             <select
@@ -721,7 +756,7 @@ function BeatRow({
             {beat.status}
           </span>
         )}
-        {isDm && (
+        {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
@@ -773,7 +808,7 @@ function BeatRow({
         </div>
       )}
 
-      {isDm &&
+      {canDmWrite &&
         (editingLinks ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 22, minWidth: 0 }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -867,7 +902,7 @@ function BeatRow({
             <span className="text-muted" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
               {target ? `→ ${target.title}` : branch.toBeatId != null ? '→ (unknown beat)' : '→ (open)'}
             </span>
-            {isDm && (
+            {canDmWrite && (
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -886,15 +921,14 @@ function BeatRow({
         );
       })}
 
-      {isDm &&
+      {canDmWrite &&
         (addingBranch ? (
           <form
             id={branchFormId}
             style={{ marginLeft: 22, minWidth: 0 }}
-            onSubmit={(event) => {
-              event.preventDefault();
+            onSubmit={compositionSafeFormSubmit(branchCompositionGate, () => {
               void addBranch();
-            }}
+            })}
           >
             <fieldset style={{ minWidth: 0 }}>
               <legend style={{ marginBottom: 5, fontSize: 12, fontWeight: 600, overflowWrap: 'anywhere' }}>
@@ -926,6 +960,7 @@ function BeatRow({
                       setBranchCreateError(null);
                     }}
                     style={{ fontSize: 12, minWidth: 0 }}
+                    {...branchCompositionGate.inputProps}
                   />
                 </div>
                 <div className="field" style={{ minWidth: 0 }}>

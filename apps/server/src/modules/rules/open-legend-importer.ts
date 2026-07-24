@@ -231,7 +231,7 @@ function parseBody(text: string): NormalizedPage {
   try {
     doc = loadYaml(text);
   } catch (err) {
-    throw new Error(`not valid YAML/JSON: ${(err as Error).message}`);
+    throw new Error(`not valid YAML/JSON: ${(err as Error).message}`, { cause: err });
   }
   if (Array.isArray(doc)) return { results: doc as Array<Record<string, unknown>>, next: null };
   if (doc && typeof doc === 'object') {

@@ -9,27 +9,33 @@ import { Link } from 'react-router-dom';
 import type { ToolChip } from './toolActivity';
 import { chipIconSlug, chipVariantColor } from './chipEmoji';
 import { GameIcon } from '../../components/GameIcon';
+import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 
 /** "AI DM is at the table" presence pill — shown wherever the seat is in Driver mode. */
 export function AiDmPresenceTag({ turnActive }: { turnActive: boolean }) {
+  // Infinite opacity pulse is decorative; under reduced motion keep a steady
+  // dot + the text status so "AI is acting" is never motion-only (issue #594).
+  const pulse = turnActive && !prefersReducedMotion();
   return (
     <span
       className="tag tag-accent"
       style={{ fontSize: 10, display: 'inline-flex', alignItems: 'center', gap: 4 }}
       title={turnActive ? 'The AI DM is mid-turn' : 'The AI DM holds this seat (Driver mode)'}
+      data-ai-dm-active={turnActive ? 'true' : 'false'}
     >
       <span
         aria-hidden="true"
+        data-testid="ai-dm-presence-dot"
         style={{
           width: 6,
           height: 6,
           borderRadius: '50%',
           background: 'currentColor',
-          animation: turnActive ? 'cf-ai-pulse 1.1s ease-in-out infinite' : undefined,
+          animation: pulse ? 'cf-ai-pulse 1.1s ease-in-out infinite' : undefined,
         }}
       />
       {turnActive ? 'AI DM is acting…' : 'AI DM is at the table'}
-      <style>{`@keyframes cf-ai-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }`}</style>
+      {pulse && <style>{`@keyframes cf-ai-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }`}</style>}
     </span>
   );
 }

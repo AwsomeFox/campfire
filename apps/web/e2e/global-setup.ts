@@ -79,6 +79,10 @@ export interface SeedData {
   baseURL: string;
   campaignId: number;
   encounterId: number;
+  bossId: number;
+  skirmisherId: number;
+  /** Hidden source map for the Ambush encounter; fog-protected (#463). */
+  mapAttachmentId: number;
   /** A second encounter that was started and then ended — must render read-only (#368). */
   endedEncounterId: number;
   /** An ended encounter attached to navigation.sessionId for post-encounter hand-off coverage (#663). */
@@ -235,14 +239,22 @@ export default async function globalSetup(config: FullConfig) {
     ],
   });
   await waitForInstall(admin, statblockUpload.id);
-  const [statblockEntry] = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
+  const statblockSearch = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
+  const statblockEntry = (statblockSearch.items ?? statblockSearch)[0];
   if (!statblockEntry) throw new Error('Uploaded statblock fixture was not searchable');
   const statblockEntryId: number = statblockEntry.id;
 
   const statblockEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'E2E — Complete Statblock',
+    hidden: false,
   });
   const statblockEncounterId: number = statblockEncounter.id;
+  // Two compendium-linked monsters so disclosure controls (issue #884) can be
+  // asserted side-by-side: each statblock toggle must control only its own region.
+  await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
+    kind: 'monster',
+    ruleEntryId: statblockEntryId,
+  });
   await okJson(dm, 'post', `/api/v1/encounters/${statblockEncounterId}/combatants`, {
     kind: 'monster',
     ruleEntryId: statblockEntryId,
@@ -253,6 +265,7 @@ export default async function globalSetup(config: FullConfig) {
     role: 'Tavern keeper',
     body: 'A round, cheerful man who runs the Ember Hearth inn.',
     dmSecret: NPC_SECRET,
+    hidden: false,
   });
   const npcId: number = npc.id;
 
@@ -263,10 +276,12 @@ export default async function globalSetup(config: FullConfig) {
   const navNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Wayfinder',
     role: 'Navigation fixture',
+    hidden: false,
   });
   const navFaction = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/factions`, {
     name: 'DLRNAV Lantern Guild',
     body: 'Navigation fixture',
+    hidden: false,
   });
   const navLocation = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/locations`, {
     name: 'DLRNAV Moon Gate',
@@ -292,6 +307,7 @@ export default async function globalSetup(config: FullConfig) {
     title: 'DLRNAV Sundering',
     body: 'Navigation fixture',
     inWorldDate: 'Year 1',
+    hidden: false,
   });
   const navArc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/arcs`, {
     title: 'DLRNAV Ember Arc',
@@ -332,6 +348,7 @@ export default async function globalSetup(config: FullConfig) {
       navBeat.title,
     ].join(' · '),
     status: 'active',
+    hidden: false,
   });
   // Identity-persisted mention fixtures (issue #739). A quest whose body embeds
   // TYPED mention tokens — `[label](/.cf/<type>/<id>)` — alongside plain-text
@@ -341,18 +358,22 @@ export default async function globalSetup(config: FullConfig) {
   const renamedNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twiceborn',
     role: 'Identity fixture',
+    hidden: false,
   });
   const twinA = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twin Bob',
     role: 'Twin A',
+    hidden: false,
   });
   const twinB = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Twin Bob',
     role: 'Twin B',
+    hidden: false,
   });
   const deadTargetNpc = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
     name: 'DLRNAV Ghosttarget',
     role: 'Will be deleted',
+    hidden: false,
   });
   const identityQuest = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/quests`, {
     title: 'DLRNAV Identity Links',
@@ -364,6 +385,7 @@ export default async function globalSetup(config: FullConfig) {
       `Dead target: [DLRNAV Ghosttarget](/.cf/npc/${deadTargetNpc.id})`,
     ].join('\n\n'),
     status: 'active',
+    hidden: false,
   });
   // Rename the once-named NPC so the typed token's authored label ("DLRNAV
   // Twiceborn") no longer matches its current name — the renderer must refresh
@@ -388,6 +410,7 @@ export default async function globalSetup(config: FullConfig) {
     okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/npcs`, {
       name,
       role: 'Unicode mention fixture',
+      hidden: false,
       ...extra,
     });
   const unicodeArabic = await unicodeNpc('زيد');
@@ -420,6 +443,7 @@ export default async function globalSetup(config: FullConfig) {
       '<script>زيد</script>',
     ].join('\n\n'),
     status: 'active',
+    hidden: false,
   });
   const deletedUnicode = await dm.delete(`/api/v1/npcs/${unicodeDeleted.id}`);
   if (!deletedUnicode.ok()) {
@@ -430,6 +454,7 @@ export default async function globalSetup(config: FullConfig) {
     questId: navQuest.id,
     locationId: navLocation.id,
     sessionId: navSession.id,
+    hidden: false,
   });
   const navScheduledSession = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/schedule`, {
     title: 'DLRNAV Saturday Game',
@@ -444,33 +469,44 @@ export default async function globalSetup(config: FullConfig) {
   }
   const navProposal = (await proposed.json()).proposal;
 
-  const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
-    name: 'Ambush at the Ember Hearth',
-  });
-  const encounterId: number = encounter.id;
+  // Issue #744: a campaign can have at most one live fight at a time, and the
+  // main "Ambush" encounter below must be the RUNNING fight downstream
+  // combat-tracker/log tests key off of. Create and fully retire the ended
+  // fixtures FIRST (each goes preparing -> running -> ended), so the live-fight
+  // slot is free when "Ambush" is started and stays that way.
 
-  for (const m of MONSTERS) {
-    const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
+  // A linked ended encounter exercises the session-aware branch of the concise
+  // post-encounter hand-off (#663). The fixture only needs a completed lifecycle
+  // plus a valid same-campaign session relation. Start requires at least one
+  // combatant with initiative (issue #469), so seed a throwaway monster first.
+  const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Linked Aftermath at the Moon Gate',
+    sessionId: navSession.id,
+    hidden: false,
+  });
+  const linkedEndedEncounterId: number = linkedEndedEncounter.id;
+  {
+    const linkedCombatant = await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/combatants`, {
       kind: 'monster',
-      name: m.name,
-      hpMax: m.hpMax,
+      name: MONSTERS[0].name,
+      hpMax: MONSTERS[0].hpMax,
     });
-    // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
-    const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
-      data: { initiative: m.initiative },
+    const patched = await dm.patch(`/api/v1/encounters/${linkedEndedEncounterId}/combatants/${linkedCombatant.id}`, {
+      data: { initiative: MONSTERS[0].initiative },
     });
     if (!patched.ok()) {
-      throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+      throw new Error(`PATCH linked ended combatant initiative -> ${patched.status()}: ${await patched.text()}`);
     }
   }
-  // Start the fight: status -> running, round 1, current actor = highest initiative.
-  await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
+  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
 
   // A second encounter that gets started then ENDED — used to assert the run screen is
   // read-only once status is 'ended' (issue #368): no per-combatant HP controls fire a
   // PATCH the server would reject via assertMutable.
   const endedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Aftermath at the Ember Hearth',
+    hidden: false,
   });
   const endedEncounterId: number = endedEncounter.id;
   const endedCombatant = await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/combatants`, {
@@ -489,16 +525,58 @@ export default async function globalSetup(config: FullConfig) {
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/start`);
   await okJson(dm, 'post', `/api/v1/encounters/${endedEncounterId}/end`);
 
-  // A linked ended encounter exercises the session-aware branch of the concise
-  // post-encounter hand-off (#663). It intentionally has no combatants: the fixture
-  // only needs a completed lifecycle plus a valid same-campaign session relation.
-  const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
-    name: 'Linked Aftermath at the Moon Gate',
-    sessionId: navSession.id,
+  const encounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
+    name: 'Ambush at the Ember Hearth',
+    hidden: false,
   });
-  const linkedEndedEncounterId: number = linkedEndedEncounter.id;
-  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/start`);
-  await okJson(dm, 'post', `/api/v1/encounters/${linkedEndedEncounterId}/end`);
+  const encounterId: number = encounter.id;
+
+  // Issue #463 fixture: the encounter uses a hidden source map with active fog.
+  // Browser specs assert the canvas loads the role-safe encounter route and that a
+  // real player session cannot fetch this attachment directly.
+  const mapUpload = await dm.post(`/api/v1/campaigns/${campaignId}/attachments`, {
+    multipart: {
+      kind: 'map',
+      file: {
+        name: 'fog-security-map.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(
+          '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+            '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+          'hex',
+        ),
+      },
+    },
+  });
+  if (!mapUpload.ok()) throw new Error(`POST map fixture -> ${mapUpload.status()}: ${await mapUpload.text()}`);
+  const mapAttachmentId: number = (await mapUpload.json()).id;
+  const mapPatch = await dm.patch(`/api/v1/encounters/${encounterId}`, {
+    data: { mapAttachmentId, fog: { enabled: true, revealed: [] } },
+  });
+  if (!mapPatch.ok()) throw new Error(`PATCH encounter map -> ${mapPatch.status()}: ${await mapPatch.text()}`);
+
+  const monsterCombatantIds: number[] = [];
+  for (const m of MONSTERS) {
+    const c = await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/combatants`, {
+      kind: 'monster',
+      name: m.name,
+      hpMax: m.hpMax,
+    });
+    monsterCombatantIds.push(c.id);
+    // Fix initiative deterministically (roll-initiative is random) so turn order is stable.
+    const patched = await dm.patch(`/api/v1/encounters/${encounterId}/combatants/${c.id}`, {
+      data: { initiative: m.initiative },
+    });
+    if (!patched.ok()) {
+      throw new Error(`PATCH combatant initiative -> ${patched.status()}: ${await patched.text()}`);
+    }
+  }
+  const bossId = monsterCombatantIds[0];
+  const skirmisherId = monsterCombatantIds[1];
+  // Start the fight: status -> running, round 1, current actor = highest initiative.
+  // Started LAST (issue #744) so it remains the campaign's single authoritative live
+  // fight for the combat-tracker and combat-log-accessibility suites.
+  await okJson(dm, 'post', `/api/v1/encounters/${encounterId}/start`);
 
   // Party-XP fixtures (#814) are created after encounter setup so the active PC
   // does not alter the combat-trackers' already-pinned rosters.
@@ -533,7 +611,7 @@ export default async function globalSetup(config: FullConfig) {
     { key: 'custom', name: 'Semantic Trusted Ally NPC', disposition: 'trusted ally' },
   ] as const) {
     const { key, ...npcFixture } = fixture;
-    const created = await okJson(dm, 'post', `/api/v1/campaigns/${semanticCampaignId}/npcs`, npcFixture);
+    const created = await okJson(dm, 'post', `/api/v1/campaigns/${semanticCampaignId}/npcs`, { ...npcFixture, hidden: false });
     semanticNpcs[key] = { id: created.id, name: fixture.name };
   }
 
@@ -548,6 +626,7 @@ export default async function globalSetup(config: FullConfig) {
       ...fixture,
       giverNpcId: semanticNpcs.friendly.id,
       body: `${fixture.title} body`,
+      hidden: false,
     });
     semanticQuests[fixture.status] = { id: created.id, title: fixture.title };
   }
@@ -586,6 +665,9 @@ export default async function globalSetup(config: FullConfig) {
     baseURL,
     campaignId,
     encounterId,
+    bossId,
+    skirmisherId,
+    mapAttachmentId,
     endedEncounterId,
     linkedEndedEncounterId,
     statblockEntryId,

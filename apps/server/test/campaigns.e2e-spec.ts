@@ -137,6 +137,36 @@ describe('campaigns (e2e)', () => {
     expect(getRes.body.ruleSystem).toBe('');
   });
 
+  /**
+   * Issue #539: clients must persist ruleSystem on POST — a create-then-PATCH flow
+   * can leave a campaign on the empty-system fallback when the PATCH fails.
+   */
+  it('issue #539: ruleSystem on POST is authoritative; failed PATCH after create-without-rules leaves empty system', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const atomic = await request(server)
+      .post('/api/v1/campaigns')
+      .set(dm)
+      .send({ name: 'Atomic D&D 5e Choice', ruleSystem: 'dnd5e-srd' });
+    expect(atomic.status).toBe(201);
+    expect(atomic.body.ruleSystem).toBe('dnd5e-srd');
+    const getAtomic = await request(server).get(`/api/v1/campaigns/${atomic.body.id}`).set(dm);
+    expect(getAtomic.body.ruleSystem).toBe('dnd5e-srd');
+
+    const createOnly = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Two-step hazard' });
+    expect(createOnly.status).toBe(201);
+    expect(createOnly.body.ruleSystem).toBe('');
+
+    const failedPatch = await request(server)
+      .patch(`/api/v1/campaigns/${createOnly.body.id}`)
+      .set(dm)
+      .send({ ruleSystem: 'not-a-real-pack' });
+    expect(failedPatch.status).toBe(400);
+
+    const afterFailedPatch = await request(server).get(`/api/v1/campaigns/${createOnly.body.id}`).set(dm);
+    expect(afterFailedPatch.body.ruleSystem).toBe('');
+  });
+
   it('GET /campaigns/:id/summary returns aggregate shape', async () => {
     const server = ctx.app.getHttpServer();
     const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Summary Test' });
@@ -171,7 +201,10 @@ describe('campaigns (e2e)', () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post('/api/v1/campaigns').set(dm).send({});
     expect(res.status).toBe(400);
-    expect(res.body.statusCode).toBe(400);
+    // Issue #682 — the published error envelope exposes `status` (not the
+    // legacy nestjs `statusCode`). The matching `code` slug is `bad_request`.
+    expect(res.body.status).toBe(400);
+    expect(res.body.code).toBe('bad_request');
   });
 
   // P2 fix pinning tests — FK-shaped fields (currentLocationId, mapAttachmentId) must
@@ -382,7 +415,7 @@ describe('campaign purge cascade (e2e)', () => {
     const uploadDir = path.join(ctx.dataDir, 'uploads', String(campaignId));
     expect(fs.existsSync(uploadDir)).toBe(true); // still on disk after a soft-delete
     // Now the explicit purge runs the real hard-cascade + fs.rm.
-    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/purge`);
+    const res = await dmAgent.delete(`/api/v1/campaigns/${campaignId}/purge`).send({ confirm: 'PURGE' });
     expect(res.status).toBe(200);
   });
 
@@ -547,9 +580,12 @@ describe('campaign soft-delete + trash/restore/purge (e2e, issue #116)', () => {
   it('purge permanently removes the campaign AND wipes its on-disk uploads', async () => {
     const server = ctx.app.getHttpServer();
 
-    // Trash then purge (purge also works on a live campaign, but this mirrors the UI flow).
+    // Trash then purge (issue #867: live purge is refused; confirm token required).
     await request(server).delete(`/api/v1/campaigns/${campaignId}`).set(dm);
-    const purge = await request(server).delete(`/api/v1/campaigns/${campaignId}/purge`).set(dm);
+    const purge = await request(server)
+      .delete(`/api/v1/campaigns/${campaignId}/purge`)
+      .set(dm)
+      .send({ confirm: 'PURGE' });
     expect(purge.status).toBe(200);
 
     // Gone from the trash and the disk directory is removed.

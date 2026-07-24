@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
+import { attachments, campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { notDeleted } from '../../common/soft-delete';
 import { isVisibleTo } from '../../common/redact';
 import { applyPage } from '../../common/pagination';
@@ -13,6 +14,8 @@ import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
+import { RevisionsService } from '../revisions/revisions.service';
 
 type CommentCreateInput = z.infer<typeof CommentCreate>;
 type CommentUpdateInput = z.infer<typeof CommentUpdate>;
@@ -46,6 +49,9 @@ function toDomain(row: typeof comments.$inferSelect): Comment {
     authorName: row.authorName,
     body: tombstoned ? TOMBSTONE_BODY : row.body,
     inCharacter: row.inCharacter,
+    characterId: row.characterId,
+    characterName: row.characterName,
+    characterAvatarUrl: row.characterAvatarUrl,
     deletedAt: row.deletedAt,
     deletedBy: row.deletedBy,
     // Editor provenance (issue #783): null on a comment only ever self-edited;
@@ -77,6 +83,7 @@ export class CommentsService {
     @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly notifications: NotificationsService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   /**
@@ -118,11 +125,19 @@ export class CommentsService {
    * leak a secret entity's discussion. Anchor visibility is resolved once per
    * distinct (entityType, entityId) to keep this a bounded number of checks.
    */
-  async listForCampaign(campaignId: number, role: Role): Promise<Comment[]> {
+  async listForCampaign(
+    campaignId: number,
+    role: Role,
+    opts: { authorUserId?: string } = {},
+  ): Promise<Comment[]> {
     const rows = await this.db
       .select()
       .from(comments)
-      .where(eq(comments.campaignId, campaignId))
+      .where(
+        opts.authorUserId
+          ? and(eq(comments.campaignId, campaignId), eq(comments.authorUserId, opts.authorUserId))
+          : eq(comments.campaignId, campaignId),
+      )
       .orderBy(asc(comments.id));
     const visibleAnchor = new Map<string, boolean>();
     const out: Comment[] = [];
@@ -310,6 +325,75 @@ export class CommentsService {
     return parent.parentId ?? parent.id;
   }
 
+  /**
+   * Resolve and snapshot an in-character speaker. The selected character must be
+   * live, belong to this campaign, and be owned by the authenticated account — DM
+   * status never grants impersonation rights. Missing/cross-campaign/removed ids
+   * share a 404 so the request cannot probe another campaign's roster; a visible
+   * but differently-owned character is a 403.
+   *
+   * The returned name/avatar are copied once and never recomputed. Attachment
+   * portraits are retained only when they resolve to a visible portrait in this
+   * campaign; remote portraits must pass the HTTPS-only sanitizer.
+   */
+  private async resolveCharacterAttribution(
+    campaignId: number,
+    input: CommentCreateInput,
+    user: RequestUser,
+  ): Promise<{ characterId: number | null; characterName: string | null; characterAvatarUrl: string | null }> {
+    if (!input.inCharacter) {
+      if (input.characterId != null) {
+        throw new BadRequestException('characterId may only be supplied for an in-character comment');
+      }
+      return { characterId: null, characterName: null, characterAvatarUrl: null };
+    }
+    if (input.characterId == null) {
+      throw new BadRequestException('characterId is required for an in-character comment');
+    }
+
+    const [character] = await this.db
+      .select({
+        id: characters.id,
+        ownerUserId: characters.ownerUserId,
+        name: characters.name,
+        portraitUrl: characters.portraitUrl,
+      })
+      .from(characters)
+      .where(
+        and(
+          eq(characters.id, input.characterId),
+          eq(characters.campaignId, campaignId),
+          notDeleted(characters.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!character) throw new NotFoundException(`Character ${input.characterId} not found`);
+    if (character.ownerUserId !== user.id) {
+      throw new ForbiddenException('You may only post in character as a character you own');
+    }
+
+    const label = (character.name.trim() || `Character ${character.id}`).slice(0, 120);
+    let avatarUrl = safeHistoricalAvatarUrl(character.portraitUrl);
+    const attachmentId = avatarUrl ? historicalAvatarAttachmentId(avatarUrl) : null;
+    if (attachmentId != null) {
+      const [attachment] = await this.db
+        .select({ id: attachments.id })
+        .from(attachments)
+        .where(
+          and(
+            eq(attachments.id, attachmentId),
+            eq(attachments.campaignId, campaignId),
+            eq(attachments.kind, 'portrait'),
+            eq(attachments.hidden, false),
+          ),
+        )
+        .limit(1);
+      if (!attachment) avatarUrl = null;
+    }
+
+    return { characterId: character.id, characterName: label, characterAvatarUrl: avatarUrl };
+  }
+
   async create(campaignId: number, input: CommentCreateInput, user: RequestUser, role: Role): Promise<Comment> {
     const entityType = input.entityType as EntityTypeValue;
     const entityId = input.entityId;
@@ -319,6 +403,7 @@ export class CommentsService {
     if (input.parentId != null) {
       parentId = await this.resolveParent(campaignId, entityType, entityId, input.parentId);
     }
+    const attribution = await this.resolveCharacterAttribution(campaignId, input, user);
 
     const ts = nowIso();
     const [row] = await this.db
@@ -332,6 +417,7 @@ export class CommentsService {
         authorName: user.name,
         body: input.body,
         inCharacter: input.inCharacter ?? false,
+        ...attribution,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -358,28 +444,58 @@ export class CommentsService {
    * leaving author_user_id / author_name untouched. The UI then renders "Author: X
    * (edited by DM Y)"; a self-edit just bumps updated_at like before.
    */
-  async update(id: number, input: CommentUpdateInput, user: RequestUser, role: Role): Promise<Comment> {
+  async update(
+    id: number,
+    input: CommentUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<Comment> {
     const existing = await this.getRowOrThrow(id);
     // A comment on an entity the caller can no longer see is, to them, nonexistent (issue #230).
     await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
     if (existing.authorUserId !== user.id && role !== 'dm') {
       throw new ForbiddenException('Only the author or a DM may edit this comment');
     }
-    // editor !== author is the trust-relevant case (a DM rewording a player's
-    // prose). A self-edit is just an ordinary content edit — it leaves the editor
-    // provenance columns untouched, the way updated_at already drives the UI's
-    // generic "edited" badge.
     const moderatorEdit = existing.authorUserId !== user.id;
-    const ts = nowIso();
-    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts };
-    if (input.body !== undefined) patch.body = input.body;
-    if (input.inCharacter !== undefined) patch.inCharacter = input.inCharacter;
+    if (input.inCharacter !== undefined && input.inCharacter !== existing.inCharacter) {
+      throw new BadRequestException('In-character attribution is immutable after posting');
+    }
+    if (input.body === undefined) {
+      throw new BadRequestException('Comment update must include a body change');
+    }
+    if (input.body === existing.body) {
+      throw new BadRequestException('Comment update must change the body');
+    }
+    const ts = nextUpdatedAt(existing.updatedAt);
+    const patch: Partial<typeof comments.$inferInsert> = { updatedAt: ts, body: input.body };
     if (moderatorEdit) {
       patch.editedAt = ts;
       patch.editedBy = auditActor(user);
     }
 
-    const [row] = await this.db.update(comments).set(patch).where(eq(comments.id, id)).returning();
+    const updated = await this.db
+      .update(comments)
+      .set(patch)
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(comments.id, id), eq(comments.updatedAt, opts.expectedUpdatedAt))
+          : eq(comments.id, id),
+      )
+      .returning();
+    if (!updated[0]) {
+      const current = await this.getRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    const row = updated[0];
+    await this.revisions.commitProseVersion({
+      entityType: 'comment',
+      entityId: id,
+      campaignId: existing.campaignId,
+      priorProse: existing.body,
+      nextProse: input.body,
+      user,
+    });
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -387,12 +503,27 @@ export class CommentsService {
       entityType: 'comment',
       entityId: id,
       campaignId: existing.campaignId,
-      // Lets an incident reviewer tell a self-edit from a DM-moderated rewrite:
-      // the audit actor/role already show WHO, but this makes the moderator-edit
-      // case greppable alongside the edited_by row provenance.
       detail: moderatorEdit ? 'moderator edit (author preserved, editor recorded)' : '',
     });
     return toDomain(row);
+  }
+
+  async listRevisions(id: number, user: RequestUser, role: Role) {
+    const existing = await this.getRowOrThrow(id);
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
+    if (existing.authorUserId !== user.id && role !== 'dm') {
+      throw new ForbiddenException('Only the author or a DM may view this comment history');
+    }
+    return this.revisions.listForEntity('comment', id);
+  }
+
+  async restoreRevision(id: number, revisionId: number, user: RequestUser, role: Role) {
+    const existing = await this.getRowOrThrow(id);
+    await this.assertAnchorVisible(existing.campaignId, existing.entityType as EntityTypeValue, existing.entityId, role);
+    if (existing.authorUserId !== user.id && role !== 'dm') {
+      throw new ForbiddenException('Only the author or a DM may restore this comment history');
+    }
+    return this.revisions.restore('comment', id, revisionId, user, role);
   }
 
   /**
@@ -507,6 +638,7 @@ export class CommentsService {
         body: excerpt(row.body),
         entityType: row.entityType as EntityTypeValue,
         entityId: row.entityId,
+        commentId: row.id,
         actorName: user.name,
       });
     }
@@ -550,6 +682,7 @@ export class CommentsService {
         body: `The discussion on this ${row.entityType} lost its top comment; your reply is preserved.`,
         entityType: row.entityType as EntityTypeValue,
         entityId: row.entityId,
+        commentId: row.id,
         actorName: user.name,
       });
     }

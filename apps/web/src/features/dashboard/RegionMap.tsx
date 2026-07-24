@@ -1,12 +1,33 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { Link } from 'react-router-dom';
-import type { Attachment, Campaign, Location, Role } from '@campfire/schema';
+import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
+import { GetAMapPanel } from '../../components/GetAMapPanel';
+import { clampPercentInt } from './mapPercent';
+
+export { clampPercentInt };
 
 const VIEW_W = 500;
 const VIEW_H = 260;
+
+type MapPoint = { x: number; y: number };
+/** Owning pointer for an in-flight pin drag (#808). Commit only from a matching pointerup. */
+type ActivePinDrag = {
+  pointerId: number;
+  captureTarget: Element;
+  locationId: number;
+  point: MapPoint | null;
+};
 
 // Status tones follow the app's existing chip convention (see cf-chip-* in index.css):
 // accent for "current" (matches the legend dot below), the emerald success family for
@@ -39,35 +60,276 @@ export function RegionMap({
   campaignId,
   campaign,
   locations,
-  role,
   onChange,
 }: {
   campaignId: number;
   campaign: Campaign;
   locations: Location[];
-  role: Role | null;
   onChange: () => void;
 }) {
-  const isDm = role === 'dm';
+  const { canDmWrite } = useCampaignAccess();
   const pinned = locations.filter((l) => l.mapX != null && l.mapY != null);
   const unpinned = locations.filter((l) => l.mapX == null || l.mapY == null);
 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [retryPending, setRetryPending] = useState(false);
+  // Mirrors retryActionRef for render — hide Retry when there is nothing to replay.
+  const [canRetry, setCanRetry] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
-  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+  const [dragPos, setDragPos] = useState<MapPoint | null>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const activeDragRef = useRef<ActivePinDrag | null>(null);
+  // A successful pointerup normally causes lostpointercapture immediately afterwards. Keep the
+  // released id long enough to identify that expected notification; any earlier capture loss is
+  // an interruption and must roll the drag back without PATCHing (#808).
+  const successfulPointerUpRef = useRef<number | null>(null);
+  // Last failed write so Retry re-issues that request (not a no-op clear).
+  const retryActionRef = useRef<(() => Promise<unknown>) | null>(null);
+  const retryInFlight = useRef(false);
+
+  function clearMapError() {
+    setError(null);
+    retryActionRef.current = null;
+    setCanRetry(false);
+  }
+
+  function setMapError(message: string, retry: (() => Promise<unknown>) | null) {
+    setError(message);
+    retryActionRef.current = retry;
+    setCanRetry(retry != null);
+  }
+
+  /** DmMapUploader / ImageUpload errors: update the alert and drop any prior write retry. */
+  function handleUploaderError(message: string) {
+    setMapError(message, null);
+  }
+
+  // Keyboard-accessible pin positioning state (#807)
+  const [kbMovingId, setKbMovingId] = useState<number | null>(null);
+  const [kbPos, setKbPos] = useState<{ x: number; y: number } | null>(null);
+  const [kbAnnouncement, setKbAnnouncement] = useState('');
+  const [kbSaving, setKbSaving] = useState(false);
+  const kbAnnounceRaf = useRef<number | null>(null);
+  const kbXInputRef = useRef<HTMLInputElement>(null);
+  /** Bumped on cancel/escape so in-flight saveKbMove ignores its result. */
+  const kbSaveGen = useRef(0);
+  const kbSaveAbort = useRef<AbortController | null>(null);
+
+  const clearDragPreview = useCallback(() => {
+    setDraggingId(null);
+    setDragPos(null);
+  }, []);
+
+  const cancelActiveDrag = useCallback(
+    (pointerId?: number, clearPreview = true) => {
+      const drag = activeDragRef.current;
+      if (!drag || (pointerId != null && drag.pointerId !== pointerId)) return;
+
+      // Clear ownership before releasing capture because releasePointerCapture may synchronously
+      // dispatch lostpointercapture. That follow-up must observe an already-cancelled drag.
+      activeDragRef.current = null;
+      successfulPointerUpRef.current = null;
+      if (clearPreview) clearDragPreview();
+      try {
+        if (drag.captureTarget.hasPointerCapture?.(drag.pointerId)) {
+          drag.captureTarget.releasePointerCapture?.(drag.pointerId);
+        }
+      } catch {
+        // The browser may already have dropped capture while backgrounding or unmounting.
+      }
+    },
+    [clearDragPreview],
+  );
+
+  useEffect(() => {
+    const cancelWhenHidden = () => {
+      if (document.visibilityState === 'hidden') cancelActiveDrag();
+    };
+    const cancelForPageExit = () => cancelActiveDrag();
+    const cancelForRotation = () => cancelActiveDrag();
+    const orientation = globalThis.screen?.orientation;
+
+    document.addEventListener('visibilitychange', cancelWhenHidden);
+    window.addEventListener('pagehide', cancelForPageExit);
+    window.addEventListener('orientationchange', cancelForRotation);
+    orientation?.addEventListener?.('change', cancelForRotation);
+    return () => {
+      document.removeEventListener('visibilitychange', cancelWhenHidden);
+      window.removeEventListener('pagehide', cancelForPageExit);
+      window.removeEventListener('orientationchange', cancelForRotation);
+      orientation?.removeEventListener?.('change', cancelForRotation);
+      cancelActiveDrag(undefined, false);
+    };
+  }, [cancelActiveDrag]);
+
+
+  const kbMovingLoc = kbMovingId != null ? locations.find((l) => l.id === kbMovingId) : null;
+
+  /** Re-announce identical consecutive messages (matches shared Announcer). */
+  const announceKb = useCallback((message: string) => {
+    setKbAnnouncement('');
+    if (kbAnnounceRaf.current != null) cancelAnimationFrame(kbAnnounceRaf.current);
+    kbAnnounceRaf.current = requestAnimationFrame(() => {
+      kbAnnounceRaf.current = null;
+      setKbAnnouncement(message);
+    });
+  }, []);
+
+  // Cancel pending live-region RAF and abort any in-flight keyboard save on unmount
+  // so late network activity cannot setState / announce after teardown.
+  useEffect(() => {
+    return () => {
+      if (kbAnnounceRaf.current != null) {
+        cancelAnimationFrame(kbAnnounceRaf.current);
+        kbAnnounceRaf.current = null;
+      }
+      kbSaveGen.current += 1;
+      kbSaveAbort.current?.abort();
+      kbSaveAbort.current = null;
+    };
+  }, []);
+
+  // Focus the positioning panel so arrow keys work immediately after Move activates.
+  useEffect(() => {
+    if (kbMovingId == null) return;
+    const id = requestAnimationFrame(() => kbXInputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [kbMovingId]);
+
+  const startKbMove = useCallback((loc: Location) => {
+    const x = clampPercentInt(loc.mapX ?? 50);
+    const y = clampPercentInt(loc.mapY ?? 50);
+    setKbMovingId(loc.id);
+    setKbPos({ x, y });
+    announceKb(
+      `Moving ${loc.name} pin. Use arrow keys to position. Current: ${x}% horizontal, ${y}% vertical.`,
+    );
+  }, [announceKb]);
+
+  function handleKbArrow(e: ReactKeyboardEvent) {
+    if (kbMovingId == null || kbPos == null) return;
+    const target = e.target as HTMLElement | null;
+    // Let native button activation own Enter/Space; avoid double-save.
+    if (
+      (e.key === 'Enter' || e.key === ' ') &&
+      target?.closest('button, [role="button"]')
+    ) {
+      return;
+    }
+    const step = e.shiftKey ? 5 : 1;
+    let { x, y } = kbPos;
+    switch (e.key) {
+      case 'ArrowLeft':
+        x = Math.max(0, x - step);
+        break;
+      case 'ArrowRight':
+        x = Math.min(100, x + step);
+        break;
+      case 'ArrowUp':
+        y = Math.max(0, y - step);
+        break;
+      case 'ArrowDown':
+        y = Math.min(100, y + step);
+        break;
+      case 'Escape':
+        e.preventDefault();
+        e.stopPropagation();
+        cancelKbMove();
+        return;
+      case 'Enter':
+        e.preventDefault();
+        e.stopPropagation();
+        void saveKbMove();
+        return;
+      default:
+        return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    setKbPos({ x, y });
+    announceKb(`${x}% horizontal, ${y}% vertical`);
+  }
+
+  function cancelKbMove() {
+    // Invalidate + abort any in-flight save so Cancel/Escape cannot leave a late patch.
+    kbSaveGen.current += 1;
+    kbSaveAbort.current?.abort();
+    kbSaveAbort.current = null;
+    setKbMovingId(null);
+    setKbPos(null);
+    setKbSaving(false);
+    announceKb('Pin move cancelled.');
+  }
+
+  async function saveKbMove() {
+    if (kbMovingId == null || kbPos == null || kbSaving) return;
+    const gen = ++kbSaveGen.current;
+    kbSaveAbort.current?.abort();
+    const controller = new AbortController();
+    kbSaveAbort.current = controller;
+    const locationId = kbMovingId;
+    const { x, y } = kbPos;
+    setKbSaving(true);
+    try {
+      // refresh:false — parent reload only after the gen token confirms this
+      // save was not cancelled (Cancel/Escape must not apply a late onChange).
+      const ok = await savePinPercent(locationId, x, y, {
+        signal: controller.signal,
+        refresh: false,
+      });
+      if (gen !== kbSaveGen.current || controller.signal.aborted) return;
+      if (!ok) {
+        announceKb('Failed to save pin position.');
+        return;
+      }
+      onChange();
+      announceKb(`Pin saved at ${x}% horizontal, ${y}% vertical.`);
+      setKbMovingId(null);
+      setKbPos(null);
+    } finally {
+      if (gen === kbSaveGen.current) {
+        setKbSaving(false);
+        if (kbSaveAbort.current === controller) kbSaveAbort.current = null;
+      }
+    }
+  }
 
   const mapImageUrl = campaign.mapAttachmentId ? attachmentFileUrl(campaign.mapAttachmentId) : null;
 
-  async function handleMapUpload(attachment: Attachment) {
-    setBusy(true);
-    setError(null);
+  async function handleMapUpload(attachment: Attachment, options?: { manageBusy?: boolean }) {
+    // uploadMapFile owns busy for the full upload+patch path; skip nested toggles.
+    const manageBusy = options?.manageBusy ?? true;
+    if (manageBusy) setBusy(true);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: attachment.id });
+      clearMapError();
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the map.");
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't save the map.",
+        () => handleMapUpload(attachment),
+      );
+    } finally {
+      if (manageBusy) setBusy(false);
+    }
+  }
+
+  // First-party generator "Use this map" (issue #409): the wizard previews without saving;
+  // Use replays the previewed seed through POST .../maps/generate to persist the exact map,
+  // then wires it as the campaign region map (which reveals it to the party, matching the
+  // upload path here). GetAMapPanel owns the preview/reroll; this just does the atomic use.
+  async function generateRegionMap(params: GenerateMapParams) {
+    const result = await api.post<GeneratedMapResult>(`${API}/campaigns/${campaignId}/maps/generate`, params);
+    // Wire the generated attachment as the region map. Do NOT route through handleMapUpload
+    // here: it swallows PATCH errors (for the dropzone flow's inline retry), which would let
+    // the wizard close as if the attach succeeded. Instead let a failure REJECT so the wizard
+    // stays open and surfaces the real error.
+    setBusy(true);
+    try {
+      await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: result.attachmentId });
+      clearMapError();
+      onChange();
     } finally {
       setBusy(false);
     }
@@ -75,12 +337,15 @@ export function RegionMap({
 
   async function handleMapRemove() {
     setBusy(true);
-    setError(null);
     try {
       await api.patch(`${API}/campaigns/${campaignId}`, { mapAttachmentId: null });
+      clearMapError();
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't remove the map.");
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't remove the map.",
+        () => handleMapRemove(),
+      );
     } finally {
       setBusy(false);
     }
@@ -89,30 +354,76 @@ export function RegionMap({
   /** "Replace map" button path — bare upload (no dropzone UI), then wire the new attachment id. */
   async function uploadMapFile(file: File) {
     setBusy(true);
-    setError(null);
     try {
       const attachment = await uploadAttachment(campaignId, 'map', file);
-      await handleMapUpload(attachment);
+      await handleMapUpload(attachment, { manageBusy: false });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't upload the map.",
+        () => uploadMapFile(file),
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  async function savePinPercent(locationId: number, xPct: number, yPct: number) {
+  /**
+   * Returns false when the patch fails or is aborted (error state is set only
+   * for real failures). When `refresh` is false, the caller must invoke
+   * `onChange()` only after its own cancel/generation guard passes — otherwise
+   * a Cancel/Escape that races a completed PATCH still reloads parent data.
+   */
+  async function savePinPercent(
+    locationId: number,
+    xPct: number,
+    yPct: number,
+    options?: { signal?: AbortSignal; refresh?: boolean },
+  ): Promise<boolean> {
+    const signal = options?.signal;
+    const refresh = options?.refresh ?? true;
     try {
-      await api.patch(`${API}/locations/${locationId}`, {
-        mapX: Math.max(0, Math.min(100, xPct)),
-        mapY: Math.max(0, Math.min(100, yPct)),
-      });
-      onChange();
+      await api.patch(
+        `${API}/locations/${locationId}`,
+        {
+          mapX: clampPercentInt(xPct),
+          mapY: clampPercentInt(yPct),
+        },
+        signal ? { signal } : undefined,
+      );
+      // Abort may land after the response; skip refresh so Cancel stays cancelled.
+      if (signal?.aborted) return false;
+      clearMapError();
+      if (refresh) onChange();
+      return true;
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't move the pin.");
+      const aborted =
+        signal?.aborted ||
+        (err instanceof DOMException && err.name === 'AbortError') ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (aborted) return false;
+      setMapError(
+        err instanceof ApiError ? err.message : "Couldn't move the pin.",
+        () => savePinPercent(locationId, xPct, yPct),
+      );
+      return false;
     }
   }
 
-  function pointerToPercent(e: ReactPointerEvent): { x: number; y: number } | null {
+  async function handleRetry() {
+    if (retryInFlight.current || busy || kbSaving) return;
+    const action = retryActionRef.current;
+    if (!action) return;
+    retryInFlight.current = true;
+    setRetryPending(true);
+    try {
+      await action();
+    } finally {
+      retryInFlight.current = false;
+      setRetryPending(false);
+    }
+  }
+
+  function pointerToPercent(e: ReactPointerEvent): MapPoint | null {
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect || rect.width === 0 || rect.height === 0) return null;
     const x = ((e.clientX - rect.left) / rect.width) * 100;
@@ -121,28 +432,65 @@ export function RegionMap({
   }
 
   function onPinPointerDown(e: ReactPointerEvent<HTMLDivElement>, locationId: number) {
-    if (!isDm || !mapImageUrl) return;
+    // Only the primary pointer may own a drag; ignore secondary touches and nested starts (#808).
+    if (!e.isPrimary || activeDragRef.current || !canDmWrite || !mapImageUrl) return;
+    // Keyboard move panel owns this pin — ignore pointer drag so Save cannot
+    // overwrite a just-dragged position with stale kbPos (or vice versa).
+    if (kbMovingId != null) return;
     e.preventDefault();
     e.stopPropagation();
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    const point = pointerToPercent(e);
+    const captureTarget = e.currentTarget;
+    captureTarget.setPointerCapture?.(e.pointerId);
+    successfulPointerUpRef.current = null;
+    activeDragRef.current = { pointerId: e.pointerId, captureTarget, locationId, point };
     setDraggingId(locationId);
-    setDragPos(pointerToPercent(e));
+    setDragPos(point);
   }
 
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
+    const drag = activeDragRef.current;
+    if (!e.isPrimary || !drag || drag.pointerId !== e.pointerId) return;
     const pct = pointerToPercent(e);
-    if (pct) setDragPos(pct);
+    if (!pct) return;
+    drag.point = pct;
+    setDragPos(pct);
   }
 
+  // Only the owning primary pointer's normal release may commit. Ownership is cleared before the
+  // mutation callback, making duplicate pointerup/lostcapture delivery exactly-once by design.
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
-    if (draggingId == null) return;
-    const pct = pointerToPercent(e) ?? dragPos;
-    const id = draggingId;
-    setDraggingId(null);
-    setDragPos(null);
+    const drag = activeDragRef.current;
+    if (!e.isPrimary || !drag || drag.pointerId !== e.pointerId) return;
+    const finalPoint = pointerToPercent(e);
+    successfulPointerUpRef.current = e.pointerId;
+    activeDragRef.current = null;
+    // Pointer capture is normally released implicitly after pointerup, but doing it explicitly
+    // makes the lifecycle deterministic across mouse, pen, and touch implementations. Ownership
+    // is already cleared, so a synchronous lostpointercapture can only acknowledge this success.
+    try {
+      if (drag.captureTarget.hasPointerCapture?.(drag.pointerId)) {
+        drag.captureTarget.releasePointerCapture?.(drag.pointerId);
+      }
+    } catch {
+      // The browser may already have released capture as part of pointerup dispatch.
+    }
+    clearDragPreview();
+    const pct = finalPoint ?? drag.point;
     if (!pct) return;
-    void savePinPercent(id, pct.x, pct.y);
+    void savePinPercent(drag.locationId, pct.x, pct.y);
+  }
+
+  function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    cancelActiveDrag(e.pointerId);
+  }
+
+  function onSurfaceLostPointerCapture(e: ReactPointerEvent<HTMLDivElement>) {
+    if (successfulPointerUpRef.current === e.pointerId) {
+      successfulPointerUpRef.current = null;
+      return;
+    }
+    cancelActiveDrag(e.pointerId);
   }
 
   return (
@@ -150,7 +498,7 @@ export function RegionMap({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">World map</span>
         <div style={{ flex: 1 }} />
-        {isDm && mapImageUrl && (
+        {canDmWrite && mapImageUrl && (
           <MapUploadButton
             campaignId={campaignId}
             hasMap
@@ -166,22 +514,42 @@ export function RegionMap({
 
       {error && (
         <div style={{ padding: '8px 14px 0' }}>
-          <ErrorNote message={error} onRetry={() => setError(null)} />
+          <ErrorNote
+            message={error}
+            pending={retryPending || busy || kbSaving}
+            onRetry={canRetry ? handleRetry : undefined}
+          />
         </div>
       )}
 
-      {isDm && !mapImageUrl && (
+      {canDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px 0' }}>
-          <DmMapUploader campaignId={campaignId} onUploaded={handleMapUpload} onError={setError} />
+          <DmMapUploader
+            campaignId={campaignId}
+            onUploaded={handleMapUpload}
+            onError={handleUploaderError}
+          />
+          {/* Built-in generation discoverable beside upload (issue #409): the procedural
+              generator wizard + external license-clean sources. Using a generated map here
+              wires it as the campaign region map (revealed to the party, like an upload). */}
+          <GetAMapPanel
+            campaignId={campaignId}
+            onImported={(id) => void handleMapUpload({ id } as Attachment)}
+            onGenerate={generateRegionMap}
+            onError={handleUploaderError}
+          />
         </div>
       )}
 
       <div
         ref={surfaceRef}
+        data-testid="region-map-surface"
         className="relative overflow-hidden h-56 md:h-64"
         style={{ margin: '8px 14px', touchAction: draggingId != null ? 'none' : undefined }}
         onPointerMove={onSurfacePointerMove}
         onPointerUp={onSurfacePointerUp}
+        onPointerCancel={onSurfacePointerCancel}
+        onLostPointerCapture={onSurfaceLostPointerCapture}
       >
         {mapImageUrl ? (
           <img src={mapImageUrl} alt="Campaign map" className="absolute inset-0 w-full h-full object-cover" />
@@ -201,8 +569,9 @@ export function RegionMap({
             {pinned.map((loc) => {
               const isCurrent = loc.status === 'current';
               const isDragging = draggingId === loc.id && dragPos != null;
-              const left = isDragging ? dragPos!.x : (loc.mapX ?? 0);
-              const top = isDragging ? dragPos!.y : (loc.mapY ?? 0);
+              const isKbMoving = kbMovingId === loc.id && kbPos != null;
+              const left = isDragging ? dragPos!.x : isKbMoving ? kbPos!.x : (loc.mapX ?? 0);
+              const top = isDragging ? dragPos!.y : isKbMoving ? kbPos!.y : (loc.mapY ?? 0);
               return (
                 <div
                   key={loc.id}
@@ -213,17 +582,20 @@ export function RegionMap({
                     width: 44,
                     height: 44,
                     justifyContent: 'center',
-                    cursor: isDm ? 'grab' : 'pointer',
+                    cursor: canDmWrite ? 'grab' : 'pointer',
                     touchAction: 'none',
                     opacity: isDragging ? 0.85 : 1,
-                    zIndex: isDragging ? 10 : 1,
+                    zIndex: isDragging || isKbMoving ? 10 : 1,
                   }}
+                  data-testid={`map-pin-${loc.id}`}
                   onPointerDown={(e) => onPinPointerDown(e, loc.id)}
                 >
                   <Link
                     to={`/c/${campaignId}/locations/${loc.id}`}
                     onClick={(e) => {
-                      if (draggingId != null) e.preventDefault();
+                      // Block navigation during pointer drag or in-progress keyboard move
+                      // so unsaved coordinates aren't abandoned by an accidental open.
+                      if (draggingId != null || kbMovingId != null) e.preventDefault();
                     }}
                     className="flex flex-col items-center gap-0.5"
                   >
@@ -307,6 +679,98 @@ export function RegionMap({
           ))}
         </div>
       )}
+
+      {/* Keyboard-accessible pin positioning panel (#807) */}
+      {canDmWrite && kbMovingId != null && kbPos != null && kbMovingLoc && (
+        <div
+          className="flex flex-wrap items-center gap-3"
+          style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)' }}
+          role="group"
+          aria-labelledby="kb-pin-heading"
+          onKeyDown={handleKbArrow}
+        >
+          <span id="kb-pin-heading" className="text-xs font-bold text-slate-300">
+            Move {kbMovingLoc.name} pin
+          </span>
+          <div className="flex items-center gap-2">
+            <label htmlFor="kb-pin-x" className="text-[10px] text-slate-400">Horizontal position (%)</label>
+            <input
+              ref={kbXInputRef}
+              id="kb-pin-x"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              value={kbPos.x}
+              onChange={(e) => {
+                const v = clampPercentInt(Number(e.target.value) || 0);
+                setKbPos({ ...kbPos, x: v });
+                announceKb(`${v}% horizontal, ${kbPos.y}% vertical`);
+              }}
+              aria-describedby="kb-pin-help"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label htmlFor="kb-pin-y" className="text-[10px] text-slate-400">Vertical position (%)</label>
+            <input
+              id="kb-pin-y"
+              type="number"
+              min={0}
+              max={100}
+              step={1}
+              className="cf-input !min-h-0 !py-0.5 !w-16 text-xs"
+              value={kbPos.y}
+              onChange={(e) => {
+                const v = clampPercentInt(Number(e.target.value) || 0);
+                setKbPos({ ...kbPos, y: v });
+                announceKb(`${kbPos.x}% horizontal, ${v}% vertical`);
+              }}
+              aria-describedby="kb-pin-help"
+            />
+          </div>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            onClick={cancelKbMove}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+            disabled={kbSaving}
+            onClick={() => void saveKbMove()}
+          >
+            {kbSaving ? 'Saving…' : 'Save'}
+          </button>
+          <span id="kb-pin-help" className="text-[10px] text-slate-500 basis-full">
+            Arrow keys move 1%, Shift+arrow moves 5%. 0% = left/top edge, 100% = right/bottom edge.
+          </span>
+        </div>
+      )}
+
+      {/* DM pin move buttons — keyboard/touch/pointer accessible (#807) */}
+      {canDmWrite && pinned.length > 0 && kbMovingId == null && (
+        <div className="flex flex-wrap gap-2" style={{ padding: '4px 14px 8px' }}>
+          {pinned.map((loc) => (
+            <button
+              key={loc.id}
+              className="btn btn-ghost"
+              style={{ fontSize: 11, minHeight: 0, padding: '2px 8px' }}
+              aria-label={`Move ${loc.name} pin`}
+              onClick={() => startKbMove(loc)}
+            >
+              ↕ {loc.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Screen reader live region for position announcements (#807) */}
+      <div aria-live="assertive" aria-atomic="true" className="sr-only" data-testid="pin-move-announcer">
+        {kbAnnouncement}
+      </div>
       <div
         className="text-muted"
         style={{
@@ -330,7 +794,7 @@ export function RegionMap({
           <span style={{ width: 8, height: 8, borderRadius: '50%', border: '1px dashed var(--color-neutral-600)' }} />
           {STATUS_GLYPH.unexplored} {STATUS_LABEL.unexplored}
         </span>
-        <span style={{ marginLeft: 'auto' }}>{isDm && mapImageUrl ? 'Drag a pin to move it' : 'Tap a pin to open it'}</span>
+        <span style={{ marginLeft: 'auto' }}>Open or move a pin</span>
       </div>
     </div>
   );

@@ -38,8 +38,25 @@ export type { GeminiProviderOptions } from './gemini-provider';
 export { MockAiProvider, mockTokenCount } from './mock-provider';
 export type { MockProviderOptions, MockResponse } from './mock-provider';
 
-export { createAiProvider } from './factory';
+export { createAiProvider, createAiImageProvider } from './factory';
 export type { AiProviderConfig, AiProviderParams } from './factory';
+
+export { providerCapabilities, supportsImageGeneration } from './capabilities';
+
+export { OpenAiImageProvider } from './openai-image-provider';
+export type { OpenAiImageProviderOptions } from './openai-image-provider';
+
+export { MockImageProvider } from './mock-image-provider';
+export type { MockImageProviderOptions } from './mock-image-provider';
+
+export type {
+  AiImageProvider,
+  AiImageRequest,
+  AiImageResult,
+  AiImageOptions,
+  AiImageUsage,
+  AiGeneratedImage,
+} from './image-provider';
 
 export {
   mcpToolToAiSchema,
@@ -52,5 +69,5 @@ export type { McpToolDefinition, McpToolInvocation } from './tool-registry';
 export { ProviderBackedAiDmProvider } from './ai-dm-bridge';
 export type { ProviderBackedAiDmOptions } from './ai-dm-bridge';
 
-export type { FetchLike, FetchResponse, RetryConfig } from './http';
-export { DEFAULT_RETRY, DEFAULT_TIMEOUT_MS } from './http';
+export type { FetchLike, FetchResponse, RetryConfig, ParseSseOptions } from './http';
+export { DEFAULT_RETRY, DEFAULT_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS, parseSse, raceRead } from './http';

@@ -2,9 +2,10 @@ import { join } from 'path';
 import { Module, type DynamicModule } from '@nestjs/common';
 import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { ZodValidationPipe } from 'nestjs-zod';
 import { DbModule } from './db/db.module';
+import { IdentityAwareThrottlerGuard } from './common/guards/identity-aware-throttler.guard';
 import { SessionAuthGuard } from './common/guards/session-auth.guard';
 import { ServerRolesGuard } from './common/guards/server-roles.guard';
 import { WriteModeGuard } from './common/guards/write-mode.guard';
@@ -15,10 +16,6 @@ import {
   THROTTLE_AI,
   DEFAULT_THROTTLE_LIMIT,
   DEFAULT_THROTTLE_TTL_MS,
-  AUTH_THROTTLE_LIMIT,
-  AUTH_THROTTLE_TTL_MS,
-  AI_THROTTLE_LIMIT,
-  AI_THROTTLE_TTL_MS,
   isThrottleDisabled,
 } from './common/throttle.constants';
 import { HealthModule } from './modules/health/health.module';
@@ -48,6 +45,7 @@ import { OAuthModule } from './modules/oauth/oauth.module';
 import { AttachmentsModule } from './modules/attachments/attachments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { MapsModule } from './modules/maps/maps.module';
+import { AiMapModule } from './modules/ai-map/ai-map.module';
 import { EventsModule } from './modules/events/events.module';
 import { RollsModule } from './modules/rolls/rolls.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -167,6 +165,7 @@ function serveStaticImports(): DynamicModule[] {
     AttachmentsModule,
     EncountersModule,
     MapsModule,
+    AiMapModule,
     EventsModule,
     RollsModule,
     NotificationsModule,
@@ -184,10 +183,11 @@ function serveStaticImports(): DynamicModule[] {
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
-    // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so a
-    // hammered IP is rejected (429) before SessionAuthGuard does any DB/crypto work resolving
-    // its session/PAT — the whole point of throttling the scrypt-heavy @Public auth routes.
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so
+    // unauthenticated floods are rejected (429) before route work. The custom subclass keeps
+    // that order while resolving identity only for strict AI buckets, making authenticated AI
+    // throttling per-user with IP fallback.
+    { provide: APP_GUARD, useClass: IdentityAwareThrottlerGuard },
     { provide: APP_GUARD, useClass: SessionAuthGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
     // Runs after SessionAuthGuard has populated req.tokenContext: enforces the

@@ -107,9 +107,11 @@ describe('inbox terminal idempotency (real SQLite + real HTTP)', () => {
     expect([...new Set(successes.map((res) => res.body.updatedAt))]).toHaveLength(1);
     for (const conflict of conflicts) {
       expect(conflict.body).toMatchObject({
-        statusCode: 409,
+        status: 409,
+        code: 'conflict',
         message: `Inbox item ${noteId} already has a different terminal result`,
       });
+      expect(conflict.body.requestId).toBeTruthy();
     }
 
     const winningBody = successes[0].body.resolvedNote as string;
@@ -142,7 +144,18 @@ describe('inbox terminal idempotency (real SQLite + real HTTP)', () => {
       .send({ resolvedNote: 'A competing terminal result.' });
     expect(firstConflict.status).toBe(409);
     expect(secondConflict.status).toBe(409);
-    expect(secondConflict.body).toEqual(firstConflict.body);
+    const conflictShape = {
+      type: 'about:blank',
+      title: 'Conflict',
+      status: 409,
+      code: 'conflict',
+      message: `Inbox item ${noteId} already has a different terminal result`,
+      instance: `/api/v1/notes/${noteId}/resolve`,
+    };
+    expect(firstConflict.body).toMatchObject(conflictShape);
+    expect(secondConflict.body).toMatchObject(conflictShape);
+    expect(firstConflict.body.requestId).toBeTruthy();
+    expect(secondConflict.body.requestId).toBeTruthy();
 
     expect(await resolveAudits(noteId)).toHaveLength(1);
     expect(await replyNotifications(payload.resolvedNote)).toHaveLength(1);

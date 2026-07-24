@@ -1,3 +1,5 @@
+[![CI](https://github.com/AwsomeFox/campfire/actions/workflows/ci.yml/badge.svg)](https://github.com/AwsomeFox/campfire/actions/workflows/ci.yml)
+
 # 🔥 Campfire
 
 **Self-hosted, AI-operable campaign tracker for tabletop RPGs.**
@@ -134,6 +136,7 @@ running on 8080 — maps to the container's internal 8080).
 | `DATA_DIR` | `/data` | SQLite DB + attachment uploads live here (the volume mount point) |
 | `ORIGIN` | *(unset)* | Comma-separated allowed CORS origin(s). Leave unset for same-origin deployments (the default — SPA + API on one origin) |
 | `TRUST_PROXY` | `1` (trust one hop) | Express `trust proxy` setting — pass a hop count (`1`, `2`, …), `false`, or an explicit IP/subnet allow-list. Needed for rate limiting and `req.ip` to see the real client IP behind a reverse proxy (Traefik in the reference deployment) |
+| `PUBLIC_BASE` | `/` | **Build-time** reverse-proxy subpath (issue #798). Set to the path prefix the app is served under, e.g. `/campfire` when the public URL is `https://host/campfire/...`. Baked into the image: the Docker build stamps it into the web bundle (asset URLs, PWA manifest scope/start_url, service-worker patterns, router basename, and the in-app API client) and re-declares it at runtime so the server can prefix its browser-facing OIDC redirects. **Re-build the image to change it.** See **Reverse-proxy subpath** below |
 | `API_DOCS` | *(unset)* | Swagger UI (`/api/docs`) + OpenAPI JSON (`/api/openapi.json`) exposure. Unset: enabled in dev, **disabled in production**. Set `1` to force-enable (e.g. agent self-discovery on a trusted network) or `0` to force-disable |
 | `ALLOW_INSECURE_HTTP` | *(unset)* | Set to `1` for a no-TLS LAN/homelab deployment reached over plain HTTP (`http://192.168.1.x:8080`). Drops the HTTPS-assuming security headers (CSP `upgrade-insecure-requests`, HSTS) and issues the session cookie without `Secure` so login works. **Leave unset whenever you have TLS** |
 | `OIDC_ISSUER` | *(unset)* | OIDC provider issuer URL (enables SSO login when set, alongside local auth) |
@@ -148,10 +151,14 @@ running on 8080 — maps to the container's internal 8080).
 | `OIDC_ALLOW_INSECURE` | *(unset)* | Set to allow OIDC over plain HTTP — dev/testing only, never in production |
 | `OPENAI_API_KEY` | *(unset)* | Fallback credential for a configured `openai` / OpenAI-compatible server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
 | `ANTHROPIC_API_KEY` | *(unset)* | Fallback credential for a configured `anthropic` server-default provider when no encrypted key is stored. The admin UI reports `Environment credential`; the value is never returned or logged |
+| `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | *(unset)* | Set to `1` to allow private/loopback AI provider `baseUrl` hosts (local Ollama / llama.cpp / LM Studio). Cloud metadata / link-local stay blocked. See docs for the safer per-host allowlist alternative |
+| `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | *(unset)* | Optional comma-separated hostname allowlist for provider `baseUrl` |
+| `AI_PROVIDER_BASEURL_DENY_HOSTS` | *(unset)* | Optional comma-separated hostname denylist for provider `baseUrl` |
 | `TZ` | *(unset, UTC)* | Container timezone, e.g. `America/Denver` — affects displayed session/log timestamps |
 | `BACKUP_SCHEDULE_ENABLED` | *(unset)* | Set to `1` to enable periodic on-disk backups (see **Backup & restore** below). Off by default |
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when `BACKUP_SCHEDULE_ENABLED=1`) |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Where scheduled backup archives are written (only when `BACKUP_SCHEDULE_ENABLED=1`) |
+| `BACKUP_KEY_PASSPHRASE` | *(unset)* | When set (≥12 characters), scheduled backups wrap the auto-generated `ai-config.key` in an encrypted envelope inside the archive (#496). Interactive downloads use `POST /api/v1/backup/download` with the same passphrase in the JSON body. |
 
 `WEB_DIST` and `NODE_ENV` are already baked into the image (`NODE_ENV=production`,
 `WEB_DIST=/app/web-dist`) — you shouldn't need to set either.
@@ -165,6 +172,9 @@ so copying that volume is still the simplest backup. On top of that, Campfire ex
 - **`GET /api/v1/backup`** — downloads a single `.zip` containing a WAL-safe hot snapshot
   of the database (taken with SQLite `VACUUM INTO`, so it never blocks writers or ships a
   torn WAL) plus every uploaded file, with a `manifest.json`.
+- **`POST /api/v1/backup/download`** — same archive as the GET endpoint, but accepts an
+  optional `keyPassphrase` in the JSON body (≥12 characters) to include an encrypted
+  AI credential keyfile envelope (#496). Passphrases must not be sent in query strings.
 - **`POST /api/v1/backup/restore`** (multipart: `file` = the archive, `confirm` = `RESTORE`)
   — **destructive**: validates the archive, then replaces the live database and uploads
   and re-opens the DB in place. Gated hard behind server-admin *and* the explicit
@@ -236,6 +246,91 @@ Expected SSO failures return to Campfire's accessible sign-in recovery page.
 Users can start a fresh SSO flow and give an operator the displayed support
 reference; provider payloads, authorization codes, state/PKCE values, tokens,
 claims, and secrets are never placed in the recovery URL or UI.
+
+### Reverse-proxy subpath (issue #798)
+
+Campfire ships at the origin root by default. To host it under a path prefix
+(`https://host/campfire/...` on a shared domain with other apps), set
+**`PUBLIC_BASE`** at **image-build time** and configure the reverse proxy to
+**strip the prefix before forwarding**. Everything browser-facing — asset
+URLs, the PWA manifest's scope/start_url, the service worker, the router
+basename, and the in-app API client — is stamped from this single setting.
+
+**The proxy contract is "strip prefix, then forward":**
+
+```
+Browser:  https://host/campfire/assets/index-abc.js
+                     └────────┘ └──────────────────┘
+                  Proxy strips   Server receives /assets/index-abc.js
+                  /campfire,     (server routing is UNCHANGED — never
+                  forwards       sees the prefix for its own routes)
+```
+
+This keeps the server's routing exactly as it is — ServeStaticModule still
+serves `index.html` for `/login`, NestJS still handles `/api/v1/...`, the
+healthcheck still probes `/readyz`. Only the browser-facing surface knows
+about the prefix.
+
+**Build the image with the prefix:**
+
+```bash
+docker build --build-arg PUBLIC_BASE=/campfire -t campfire:subpath .
+# or, in compose:
+#   build: { args: { PUBLIC_BASE: /campfire } }
+```
+
+**Traefik strip-prefix labels (PathPrefix + StripPrefix):**
+
+```yaml
+labels:
+  - traefik.http.routers.campfire.rule=PathPrefix(`/campfire`)
+  - traefik.http.routers.campfire.middlewares=campfire-strip
+  - traefik.http.middlewares.campfire-strip.stripprefix.prefixes=/campfire
+```
+
+**Caddy (handle_path auto-strips):**
+
+```caddyfile
+example.com {
+  handle_path /campfire/* {
+    reverse_proxy campfire:8080
+  }
+}
+```
+
+**Nginx (`rewrite` / `location` with trailing slash):**
+
+```nginx
+location /campfire/ {
+    rewrite ^/campfire/(.*)$ /$1 break;
+    proxy_pass http://campfire:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+# Also handle the bare prefix so https://host/campfire redirects cleanly:
+location = /campfire {
+    return 301 /campfire/;
+}
+```
+
+**Important notes:**
+
+- `PUBLIC_BASE` is a PATH, not an origin. Passing a full URL like
+  `https://host/campfire` is accepted (the host portion is dropped) for
+  operator convenience, but only the path component is used.
+- Re-building the image is required to change the prefix — it is a build-time
+  constant by design (the browser cannot be told at runtime which path to
+  fetch assets from). Operators who need to switch prefixes must build two
+  images or use a per-deployment tag.
+- **OIDC SSO under a subpath:** set `OIDC_REDIRECT_URI` to the full
+  externally-visible callback URL including the prefix, e.g.
+  `https://host/campfire/api/v1/auth/oidc/callback`. The server prefixes its
+  own post-SSO redirect (`/campfire/`) and scopes the OIDC flow cookie to
+  the prefixed path automatically — no extra proxy configuration needed.
+- **Trailing slash** in `PUBLIC_BASE` is optional (`/campfire` and
+  `/campfire/` normalize to the same value internally).
+- Root deployment (the default, `PUBLIC_BASE=/`) is identical to pre-#798
+  behavior — no proxy rewrites, no prefix anywhere.
 
 ## AI Dungeon Master (experimental)
 

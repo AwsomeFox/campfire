@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import type { EncounterEvent } from '@campfire/schema';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 test.use({ storageState: stateFor('dm') });
 
@@ -12,7 +12,17 @@ interface TestWindow extends Window {
 
 async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
   const { campaignId } = seed();
-  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name } });
+  // Issue #744: a campaign can have at most one live fight. The seeded "Ambush"
+  // encounter is currently RUNNING; end it so this throwaway encounter can start.
+  // restoreSeedFight() (called by each test's finally) reopens it afterward, since
+  // /reopen preserves round/turnIndex and the combat-tracker suite expects Round 1.
+  const live = await page.request.get(`/api/v1/campaigns/${campaignId}/encounters?status=running`);
+  if (live.ok()) {
+    for (const enc of (await live.json()) as { id: number }[]) {
+      await page.request.post(`/api/v1/encounters/${enc.id}/end`);
+    }
+  }
+  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name, hidden: false } });
   expect(created.ok()).toBe(true);
   const encounter = (await created.json()) as { id: number };
 
@@ -35,10 +45,72 @@ async function createRunningEncounter(page: Page, name: string, hpMax = 10) {
   return { campaignId, encounterId: encounter.id, combatantId: combatant.id };
 }
 
+/**
+ * Restore the seeded "Ambush" encounter as the campaign's RUNNING live fight after
+ * a throwaway-encounter test ended it (issue #744). /reopen transitions 'ended' ->
+ * 'running' and preserves round/turnIndex, so the combat-tracker suite still sees
+ * Round 1 with its seeded initiatives intact. Safe to call when the seed fight is
+ * already running (the 400 from /reopen on a non-'ended' status is ignored). Called
+ * from each test's `finally` block so the one-live-fight invariant holds across the
+ * serial suite regardless of which throwaway fight a test created and ended.
+ */
+async function restoreSeedFight(page: Page): Promise<void> {
+  await restoreSeedEncounter(page);
+}
+
 async function openEncounter(page: Page, campaignId: number, encounterId: number, heading: string) {
   await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
   await expect(page.getByRole('heading', { name: heading })).toBeVisible();
   await expect(page.getByRole('log', { name: 'Combat log' })).toBeVisible();
+}
+
+async function mockDriverToolEvent(page: Page, campaignId: number, toolName: string) {
+  const at = '2026-07-24T00:00:00.000Z';
+  const seat = {
+    campaignId,
+    mode: 'driver',
+    enabled: true,
+    model: 'test',
+    instructions: '',
+    tokenBudget: 10_000,
+    tokensUsed: 0,
+    turnCount: 0,
+    lastTurnAt: null,
+    createdAt: at,
+    updatedAt: at,
+  };
+  const session = {
+    campaignId,
+    status: 'active',
+    state: 'running',
+    scene: 'Live play',
+    lastNarration: null,
+    lastTurnAt: null,
+    turnCount: 0,
+    stuck: null,
+    levers: [],
+    actingDm: null,
+    vote: null,
+    takeoverRequestedBy: null,
+  };
+  let sentToolEvent = false;
+  await page.route(`**/api/v1/campaigns/${campaignId}/ai-dm**`, async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith('/ai-dm/stream')) {
+      const payload = sentToolEvent
+        ? ': keepalive\n\n'
+        : `data: ${JSON.stringify({ type: 'tool', campaignId, name: toolName, isError: false, proposed: false, at })}\n\n`;
+      sentToolEvent = true;
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: payload });
+    }
+    if (path.endsWith('/ai-dm/seat') || (path.endsWith('/ai-dm') && route.request().method() === 'GET')) {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(seat) });
+    }
+    if (path.endsWith('/ai-dm/session')) {
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(session) });
+    }
+    return route.fallback();
+  });
 }
 
 async function watchAnnouncements(page: Page) {
@@ -78,7 +150,10 @@ test.describe('combat log accessibility — remote clients', () => {
 
       const damaged = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpDelta: -1 } },
+        // actorId: null opts out of issue #620's current-turn attribution so this test
+        // asserts the unattributed phrasing deterministically — without it, a party
+        // member winning initiative would render "X to Secret Ash Hound: took 1 damage".
+        { data: { hpDelta: -1, actorId: null } },
       );
       expect(damaged.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: took 1 damage');
@@ -113,20 +188,25 @@ test.describe('combat log accessibility — remote clients', () => {
       const turned = await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/next-turn`);
       expect(turned.ok()).toBe(true);
       await expect
-        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn (round")))
+        .poll(async () => (await announcements(viewerPage)).slice(announcementCountBeforeTurn).some((message) => message.includes("'s turn")))
         .toBe(true);
 
       const defeated = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpSet: 0 } },
+        // actorId: null — see the damage patch above (deterministic unattributed phrasing).
+        { data: { hpSet: 0, actorId: null } },
       );
       expect(defeated.ok()).toBe(true);
       await waitForAnnouncement(viewerPage, 'Outcome: dropped to 0 HP');
       await expect(log).toContainText('Secret Ash Hound dropped to 0 HP');
     } finally {
       await viewerContext.close();
+      // End before delete so a failed DELETE cannot leave a RUNNING fight that
+      // blocks restoreSeedEncounter's /reopen (ENCOUNTER_ALREADY_RUNNING, #744).
+      await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
+      await restoreSeedFight(dmPage);
     }
   });
 
@@ -142,7 +222,8 @@ test.describe('combat log accessibility — remote clients', () => {
 
       const damaged = await dmPage.request.patch(
         `/api/v1/encounters/${fixture.encounterId}/combatants/${fixture.combatantId}`,
-        { data: { hpDelta: -2 } },
+        // actorId: null — deterministic unattributed phrasing (see the first test).
+        { data: { hpDelta: -2, actorId: null } },
       );
       expect(damaged.ok()).toBe(true);
       const conditioned = await dmPage.request.patch(
@@ -160,8 +241,10 @@ test.describe('combat log accessibility — remote clients', () => {
     } finally {
       await viewerContext.setOffline(false);
       await viewerContext.close();
+      await dmPage.request.post(`/api/v1/encounters/${fixture.encounterId}/end`).catch(() => undefined);
       const removed = await dmPage.request.delete(`/api/v1/encounters/${fixture.encounterId}`);
       expect(removed.ok()).toBe(true);
+      await restoreSeedFight(dmPage);
     }
   });
 
@@ -176,6 +259,8 @@ test.describe('combat log accessibility — remote clients', () => {
       type: 'note',
       actor: 'Historian',
       target: null,
+      actorId: null,
+      targetId: null,
       detail: `Earlier combat note ${index + 1} with enough detail to keep the history independently scrollable`,
       createdAt: `2026-07-22T10:${String(index).padStart(2, '0')}:00.000Z`,
     }));
@@ -213,6 +298,8 @@ test.describe('combat log accessibility — remote clients', () => {
           type: 'note',
           actor: 'Mira',
           target: null,
+          actorId: null,
+          targetId: null,
           detail: 'The bridge is unstable',
           createdAt: '2026-07-22T12:01:00.000Z',
         },
@@ -223,6 +310,8 @@ test.describe('combat log accessibility — remote clients', () => {
           type: 'override',
           actor: 'Game Master',
           target: 'Goblin Boss',
+          actorId: null,
+          targetId: null,
           detail: 'set initiative to 12',
           createdAt: '2026-07-22T12:02:00.000Z',
         },
@@ -233,6 +322,8 @@ test.describe('combat log accessibility — remote clients', () => {
           type: 'correction',
           actor: 'Game Master',
           target: 'Goblin Boss',
+          actorId: null,
+          targetId: null,
           detail: 'corrected damage to 4',
           createdAt: '2026-07-22T12:03:00.000Z',
         },
@@ -278,9 +369,61 @@ test('combat log remains named, reflow-safe, keyboard reachable, and axe-clean o
     expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(320);
     expect(await log.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
 
-    const results = await new AxeBuilder({ page }).include('[role="log"]').analyze();
+    // Scope to the combat log only — the encounter page also mounts SharedDiceLog
+    // as role="log" (#590), and discarded dice faces use muted strikethrough that
+    // intentionally fails AA contrast.
+    const results = await new AxeBuilder({ page })
+      .include('[role="log"][aria-labelledby]')
+      .analyze();
     expect(results.violations).toEqual([]);
   } finally {
     await context.close();
   }
+});
+
+test('mobile encounter view announces AI loot/treasury tool activity and keeps the toast in-bounds', async ({ page }) => {
+  const { campaignId, encounterId } = seed();
+  await restoreSeedEncounter(page);
+  await page.setViewportSize({ width: 320, height: 568 });
+  await mockDriverToolEvent(page, campaignId, 'adjust_treasury');
+  // Persist a combat-log note as the driver does after a successful grant (#1021) so the
+  // named Combat log (not only the 8s toast) shows the award under role="log".
+  await page.route(`**/api/v1/encounters/${encounterId}/events**`, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          id: 9001,
+          encounterId,
+          round: 1,
+          type: 'note',
+          actor: 'AI DM',
+          target: null,
+          actorId: null,
+          targetId: null,
+          detail: 'Granted treasury (+25 gp)',
+          createdAt: '2026-07-24T00:00:00.000Z',
+        },
+      ]),
+    });
+  });
+
+  await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
+  await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
+
+  const toast = page.getByText('The AI DM adjust treasury').first();
+  await expect(toast).toBeVisible();
+  const bounds = await toast.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(320);
+
+  const polite = page.locator('.sr-only[aria-live="polite"]').first();
+  await expect
+    .poll(async () => ((await polite.textContent()) ?? '').toLowerCase().includes('the ai dm adjust treasury'))
+    .toBe(true);
+
+  const combatLog = page.getByRole('log', { name: 'Combat log' });
+  await expect(combatLog.getByText(/Granted treasury \(\+25 gp\)/i)).toBeVisible();
 });

@@ -13,6 +13,8 @@ import {
   CharacterUpdate,
   EncounterGenerate,
   GenerateMapParams,
+  FactionCreate,
+  FactionUpdate,
   ProposalApprove,
   ProposalResolve,
 } from '@campfire/schema';
@@ -29,6 +31,7 @@ import { SessionsService } from '../sessions/sessions.service';
 import { CharactersService } from '../characters/characters.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
+import { FactionsService } from '../factions/factions.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
@@ -54,6 +57,7 @@ const CREATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationCreate.strict(),
   session: SessionCreate.strict(),
   character: CharacterCreate.strict(),
+  faction: FactionCreate.strict(),
   // Co-DM (issue #313): an encounter/map proposal's payload is the (seeded) GENERATOR
   // request, not a persisted row — approve re-runs generate_encounter (#304) /
   // generate_map (#306). These are create-only in v1; the update entries below reuse the
@@ -67,6 +71,7 @@ const UPDATE_SCHEMAS: Record<ProposableEntityType, z.ZodTypeAny> = {
   location: LocationUpdate.strict(),
   session: SessionUpdate.strict(),
   character: CharacterUpdate.strict(),
+  faction: FactionUpdate.strict(),
   encounter: EncounterGenerate.strict(),
   map: GenerateMapParams.strict(),
 };
@@ -84,14 +89,16 @@ export class ProposalsService {
     private readonly characters: CharactersService,
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
+    private readonly factions: FactionsService,
   ) {}
 
   async listForCampaign(
     campaignId: number,
     status: string | undefined,
+    role: Role,
     opts?: { proposerUserId?: string },
   ): Promise<Proposal[]> {
-    return this.records.listForCampaign(campaignId, status, opts);
+    return this.records.listForCampaign(campaignId, status, role, opts);
   }
 
   /**
@@ -116,8 +123,8 @@ export class ProposalsService {
     });
   }
 
-  async latestForCampaign(campaignId: number, limit = 500): Promise<Proposal[]> {
-    return this.records.latestForCampaign(campaignId, limit);
+  async latestForCampaign(campaignId: number, limit = 500, role: Role = 'dm'): Promise<Proposal[]> {
+    return this.records.latestForCampaign(campaignId, limit, role);
   }
 
   async getRowOrThrow(id: number) {
@@ -180,6 +187,21 @@ export class ProposalsService {
           },
           update: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
           remove: () => Promise.reject(new BadRequestException('Map proposals are create-only')),
+        };
+      // Co-DM (issue #1056): factions are proposable for drafting but create-only in v1 —
+      // captureAuthorizedSnapshot returns null (no prior-row diff), so update/delete must
+      // reject loudly rather than routing through the full FactionsService.
+      case 'faction':
+        return {
+          create: (campaignId: number, payload: Record<string, unknown>, user: RequestUser, role: Role) =>
+            this.factions.create(
+              campaignId,
+              payload as Parameters<FactionsService['create']>[1],
+              user,
+              role,
+            ),
+          update: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
+          remove: () => Promise.reject(new BadRequestException('Faction proposals are create-only')),
         };
     }
   }
@@ -321,7 +343,7 @@ export class ProposalsService {
     if (existing.status !== 'pending') {
       throw new ConflictException(`Proposal ${id} is already ${existing.status}`);
     }
-    const withdrawn = await this.records.markWithdrawn(id, user.id);
+    const withdrawn = await this.records.markWithdrawn(id, user.id, role);
     if (!withdrawn) {
       const current = await this.records.getRowOrThrow(id);
       throw new ConflictException(`Proposal ${id} is already ${current.status}`);
@@ -345,7 +367,7 @@ export class ProposalsService {
    * edit-before-approve), so a bad revision 400s rather than being stored. Delete
    * proposals carry no payload and cannot be revised.
    */
-  async revise(id: number, input: { payload: Record<string, unknown> }, user: RequestUser): Promise<Proposal> {
+  async revise(id: number, input: { payload: Record<string, unknown> }, user: RequestUser, role: Role): Promise<Proposal> {
     const existing = await this.records.getRowOrThrow(id);
     if ((existing.proposerUserId ?? '') !== user.id) {
       throw new ForbiddenException('You can only revise your own proposals');
@@ -361,7 +383,7 @@ export class ProposalsService {
       throw new BadRequestException('Delete proposals have no payload to revise');
     }
     const validated = this.validatePayload(existing.entityType, action, input.payload);
-    const revised = await this.records.revisePayload(id, validated);
+    const revised = await this.records.revisePayload(id, validated, role);
     if (!revised) {
       const current = await this.records.getRowOrThrow(id);
       throw new ConflictException(`Proposal ${id} is already ${current.status}`);

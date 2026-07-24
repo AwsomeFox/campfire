@@ -62,9 +62,23 @@ export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
   },
 );
 
+/**
+ * HP bar tone for a current/max pair (issue #642).
+ *
+ * Extracted from `HpBar` so every HP surface — combat tracker, Party card,
+ * character sheet — resolves the SAME danger ramp from the same pure helper.
+ * Returns the CSS modifier class name appended to `.cf-hp` (`crit` < 25%,
+ * `low` < 50%, otherwise empty). Kept here next to the bar so the threshold
+ * table and the rendered bar can't drift apart.
+ */
+export function hpTone(current: number, max: number): '' | 'low' | 'crit' {
+  const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
+  return pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
+}
+
 export function HpBar({ current, max }: { current: number; max: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(100, (current / max) * 100)) : 0;
-  const tone = pct < 25 ? 'crit' : pct < 50 ? 'low' : '';
+  const tone = hpTone(current, max);
   // Flash + shake on HP change (issue #67). Track the previous value across
   // renders and fire a one-shot 'damage'/'heal' pulse cleared on animation end.
   // CSS disables the motion under prefers-reduced-motion; the bar width still
@@ -113,26 +127,70 @@ export function EmptyState({ icon = 'candle-flame', title, hint }: { icon?: stri
 }
 
 export function Skeleton({ lines = 3 }: { lines?: number }) {
+  // Bars stay visible when animate-pulse is frozen under reduced motion (#594).
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" role="status" aria-busy="true" data-testid="skeleton">
+      <span className="sr-only">Loading…</span>
       {Array.from({ length: lines }, (_, i) => (
         <div
           key={i}
           className="h-3 rounded animate-pulse bg-[var(--color-neutral-800)]"
           style={{ width: `${85 - i * 15}%` }}
+          aria-hidden="true"
         />
       ))}
     </div>
   );
 }
 
-export function ErrorNote({ message, onRetry }: { message: string; onRetry?: () => void }) {
+export function ErrorNote({
+  message,
+  onRetry,
+  onDismiss,
+  pending = false,
+  context,
+}: {
+  message: string;
+  onRetry?: () => void | Promise<void>;
+  /** Optional dismiss — used when the error is stale and no longer actionable (#430). */
+  onDismiss?: () => void;
+  /** Keeps Retry visible but disabled while the loader/mutation is in flight. */
+  pending?: boolean;
+  /** Light secondary context (e.g. relative time) shown after the message. */
+  context?: string;
+}) {
   return (
     <div role="alert" className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
-      {message}{' '}
+      <span>{message}</span>
+      {context && (
+        <span className="text-[var(--color-neutral-500)]">
+          {' '}
+          · {context}
+        </span>
+      )}
+      {' '}
       {onRetry && (
-        <button onClick={onRetry} className="font-semibold text-[var(--cf-accent)] hover:underline">
-          Retry
+        <button
+          type="button"
+          onClick={() => {
+            // Support async retries without forcing callers to wrap in `void`.
+            // Rejections are owned by the loader's error UI — don't surface as unhandled.
+            void Promise.resolve(onRetry()).catch(() => {});
+          }}
+          disabled={pending}
+          aria-busy={pending || undefined}
+          className="font-semibold text-[var(--cf-accent)] hover:underline disabled:opacity-60 disabled:no-underline"
+        >
+          {pending ? 'Retrying…' : 'Retry'}
+        </button>
+      )}
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="ml-2 font-semibold text-[var(--color-neutral-500)] hover:underline"
+        >
+          Dismiss
         </button>
       )}
     </div>

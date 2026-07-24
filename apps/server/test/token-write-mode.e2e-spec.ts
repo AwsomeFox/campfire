@@ -65,8 +65,6 @@ describe('Issue #158: server-enforced token write-mode (e2e)', () => {
     await closeTestApp(ctx);
   });
 
-  const authed = (token: string) => request(ctx.app.getHttpServer()).set('Authorization', `Bearer ${token}`) as never;
-
   describe('propose-mode token is FORCED down the proposal path', () => {
     it('CREATE without ?proposed=true is coerced into a pending proposal, not a direct write', async () => {
       const server = ctx.app.getHttpServer();

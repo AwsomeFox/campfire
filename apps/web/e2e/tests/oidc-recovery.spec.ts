@@ -65,6 +65,8 @@ test.describe('OIDC recovery page', () => {
     const retry = page.getByRole('link', { name: 'Try SSO again' });
     const local = page.getByRole('link', { name: 'Sign in with username and password' });
     await expect(heading).toBeFocused();
+    // Local login is gated on auth/status; wait until it mounts so Tab order is stable.
+    await expect(local).toBeVisible();
     await page.keyboard.press('Tab');
     await expect(retry).toBeFocused();
     await page.keyboard.press('Tab');
@@ -89,7 +91,8 @@ test.describe('OIDC recovery page', () => {
     await local.click();
     await expect(page).toHaveURL(/\/login\?local=1$/);
     await expect(page.getByLabel('Username')).toBeVisible();
-    await expect(page.getByLabel('Password')).toBeVisible();
+    await expect(page.getByLabel('Password', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Show password' })).toBeVisible();
   });
 
   test('does not show a local-login affordance when public status says it is unavailable', async ({ page }) => {

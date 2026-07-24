@@ -24,7 +24,7 @@
  * page leaves clearly-marked seams for them (see the `session.stuck` / `session.state`
  * region below) and renders only a minimal fallback for the gated/off states.
  */
-import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -52,10 +52,34 @@ import {
   type ToolEntry,
 } from './transcript';
 import { invalidateForToolEvent, resolveToolActivity, type ToolResource } from './toolActivity';
+import {
+  advanceNarrationLog,
+  announceableEntryIds,
+  beginNarrationLogLive,
+  collectPreLiveAnnounceableIds,
+  formatNarrationLogAddition,
+  nextComposerStatusAnnouncement,
+  NARRATION_LOG_LIVE_REGION,
+  NARRATION_STATUS_LIVE_REGION,
+  NARRATION_VISUAL_TRANSCRIPT,
+  resolveComposerA11ySnapshot,
+  type ComposerA11ySnapshot,
+  type NarrationLogAddition,
+  type NarrationLogCursor,
+} from './narrationAccessibility';
+import {
+  followLatestAfterUserScroll,
+  FEED_NEAR_BOTTOM_PX,
+  isFeedNearBottom,
+  shouldScrollTranscriptToTailOnMount,
+  unreadAfterFeedGrowth,
+} from './feedScrollFollow';
 import { AiSetupChecklist, AiGateExplainer, AiTransparencyNote } from './AiSetupChecklist';
 import { StuckLadder } from './StuckLadder';
 import { Markdown } from '../../components/Markdown';
-import { Btn, Card, Chip, EmptyState, Skeleton, TextArea, TextInput, type ChipVariant } from '../../components/ui';
+import { Field } from '../../components/Field';
+import { AI_TABLE_FIELD, AI_TABLE_PREFIX } from '../../components/formFieldLabels';
+import { Btn, Card, Chip, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 
 /** game-icons slug for a tool chip's resource family — the shared map returns lucide
  * names, which this app doesn't bundle, so we render an equivalent <GameIcon> glyph. */
@@ -158,20 +182,65 @@ export default function AiTablePage() {
 
   // Seed a fresh transcript (empty localStorage) from thin session state so a brand-new
   // browser drops in behind a "joined mid-session" divider showing scene + last narration.
+  // `narrationLogLive` stays false until this phase settles so the SR log mirror does not
+  // treat the delayed seed as live additions (#1077 / Bugbot).
   const seededRef = useRef(false);
+  const [narrationLogLive, setNarrationLogLive] = useState(false);
+  // When viewer→driver reseeds after the log already went live, re-baseline so join
+  // context is silenced instead of announced as live additions.
+  const silenceSeedBaselineRef = useRef(false);
+  const narrationLogCursorRef = useRef<NarrationLogCursor | null>(null);
+  const pendingPreLiveIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (seededRef.current || !isDriver) return;
     if (transcript.entries.length > 0) {
-      seededRef.current = true;
+      // Hydrated history (or seed applied on the previous commit): no further seed.
+      if (!seededRef.current) seededRef.current = true;
+      if (!narrationLogLive) setNarrationLogLive(true);
       return;
     }
-    if (session) {
-      if (session.scene || session.lastNarration) {
-        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
-      }
-      seededRef.current = true;
+    if (seededRef.current) {
+      if (!narrationLogLive) setNarrationLogLive(true);
+      return;
     }
-  }, [session, isDriver, transcript.entries.length]);
+    // Seat still loading: `isDriver` is false while data is missing, but a driver
+    // session seed may still arrive — wait before enabling the live log.
+    if (!seatQuery.isFetched) return;
+    if (!isDriver) {
+      // Do NOT set seededRef — a later seat switch into driver with an empty
+      // transcript must still run session join-context seeding (#1077 recovery).
+      if (!narrationLogLive) setNarrationLogLive(true);
+      return;
+    }
+    // Driver: wait for the session read so join-context seed can land in the same
+    // settle pass as enabling the live log (empty/error session → empty baseline).
+    if (!sessionQuery.isFetched) return;
+    if (session?.scene || session?.lastNarration) {
+      // If SR log already went live (viewer → driver), hold the live region and
+      // re-baseline so join-context seed is silenced rather than announced.
+      if (narrationLogLive) {
+        narrationLogCursorRef.current = null;
+        pendingPreLiveIdsRef.current.clear();
+        silenceSeedBaselineRef.current = true;
+        setNarrationLogLive(false);
+        dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+        seededRef.current = true;
+        // Next pass (entries.length > 0) re-enables live and silences the seed.
+        return;
+      }
+      dispatch({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+    }
+    seededRef.current = true;
+    // Batched with the seed dispatch so the next commit sees seeded entries + live
+    // together; the log effect then silences the baseline instead of announcing it.
+    setNarrationLogLive(true);
+  }, [
+    session,
+    isDriver,
+    transcript.entries.length,
+    seatQuery.isFetched,
+    sessionQuery.isFetched,
+    narrationLogLive,
+  ]);
 
   // Subscribe to the narration stream. Only opened in Driver mode; the hook itself also
   // stops on a 401/403 (feature off / not a member), so a non-member simply gets nothing.
@@ -184,7 +253,10 @@ export default function AiTablePage() {
         if (event.type === 'turn.start') setStreaming(true);
         else if (event.type === 'turn.end') setStreaming(false);
         else if (event.type === 'tool') {
-          invalidateForToolEvent(queryClient, event, { campaignId, encounterId: activeEncounterId });
+          invalidateForToolEvent(queryClient, event, {
+            campaignId,
+            encounterId: event.encounterId ?? activeEncounterId,
+          });
         } else if (
           event.type === 'state' ||
           event.type === 'stuck' ||
@@ -200,7 +272,17 @@ export default function AiTablePage() {
       },
       onReconnect: () => {
         if (campaignId === undefined) return;
-        // Caught up after a drop: refetch the session + the live surfaces we may have missed.
+        // Transport drop healed — refetch session + live surfaces we may have missed.
+        setStreaming(false);
+        invalidateAiDm(queryClient, campaignId);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignParty(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignCharacters(campaignId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.campaignMap(campaignId) });
+      },
+      // Parser recovery keeps the connection; still refetch skipped stream state.
+      onStreamRecovery: () => {
+        if (campaignId === undefined) return;
         setStreaming(false);
         invalidateAiDm(queryClient, campaignId);
         void queryClient.invalidateQueries({ queryKey: queryKeys.campaignEncounters(campaignId) });
@@ -212,11 +294,162 @@ export default function AiTablePage() {
     { enabled: campaignId !== undefined && isDriver },
   );
 
-  // Auto-scroll to the newest entry as the transcript grows / streams.
+  // Auto-scroll only while the reader is pinned to the tail (#590).
+  const transcriptRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const [followLatest, setFollowLatest] = useState(true);
+  const [unreadBelow, setUnreadBelow] = useState(0);
+  const prevEntryCountRef = useRef(transcript.entries.length);
+  const transcriptMountScrollDoneRef = useRef(false);
+  /** Suppress unpin-on-scroll while a programmatic pin assigns scrollTop (#590). */
+  const ignoreScrollUnpinRef = useRef(false);
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
+    // Campaign switches must not inherit follow/unread state from the previous table.
+    transcriptMountScrollDoneRef.current = false;
+    followLatestRef.current = true;
+    setFollowLatest(true);
+    setUnreadBelow(0);
+    prevEntryCountRef.current = 0;
+    ignoreScrollUnpinRef.current = false;
+  }, [campaignId]);
+
+  useEffect(() => {
+    followLatestRef.current = followLatest;
+  }, [followLatest]);
+
+  const transcriptRevision = useMemo(() => {
+    const last = transcript.entries[transcript.entries.length - 1];
+    const tail =
+      last?.kind === 'dm' && last.status === 'streaming'
+        ? `${last.id}:${dmEntryText(last).length}`
+        : (last?.id ?? '');
+    return `${transcript.entries.length}:${tail}`;
   }, [transcript.entries]);
+
+  useEffect(() => {
+    const prev = prevEntryCountRef.current;
+    const next = transcript.entries.length;
+    prevEntryCountRef.current = next;
+    setUnreadBelow((unread) => unreadAfterFeedGrowth(unread, followLatestRef.current, prev, next));
+  }, [transcript.entries.length]);
+
+  const handleTranscriptScroll = useCallback(() => {
+    // Programmatic pinTranscriptToTail fires scroll events; don't treat those as the
+    // reader leaving the tail (flex settle on short viewports can land ~50–60px off,
+    // just outside FEED_NEAR_BOTTOM_PX, and would otherwise show jump-to-latest).
+    if (ignoreScrollUnpinRef.current) return;
+    const el = transcriptRef.current;
+    if (!el) return;
+    const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+    const pin = followLatestAfterUserScroll(near);
+    followLatestRef.current = pin;
+    setFollowLatest((prev) => (prev === pin ? prev : pin));
+    if (pin) setUnreadBelow(0);
+  }, []);
+
+  const pinTranscriptToTail = useCallback((el: HTMLDivElement) => {
+    // Prefer scrollTop over scrollIntoView — the latter can move the window when
+    // nested flex overflow is still settling (issue #590 mount flake).
+    ignoreScrollUnpinRef.current = true;
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        ignoreScrollUnpinRef.current = false;
+        // Layout may have moved us off the tail during the suppressed window; re-pin
+        // while follow is still intended so jump-to-latest does not stick (#590).
+        const node = transcriptRef.current;
+        if (node && followLatestRef.current) {
+          node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+        }
+      });
+    });
+  }, []);
+
+  const syncTranscriptTailScroll = useCallback(() => {
+    const el = transcriptRef.current;
+    if (!el || transcript.entries.length === 0) return;
+
+    const canScroll = el.scrollHeight > el.clientHeight + 1;
+
+    if (!transcriptMountScrollDoneRef.current) {
+      // Wait for a real overflow box; early layouts with equal scroll/client height
+      // would otherwise mark the mount done and leave the reader at the top.
+      if (!canScroll) return;
+      transcriptMountScrollDoneRef.current = true;
+      if (
+        shouldScrollTranscriptToTailOnMount(
+          transcript.entries.length,
+          el.scrollTop,
+          el.scrollHeight,
+          el.clientHeight,
+        )
+      ) {
+        pinTranscriptToTail(el);
+        followLatestRef.current = true;
+        setFollowLatest(true);
+        setUnreadBelow(0);
+        return;
+      }
+    }
+
+    if (!canScroll) return;
+
+    // Prefer previous follow intent over post-growth distance: a tall append can
+    // push "near bottom" false even when the reader was pinned (orchestrator / #590).
+    if (followLatestRef.current) {
+      setUnreadBelow(0);
+      pinTranscriptToTail(el);
+      return;
+    }
+    const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
+    if (near) {
+      followLatestRef.current = true;
+      setFollowLatest(true);
+      setUnreadBelow(0);
+      pinTranscriptToTail(el);
+    }
+  }, [pinTranscriptToTail, transcript.entries.length]);
+
+  const jumpToLatest = useCallback(() => {
+    followLatestRef.current = true;
+    setFollowLatest(true);
+    setUnreadBelow(0);
+    const el = transcriptRef.current;
+    if (el) pinTranscriptToTail(el);
+    else bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [pinTranscriptToTail]);
+
+  useLayoutEffect(() => {
+    if (!isDriver) return;
+    const el = transcriptRef.current;
+    if (!el) return;
+
+    const sync = () => {
+      // If follow-latest is on but layout left us away from the tail (flex
+      // overflow settling on CI), allow mount pin to run again (#590 flake).
+      if (
+        followLatestRef.current &&
+        el.scrollHeight > el.clientHeight + 1 &&
+        el.scrollHeight - el.scrollTop - el.clientHeight > FEED_NEAR_BOTTOM_PX
+      ) {
+        transcriptMountScrollDoneRef.current = false;
+      }
+      syncTranscriptTailScroll();
+    };
+
+    sync();
+    const raf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(sync);
+    });
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [isDriver, transcriptRevision, campaignId, syncTranscriptTailScroll]);
 
   // Composer lock: streaming OR a state the stuck-ladder issue (#340) owns.
   const paused = session?.state === 'paused';
@@ -232,6 +465,65 @@ export default function AiTablePage() {
         : awaiting
           ? t('table.composerLockedAwaiting')
           : null;
+
+  // #1077: SR live regions. The visible transcript mutates token-by-token, so a
+  // mirror only gains finished additions (turn.end / player / system). Status
+  // covers turn.start/end + composer lock/unlock without flooding SRs.
+  const [narrationLogMirror, setNarrationLogMirror] = useState<NarrationLogAddition[]>([]);
+  const [a11yStatus, setA11yStatus] = useState('');
+  const composerA11yRef = useRef<ComposerA11ySnapshot | null>(null);
+  // Hydrated localStorage ids on first commit — never treat as pre-live pending.
+  const mountBaselineIdsRef = useRef<Set<string> | null>(null);
+  if (mountBaselineIdsRef.current === null) {
+    mountBaselineIdsRef.current = announceableEntryIds(transcript.entries);
+  }
+
+  useEffect(() => {
+    // Delay until seed/hydration settles — an early pass on [] would pin an empty
+    // cursor and then announce the later session seed as live additions.
+    if (!narrationLogLive) {
+      // Viewer→driver reseed hold: do not mark seed lines as pre-live pending.
+      if (silenceSeedBaselineRef.current) return;
+      // Keep early finished turns pending so the go-live silence pass cannot
+      // permanently suppress a streamed DM that completed before seeding (#1077).
+      for (const id of collectPreLiveAnnounceableIds(
+        transcript.entries,
+        mountBaselineIdsRef.current!,
+      )) {
+        pendingPreLiveIdsRef.current.add(id);
+      }
+      return;
+    }
+    if (narrationLogCursorRef.current === null) {
+      const pending = silenceSeedBaselineRef.current
+        ? new Set<string>()
+        : pendingPreLiveIdsRef.current;
+      silenceSeedBaselineRef.current = false;
+      const started = beginNarrationLogLive(transcript.entries, pending);
+      narrationLogCursorRef.current = started.cursor;
+      pendingPreLiveIdsRef.current.clear();
+      if (started.additions.length === 0) return;
+      setNarrationLogMirror((prev) => [...prev, ...started.additions]);
+      return;
+    }
+    const advanced = advanceNarrationLog(transcript.entries, narrationLogCursorRef.current);
+    narrationLogCursorRef.current = advanced.cursor;
+    if (advanced.additions.length === 0) return;
+    setNarrationLogMirror((prev) => [...prev, ...advanced.additions]);
+  }, [transcript.entries, narrationLogLive]);
+
+  useEffect(() => {
+    // Non-streaming lock reasons already carry the localized copy; streaming uses
+    // the same "DM is narrating…" string as the composer placeholder.
+    // Viewers must not hear "Composer unlocked…" — the composer isn't shown.
+    const next = resolveComposerA11ySnapshot(streaming, streaming ? null : lockReason);
+    const message = nextComposerStatusAnnouncement(composerA11yRef.current, next, {
+      streaming: t('table.composerLockedStreaming'),
+      ready: canCompose ? t('table.composerUnlocked') : t('table.narrationReady'),
+    });
+    composerA11yRef.current = next;
+    if (message) setA11yStatus(message);
+  }, [streaming, lockReason, canCompose, t]);
 
   const placeholder = activeEncounter
     ? currentCombatantName
@@ -332,7 +624,10 @@ export default function AiTablePage() {
   }[statusKey];
 
   return (
-    <div className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3" style={{ minHeight: 'calc(100dvh - 60px)' }}>
+    <div
+      className="max-w-3xl mx-auto w-full px-4 py-5 flex flex-col gap-3 min-h-0"
+      style={{ height: 'calc(100dvh - 60px)' }}
+    >
       {/* Header: scene, status pill, token budget, DM pause/resume */}
       <Card className="!p-4">
         <div className="flex items-start gap-3 flex-wrap">
@@ -400,9 +695,19 @@ export default function AiTablePage() {
         />
       )}
 
-      {/* Transcript */}
-      <Card className="!p-0 flex-1 flex flex-col overflow-hidden">
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      {/* Transcript — named log landmark with aria-live=off so token deltas
+          never spam SRs. The sr-only mirror below owns polite additions. */}
+      <Card className="!p-0 flex-1 min-h-0 flex flex-col overflow-hidden relative">
+        <div
+          ref={transcriptRef}
+          {...NARRATION_VISUAL_TRANSCRIPT}
+          onScroll={handleTranscriptScroll}
+          className="flex-1 min-h-0 overflow-y-auto p-4 space-y-3"
+          aria-label={t('table.transcriptLabel')}
+          aria-busy={streaming || undefined}
+          tabIndex={0}
+          style={{ overflowAnchor: 'none' }}
+        >
           {transcript.entries.length === 0 ? (
             <EmptyState icon="campfire" title={t('table.emptyTitle')} hint={t('table.emptyHint')} />
           ) : (
@@ -417,21 +722,79 @@ export default function AiTablePage() {
           )}
           <div ref={bottomRef} />
         </div>
+        {!followLatest && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
+            <Btn type="button" onClick={jumpToLatest} data-testid="transcript-jump-latest">
+              {unreadBelow > 0
+                ? t('table.jumpToLatestUnread', { count: unreadBelow })
+                : t('table.jumpToLatest')}
+            </Btn>
+          </div>
+        )}
       </Card>
+
+      {/* #1077: polite log mirror — appends only finished entries (turn.end). */}
+      <div
+        {...NARRATION_LOG_LIVE_REGION}
+        aria-label={t('table.narrationLogLabel')}
+        className="sr-only"
+        data-testid="ai-narration-log"
+      >
+        {narrationLogMirror.map((addition) => (
+          <p key={addition.id}>
+            {formatNarrationLogAddition(addition, {
+              // Same localized copy as the visible transcript (not English fallback).
+              // Tool additions use their own spoken text (not system/info, which ignores `text`).
+              formatSystem: (a) =>
+                systemText(
+                  {
+                    id: a.id,
+                    kind: 'system',
+                    variant: a.variant,
+                    text: a.text,
+                    data: a.data,
+                    at: '',
+                  },
+                  t,
+                ),
+            })}
+          </p>
+        ))}
+      </div>
+
+      {/* #1077: turn.start/end + composer lock/unlock — same status pattern as
+          DraftWithAiButton / StuckLadder. */}
+      <div
+        {...NARRATION_STATUS_LIVE_REGION}
+        className="sr-only"
+        data-testid="ai-narration-status"
+      >
+        {a11yStatus}
+      </div>
 
       {/* Composer */}
       {canCompose ? (
-        <form onSubmit={onSubmit} className="flex flex-col gap-2">
+        <form onSubmit={onSubmit} className="flex flex-col gap-2" data-testid="ai-table-composer">
           {isDm && (
-            <TextInput
+            <Field
+              idPrefix={AI_TABLE_PREFIX}
+              name={AI_TABLE_FIELD.scene}
+              label={t('table.sceneFieldLabel')}
               value={sceneField}
               onChange={(e) => setSceneField(e.target.value)}
               placeholder={t('table.sceneFieldPlaceholder')}
+              help={t('table.sceneFieldHelp')}
               disabled={submitting}
+              optional
             />
           )}
           <div className="flex items-end gap-2">
-            <TextArea
+            <Field
+              idPrefix={AI_TABLE_PREFIX}
+              name={AI_TABLE_FIELD.action}
+              as="textarea"
+              label={t('table.composerLabel')}
+              className="field flex-1 min-w-0"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
@@ -440,17 +803,18 @@ export default function AiTablePage() {
                   void onSubmit(e as unknown as FormEvent);
                 }
               }}
+              help={locked && lockReason ? lockReason : t('table.composerHelp')}
               placeholder={locked && lockReason ? lockReason : placeholder}
               disabled={locked || submitting}
               rows={2}
-              className="flex-1 resize-none"
+              minHeight={56}
+              error={submitError}
+              style={{ resize: 'none' }}
             />
             <Btn type="submit" disabled={locked || submitting || !input.trim()}>
               {submitting ? t('table.sending') : t('table.send')}
             </Btn>
           </div>
-          {lockReason && <p className="text-xs text-[var(--color-neutral-600)]">{lockReason}</p>}
-          {submitError && <p className="text-xs text-rose-400">{submitError}</p>}
         </form>
       ) : (
         <p className="text-xs text-center text-[var(--color-neutral-600)] py-2">{t('table.viewerHint')}</p>
@@ -541,7 +905,16 @@ function TranscriptRow({
 
   if (entry.kind === 'tool') {
     const chip = resolveToolActivity(
-      { type: 'tool', campaignId, name: entry.name, isError: entry.isError, proposed: entry.proposed, at: entry.at },
+      {
+        type: 'tool',
+        campaignId,
+        name: entry.name,
+        isError: entry.isError,
+        proposed: entry.proposed,
+        ...(entry.encounterId !== undefined ? { encounterId: entry.encounterId } : {}),
+        at: entry.at,
+      },
+      // Keep the Table's active encounter as context so cross-encounter rows label correctly (#825).
       { campaignId, encounterId },
     );
     const tone =
@@ -593,7 +966,7 @@ function TranscriptRow({
   );
 }
 
-/** Localized text for a system/divider transcript line. */
+/** Localized text for a system/divider transcript line (visible + SR mirror). */
 function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknown>) => string): string {
   switch (entry.variant) {
     case 'divider':
@@ -612,6 +985,10 @@ function systemText(entry: SystemEntry, t: (k: string, o?: Record<string, unknow
       return t('table.systemTakeover');
     case 'vote':
       return t('table.systemVote', { action: entry.data?.action ?? '' });
+    case 'rules':
+      return entry.text
+        ? t('table.systemRules', { text: entry.text })
+        : t('table.systemRulesEmpty');
     case 'info':
     default:
       return t('table.systemInfo', { state: entry.data?.state ?? '' });

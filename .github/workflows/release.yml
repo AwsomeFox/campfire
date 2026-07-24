@@ -24,7 +24,27 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/campfire" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp workspace package.json versions for the release tag
+        run: |
+          version="${{ steps.meta.outputs.version }}"
+          node -e '
+            const fs = require("fs");
+            const v = process.argv[1];
+            for (const f of ["package.json","apps/server/package.json","apps/web/package.json","packages/schema/package.json"]) {
+              const p = JSON.parse(fs.readFileSync(f, "utf8"));
+              p.version = v;
+              fs.writeFileSync(f, JSON.stringify(p, null, 2) + "\n");
+            }
+            const docs = "website/docs/index.md";
+            const md = fs.readFileSync(docs, "utf8");
+            const next = md.replace(/current release is \*\*v[^*]+\*\*/, `current release is **v${v}**`);
+            if (next === md) throw new Error("docs version marker missing");
+            fs.writeFileSync(docs, next);
+          ' "$version"
+          node scripts/check-version-sync.mjs
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -44,6 +64,10 @@ jobs:
           push: true
           build-args: |
             APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_COMMIT=${{ steps.meta.outputs.commit }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
           tags: |
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest

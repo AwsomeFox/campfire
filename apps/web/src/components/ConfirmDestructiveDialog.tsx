@@ -2,8 +2,9 @@
  * ConfirmDestructiveDialog — structured, accessible type-to-confirm dialog for
  * irreversible actions (issue #775).
  *
- * Built on the existing `useDialog` hook for focus-trap + restore + Escape handling,
- * and the shared `Announcer` live region for assertive error announcements.
+ * Built on `useDialog` (focus trap, restore, Escape) and `Announcer` for
+ * assertive error announcements. Portals to `document.body` with an inert
+ * background like ConfirmDialog (issue #791).
  *
  * Accessibility contract:
  *  - role="alertdialog" + aria-modal + aria-labelledby + aria-describedby
@@ -15,8 +16,10 @@
  *  - Escape closes (unless busy); backdrop click closes (unless busy)
  */
 import { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useDialog } from './useDialog';
 import { useAnnounce } from './Announcer';
+import { resolveBusyConfirmLabel } from './confirmDialogLabel';
 import { Btn } from './ui';
 
 export interface ConfirmDestructiveDialogProps {
@@ -24,12 +27,22 @@ export interface ConfirmDestructiveDialogProps {
   title: string;
   /** Describes the consequence of the action — rendered as the dialog description. */
   consequence: React.ReactNode;
+  /** Optional extra body content (e.g. invite-revoke checkbox) below consequence. */
+  extraBody?: React.ReactNode;
   /** The string the user must type to confirm. */
   confirmValue: string;
   /** Label for the destructive action button. */
   confirmLabel: string;
+  /** Label shown while `busy` is true. Derived from `confirmLabel` when omitted. */
+  pendingLabel?: string;
   /** Optional label for the cancel button. @default 'Cancel' */
   cancelLabel?: string;
+  /** Label for the type-to-confirm input. @default 'Type {confirmValue} to confirm' */
+  inputLabel?: React.ReactNode;
+  /** Hint shown while the typed value does not match. */
+  hintMismatch?: string;
+  /** Hint shown once the typed value matches. */
+  hintConfirmed?: string;
   /** Whether the action is currently in flight. */
   busy?: boolean;
   /** Server or validation error to display and announce. */
@@ -42,18 +55,27 @@ export interface ConfirmDestructiveDialogProps {
 
 /**
  * Normalize strings for comparison: trim, collapse whitespace, lowercase.
- * This allows minor spacing differences without making the control overly strict.
+ * Allows minor spacing differences without making the control overly strict.
  */
-function normalize(s: string): string {
+export function normalizeConfirmValue(s: string): string {
   return s.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+export function confirmValuesMatch(typed: string, expected: string): boolean {
+  return normalizeConfirmValue(typed) === normalizeConfirmValue(expected);
 }
 
 export function ConfirmDestructiveDialog({
   title,
   consequence,
+  extraBody,
   confirmValue,
   confirmLabel,
+  pendingLabel,
   cancelLabel = 'Cancel',
+  inputLabel,
+  hintMismatch,
+  hintConfirmed = 'Confirmed — you may proceed.',
   busy = false,
   error = null,
   onConfirm,
@@ -69,21 +91,27 @@ export function ConfirmDestructiveDialog({
   const errorId = `${uid}-error`;
   const hintId = `${uid}-hint`;
 
-  const matches = normalize(inputValue) === normalize(confirmValue);
+  const matches = confirmValuesMatch(inputValue, confirmValue);
+  const confirmText = busy ? resolveBusyConfirmLabel(confirmLabel, pendingLabel) : confirmLabel;
+  const resolvedInputLabel = inputLabel ?? (
+    <>
+      Type <strong>{confirmValue}</strong> to confirm
+    </>
+  );
+  const resolvedHintMismatch =
+    hintMismatch ?? `You must type "${confirmValue}" to enable the button.`;
 
-  // Focus the input on mount (overrides useDialog's default auto-focus).
   const dialogRef = useDialog<HTMLDivElement>({
     onClose: onCancel,
     disabled: busy,
     autoFocus: false,
+    inertBackground: true,
   });
 
   useEffect(() => {
-    // Small delay so the dialog DOM is stable before focusing.
     requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
-  // Announce errors assertively for screen readers.
   useEffect(() => {
     if (error) announce(error, { assertive: true });
   }, [error, announce]);
@@ -93,13 +121,12 @@ export function ConfirmDestructiveDialog({
     if (matches && !busy) onConfirm();
   }
 
-  // Build the aria-describedby list for the input. Always includes the hint;
-  // adds the error id when an error is present.
   const inputDescribedBy = [hintId, error ? errorId : null].filter(Boolean).join(' ');
 
-  return (
+  return createPortal(
     <div
       className="dialog-backdrop"
+      data-overlay="dialog"
       data-testid="confirm-destructive-backdrop"
       onClick={() => !busy && onCancel()}
     >
@@ -110,6 +137,7 @@ export function ConfirmDestructiveDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descId}
+        aria-busy={busy || undefined}
         onClick={(e) => e.stopPropagation()}
         data-testid="confirm-destructive-dialog"
       >
@@ -119,11 +147,12 @@ export function ConfirmDestructiveDialog({
 
         <div className="dialog-body" id={descId}>
           {consequence}
+          {extraBody}
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-2" style={{ marginTop: 8 }}>
           <label htmlFor={`${uid}-input`} style={{ fontSize: 12.5 }}>
-            Type <strong>{confirmValue}</strong> to confirm
+            {resolvedInputLabel}
           </label>
           <input
             ref={inputRef}
@@ -141,23 +170,18 @@ export function ConfirmDestructiveDialog({
             data-testid="confirm-destructive-input"
           />
 
-          {/* Non-color explanation for disabled state */}
           <p
             id={hintId}
             className="text-muted"
             style={{ margin: 0, fontSize: 11.5 }}
             data-testid="confirm-destructive-hint"
           >
-            {matches
-              ? 'Confirmed — you may proceed.'
-              : `You must type the exact name "${confirmValue}" to enable the button.`}
+            {matches ? hintConfirmed : resolvedHintMismatch}
           </p>
 
           {error && (
             <p
               id={errorId}
-              role="alert"
-              aria-live="assertive"
               style={{ margin: 0, fontSize: 12.5, color: '#f87171' }}
               data-testid="confirm-destructive-error"
             >
@@ -166,7 +190,13 @@ export function ConfirmDestructiveDialog({
           )}
 
           <div className="dialog-actions" style={{ marginTop: 4 }}>
-            <Btn ghost type="button" onClick={onCancel} disabled={busy} data-testid="confirm-destructive-cancel">
+            <Btn
+              ghost
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              data-testid="confirm-destructive-cancel"
+            >
               {cancelLabel}
             </Btn>
             <Btn
@@ -176,11 +206,12 @@ export function ConfirmDestructiveDialog({
               busy={busy}
               data-testid="confirm-destructive-confirm"
             >
-              {busy ? 'Working…' : confirmLabel}
+              {confirmText}
             </Btn>
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

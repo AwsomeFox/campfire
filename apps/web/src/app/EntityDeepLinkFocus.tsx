@@ -1,7 +1,6 @@
 import { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-
-const ENTITY_HASH = /^#entity-[a-z_-]+-\d+$/;
+import { isEntityDeepLinkHash } from './routeFocus';
 
 /**
  * Focus a deep-linked record after its async page data renders.
@@ -14,7 +13,7 @@ export function EntityDeepLinkFocus() {
   const location = useLocation();
 
   useEffect(() => {
-    if (!ENTITY_HASH.test(location.hash)) return;
+    if (!isEntityDeepLinkHash(location.hash)) return;
     const id = decodeURIComponent(location.hash.slice(1));
     let observer: MutationObserver | null = null;
     let frame = 0;

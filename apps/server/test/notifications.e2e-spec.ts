@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -368,6 +370,113 @@ describe('note_shared notifications (issue #105, e2e)', () => {
 });
 
 /**
+ * Issue #784: author edits must notify only when audience/recipient expands or
+ * changes — typo/body fixes on an already-shared note must not re-ping.
+ */
+describe('note edit audience notifications (issue #784, e2e)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>;
+  let author: ReturnType<typeof request.agent>;
+  let alice: ReturnType<typeof request.agent>;
+  let bob: ReturnType<typeof request.agent>;
+  let authorId: number;
+  let aliceId: number;
+  let bobId: number;
+  let campaignId: number;
+
+  type Notification = { id: number; type: string; title: string; body: string };
+
+  async function sharedFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return (res.body as Notification[]).filter((n) => n.type === 'note_shared');
+  }
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'ne-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'ne-dm', password: 'password-dm-1', displayName: 'Dana DM' });
+    authorId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-author', password: 'password-au-1', displayName: 'Ada Author' })
+    ).body.id;
+    aliceId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-alice', password: 'password-al-1', displayName: 'Alice' })
+    ).body.id;
+    bobId = (
+      await adminAgent.post('/api/v1/users').send({ username: 'ne-bob', password: 'password-bo-1', displayName: 'Bob' })
+    ).body.id;
+
+    dm = request.agent(server);
+    await dm.post('/api/v1/auth/login').send({ username: 'ne-dm', password: 'password-dm-1' });
+    author = request.agent(server);
+    await author.post('/api/v1/auth/login').send({ username: 'ne-author', password: 'password-au-1' });
+    alice = request.agent(server);
+    await alice.post('/api/v1/auth/login').send({ username: 'ne-alice', password: 'password-al-1' });
+    bob = request.agent(server);
+    await bob.post('/api/v1/auth/login').send({ username: 'ne-bob', password: 'password-bo-1' });
+
+    const campaign = await dm.post('/api/v1/campaigns').send({ name: 'Edit Notify Keep' });
+    campaignId = campaign.body.id;
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: authorId, role: 'player' });
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: aliceId, role: 'player' });
+    await dm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: bobId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('party_shared body typo fix does not re-notify the party', async () => {
+    const created = await author
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Party tip about the bridge.', visibility: 'party_shared' });
+    expect(created.status).toBe(201);
+    const beforeAlice = (await sharedFor(alice)).length;
+    const beforeDm = (await sharedFor(dm)).length;
+
+    const edit = await author
+      .patch(`/api/v1/notes/${created.body.id}`)
+      .send({ body: 'Party tip about the bridge (typo fixed).', expectedUpdatedAt: created.body.updatedAt });
+    expect(edit.status).toBe(200);
+    expect((await sharedFor(alice)).length).toBe(beforeAlice);
+    expect((await sharedFor(dm)).length).toBe(beforeDm);
+  });
+
+  it('whisper retarget notifies the new recipient; body edit of the same whisper does not', async () => {
+    const created = await author.post(`/api/v1/campaigns/${campaignId}/notes`).send({
+      body: 'Only you notice the trap door',
+      visibility: 'whisper',
+      recipientUserId: String(aliceId),
+    });
+    expect(created.status).toBe(201);
+    expect((await sharedFor(alice)).some((n) => n.body.includes('trap door'))).toBe(true);
+
+    const beforeBob = (await sharedFor(bob)).length;
+    const beforeAlice = (await sharedFor(alice)).length;
+
+    const retarget = await author.patch(`/api/v1/notes/${created.body.id}`).send({
+      recipientUserId: String(bobId),
+      expectedUpdatedAt: created.body.updatedAt,
+    });
+    expect(retarget.status).toBe(200);
+    expect((await sharedFor(bob)).length).toBe(beforeBob + 1);
+    // Alice is not re-pinged on retarget away from her.
+    expect((await sharedFor(alice)).length).toBe(beforeAlice);
+
+    const beforeBobAfter = (await sharedFor(bob)).length;
+    const typo = await author.patch(`/api/v1/notes/${created.body.id}`).send({
+      body: 'Only you notice the trap door.',
+      expectedUpdatedAt: retarget.body.updatedAt,
+    });
+    expect(typo.status).toBe(200);
+    expect((await sharedFor(bob)).length).toBe(beforeBobAfter);
+  });
+});
+
+/**
  * Issue #263: notification coverage was incomplete — scheduling, quest changes,
  * party-shared notes and proposals never notified anyone. Each of those now emits
  * a best-effort in-app notification to the right recipient. Real cookie sessions
@@ -380,7 +489,16 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let playerId: number;
   let campaignId: number;
 
-  type Notification = { id: number; type: string; title: string; body: string; entityType: string | null; entityId: number | null; actorName: string };
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    data?: Record<string, unknown> | null;
+  };
 
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
@@ -426,8 +544,65 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(scheduled).toHaveLength(1);
     expect(scheduled[0].title).toContain('Game night');
     expect(scheduled[0].actorName).toBe('Dana DM');
+    // Issue #446: schedule row id is stamped so the UI can open the exact card.
+    expect(scheduled[0].entityId).toBe(res.body.id);
+    expect(scheduled[0].entityType).toBeNull();
+    // Issue #820: structured metadata carries the instant (no UTC date baked into title).
+    expect(scheduled[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId: res.body.id,
+      changeType: 'created',
+      scheduledAt: res.body.scheduledAt,
+    });
+    expect(scheduled[0].title).not.toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(scheduled[0].title).not.toMatch(/scheduled for \d{4}-\d{2}-\d{2}/);
     // The scheduling DM does not notify themselves.
     expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
+  });
+
+  it('venue/VTT-link and notes changes notify once; title-only edits stay silent; cancel notifies', async () => {
+    const future = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
+    const created = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'Lifecycle night' });
+    expect(created.status).toBe(201);
+    const scheduleId = created.body.id as number;
+    const before = ofType(await listFor(player), 'session_scheduled').length;
+
+    // Title-only: no ping.
+    const titleOnly = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({ title: 'Lifecycle night (renamed)' });
+    expect(titleOnly.status).toBe(200);
+    expect(ofType(await listFor(player), 'session_scheduled')).toHaveLength(before);
+
+    // Venue (VTT link) + notes: one coalesced update ping, field names only.
+    const venueNotes = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({
+      location: 'https://vtt.example/room/secret-invite',
+      notes: 'private prep: surprise dragon',
+    });
+    expect(venueNotes.status).toBe(200);
+    const afterVenue = ofType(await listFor(player), 'session_scheduled');
+    expect(afterVenue).toHaveLength(before + 1);
+    const updatePing = afterVenue[0];
+    expect(updatePing.data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'updated',
+      changedFields: expect.arrayContaining(['venue', 'notes']),
+    });
+    expect(updatePing.title).toMatch(/updated/i);
+    expect(JSON.stringify(updatePing)).not.toMatch(/secret-invite|surprise dragon/i);
+
+    // Cancellation notifies with a cancelled snapshot.
+    const cancel = await dm.delete(`/api/v1/schedule/${scheduleId}`);
+    expect(cancel.status).toBe(200);
+    const afterCancel = ofType(await listFor(player), 'session_scheduled');
+    expect(afterCancel).toHaveLength(before + 2);
+    expect(afterCancel[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'cancelled',
+    });
+    expect(afterCancel[0].title).toMatch(/cancelled/i);
   });
 
   it("a player's RSVP notifies the DM (not the RSVPing player)", async () => {
@@ -442,12 +617,56 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(dmRsvps).toHaveLength(1);
     expect(dmRsvps[0].title).toContain('Pat Player');
     expect(dmRsvps[0].title).toContain('yes');
+    expect(dmRsvps[0].entityId).toBe(sched.body.id);
     // The RSVPing player is not notified about their own availability.
     expect(ofType(await listFor(player), 'session_rsvp')).toHaveLength(0);
   });
 
+  it("a player's RSVP note-only update notifies the DM with note-specific copy", async () => {
+    const future = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+    const sched = await dm.post(`/api/v1/campaigns/${campaignId}/schedule`).send({ scheduledAt: future, title: 'RSVP note night' });
+    expect(sched.status).toBe(201);
+    const scheduleId = sched.body.id as number;
+
+    const initial = await player.put(`/api/v1/schedule/${scheduleId}/rsvp`).send({ status: 'yes' });
+    expect(initial.status).toBe(200);
+
+    const noteOnly = await player
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .send({ note: 'Running 15 minutes late' });
+    expect(noteOnly.status).toBe(200);
+
+    const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
+    expect(dmRsvps).toHaveLength(2);
+    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
+    expect(dmRsvps[0].title).not.toMatch(/RSVP'd yes/i);
+  });
+
+  it("a player's RSVP status+note update notifies the DM with both status and note change copy", async () => {
+    const future = new Date(Date.now() + 10 * 24 * 3600 * 1000).toISOString();
+    const sched = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'RSVP status+note night' });
+    expect(sched.status).toBe(201);
+    const scheduleId = sched.body.id as number;
+
+    const initial = await player.put(`/api/v1/schedule/${scheduleId}/rsvp`).send({ status: 'yes' });
+    expect(initial.status).toBe(200);
+
+    const statusAndNote = await player
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .send({ status: 'no', note: 'Can only join for the first hour' });
+    expect(statusAndNote.status).toBe(200);
+
+    const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
+    expect(dmRsvps).toHaveLength(2);
+    expect(dmRsvps[0].title).toMatch(/RSVP'd no/i);
+    expect(dmRsvps[0].title).toMatch(/updated their note/i);
+  });
+
   it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
-    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon' });
+    // #754: omit defaults to DM-only (no completion ping); create visible for this case.
+    const quest = await dm.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Slay the dragon', hidden: false });
     expect(quest.status).toBe(201);
 
     const done = await dm.post(`/api/v1/quests/${quest.body.id}/status`).send({ status: 'completed' });
@@ -534,5 +753,146 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(resolved.length).toBe(before + 1);
     expect(resolved[0].title).toContain('rejected');
     expect(resolved[0].body).toContain('not this time');
+  });
+});
+
+/**
+ * Issue #832: posting to the DM scribe inbox notifies every current DM except the
+ * author. Real cookie sessions — notifications hang off users.id.
+ */
+describe('inbox submission notifies DMs (issue #832, e2e)', () => {
+  let ctx: TestAppContext;
+  let creatorDm: ReturnType<typeof request.agent>;
+  let coDm: ReturnType<typeof request.agent>;
+  let coDmId: number;
+  let player: ReturnType<typeof request.agent>;
+  let campaignId: number;
+
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    readAt: string | null;
+  };
+
+  async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return res.body as Notification[];
+  }
+
+  const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
+
+  /** Inbox create fans out inbox_submitted off the request path; let that settle before asserts. */
+  const settleInboxNotify = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'inbox832-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-dm', password: 'password-dm-1', displayName: 'Creator DM' });
+    const coCreate = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'inbox832-co-dm', password: 'password-co-1', displayName: 'Co DM' });
+    coDmId = coCreate.body.id;
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-player', password: 'password-pl-1', displayName: 'Pat Player' });
+
+    creatorDm = request.agent(server);
+    await creatorDm.post('/api/v1/auth/login').send({ username: 'inbox832-dm', password: 'password-dm-1' });
+    coDm = request.agent(server);
+    await coDm.post('/api/v1/auth/login').send({ username: 'inbox832-co-dm', password: 'password-co-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'inbox832-player', password: 'password-pl-1' });
+
+    const campaign = await creatorDm.post('/api/v1/campaigns').send({ name: 'Inbox Notify Keep' });
+    campaignId = campaign.body.id;
+    const playerMe = await player.get('/api/v1/me');
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerMe.body.user.id, role: 'player' });
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: coDmId, role: 'dm' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a player inbox post notifies every DM with a deep-link id; the player gets nothing', async () => {
+    const inbox = await player
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .send({ body: 'Can we explore the catacombs next session?' });
+    expect(inbox.status).toBe(201);
+    const inboxId = inbox.body.id as number;
+    await settleInboxNotify();
+
+    const creatorNotifs = ofType(await listFor(creatorDm), 'inbox_submitted');
+    expect(creatorNotifs).toHaveLength(1);
+    expect(creatorNotifs[0].title).toContain('Pat Player');
+    expect(creatorNotifs[0].body).toContain('catacombs');
+    expect(creatorNotifs[0].entityId).toBe(inboxId);
+    expect(creatorNotifs[0].actorName).toBe('Pat Player');
+    expect(creatorNotifs[0].readAt).toBeNull();
+
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    expect(coNotifs).toHaveLength(1);
+    expect(coNotifs[0].entityId).toBe(inboxId);
+
+    expect(ofType(await listFor(player), 'inbox_submitted')).toHaveLength(0);
+  });
+
+  it('a DM author posting to their own inbox does not notify themselves', async () => {
+    const beforeCreator = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+
+    const inbox = await creatorDm.post(`/api/v1/campaigns/${campaignId}/inbox`).send({ body: 'DM self-capture' });
+    expect(inbox.status).toBe(201);
+    await settleInboxNotify();
+
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(beforeCreator);
+    expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo + 1);
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    const selfCapture = coNotifs.find((n) => n.body.includes('DM self-capture'));
+    expect(selfCapture).toBeDefined();
+    expect(selfCapture!.title).toContain('Creator DM');
+  });
+
+  it('a campaign with no other DMs still succeeds without notifying anyone when the sole DM is the author', async () => {
+    const lone = await creatorDm.post('/api/v1/campaigns').send({ name: 'Solo DM Inbox' });
+    expect(lone.status).toBe(201);
+    const loneId = lone.body.id as number;
+
+    const before = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const post = await creatorDm.post(`/api/v1/campaigns/${loneId}/inbox`).send({ body: 'Solo note' });
+    expect(post.status).toBe(201);
+    await settleInboxNotify();
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(before);
+  });
+
+  it('keeps inbox create durable when inbox_submitted notification delivery fails', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.run(sql`
+      CREATE TRIGGER fail_inbox_submitted_notification
+      BEFORE INSERT ON notifications
+      WHEN NEW.type = 'inbox_submitted'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated notification failure');
+      END
+    `);
+    try {
+      const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+      const inbox = await player
+        .post(`/api/v1/campaigns/${campaignId}/inbox`)
+        .send({ body: 'Notify failure must not block inbox create' });
+      expect(inbox.status).toBe(201);
+      expect(inbox.body.body).toContain('Notify failure');
+      await settleInboxNotify();
+      expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo);
+    } finally {
+      await db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
+    }
   });
 });

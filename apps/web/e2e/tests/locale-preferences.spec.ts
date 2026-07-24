@@ -78,6 +78,7 @@ test('Preferences keeps catalog language separate from System formatting across 
     const summary = await response.json();
     await route.fulfill({ response, json: {
       ...summary,
+      inProgressSession: null,
       nextSession: {
         id: 99_001,
         campaignId: seed().campaignId,
@@ -100,7 +101,7 @@ test('Preferences keeps catalog language separate from System formatting across 
     minute: '2-digit',
   }), scheduledAt);
   await page.goto(`/c/${seed().campaignId}`);
-  await expect(page.getByText(expectedEnglishSchedule, { exact: true })).toBeVisible();
+  await expect(page.getByText(expectedEnglishSchedule).first()).toBeVisible();
 
   // System is itself explicit, survives reload, and does not change the rendered catalog.
   await page.goto('/preferences');

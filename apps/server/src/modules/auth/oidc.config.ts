@@ -124,3 +124,118 @@ export function resolveOidcConfig(stored: StoredOidcConfig): OidcResolvedConfig 
 
   return { providerName, issuer, clientId, clientSecret, redirectUri, adminGroup, allowedGroup, groupsClaim, scope };
 }
+
+/** Draft override fields accepted by diagnostic probes (issue #848). */
+export interface OidcDiagnosticDraft {
+  issuer?: string;
+  clientId?: string;
+  /** Write-only: undefined/'' means reuse env-or-stored secret. */
+  clientSecret?: string;
+  redirectUri?: string;
+  adminGroup?: string;
+  allowedGroup?: string;
+  groupsClaim?: string;
+  scope?: string;
+}
+
+export type OidcConfigValueSource = 'draft' | 'stored' | 'environment' | 'default';
+
+export interface OidcDiagnosticResolved {
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  adminGroup: string;
+  allowedGroup: string;
+  groupsClaim: string;
+  scope: string;
+  fieldSources: {
+    issuer: OidcConfigValueSource;
+    clientId: OidcConfigValueSource;
+    clientSecret: OidcConfigValueSource;
+    redirectUri: OidcConfigValueSource;
+    adminGroup: OidcConfigValueSource;
+    allowedGroup: OidcConfigValueSource;
+    groupsClaim: OidcConfigValueSource;
+    scope: OidcConfigValueSource;
+  };
+}
+
+function sourceFor(
+  field: keyof StoredOidcConfig,
+  stored: StoredOidcConfig,
+  draftValue: string | undefined,
+  opts: { treatBlankDraftAsReuse?: boolean } = {},
+): { value: string; source: OidcConfigValueSource } {
+  // Env always wins over draft/stored — admins cannot probe past an env pin.
+  const fromEnv = envValue(field);
+  if (fromEnv !== undefined) return { value: fromEnv, source: 'environment' };
+
+  if (draftValue !== undefined) {
+    const trimmed = draftValue.trim();
+    if (opts.treatBlankDraftAsReuse && trimmed === '') {
+      const storedVal = stored[field]?.trim() || '';
+      return { value: storedVal, source: storedVal ? 'stored' : 'default' };
+    }
+    return { value: trimmed, source: 'draft' };
+  }
+
+  const storedVal = stored[field]?.trim() || '';
+  return { value: storedVal, source: storedVal ? 'stored' : 'default' };
+}
+
+/**
+ * Resolve a diagnostic candidate from optional draft fields over env-over-stored
+ * config. Never returns secrets in `fieldSources` — only the origin label.
+ * Env pins always override draft values (same precedence as runtime config).
+ */
+export function resolveDiagnosticCandidate(
+  stored: StoredOidcConfig,
+  draft: OidcDiagnosticDraft = {},
+): OidcDiagnosticResolved {
+  const issuer = sourceFor('issuer', stored, draft.issuer);
+  const clientId = sourceFor('clientId', stored, draft.clientId);
+  // Blank/omitted draft secret reuses env-or-stored (write-only semantics).
+  const clientSecret = sourceFor('clientSecret', stored, draft.clientSecret, {
+    treatBlankDraftAsReuse: true,
+  });
+  const redirect = sourceFor('redirectUri', stored, draft.redirectUri);
+  const redirectUri =
+    redirect.value || `${appUrl()}/api/v1/auth/oidc/callback`;
+  const redirectSource: OidcConfigValueSource = redirect.value
+    ? redirect.source
+    : 'default';
+
+  const adminGroup = sourceFor('adminGroup', stored, draft.adminGroup);
+  const allowedGroup = sourceFor('allowedGroup', stored, draft.allowedGroup);
+  const groupsClaimRaw = sourceFor('groupsClaim', stored, draft.groupsClaim);
+  const scopeRaw = sourceFor('scope', stored, draft.scope);
+
+  const groupsClaim = groupsClaimRaw.value || 'groups';
+  const groupsClaimSource: OidcConfigValueSource = groupsClaimRaw.value
+    ? groupsClaimRaw.source
+    : 'default';
+  const scope = scopeRaw.value || 'openid profile email';
+  const scopeSource: OidcConfigValueSource = scopeRaw.value ? scopeRaw.source : 'default';
+
+  return {
+    issuer: issuer.value.replace(/\/+$/, ''),
+    clientId: clientId.value,
+    clientSecret: clientSecret.value,
+    redirectUri,
+    adminGroup: adminGroup.value,
+    allowedGroup: allowedGroup.value,
+    groupsClaim,
+    scope,
+    fieldSources: {
+      issuer: issuer.source,
+      clientId: clientId.source,
+      clientSecret: clientSecret.source,
+      redirectUri: redirectSource,
+      adminGroup: adminGroup.value ? adminGroup.source : adminGroup.source === 'draft' ? 'draft' : 'default',
+      allowedGroup: allowedGroup.value ? allowedGroup.source : allowedGroup.source === 'draft' ? 'draft' : 'default',
+      groupsClaim: groupsClaimSource,
+      scope: scopeSource,
+    },
+  };
+}

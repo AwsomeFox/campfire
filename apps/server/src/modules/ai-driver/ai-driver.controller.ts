@@ -5,14 +5,14 @@ import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
-import type { CampaignEvent } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
-import { AiDriverService } from './ai-driver.service';
+import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -157,7 +157,7 @@ export class AiDriverController {
   @ApiResponse({ status: 200, description: 'The session state.' })
   async session(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, id);
-    return this.driver.getSession(id);
+    return toPublicAiDmSessionState(this.driver.getSession(id));
   }
 
   @Post('pause')
@@ -172,7 +172,7 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ) {
     await this.access.requireRole(user, id, 'dm');
-    return this.driver.setPaused(id, body.paused);
+    return toPublicAiDmSessionState(this.driver.setPaused(id, body.paused));
   }
 
   @Post('resume')
@@ -183,7 +183,7 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The session state after resuming.' })
   async resume(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
-    return this.driver.setPaused(id, false);
+    return toPublicAiDmSessionState(this.driver.setPaused(id, false));
   }
 
   // ---- Stuck-ladder player levers (#314): available to any player at the table ----
@@ -225,8 +225,8 @@ export class AiDriverController {
   @ApiResponse({ status: 409, description: 'A vote is already open, or none is open to cast on.' })
   async vote(@Param('id', ParseIntPipe) id: number, @Body() body: AiDmVoteDto, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'player');
-    if (body.action === 'open') return this.driver.openVote(id, user, body.kind!, role);
-    return this.driver.castVote(id, user, body.choice!, role);
+    if (body.action === 'open') return toPublicAiDmSessionState(await this.driver.openVote(id, user, body.kind!, role));
+    return toPublicAiDmSessionState(await this.driver.castVote(id, user, body.choice!, role));
   }
 
   @Post('rules-lookup')
@@ -248,7 +248,7 @@ export class AiDriverController {
   @ApiResponse({ status: 201, description: 'The session state after the request.' })
   async requestTakeover(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.requestTakeover(id, user, role);
+    return toPublicAiDmSessionState(await this.driver.requestTakeover(id, user, role));
   }
 
   @Post('grant-takeover')
@@ -263,7 +263,7 @@ export class AiDriverController {
     @CurrentUser() user: RequestUser,
   ) {
     const role = await this.access.requireRole(user, id, 'dm');
-    return this.driver.grantTakeover(id, user, body.memberId, body.note, role);
+    return toPublicAiDmSessionState(await this.driver.grantTakeover(id, user, body.memberId, body.note, role));
   }
 
   @Post('handback')
@@ -276,7 +276,7 @@ export class AiDriverController {
     // Route allows player+ so the acting-DM grant holder (often a player) can hand the seat back;
     // the service then enforces that only the grant holder or a campaign DM may actually do it (#375).
     const role = await this.access.requireRole(user, id, 'player');
-    return this.driver.handback(id, user, body.note, role);
+    return toPublicAiDmSessionState(await this.driver.handback(id, user, body.note, role));
   }
 
   @Get('secret-approvals')
@@ -313,7 +313,7 @@ export class AiDriverController {
     if (body.action === 'grant') {
       return this.driver.grantSecretReadApproval(id, user, body.tool, body.entityId, body.note, role);
     }
-    return this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role);
+    return toPublicAiDmSessionState(await this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role));
   }
 
   @Sse('stream')
@@ -321,7 +321,8 @@ export class AiDriverController {
     summary: 'Subscribe to AI DM narration (SSE)',
     description:
       'Requires campaign membership. Server-sent stream of AiDmStreamEvent JSON in `data`: turn.start, narration.delta ' +
-      '(token-by-token), narration.message, tool (id-only signals — refetch through REST), and turn.end. Periodic ' +
+      '(token-by-token), narration.message, tool (thin signals with optional encounterId for encounter mutations — ' +
+      'refetch through REST; hidden encounter ids are stripped for non-DMs, #825), and turn.end. Periodic ' +
       '`{"type":"ping"}` keepalives should be ignored. The stream closes automatically when the subscriber is removed ' +
       'from the campaign (issue #527); a reconnect then receives 403.',
   })
@@ -332,7 +333,7 @@ export class AiDriverController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
   ): Promise<Observable<MessageEvent>> {
-    await this.access.requireMember(user, id);
+    const role = await this.access.requireMember(user, id);
     // Issue #527: terminate the narration stream when this user's membership is revoked.
     // The AI narration channel is a separate Subject from CampaignEventsService, so the
     // shared membership.revoked notifier (from the campaign event stream) is tapped here
@@ -340,15 +341,22 @@ export class AiDriverController {
     // too (otherwise merge keeps the connection alive on keepalive pings after the data
     // stream has ended). Same race-free reasoning as CampaignEventsController: the notifier
     // subscribes to the same Subject the revocation is emitted on, so it fires synchronously.
-    const revoked = this.events.streamFor(id).pipe(
+    // Issue #527 / #867: tear down on membership revocation OR campaign trash.
+    const closed = this.events.streamFor(id).pipe(
       filter(
-        (event): event is Extract<CampaignEvent, { type: 'membership.revoked' }> =>
-          event.type === 'membership.revoked' && event.userId === user.id,
+        (event) =>
+          (event.type === 'membership.revoked' && event.userId === user.id)
+          || event.type === 'campaign.trashed',
       ),
     );
     return merge(
-      this.stream.streamFor(id).pipe(map((event): MessageEvent => ({ data: event }))),
+      this.stream.streamFor(id).pipe(
+        map((event): MessageEvent => ({
+          // Role-project tool frames so hidden encounter ids never reach non-DMs (#825 / #262).
+          data: event.type === 'tool' ? projectAiDmToolEventForRole(event, role) : event,
+        })),
+      ),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
-    ).pipe(takeUntil(revoked));
+    ).pipe(takeUntil(closed));
   }
 }

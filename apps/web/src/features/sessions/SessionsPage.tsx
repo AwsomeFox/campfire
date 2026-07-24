@@ -17,35 +17,70 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
+import { CopyControl } from '../../components/CopyControl';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
-import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
+import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
+import {
+  assertMutationTarget,
+  decideRouteBoundCommit,
+  mutationsEnabledForRoute,
+  RouteBoundLoadSequencer,
+} from '../../lib/routeBoundRecord';
+import {
+  RECAP_BODY_HELP,
+  RECAP_FIELD_LABELS,
+  RECAP_PLAYED_ON_HELP,
+  RECAP_TITLE_HELP,
+  editRecapFieldIds,
+  firstInvalidRecapControlId,
+  newRecapFieldIds,
+  recapDescribedBy,
+  validateRecapFields,
+  type RecapFieldErrors,
+} from './recapFormFields';
+
+/** Visible label text with the shared “· optional” marker (issue #859). */
+function OptionalFieldLabel({ children }: { children: string }) {
+  return (
+    <>
+      {children}{' '}
+      <span className="text-slate-400 normal-case tracking-normal font-semibold">· optional</span>
+    </>
+  );
+}
 
 export default function SessionsPage() {
   useFormattingLocale();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
 
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
+  const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
+    campaignId: cid,
+    target: 'recap',
+    label: 'Draft a recap with AI',
+    enabled: canDmWrite && tab === 'log',
+  });
 
   // Roving-tabindex tablist — the selected tab holds tabindex 0, the rest -1, so
   // a single Tab keystroke lands in the panel and arrow keys move between tabs
@@ -138,9 +173,9 @@ export default function SessionsPage() {
   useEffect(() => {
     // Reconcile browser Back/Forward for a deep-linked form. Local button opens
     // do not change recapAction, so they remain controlled by showAddForm.
-    if (isDm && recapAction === 'new-recap') setShowAddForm(true);
+    if (canDmWrite && recapAction === 'new-recap') setShowAddForm(true);
     else if (recapAction !== 'new-recap') setShowAddForm(false);
-  }, [isDm, recapAction]);
+  }, [canDmWrite, recapAction]);
 
   function clearRecapAction() {
     setSearchParams(
@@ -302,33 +337,39 @@ export default function SessionsPage() {
   // The add form lives in the detail pane. Treat it like selected detail on
   // mobile; otherwise tapping "+ Add recap" mounts the form inside a pane that
   // remains `display: none` below the desktop breakpoint.
-  const showDetailOnMobile = Boolean(selected) || (isDm && (showAddForm || sessions.length === 0));
+  const showDetailOnMobile = Boolean(selected) || (canDmWrite && (showAddForm || sessions.length === 0));
+
+  const secondaryActions: PageHeaderSecondaryAction[] = [];
+  if (isDm) {
+    secondaryActions.push({ key: 'trash', label: 'Trash', href: `/c/${cid}/trash` });
+  }
+  if (draftAction) {
+    secondaryActions.push(draftAction);
+  }
 
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      <div className="flex items-center gap-2.5">
-        <h1 className="text-2xl font-extrabold text-white">Sessions</h1>
-        <div className="flex-1" />
-        {isDm && (
-          <Link to={`/c/${cid}/trash`} className="text-xs text-slate-500 hover:text-slate-300" title="Restore deleted entities">
-            Trash
-          </Link>
-        )}
-        {isDm && tab === 'log' && <DraftWithAiButton campaignId={cid} target="recap" label="Draft a recap with AI" />}
-        {isDm && tab === 'log' && (
-          <Btn
-            className="!min-h-0 !py-1.5 text-xs"
-            onClick={() => {
-              setShowAddForm(true);
-              if (selected) backToList();
-            }}
-          >
-            + Add recap
-          </Btn>
-        )}
-      </div>
+      <PageHeader
+        title="Sessions"
+        secondaryActions={secondaryActions}
+        primaryAction={
+          canDmWrite && tab === 'log' ? (
+            <Btn
+              type="button"
+              className="cf-page-header__action"
+              onClick={() => {
+                setShowAddForm(true);
+                if (selected) backToList();
+              }}
+            >
+              + Add recap
+            </Btn>
+          ) : undefined
+        }
+      />
+      {draftDialog}
 
       {/*
         Log/Schedule tablist (issue #706) — was a colour-only segmented control with
@@ -470,9 +511,9 @@ export default function SessionsPage() {
         <main className={`min-w-0 lg:col-span-2 space-y-4 ${showDetailOnMobile ? '' : 'hidden lg:block'}`}>
           {selected ? (
             <SessionDetail
+              key={selected.id}
               session={selected}
               campaignId={cid}
-              isDm={isDm}
               startEditing={recapAction === 'edit-recap'}
               onEditActionHandled={clearRecapAction}
               onBack={backToList}
@@ -490,7 +531,7 @@ export default function SessionsPage() {
             </Card>
           )}
 
-          {isDm && (showAddForm || sessions.length === 0) && (
+          {canDmWrite && (showAddForm || sessions.length === 0) && (
             <AddRecapForm
               campaignId={cid}
               nextNumber={nextNumber()}
@@ -537,7 +578,6 @@ export default function SessionsPage() {
 function SessionDetail({
   session,
   campaignId,
-  isDm,
   startEditing,
   onEditActionHandled,
   onBack,
@@ -547,7 +587,6 @@ function SessionDetail({
 }: {
   session: SessionListItem;
   campaignId: number;
-  isDm: boolean;
   /** Open the existing recap editor when arriving from a post-encounter deep link. */
   startEditing: boolean;
   /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
@@ -560,17 +599,20 @@ function SessionDetail({
    *  recap is opened from the list so SR users land on the new content. */
   detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
-  const [editing, setEditing] = useState(isDm && startEditing);
+  const { canDmWrite } = useCampaignAccess();
+  const [editing, setEditing] = useState(canDmWrite && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   // The list omits the full recap body (issue #71) — fetch it for the opened session.
   const [recap, setRecap] = useState('');
   const [recapLoading, setRecapLoading] = useState(true);
   const [recapDraft, setRecapDraft] = useState('');
+  const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
   // The `updatedAt` we last loaded — sent back on save as the optimistic-concurrency
   // guard (#157) so a co-DM's or a connected AI's interleaved edit 409s instead of being
   // silently clobbered. Bumped to null on a stale-conflict so the user must reload first.
@@ -578,32 +620,74 @@ function SessionDetail({
   const [conflict, setConflict] = useState(false);
   // Bumped after a save/restore to tell the history panel to refetch.
   const [historyNonce, setHistoryNonce] = useState(0);
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
+  const fieldIds = editRecapFieldIds(session.id);
 
   useEffect(() => {
-    setEditing(isDm && startEditing);
+    setEditing(canDmWrite && startEditing);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
+    // Issue #853: clear prior recap/draft immediately so a slow A fetch cannot leave
+    // A's prose editable against B (key= remounts help; sequencer covers races).
+    setRecap('');
+    setRecapDraft('');
+    setLoadedSessionId(null);
+    setLoadedUpdatedAt(null);
+    setConflict(false);
+    setConfirmingDelete(false);
+    setError(null);
+    setFieldErrors({});
     setRecapLoading(true);
-    let cancelled = false;
+    const { generation, signal } = loadSequencerRef.current.begin(session.id);
     api
-      .get<Session>(`${API}/sessions/${session.id}`)
+      .get<Session>(`${API}/sessions/${session.id}`, { signal })
       .then((full) => {
-        if (cancelled) return;
-        setRecap(full.recap);
-        setRecapDraft(full.recap);
-        setLoadedUpdatedAt(full.updatedAt);
+        const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, session.id, full);
+        if (decision.kind !== 'commit') return;
+        setRecap(decision.record.recap);
+        setRecapDraft(decision.record.recap);
+        setLoadedUpdatedAt(decision.record.updatedAt);
+        setLoadedSessionId(decision.record.id);
         setConflict(false);
       })
-      .catch(() => undefined)
+      .catch((err) => {
+        if (!loadSequencerRef.current.isCurrent(generation, session.id)) return;
+        setRecap('');
+        setRecapDraft('');
+        setLoadedUpdatedAt(null);
+        setLoadedSessionId(null);
+        if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
+        setError(err instanceof ApiError ? err.message : "Couldn't load this recap.");
+      })
       .finally(() => {
-        if (!cancelled) setRecapLoading(false);
+        if (loadSequencerRef.current.isCurrent(generation, session.id)) setRecapLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [session, isDm, startEditing]);
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
+  }, [session, canDmWrite, startEditing]);
+
+  const detailReady = mutationsEnabledForRoute(
+    loadedSessionId != null ? { id: loadedSessionId } : null,
+    session.id,
+    recapLoading,
+  );
 
   async function save() {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
+    const nextErrors = validateRecapFields({
+      title: titleDraft,
+      playedAt: dateDraft,
+      recap: recapDraft,
+    });
+    setFieldErrors(nextErrors);
+    // Keep an active 409 conflict banner until validation passes and we actually
+    // attempt a save — a failed client check must not dismiss Reload latest.
+    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
+    if (invalidId) {
+      document.getElementById(invalidId)?.focus();
+      return;
+    }
+
     setSaving(true);
     setError(null);
     setConflict(false);
@@ -618,6 +702,7 @@ function SessionDetail({
       });
       setRecap(updated.recap);
       setLoadedUpdatedAt(updated.updatedAt);
+      setLoadedSessionId(updated.id);
       setEditing(false);
       onEditActionHandled();
       setHistoryNonce((n) => n + 1);
@@ -634,6 +719,7 @@ function SessionDetail({
       } else {
         setError("Couldn't save the recap.");
       }
+      document.getElementById(fieldIds.title.controlId)?.focus();
     } finally {
       setSaving(false);
     }
@@ -642,12 +728,14 @@ function SessionDetail({
   async function reloadLatest() {
     setError(null);
     setConflict(false);
+    setFieldErrors({});
     setRecapLoading(true);
     try {
       const full = await api.get<Session>(`${API}/sessions/${session.id}`);
       setRecap(full.recap);
       setRecapDraft(full.recap);
       setLoadedUpdatedAt(full.updatedAt);
+      setLoadedSessionId(full.id);
     } catch {
       setError("Couldn't reload the latest recap.");
     } finally {
@@ -656,6 +744,7 @@ function SessionDetail({
   }
 
   async function remove() {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
     setDeleting(true);
     setError(null);
     try {
@@ -678,7 +767,7 @@ function SessionDetail({
           ← Back to sessions
         </button>
       </div>
-      {error && <ErrorNote message={error} />}
+      {!editing && error && <ErrorNote message={error} />}
       <div className="flex items-baseline gap-2.5 flex-wrap">
         <span className="tag tag-accent">Session {session.number}</span>
         <h2
@@ -692,55 +781,145 @@ function SessionDetail({
       </div>
 
       {editing ? (
-        <Card className="space-y-3">
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Title</label>
-            <TextInput value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} placeholder="Session title…" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Played on</label>
-            <TextInput type="date" value={dateDraft} onChange={(e) => setDateDraft(e.target.value)} />
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <label
-                htmlFor={`session-${session.id}-recap`}
-                className="text-xs font-bold text-slate-500 uppercase tracking-wide"
-              >
-                Recap
-              </label>
-              <div className="flex-1" />
-              <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
-            </div>
-            <TextArea
-              id={`session-${session.id}-recap`}
-              autoFocus={startEditing}
-              style={{ minHeight: 200 }}
-              value={recapDraft}
-              onChange={(e) => setRecapDraft(e.target.value)}
-              placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
-            />
-          </div>
-          <div className="flex gap-2 justify-end items-center">
-            {conflict && (
-              <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
-                Reload latest
-              </Btn>
+        <Card className="edit-recap-form min-w-0 space-y-3">
+          <form
+            className="min-w-0 space-y-3"
+            noValidate
+            onSubmit={(e) => {
+              e.preventDefault();
+              void save();
+            }}
+          >
+            {error && (
+              <div id={fieldIds.formErrorId}>
+                <ErrorNote message={error} />
+              </div>
             )}
-            <Btn
-              ghost
-              className="!min-h-0 !py-1.5 text-xs"
-              onClick={() => {
-                setEditing(false);
-                onEditActionHandled();
-              }}
-            >
-              Cancel
-            </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </Btn>
-          </div>
+            <div className="min-w-0 space-y-1">
+              <label
+                htmlFor={fieldIds.title.controlId}
+                className="block text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+              >
+                <OptionalFieldLabel>{RECAP_FIELD_LABELS.title}</OptionalFieldLabel>
+              </label>
+              <TextInput
+                id={fieldIds.title.controlId}
+                name="title"
+                className="min-w-0"
+                value={titleDraft}
+                onChange={(e) => {
+                  setTitleDraft(e.target.value);
+                  setFieldErrors((current) => ({ ...current, title: undefined }));
+                }}
+                placeholder="Session title…"
+                aria-invalid={fieldErrors.title ? true : undefined}
+                aria-describedby={recapDescribedBy(fieldIds.title, {
+                  error: Boolean(fieldErrors.title),
+                  formErrorId: error && !fieldErrors.title ? fieldIds.formErrorId : null,
+                })}
+              />
+              <p id={fieldIds.title.helpId} className="m-0 text-xs text-slate-400 break-words">
+                {RECAP_TITLE_HELP}
+              </p>
+              {fieldErrors.title && (
+                <p id={fieldIds.title.errorId} role="alert" className="m-0 text-xs text-rose-400">
+                  {fieldErrors.title}
+                </p>
+              )}
+            </div>
+            <div className="min-w-0 space-y-1">
+              <label
+                htmlFor={fieldIds.playedAt.controlId}
+                className="block text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+              >
+                <OptionalFieldLabel>{RECAP_FIELD_LABELS.playedAt}</OptionalFieldLabel>
+              </label>
+              <TextInput
+                id={fieldIds.playedAt.controlId}
+                name="playedAt"
+                className="min-w-0"
+                type="date"
+                value={dateDraft}
+                onChange={(e) => {
+                  setDateDraft(e.target.value);
+                  setFieldErrors((current) => ({ ...current, playedAt: undefined }));
+                }}
+                aria-invalid={fieldErrors.playedAt ? true : undefined}
+                aria-describedby={recapDescribedBy(fieldIds.playedAt, {
+                  error: Boolean(fieldErrors.playedAt),
+                })}
+              />
+              <p id={fieldIds.playedAt.helpId} className="m-0 text-xs text-slate-400 break-words">
+                {RECAP_PLAYED_ON_HELP}
+              </p>
+              {fieldErrors.playedAt && (
+                <p id={fieldIds.playedAt.errorId} role="alert" className="m-0 text-xs text-rose-400">
+                  {fieldErrors.playedAt}
+                </p>
+              )}
+            </div>
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <label
+                  htmlFor={fieldIds.recap.controlId}
+                  className="text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+                >
+                  <OptionalFieldLabel>{RECAP_FIELD_LABELS.recap}</OptionalFieldLabel>
+                </label>
+                <div className="flex-1 min-w-0" />
+                <TemplateButton value={recapDraft} onInsert={setRecapDraft} />
+              </div>
+              <TextArea
+                id={fieldIds.recap.controlId}
+                name="recap"
+                className="min-w-0"
+                autoFocus={startEditing}
+                style={{ minHeight: 200 }}
+                value={recapDraft}
+                onChange={(e) => {
+                  setRecapDraft(e.target.value);
+                  setFieldErrors((current) => ({ ...current, recap: undefined }));
+                }}
+                placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
+                aria-invalid={fieldErrors.recap ? true : undefined}
+                aria-describedby={recapDescribedBy(fieldIds.recap, {
+                  error: Boolean(fieldErrors.recap),
+                })}
+              />
+              <p id={fieldIds.recap.helpId} className="m-0 text-xs text-slate-400 break-words">
+                {RECAP_BODY_HELP}
+              </p>
+              {fieldErrors.recap && (
+                <p id={fieldIds.recap.errorId} role="alert" className="m-0 text-xs text-rose-400">
+                  {fieldErrors.recap}
+                </p>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2 justify-end items-center">
+              {conflict && (
+                <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
+                  Reload latest
+                </Btn>
+              )}
+              <Btn
+                ghost
+                type="button"
+                className="!min-h-0 !py-1.5 text-xs"
+                onClick={() => {
+                  setEditing(false);
+                  setFieldErrors({});
+                  setError(null);
+                  setConflict(false);
+                  onEditActionHandled();
+                }}
+              >
+                Cancel
+              </Btn>
+              <Btn type="submit" className="!min-h-0 !py-1.5 text-xs" disabled={saving || !detailReady}>
+                {saving ? 'Saving…' : 'Save'}
+              </Btn>
+            </div>
+          </form>
         </Card>
       ) : (
         <Card>
@@ -754,9 +933,9 @@ function SessionDetail({
         </Card>
       )}
 
-      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} isDm={isDm} />}
+      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
 
-      {isDm && !editing && (
+      {canDmWrite && !editing && (
         <div className="flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
@@ -767,15 +946,16 @@ function SessionDetail({
         </div>
       )}
 
-      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} isDm={isDm} />}
+      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} />}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
-      {isDm && !editing && (
+      {canDmWrite && !editing && (
         <RevisionHistoryPanel
           entityType="session"
           entityId={session.id}
           currentSnapshot={{ recap }}
+          expectedUpdatedAt={loadedUpdatedAt}
           label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {
@@ -799,7 +979,7 @@ function SessionDetail({
               .
             </>
           }
-          confirmLabel={deleting ? 'Deleting…' : 'Delete session'}
+          confirmLabel="Delete session"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
@@ -821,7 +1001,8 @@ function SessionDetail({
  * characters played (replace-set PUT). West Marches / rotating-cast tables need
  * this because the party is otherwise all-or-nothing.
  */
-function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { canDmWrite } = useCampaignAccess();
   const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -830,24 +1011,50 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadedForSessionId, setLoadedForSessionId] = useState<number | null>(null);
+  const loadSequencerRef = useRef(new RouteBoundLoadSequencer());
 
   const load = useCallback(async () => {
+    const { generation, signal } = loadSequencerRef.current.begin(sessionId);
     setLoading(true);
+    // Issue #853: drop the prior session's roster immediately so a save cannot
+    // PUT A's attendance into B while B's fetch is still in flight.
+    setAttendees([]);
+    setSelected(new Set());
+    setLoadedForSessionId(null);
+    setEditing(false);
+    setError(null);
     try {
-      setAttendees(await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`));
-    } catch {
-      // Attendance is a non-critical embellishment on the recap — stay quiet on read failure.
+      const next = await api.get<SessionAttendee[]>(`${API}/sessions/${sessionId}/attendance`, { signal });
+      if (!loadSequencerRef.current.isCurrent(generation, sessionId)) return;
+      setAttendees(next);
+      setLoadedForSessionId(sessionId);
+    } catch (err) {
+      if (!loadSequencerRef.current.isCurrent(generation, sessionId)) return;
+      setAttendees([]);
+      setLoadedForSessionId(null);
+      if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
+      // Attendance is a non-critical embellishment — surface retry via the empty state.
+      setError("Couldn't load attendance.");
     } finally {
-      setLoading(false);
+      if (loadSequencerRef.current.isCurrent(generation, sessionId)) setLoading(false);
     }
   }, [sessionId]);
 
   useEffect(() => {
-    setEditing(false);
     void load();
+    const sequencer = loadSequencerRef.current;
+    return () => sequencer.invalidate();
   }, [load]);
 
+  const attendanceReady = mutationsEnabledForRoute(
+    loadedForSessionId != null ? { id: loadedForSessionId } : null,
+    sessionId,
+    loading,
+  );
+
   async function startEditing() {
+    if (!attendanceReady) return;
     setError(null);
     if (!rosterLoaded) {
       try {
@@ -872,6 +1079,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
   }
 
   async function save() {
+    if (!assertMutationTarget(loadedForSessionId, sessionId).ok) return;
     setSaving(true);
     setError(null);
     try {
@@ -887,14 +1095,14 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
     }
   }
 
-  if (loading) return null;
+  if (loading || !attendanceReady) return null;
 
   return (
     <Card className="space-y-2">
       <div className="flex items-center gap-2">
         <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Who played</span>
         <div className="flex-1" />
-        {isDm && !editing && (
+        {canDmWrite && !editing && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEditing}>
             {attendees.length ? 'Edit' : 'Set attendance'}
           </Btn>
@@ -931,7 +1139,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
             <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)} disabled={saving}>
               Cancel
             </Btn>
-            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving}>
+            <Btn className="!min-h-0 !py-1.5 text-xs" onClick={save} disabled={saving || !attendanceReady}>
               {saving ? 'Saving…' : 'Save'}
             </Btn>
           </div>
@@ -954,7 +1162,8 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
 type ShareLifetime = '1' | '7' | '30' | 'never';
 
 /** Member-visible status plus DM-only capability controls for one recap. */
-function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
   const [loading, setLoading] = useState(true);
@@ -963,9 +1172,9 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
   const [lifetime, setLifetime] = useState<ShareLifetime>('7');
   const [acknowledgedNever, setAcknowledgedNever] = useState(false);
   const [newLink, setNewLink] = useState<{ shareId: number; url: string } | null>(null);
-  const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const policyEnabled = campaign?.publicRecapSharingEnabled !== false;
+  const newLinkId = `recap-share-url-${sessionId}`;
 
   const load = useCallback(async () => {
     setError(null);
@@ -981,7 +1190,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
 
   useEffect(() => {
     setNewLink(null);
-    setCopied(false);
     void load();
   }, [load]);
 
@@ -989,13 +1197,12 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
     if (lifetime === 'never' && !acknowledgedNever) return;
     setCreating(true);
     setError(null);
-    setCopied(false);
     try {
       const expiresAt = lifetime === 'never'
         ? null
         : new Date(Date.now() + Number(lifetime) * 24 * 60 * 60 * 1000).toISOString();
       const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`, { label, expiresAt });
-      setNewLink({ shareId: res.share.id, url: `${window.location.origin}/share/${res.token}` });
+      setNewLink({ shareId: res.share.id, url: `${window.location.origin}${joinPublicBase('/share/')}${res.token}` });
       setLabel('');
       setLifetime('7');
       setAcknowledgedNever(false);
@@ -1004,16 +1211,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       setError("Couldn't create a share link.");
     } finally {
       setCreating(false);
-    }
-  }
-
-  async function copy() {
-    if (!newLink) return;
-    try {
-      await navigator.clipboard.writeText(newLink.url);
-      setCopied(true);
-    } catch {
-      /* clipboard unavailable — the link is selectable below */
     }
   }
 
@@ -1034,7 +1231,7 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       )}
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && policyEnabled && (
+      {canDmWrite && policyEnabled && (
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px_auto] items-end">
           <div className="field !mb-0">
             <label htmlFor={`share-label-${sessionId}`}>Label</label>
@@ -1085,13 +1282,24 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       )}
 
       {newLink && (
-        <div className="flex items-center gap-2 flex-wrap" aria-live="polite">
-          <code className="text-xs break-all flex-1 min-w-0" style={{ color: 'var(--color-accent)' }}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <code
+            id={newLinkId}
+            className="text-xs break-all flex-1 min-w-0"
+            style={{ color: 'var(--color-accent)' }}
+          >
             {newLink.url}
           </code>
-          <Btn ghost className="!min-h-0 !py-1.5 text-xs shrink-0" onClick={copy}>
-            {copied ? 'Copied ✓' : 'Copy link'}
-          </Btn>
+          <CopyControl
+            text={newLink.url}
+            selectTargetId={newLinkId}
+            label="Copy link"
+            copiedLabel="Copied ✓"
+            ghost
+            className="!min-h-0 !py-1.5 text-xs shrink-0"
+            successAnnouncement="Share link copied to clipboard."
+            failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
+          />
         </div>
       )}
 
@@ -1106,7 +1314,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
               key={s.id}
               share={s}
               sessionId={sessionId}
-              isDm={isDm}
               onChanged={load}
               onRevoked={(shareId) => setNewLink((current) => current?.shareId === shareId ? null : current)}
             />
@@ -1120,16 +1327,15 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
 function ShareRow({
   share,
   sessionId,
-  isDm,
   onChanged,
   onRevoked,
 }: {
   share: SessionShare;
   sessionId: number;
-  isDm: boolean;
   onChanged: () => Promise<void>;
   onRevoked: (shareId: number) => void;
 }) {
+  const { canDmWrite } = useCampaignAccess();
   const [draftLabel, setDraftLabel] = useState(share.label);
   const [busy, setBusy] = useState<'label' | 'extend' | 'revoke' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1171,7 +1377,7 @@ function ShareRow({
         </div>
         <code className="text-slate-300 shrink-0" aria-label="Share token display prefix">{share.tokenPrefix}…</code>
       </div>
-      {isDm && (
+      {canDmWrite && (
         <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
           <label className="sr-only" htmlFor={`share-row-label-${share.id}`}>Edit share label</label>
           <TextInput
@@ -1216,6 +1422,8 @@ function AddRecapForm({
   const [recap, setRecap] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
+  const fieldIds = newRecapFieldIds();
 
   // A form can stay open while a session runs across midnight. Keep the
   // suggested date aligned with the user's local calendar until they make an
@@ -1258,6 +1466,17 @@ function AddRecapForm({
   }, []);
 
   async function publish() {
+    const nextErrors = validateRecapFields({ title, playedAt, recap });
+    setFieldErrors(nextErrors);
+    // Keep an existing API failure banner until validation passes and we actually
+    // attempt a publish — a failed client check must not drop formErrorId from
+    // the title's aria-describedby.
+    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
+    if (invalidId) {
+      document.getElementById(invalidId)?.focus();
+      return;
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -1269,9 +1488,11 @@ function AddRecapForm({
       });
       setTitle('');
       setRecap('');
+      setFieldErrors({});
       onCreated(created);
     } catch {
       setError("Couldn't publish the recap.");
+      document.getElementById(fieldIds.title.controlId)?.focus();
     } finally {
       setSaving(false);
     }
@@ -1280,58 +1501,135 @@ function AddRecapForm({
   return (
     <Card className="new-recap-form min-w-0 space-y-3">
       <h2 className="font-bold text-white text-sm">+ Add recap (Session {nextNumber})</h2>
-      {error && <ErrorNote message={error} onRetry={publish} />}
-      <label htmlFor="new-recap-title" className="block text-xs font-bold text-slate-400 uppercase tracking-wide">
-        Title
-      </label>
-      <TextInput
-        id="new-recap-title"
-        className="min-w-0"
-        autoFocus
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder={'e.g. "The Dragon’s Shadow"'}
-      />
-      <label htmlFor="new-recap-played-at" className="block text-xs font-bold text-slate-400 uppercase tracking-wide">
-        Played on
-      </label>
-      <TextInput
-        id="new-recap-played-at"
-        className="min-w-0"
-        type="date"
-        value={playedAt}
-        onChange={(e) => {
-          dateWasEdited.current = true;
-          setPlayedAt(e.target.value);
-        }}
-      />
-      <div className="flex items-center gap-2">
-        <label htmlFor="new-recap-body" className="text-xs font-bold text-slate-400 uppercase tracking-wide">Recap</label>
-        <div className="flex-1" />
-        <TemplateButton value={recap} onInsert={setRecap} />
-      </div>
-      <TextArea
-        id="new-recap-body"
-        className="!min-h-[100px]"
-        value={recap}
-        onChange={(e) => setRecap(e.target.value)}
-        placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
-      />
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <p className="text-[11px] text-slate-400">
-          Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
-        </p>
-        <div className="flex flex-wrap gap-2 sm:shrink-0">
-          {onCancel && (
-            <Btn ghost className="!min-h-0 !py-2 text-sm" onClick={onCancel}>
-              Cancel
-            </Btn>
-          )}
-          <Btn className="!min-h-0 !py-2 text-sm" onClick={publish} disabled={saving}>
-            {saving ? 'Publishing…' : 'Publish recap'}
-          </Btn>
+      {error && (
+        <div id={fieldIds.formErrorId}>
+          <ErrorNote message={error} onRetry={publish} />
         </div>
-      </div>
+      )}
+      <form
+        className="min-w-0 space-y-3"
+        noValidate
+        onSubmit={(e) => {
+          e.preventDefault();
+          void publish();
+        }}
+      >
+        <div className="min-w-0 space-y-1">
+          <label
+            htmlFor={fieldIds.title.controlId}
+            className="block text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+          >
+            <OptionalFieldLabel>{RECAP_FIELD_LABELS.title}</OptionalFieldLabel>
+          </label>
+          <TextInput
+            id={fieldIds.title.controlId}
+            name="title"
+            className="min-w-0"
+            autoFocus
+            value={title}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              setFieldErrors((current) => ({ ...current, title: undefined }));
+            }}
+            placeholder={'e.g. "The Dragon’s Shadow"'}
+            aria-invalid={fieldErrors.title ? true : undefined}
+            aria-describedby={recapDescribedBy(fieldIds.title, {
+              error: Boolean(fieldErrors.title),
+              formErrorId: error && !fieldErrors.title ? fieldIds.formErrorId : null,
+            })}
+          />
+          <p id={fieldIds.title.helpId} className="m-0 text-xs text-slate-400 break-words">
+            {RECAP_TITLE_HELP}
+          </p>
+          {fieldErrors.title && (
+            <p id={fieldIds.title.errorId} role="alert" className="m-0 text-xs text-rose-400">
+              {fieldErrors.title}
+            </p>
+          )}
+        </div>
+        <div className="min-w-0 space-y-1">
+          <label
+            htmlFor={fieldIds.playedAt.controlId}
+            className="block text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+          >
+            <OptionalFieldLabel>{RECAP_FIELD_LABELS.playedAt}</OptionalFieldLabel>
+          </label>
+          <TextInput
+            id={fieldIds.playedAt.controlId}
+            name="playedAt"
+            className="min-w-0"
+            type="date"
+            value={playedAt}
+            onChange={(e) => {
+              dateWasEdited.current = true;
+              setPlayedAt(e.target.value);
+              setFieldErrors((current) => ({ ...current, playedAt: undefined }));
+            }}
+            aria-invalid={fieldErrors.playedAt ? true : undefined}
+            aria-describedby={recapDescribedBy(fieldIds.playedAt, {
+              error: Boolean(fieldErrors.playedAt),
+            })}
+          />
+          <p id={fieldIds.playedAt.helpId} className="m-0 text-xs text-slate-400 break-words">
+            {RECAP_PLAYED_ON_HELP}
+          </p>
+          {fieldErrors.playedAt && (
+            <p id={fieldIds.playedAt.errorId} role="alert" className="m-0 text-xs text-rose-400">
+              {fieldErrors.playedAt}
+            </p>
+          )}
+        </div>
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <label
+              htmlFor={fieldIds.recap.controlId}
+              className="text-xs font-bold text-slate-300 uppercase tracking-wide break-words"
+            >
+              <OptionalFieldLabel>{RECAP_FIELD_LABELS.recap}</OptionalFieldLabel>
+            </label>
+            <div className="flex-1 min-w-0" />
+            <TemplateButton value={recap} onInsert={setRecap} />
+          </div>
+          <TextArea
+            id={fieldIds.recap.controlId}
+            name="recap"
+            className="!min-h-[100px] min-w-0"
+            value={recap}
+            onChange={(e) => {
+              setRecap(e.target.value);
+              setFieldErrors((current) => ({ ...current, recap: undefined }));
+            }}
+            placeholder="What happened? Plain text is fine — # headings and - bullets render nicely."
+            aria-invalid={fieldErrors.recap ? true : undefined}
+            aria-describedby={recapDescribedBy(fieldIds.recap, {
+              error: Boolean(fieldErrors.recap),
+            })}
+          />
+          <p id={fieldIds.recap.helpId} className="m-0 text-xs text-slate-400 break-words">
+            {RECAP_BODY_HELP}
+          </p>
+          {fieldErrors.recap && (
+            <p id={fieldIds.recap.errorId} role="alert" className="m-0 text-xs text-rose-400">
+              {fieldErrors.recap}
+            </p>
+          )}
+        </div>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <p className="text-[11px] text-slate-400 break-words">
+            Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
+          </p>
+          <div className="flex flex-wrap gap-2 sm:shrink-0">
+            {onCancel && (
+              <Btn ghost type="button" className="!min-h-0 !py-2 text-sm" onClick={onCancel}>
+                Cancel
+              </Btn>
+            )}
+            <Btn type="submit" className="!min-h-0 !py-2 text-sm" disabled={saving}>
+              {saving ? 'Publishing…' : 'Publish recap'}
+            </Btn>
+          </div>
+        </div>
+      </form>
     </Card>
   );
 }
