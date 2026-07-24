@@ -94,5 +94,17 @@
     "actions": "Actions",
     "creatureType": "Type",
     "ratingLine": "Challenge Rating 2"
+  },
+  "starforged": {
+    "rating": "Rating",
+    "ratingShort": null,
+    "defense": "Defense",
+    "defenseShort": null,
+    "hitPoints": "Hit Points",
+    "hitPointsShort": "HP",
+    "abilities": "Abilities",
+    "actions": "Actions",
+    "creatureType": "Type",
+    "ratingLine": "Rating 2"
   }
 }
