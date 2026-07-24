@@ -32,7 +32,7 @@ describe('notifications (e2e)', () => {
   async function listFor(agent: ReturnType<typeof request.agent>, query = ''): Promise<Notification[]> {
     const res = await agent.get(`/api/v1/notifications${query}`);
     expect(res.status).toBe(200);
-    return res.body;
+    return Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
   }
 
   beforeAll(async () => {
@@ -277,7 +277,8 @@ describe('note_shared notifications (issue #105, e2e)', () => {
   async function sharedFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return (res.body as Notification[]).filter((n) => n.type === 'note_shared');
+    const items: Notification[] = Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
+    return items.filter((n) => n.type === 'note_shared');
   }
 
   beforeAll(async () => {
@@ -389,7 +390,8 @@ describe('note edit audience notifications (issue #784, e2e)', () => {
   async function sharedFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return (res.body as Notification[]).filter((n) => n.type === 'note_shared');
+    const items: Notification[] = Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
+    return items.filter((n) => n.type === 'note_shared');
   }
 
   beforeAll(async () => {
@@ -503,7 +505,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return res.body as Notification[];
+    return Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
   }
   const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
 
@@ -782,7 +784,7 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
     expect(res.status).toBe(200);
-    return res.body as Notification[];
+    return Array.isArray(res.body) ? res.body : (res.body.items ?? res.body);
   }
 
   const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
@@ -896,3 +898,126 @@ describe('inbox submission notifies DMs (issue #832, e2e)', () => {
     }
   });
 });
+
+describe('Issue #550: notification pagination, filtering, bulk operations & undo (e2e)', () => {
+  let ctx: TestAppContext;
+  let dm: ReturnType<typeof request.agent>;
+  let player: ReturnType<typeof request.agent>;
+  let playerId: number;
+  let campaign1Id: number;
+  let campaign2Id: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'p550-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'p550-dm', password: 'password-dm-1', displayName: 'DM 550' });
+    const createPlayer = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'p550-player', password: 'password-pl-1', displayName: 'Player 550' });
+    playerId = createPlayer.body.id;
+
+    dm = request.agent(server);
+    await dm.post('/api/v1/auth/login').send({ username: 'p550-dm', password: 'password-dm-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'p550-player', password: 'password-pl-1' });
+
+    const c1 = await dm.post('/api/v1/campaigns').send({ name: 'Campaign Alpha' });
+    campaign1Id = c1.body.id;
+    await dm.post(`/api/v1/campaigns/${campaign1Id}/members`).send({ userId: playerId, role: 'player' });
+
+    const c2 = await dm.post('/api/v1/campaigns').send({ name: 'Campaign Beta' });
+    campaign2Id = c2.body.id;
+    await dm.post(`/api/v1/campaigns/${campaign2Id}/members`).send({ userId: playerId, role: 'player' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('supports cursor pagination across 35 items', async () => {
+    for (let i = 1; i <= 35; i++) {
+      await dm.post(`/api/v1/campaigns/${campaign1Id}/sessions`).send({ number: i, title: `Session ${i}`, recap: `Recap ${i}` });
+    }
+
+    const unreadCountRes = await player.get('/api/v1/notifications/unread-count');
+    expect(unreadCountRes.body.count).toBe(37);
+
+    const page1 = await player.get('/api/v1/notifications?limit=20');
+    expect(page1.status).toBe(200);
+    expect(page1.body.items).toHaveLength(20);
+    expect(page1.body.total).toBe(37);
+    expect(page1.body.hasMore).toBe(true);
+    expect(page1.body.nextCursor).toBeDefined();
+
+    const cursor = page1.body.nextCursor;
+    const page2 = await player.get(`/api/v1/notifications?limit=20&cursor=${cursor}`);
+    expect(page2.status).toBe(200);
+    expect(page2.body.items).toHaveLength(17);
+    expect(page2.body.hasMore).toBe(false);
+    expect(page2.body.nextCursor).toBeNull();
+  });
+
+  it('filters by campaign, type, date range, and unread status', async () => {
+    for (let i = 1; i <= 5; i++) {
+      await dm.post(`/api/v1/campaigns/${campaign2Id}/sessions`).send({ number: i + 100, title: `Beta Session ${i}`, recap: `Beta Recap ${i}` });
+    }
+
+    const resC2 = await player.get(`/api/v1/notifications?campaignId=${campaign2Id}`);
+    expect(resC2.status).toBe(200);
+    expect(resC2.body.items.every((n: any) => n.campaignId === campaign2Id)).toBe(true);
+    expect(resC2.body.items.filter((n: any) => n.type === 'recap_posted')).toHaveLength(5);
+
+    const resType = await player.get('/api/v1/notifications?type=recap_posted');
+    expect(resType.status).toBe(200);
+    expect(resType.body.items.length).toBeGreaterThanOrEqual(40);
+
+    const resUnread = await player.get('/api/v1/notifications?unread=true');
+    expect(resUnread.status).toBe(200);
+    expect(resUnread.body.items.every((n: any) => n.readAt === null)).toBe(true);
+  });
+
+  it('bulk mark read by IDs, by campaign, all, and bulk mark unread for undo', async () => {
+    const initialList = await player.get('/api/v1/notifications?limit=5');
+    const idsToMark = initialList.body.items.map((n: any) => n.id);
+
+    const markResult = await player.post('/api/v1/notifications/mark-read').send({ ids: idsToMark });
+    expect(markResult.status).toBe(201);
+    expect(markResult.body.updated).toBe(5);
+    expect([...markResult.body.updatedIds].sort()).toEqual([...idsToMark].sort());
+
+    const countAfter5 = await player.get('/api/v1/notifications/unread-count');
+    expect(countAfter5.body.count).toBe(37);
+
+    const undoResult = await player.post('/api/v1/notifications/mark-unread').send({ ids: idsToMark });
+    expect(undoResult.status).toBe(201);
+    expect(undoResult.body.updated).toBe(5);
+
+    const countRestored = await player.get('/api/v1/notifications/unread-count');
+    expect(countRestored.body.count).toBe(42);
+
+    const c2Mark = await player.post('/api/v1/notifications/mark-read').send({ campaignId: campaign2Id });
+    expect(c2Mark.status).toBe(201);
+    expect(c2Mark.body.updated).toBe(6);
+
+    const allMark = await player.post('/api/v1/notifications/mark-read').send({ all: true });
+    expect(allMark.status).toBe(201);
+    expect(allMark.body.updated).toBe(36);
+
+    const finalCount = await player.get('/api/v1/notifications/unread-count');
+    expect(finalCount.body.count).toBe(0);
+
+    const singleUnread = await player.post(`/api/v1/notifications/${idsToMark[0]}/unread`);
+    expect(singleUnread.status).toBe(201);
+    expect(singleUnread.body.readAt).toBeNull();
+    expect((await player.get('/api/v1/notifications/unread-count')).body.count).toBe(1);
+
+    const singleRead = await player.post(`/api/v1/notifications/${idsToMark[0]}/read`);
+    expect(singleRead.status).toBe(201);
+    expect(singleRead.body.readAt).not.toBeNull();
+    expect((await player.get('/api/v1/notifications/unread-count')).body.count).toBe(0);
+  });
+});
+

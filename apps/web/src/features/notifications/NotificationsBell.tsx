@@ -66,7 +66,15 @@ type CountSnapshot = {
 type NotificationSyncMessage =
   | { type: 'snapshot'; snapshot: CountSnapshot }
   | { type: 'read'; id: number; readAt: string }
+  | { type: 'unread'; id: number }
+  | { type: 'read-bulk'; ids: number[]; readAt: string }
+  | { type: 'unread-bulk'; ids: number[] }
   | { type: 'read-all'; readAt: string };
+
+export type BulkMarkResult = {
+  updated: number;
+  updatedIds: number[];
+};
 
 type NotificationContextValue = {
   count: number;
@@ -77,12 +85,16 @@ type NotificationContextValue = {
   closePanel(): void;
   retryLoadItems(): void;
   markRead(notification: Notification): Promise<void>;
+  markUnread(notification: Notification): Promise<void>;
+  markReadBulk(opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult>;
+  markUnreadBulk(opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult>;
   markAllRead(): Promise<boolean>;
+  refreshCount(force?: boolean): Promise<void>;
 };
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
 
-function useNotifications(): NotificationContextValue {
+export function useNotifications(): NotificationContextValue {
   const value = useContext(NotificationContext);
   if (!value) throw new Error('Notifications must be rendered inside NotificationsProvider');
   return value;
@@ -276,10 +288,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`, {
         signal: controller.signal,
       });
-      if (!mountedRef.current || controller.signal.aborted || generation !== countGenerationRef.current) return;
-      // A read mutation or a newer tab refresh completed while this request was
-      // in flight. Its snapshot is authoritative; do not resurrect an old count.
-      if (snapshotVersionRef.current !== snapshotVersion) return;
+      if (allReadAtRef.current !== null) {
+        publishSnapshot({ count: 0, refreshedAt: Date.now() });
+        return;
+      }
       publishSnapshot({ count: res.count, refreshedAt: Date.now() });
     };
 
@@ -288,8 +300,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         if (navigator.locks) {
           await navigator.locks.request(lockName, { ifAvailable: true }, async (lock) => {
             if (!lock) return;
-            // A tab may have refreshed between our first cache check and acquiring
-            // the origin-wide lock. Non-forced interval/initial reads can reuse it.
             const newer = readStoredSnapshot();
             if (!force && newer && Date.now() - newer.refreshedAt < POLL_MS) {
               applySnapshot(newer);
@@ -298,8 +308,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
             await load();
           });
         } else {
-          // Web Locks is an optimization for multiple tabs. The per-provider gate
-          // still guarantees no overlap in browsers that do not implement it.
           await load();
         }
       } catch (error) {
@@ -324,8 +332,9 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     listRequestRef.current = { controller, generation };
     setItems(null);
     setLoadError(false);
-    void api.get<Notification[]>(`${API}/notifications?limit=30`, { signal: controller.signal })
-      .then((nextItems) => {
+    void api.get<{ items: Notification[] } | Notification[]>(`${API}/notifications?limit=30`, { signal: controller.signal })
+      .then((res) => {
+        const nextItems = Array.isArray(res) ? res : res.items;
         if (
           mountedRef.current
           && openRef.current
@@ -370,14 +379,31 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     loadItems();
   }, [closePanel, loadItems]);
 
-  const syncReadMessage = useCallback((message: Extract<NotificationSyncMessage, { type: 'read' | 'read-all' }>) => {
+  const syncReadMessage = useCallback((message: NotificationSyncMessage) => {
     if (!mountedRef.current) return;
     if (message.type === 'read') {
       readAtByIdRef.current.set(message.id, message.readAt);
       setItems((previous) => previous?.map((item) => (
         item.id === message.id && !item.readAt ? { ...item, readAt: message.readAt } : item
       )) ?? previous);
-    } else {
+    } else if (message.type === 'unread') {
+      readAtByIdRef.current.delete(message.id);
+      setItems((previous) => previous?.map((item) => (
+        item.id === message.id ? { ...item, readAt: null } : item
+      )) ?? previous);
+    } else if (message.type === 'read-bulk') {
+      const idSet = new Set(message.ids);
+      idSet.forEach((id) => readAtByIdRef.current.set(id, message.readAt));
+      setItems((previous) => previous?.map((item) => (
+        idSet.has(item.id) && !item.readAt ? { ...item, readAt: message.readAt } : item
+      )) ?? previous);
+    } else if (message.type === 'unread-bulk') {
+      const idSet = new Set(message.ids);
+      idSet.forEach((id) => readAtByIdRef.current.delete(id));
+      setItems((previous) => previous?.map((item) => (
+        idSet.has(item.id) ? { ...item, readAt: null } : item
+      )) ?? previous);
+    } else if (message.type === 'read-all') {
       allReadAtRef.current = message.readAt;
       setItems((previous) => previous?.map((item) => (
         item.readAt ? item : { ...item, readAt: message.readAt }
@@ -434,8 +460,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
       interval = window.setInterval(() => void refreshCount(), POLL_MS);
     };
 
-    // Defer initial work one task so React StrictMode's development-only effect
-    // replay cancels the discarded mount before it can create network traffic.
     const initialTimer = window.setTimeout(() => {
       initializedRef.current = true;
       active = isDocumentActive();
@@ -455,8 +479,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         cancelListRequest();
         return;
       }
-      // A hidden+offline tab waits until both conditions recover, then does one
-      // refresh even if visibility and online events arrive back-to-back.
       void refreshCount(true);
       if (openRef.current) loadItems();
       startInterval();
@@ -495,8 +517,6 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     userId,
   ]);
 
-  // Route changes reconcile the badge without rebuilding the interval. The
-  // initial route is handled by the lifecycle effect above.
   useEffect(() => {
     if (previousPathRef.current === location.pathname) return;
     previousPathRef.current = location.pathname;
@@ -505,15 +525,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const markRead = useCallback(async (notification: Notification) => {
     closePanel();
-    // Issue #820: stash cancelled-night snapshot before navigate so the Schedule
-    // tab can render a stable cancelled-event detail after the row is deleted.
     const scheduleData = parseScheduleNotificationData(notification.data);
     if (scheduleData?.changeType === 'cancelled') {
       rememberCancelledScheduleDetail(scheduleData);
     }
-    // Issue #446: navigate first so mark-read only follows a successful route
-    // change. Deleted/hidden targets still get a URL; EntityDeepLinkFocus times
-    // out gracefully when the DOM node never appears.
     const href = notificationHref(notification);
     navigate(href);
     if (!notification.readAt) {
@@ -525,27 +540,83 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         channelRef.current?.postMessage({ type: 'read', id: notification.id, readAt } satisfies NotificationSyncMessage);
         publishSnapshot({ count: Math.max(0, countRef.current - 1), refreshedAt: Date.now() });
       } catch {
-        // User already navigated; still announce the failed mark-read so the
-        // unread badge state is explainable (issue #592 mark-read announce AC).
         announce("Couldn't mark notification as read.", { assertive: true });
       }
       void refreshCount(true);
     }
   }, [announce, cancelCountRequest, closePanel, navigate, publishSnapshot, refreshCount, syncReadMessage]);
 
-  const markAllRead = useCallback(async (): Promise<boolean> => {
+  const markUnread = useCallback(async (notification: Notification) => {
+    if (notification.readAt) {
+      try {
+        await api.post(`${API}/notifications/${notification.id}/unread`);
+        cancelCountRequest();
+        syncReadMessage({ type: 'unread', id: notification.id });
+        channelRef.current?.postMessage({ type: 'unread', id: notification.id } satisfies NotificationSyncMessage);
+        publishSnapshot({ count: countRef.current + 1, refreshedAt: Date.now() });
+      } catch {
+        announce("Couldn't mark notification as unread.", { assertive: true });
+      }
+      void refreshCount(true);
+    }
+  }, [announce, cancelCountRequest, publishSnapshot, refreshCount, syncReadMessage]);
+
+  const markReadBulk = useCallback(async (opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult> => {
     try {
-      await api.post(`${API}/notifications/read-all`);
+      const res = await api.post<BulkMarkResult>(`${API}/notifications/mark-read`, opts);
       cancelCountRequest();
       const readAt = new Date().toISOString();
-      syncReadMessage({ type: 'read-all', readAt });
-      channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
+      if (opts.all) {
+        syncReadMessage({ type: 'read-all', readAt });
+        channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
+        publishSnapshot({ count: 0, refreshedAt: Date.now() });
+      } else {
+        syncReadMessage({ type: 'read-bulk', ids: res.updatedIds, readAt });
+        channelRef.current?.postMessage({ type: 'read-bulk', ids: res.updatedIds, readAt } satisfies NotificationSyncMessage);
+        publishSnapshot({ count: Math.max(0, countRef.current - res.updated), refreshedAt: Date.now() });
+      }
+      void refreshCount(true);
+      return res;
+    } catch {
+      return { updated: 0, updatedIds: [] };
+    }
+  }, [cancelCountRequest, publishSnapshot, refreshCount, syncReadMessage]);
+
+  const markUnreadBulk = useCallback(async (opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult> => {
+    try {
+      const res = await api.post<BulkMarkResult>(`${API}/notifications/mark-unread`, opts);
+      cancelCountRequest();
+      syncReadMessage({ type: 'unread-bulk', ids: res.updatedIds });
+      channelRef.current?.postMessage({ type: 'unread-bulk', ids: res.updatedIds } satisfies NotificationSyncMessage);
+      publishSnapshot({ count: countRef.current + res.updated, refreshedAt: Date.now() });
+      void refreshCount(true);
+      return res;
+    } catch {
+      return { updated: 0, updatedIds: [] };
+    }
+  }, [cancelCountRequest, publishSnapshot, refreshCount, syncReadMessage]);
+
+  const markAllRead = useCallback(async (): Promise<boolean> => {
+    try {
+      const res = await api.post<BulkMarkResult | Notification[]>(`${API}/notifications/read-all`);
+      const readAt = new Date().toISOString();
+      cancelCountRequest();
+      allReadAtRef.current = readAt;
+      applyCount(0);
+      const updatedIds = Array.isArray(res) ? [] : (res.updatedIds ?? []);
+      if (updatedIds.length > 0) {
+        syncReadMessage({ type: 'read-bulk', ids: updatedIds, readAt });
+        channelRef.current?.postMessage({ type: 'read-bulk', ids: updatedIds, readAt } satisfies NotificationSyncMessage);
+      } else {
+        syncReadMessage({ type: 'read-all', readAt });
+        channelRef.current?.postMessage({ type: 'read-all', readAt } satisfies NotificationSyncMessage);
+      }
       publishSnapshot({ count: 0, refreshedAt: Date.now() });
       return true;
     } catch {
       return false;
     }
-  }, [cancelCountRequest, publishSnapshot, syncReadMessage]);
+  }, [applyCount, cancelCountRequest, publishSnapshot, syncReadMessage]);
 
   const value: NotificationContextValue = {
     count,
@@ -556,7 +627,11 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     closePanel,
     retryLoadItems: loadItems,
     markRead,
+    markUnread,
+    markReadBulk,
+    markUnreadBulk,
     markAllRead,
+    refreshCount,
   };
 
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>;
@@ -625,9 +700,6 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
 }
 
 function notificationCopy(notification: Notification, locale: string | undefined): { title: string; body: string } {
-  // Issue #820: prefer viewer-local schedule copy when structured data is present.
-  // Empty body is intentional for `created` / time-only `rescheduled` (title carries
-  // the localized instant) — do not fall back to the server UTC body.
   const scheduleData = parseScheduleNotificationData(notification.data);
   if (scheduleData) {
     return {
@@ -639,11 +711,12 @@ function notificationCopy(notification: Notification, locale: string | undefined
 }
 
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
-  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
+  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead, markReadBulk } = notifications;
   const formattingLocale = useFormattingLocale();
   const narrow = useIsNarrowViewport();
+  const navigate = useNavigate();
   const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
-  // Panel unmounts on close; mark-all may still resolve after Escape/backdrop.
+  
   const panelMountedRef = useRef(true);
   useEffect(() => {
     panelMountedRef.current = true;
@@ -651,13 +724,9 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
       panelMountedRef.current = false;
     };
   }, []);
-  // useDialog already wires Escape-to-close, focus trap, focus restore to the
-  // trigger, and an inert background (issue #650/#92). It runs once per mount,
-  // so it stays put when the panel re-renders across the breakpoint.
+
   const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
-  // Stable dialog description (aria-describedby) stays on list state. Transient
-  // mark-all results go to a separate live status region so the dialog does not
-  // permanently describe itself as “All notifications marked as read.” (#592).
+  
   const listDescription =
     items === null
       ? loadError
@@ -674,11 +743,11 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     );
   }, [markAllRead]);
 
-  // Bottom sheet on phones (issue #664), top-right flyout everywhere else —
-  // matches the MoreSheet pattern in Layout.tsx so a thumb reaches the close
-  // button and the surface sits above the mobile tab bar.
-  // z-index from --cf-layer-notification so the sheet shares the dialog tier
-  // and stays under the undo snackbar (issue #794 layer scale).
+  const handleViewAllCenter = useCallback(() => {
+    closePanel();
+    navigate('/notifications');
+  }, [closePanel, navigate]);
+
   const rootClassName = narrow
     ? 'fixed inset-0 flex items-end justify-center'
     : 'fixed inset-0';
@@ -751,7 +820,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           )}
           <CloseButton onClose={closePanel} label="Close notifications" />
         </div>
-        <div className="overflow-y-auto p-2" style={{ overscrollBehavior: 'contain' }}>
+        <div className="overflow-y-auto p-2 flex-1" style={{ overscrollBehavior: 'contain' }}>
           {items === null && !loadError && (
             <div className="p-3">
               <Skeleton lines={4} />
@@ -826,7 +895,22 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             );
           })}
         </div>
+        <div
+          className="px-4 py-2 border-t text-center shrink-0"
+          style={{ borderColor: 'var(--color-divider)', background: 'var(--color-surface, rgba(0,0,0,0.1))' }}
+        >
+          <span
+            role="button"
+            tabIndex={-1}
+            onClick={handleViewAllCenter}
+            className="text-xs font-semibold hover:underline cursor-pointer inline-block"
+            style={{ color: 'var(--color-accent)' }}
+          >
+            Notification Center &rarr;
+          </span>
+        </div>
       </div>
     </div>
   );
 }
+
