@@ -221,6 +221,69 @@ describe('revisions + optimistic concurrency (e2e) — #157', () => {
     });
   });
 
+  describe('factions (body) — #440', () => {
+    let factionId: number;
+
+    beforeAll(async () => {
+      const res = await request(ctx.app.getHttpServer())
+        .post(`/api/v1/campaigns/${campaignId}/factions`)
+        .set(dm)
+        .send({ name: 'The Carta', body: 'fbody1' });
+      expect(res.status).toBe(201);
+      factionId = res.body.id;
+    });
+
+    it('a stale expectedUpdatedAt PATCH 409s (the web-sent guard); a matching one succeeds + snapshots', async () => {
+      const server = ctx.app.getHttpServer();
+      const conflict = await request(server)
+        .patch(`/api/v1/factions/${factionId}`)
+        .set(dm)
+        .send({ body: 'CLOBBER', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body.code).toBe('STALE_WRITE');
+
+      const mid = await request(server).get(`/api/v1/factions/${factionId}`).set(dm);
+      expect(mid.body.body).toBe('fbody1'); // untouched
+
+      const ok = await request(server)
+        .patch(`/api/v1/factions/${factionId}`)
+        .set(dm)
+        .send({ body: 'fbody2', expectedUpdatedAt: mid.body.updatedAt });
+      expect(ok.status).toBe(200);
+
+      const revs = await request(server).get(`/api/v1/revisions/faction/${factionId}`).set(dm);
+      expect(revs.status).toBe(200);
+      expect(revs.body).toHaveLength(1);
+      expect(revs.body[0].snapshot.body).toBe('fbody1');
+    });
+
+    it('a concurrent MCP-style edit between web load and save 409s the stale web guard', async () => {
+      const server = ctx.app.getHttpServer();
+      // Web load: capture the updatedAt the form would echo back.
+      const loaded = await request(server).get(`/api/v1/factions/${factionId}`).set(dm);
+      const webExpectedUpdatedAt = loaded.body.updatedAt;
+
+      // MCP/agent edit with the fresh guard succeeds (simulates upsert_faction).
+      const mcpEdit = await request(server)
+        .patch(`/api/v1/factions/${factionId}`)
+        .set(dm)
+        .send({ body: 'mcp-edited', expectedUpdatedAt: loaded.body.updatedAt });
+      expect(mcpEdit.status).toBe(200);
+      expect(mcpEdit.body.body).toBe('mcp-edited');
+
+      // Web save with the now-stale expectedUpdatedAt must 409, not clobber.
+      const staleSave = await request(server)
+        .patch(`/api/v1/factions/${factionId}`)
+        .set(dm)
+        .send({ body: 'web-clobber', expectedUpdatedAt: webExpectedUpdatedAt });
+      expect(staleSave.status).toBe(409);
+      expect(staleSave.body.code).toBe('STALE_WRITE');
+
+      const after = await request(server).get(`/api/v1/factions/${factionId}`).set(dm);
+      expect(after.body.body).toBe('mcp-edited');
+    });
+  });
+
   describe('notes (concurrency + visibility-gated history — #233)', () => {
     let noteId: number;
 

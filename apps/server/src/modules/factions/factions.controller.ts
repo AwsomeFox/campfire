@@ -60,6 +60,7 @@ export class FactionsController {
   @Patch(':id')
   @ApiOperation({ summary: 'Update a faction', description: 'dm role required.' })
   @ApiResponse({ status: 200, description: 'Updated faction.' })
+  @ApiResponse({ status: 409, description: 'Stale expectedUpdatedAt — another edit landed first (STALE_WRITE).' })
   async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: FactionUpdateDto,
