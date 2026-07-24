@@ -269,6 +269,8 @@ function ScheduleItem({
           <RevisionHistoryPanel
             entityType="scheduled_session"
             entityId={schedule.id}
+            currentSnapshot={{ notes: schedule.notes }}
+            expectedUpdatedAt={schedule.updatedAt}
             onRestored={onChange}
             label="Schedule notes history"
           />

@@ -603,7 +603,14 @@ function BeatRow({
 
       {isDm && !editingLinks && (
         <div style={{ marginLeft: 22 }}>
-          <RevisionHistoryPanel entityType="story_beat" entityId={beat.id} onRestored={onChange} label="Beat prose history" />
+          <RevisionHistoryPanel
+            entityType="story_beat"
+            entityId={beat.id}
+            currentSnapshot={{ body: beat.body }}
+            expectedUpdatedAt={beat.updatedAt}
+            onRestored={onChange}
+            label="Beat prose history"
+          />
         </div>
       )}
 

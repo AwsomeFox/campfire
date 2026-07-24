@@ -303,7 +303,8 @@ function CommentCard({
         <RevisionHistoryPanel
           entityType="comment"
           entityId={comment.id}
-          endpointBase={`${API}/comments/${comment.id}/revisions`}
+          currentSnapshot={{ body: comment.body }}
+          expectedUpdatedAt={comment.updatedAt}
           reloadNonce={historyNonce}
           onRestored={() => { setHistoryNonce((value) => value + 1); onChanged(); }}
           label="Comment history"

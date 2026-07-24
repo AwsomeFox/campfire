@@ -247,6 +247,14 @@ export default function SessionZeroPage() {
         <RevisionHistoryPanel
           entityType="session_zero"
           entityId={cid}
+          currentSnapshot={{
+            lines: charter.lines.join('\n'),
+            veils: charter.veils.join('\n'),
+            safetyTools: charter.safetyTools.join('\n'),
+            houseRules: charter.houseRules,
+            toneAndExpectations: charter.toneAndExpectations,
+          }}
+          expectedUpdatedAt={charter.updatedAt}
           reloadNonce={historyNonce}
           onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
           label="Charter history"

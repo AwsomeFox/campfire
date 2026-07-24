@@ -355,6 +355,8 @@ export default function TimelinePage() {
               <RevisionHistoryPanel
                 entityType="timeline_calendar"
                 entityId={cid}
+                currentSnapshot={{ note: calendar.note }}
+                expectedUpdatedAt={calendar.updatedAt}
                 reloadNonce={historyNonce}
                 onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
                 label="Calendar note history"
@@ -471,6 +473,8 @@ export default function TimelinePage() {
                   <RevisionHistoryPanel
                     entityType="timeline_event"
                     entityId={e.id}
+                    currentSnapshot={{ body: e.body }}
+                    expectedUpdatedAt={e.updatedAt}
                     reloadNonce={historyNonce}
                     onRestored={() => { setHistoryNonce((value) => value + 1); void load(); }}
                     label="Event description history"

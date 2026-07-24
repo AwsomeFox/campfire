@@ -4,7 +4,11 @@
  * - dev-role override: localStorage 'cf.devRole' / 'cf.devUser' adds x-dev-* headers
  *   (only honored by the server when DEV_AUTH=1; harmless otherwise)
  * - throws ApiError with status + server message
+ * - provenance-safe 401 → {@link noteUnauthorizedResponse} (issue #885); network
+ *   failures never look like session expiry
  */
+
+import { noteUnauthorizedResponse } from './sessionExpiry';
 
 /** A single field-level validation failure parsed from the server's `errors[]`. */
 export interface FieldError {
@@ -61,6 +65,15 @@ function summarizeFieldErrors(fieldErrors: FieldError[]): string {
     .join('; ');
 }
 
+function parseStaleWriteFields(body: unknown): { currentUpdatedAt?: string; expectedUpdatedAt?: string } {
+  if (!body || typeof body !== 'object') return {};
+  const stale = body as { currentUpdatedAt?: unknown; expectedUpdatedAt?: unknown };
+  return {
+    currentUpdatedAt: typeof stale.currentUpdatedAt === 'string' ? stale.currentUpdatedAt : undefined,
+    expectedUpdatedAt: typeof stale.expectedUpdatedAt === 'string' ? stale.expectedUpdatedAt : undefined,
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -97,12 +110,12 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit & { json?: unknown }): Promise<T> {
-  const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
-  if (init?.json !== undefined) headers['Content-Type'] = 'application/json';
+  const headers = new Headers(init?.headers);
+  if (init?.json !== undefined) headers.set('Content-Type', 'application/json');
   const devRole = localStorage.getItem('cf.devRole');
   const devUser = localStorage.getItem('cf.devUser');
-  if (devRole) headers['x-dev-role'] = devRole;
-  if (devUser) headers['x-dev-user'] = devUser;
+  if (devRole) headers.set('x-dev-role', devRole);
+  if (devUser) headers.set('x-dev-user', devUser);
 
   const res = await fetch(path, {
     ...init,
@@ -111,6 +124,9 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
   });
   if (!res.ok) {
+    // Proven HTTP 401 (not a network throw): fan out before shaping the error so
+    // AuthProvider can transition a sleeping tab even when the caller swallows ApiError.
+    noteUnauthorizedResponse(path, res.status);
     let message = res.statusText;
     let fieldErrors: FieldError[] = [];
     let code: string | undefined;
@@ -123,9 +139,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
       // the client can translate it, falling back to the human message below.
       const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
       if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
-      const stale = body as { currentUpdatedAt?: unknown; expectedUpdatedAt?: unknown };
-      if (typeof stale.currentUpdatedAt === 'string') currentUpdatedAt = stale.currentUpdatedAt;
-      if (typeof stale.expectedUpdatedAt === 'string') expectedUpdatedAt = stale.expectedUpdatedAt;
+      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
       // Prefer the structured field-level reasons — the server's `message` for a validation
       // failure is a bare "Validation failed", the actual detail lives in `errors[]` (issue #146).
       if (fieldErrors.length > 0) {
@@ -148,18 +162,79 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   return JSON.parse(text) as T;
 }
 
+/**
+ * Same as `request`, but also returns the response `Headers` so callers can
+ * read server-disclosed metadata (e.g. the dice-log retention headers, #614).
+ * Kept separate from `get` so the common path stays a bare `T`.
+ */
+export async function getWithHeaders<T>(path: string, init?: RequestInit): Promise<{ data: T; headers: Headers }> {
+  const headers = new Headers(init?.headers);
+  const devRole = localStorage.getItem('cf.devRole');
+  const devUser = localStorage.getItem('cf.devUser');
+  if (devRole) headers.set('x-dev-role', devRole);
+  if (devUser) headers.set('x-dev-user', devUser);
+  const res = await fetch(path, { ...init, credentials: 'include', headers });
+  if (!res.ok) {
+    noteUnauthorizedResponse(path, res.status);
+    // Reuse the same error shaping as `request` so callers' catch blocks are identical.
+    let message = res.statusText;
+    let code: string | undefined;
+    let currentUpdatedAt: string | undefined;
+    let expectedUpdatedAt: string | undefined;
+    try {
+      const body = await res.json();
+      const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
+      if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
+      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
+      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+    } catch {
+      /* non-json error body */
+    }
+    throw new ApiError(res.status, message, [], code, currentUpdatedAt, expectedUpdatedAt);
+  }
+  const text = await res.text();
+  const data = (text === '' ? undefined : JSON.parse(text)) as T;
+  return { data, headers: res.headers };
+}
+
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, json?: unknown) => request<T>(path, { method: 'POST', json }),
-  patch: <T>(path: string, json?: unknown) => request<T>(path, { method: 'PATCH', json }),
-  put: <T>(path: string, json?: unknown) => request<T>(path, { method: 'PUT', json }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
+  post: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'POST', json }),
+  patch: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PATCH', json }),
+  put: <T>(path: string, json?: unknown, init?: RequestInit) => request<T>(path, { ...init, method: 'PUT', json }),
+  delete: <T>(path: string, init?: RequestInit) => request<T>(path, { ...init, method: 'DELETE' }),
 };
 
 export const API = '/api/v1';
 
 export function isStaleWrite(err: unknown): err is ApiError {
   return err instanceof ApiError && err.status === 409 && err.code === 'STALE_WRITE';
+}
+
+/**
+ * Classify an error from {@link request} as TRANSIENT (worth retrying) vs PERSISTENT
+ * (definitive — retrying won't change the outcome). Used by retry affordances such as
+ * the invite-preview recovery on the join page (issue #709).
+ *
+ * Transient:
+ *   - a non-{@link ApiError} thrown by `fetch` itself (network failure, DNS, CORS,
+ *     timeout, offline) — these carry no HTTP status and almost always clear on retry;
+ *   - HTTP 408 Request Timeout, 425 Too Early, 429 Too Many Requests;
+ *   - HTTP 5xx (server error / gateway / service unavailable).
+ *
+ * Persistent:
+ *   - any {@link ApiError} with a 4xx status (404 invalid/expired/used invite, 403
+ *     forbidden, 409 conflict, 422 validation, …). The server has answered; that
+ *     answer is final for this request.
+ */
+export function isTransientError(err: unknown): boolean {
+  // A failure from `fetch` itself (network/offline/DNS/CORS) has no HTTP status —
+  // it surfaces as a bare TypeError. Treat any non-ApiError as transient: the
+  // request never reached a definitive HTTP answer, so retrying is the right move.
+  if (!(err instanceof ApiError)) return true;
+  // 5xx and the retryable 4xx codes mean "try again later".
+  if (err.status >= 500) return true;
+  return err.status === 408 || err.status === 425 || err.status === 429;
 }
 
 /**
