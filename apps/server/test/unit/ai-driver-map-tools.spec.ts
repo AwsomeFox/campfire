@@ -23,24 +23,6 @@ import {
 describe('AI Driver battle-map tools (#488)', () => {
   const writeTool = (name: string) => ({ name, mutating: true, proposalCapable: false });
 
-  function _session(overrides: Partial<AiDmSessionState> = {}): AiDmSessionState {
-    return {
-      campaignId: 1,
-      status: 'idle',
-      state: 'running',
-      scene: null,
-      lastNarration: null,
-      lastTurnAt: null,
-      turnCount: 0,
-      stuck: null,
-      levers: [],
-      actingDm: null,
-      vote: null,
-      takeoverRequestedBy: null,
-      ...overrides,
-    };
-  }
-
   it('allows generate_map — the driver can originate a battlefield in the flow of play', () => {
     expect(isDriverToolAllowed(writeTool('generate_map'))).toBe(true);
   });
