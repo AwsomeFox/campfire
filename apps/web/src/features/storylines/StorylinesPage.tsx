@@ -34,7 +34,6 @@ import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLink
 import { Markdown } from '../../components/Markdown';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { PageTitle } from '../../components/PageTitle';
-import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -786,18 +785,6 @@ function BeatRow({
       {beat.body && (
         <div style={{ marginLeft: 22 }}>
           <Markdown className="text-muted !text-[12px]">{beat.body}</Markdown>
-        </div>
-      )}
-      {isDm && (
-        <div style={{ marginLeft: 22, marginTop: 6 }}>
-          <RevisionHistoryPanel
-            entityType="story_beat"
-            entityId={beat.id}
-            currentSnapshot={{ body: beat.body }}
-            expectedUpdatedAt={beat.updatedAt}
-            onRestored={onChange}
-            label="Beat description history"
-          />
         </div>
       )}
 
