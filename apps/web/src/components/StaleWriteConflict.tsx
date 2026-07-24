@@ -67,7 +67,7 @@ export function StaleWriteConflict<T extends object>({
       aria-label="Conflicting edits"
     >
       <div className="space-y-1">
-        <h4 className="font-bold text-amber-200 text-sm m-0">Someone saved a newer version</h4>
+        <p className="font-bold text-amber-200 text-sm m-0">Someone saved a newer version</p>
         <p className="text-xs text-amber-100/80 m-0">
           Your draft is still here. Resolve each changed field, then save again; another intervening edit will be checked again.
         </p>
