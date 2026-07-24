@@ -15,6 +15,7 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
 import {
@@ -58,6 +59,11 @@ export default function FactionPage() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
   const [bumping, setBumping] = useState(false);
+  // Optimistic-concurrency guard (#157/#440): a stale save 409s instead of clobbering a
+  // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
+  // affordance; `historyNonce` refetches the edit-history panel after each save.
+  const [conflict, setConflict] = useState(false);
+  const [historyNonce, setHistoryNonce] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,6 +101,7 @@ export default function FactionPage() {
     });
     setSaveError(null);
     setFieldErrors({});
+    setConflict(false);
     setEditing(true);
   }
 
@@ -103,8 +110,8 @@ export default function FactionPage() {
     if (!faction) return;
     setTogglingHidden(true);
     try {
-      await api.patch(`${API}/factions/${id}`, { hidden: !faction.hidden });
-      await load();
+      const updated = await api.patch<FactionWithMembers>(`${API}/factions/${id}`, { hidden: !faction.hidden });
+      setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't change visibility.");
     } finally {
@@ -135,8 +142,9 @@ export default function FactionPage() {
     setSaving(true);
     setSaveError(null);
     setFieldErrors({});
+    setConflict(false);
     try {
-      await api.patch(`${API}/factions/${id}`, {
+      const updated = await api.patch<FactionWithMembers>(`${API}/factions/${id}`, {
         name: form.name.trim(),
         kind: form.kind.trim(),
         body: form.body,
@@ -145,11 +153,20 @@ export default function FactionPage() {
         hidden: form.hidden,
         standing: form.standing,
         reputation: form.reputation,
+        // Echo back the updatedAt we loaded so a concurrent edit 409s (#157/#440) instead
+        // of silently overwriting the other author's work.
+        ...(faction?.updatedAt ? { expectedUpdatedAt: faction.updatedAt } : {}),
       });
-      await load();
+      setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
       setEditing(false);
+      setHistoryNonce((n) => n + 1);
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Someone saved between our load and this save — keep the draft, block the
+        // clobber, and prompt a reload of the latest before saving again.
+        setConflict(true);
+        setSaveError(err.message || "This faction changed since you opened it — reload the latest before saving so you don't erase the other edit.");
+      } else if (err instanceof ApiError) {
         setFieldErrors(err.fieldMessages());
         setSaveError(err.message);
       } else {
@@ -157,6 +174,20 @@ export default function FactionPage() {
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reloadLatest() {
+    if (!faction) return;
+    setSaveError(null);
+    setFieldErrors({});
+    setConflict(false);
+    try {
+      const fresh = await api.get<FactionWithMembers>(`${API}/factions/${id}`);
+      setFaction(fresh);
+      setForm((f) => ({ ...f, body: fresh.body, dmSecret: fresh.dmSecret }));
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't reload the latest faction.");
     }
   }
 
@@ -277,6 +308,21 @@ export default function FactionPage() {
               )}
 
               {isDm && faction.dmSecret && <DmPanel>{faction.dmSecret}</DmPanel>}
+
+              {/* Body revision history + restore (#157/#440) — DM-only, so a clobbered or
+                  regretted edit is recoverable. Refetches after each save. */}
+              {isDm && (
+                <RevisionHistoryPanel
+                  entityType="faction"
+                  entityId={id}
+                  currentSnapshot={{ body: faction.body }}
+                  reloadNonce={historyNonce}
+                  onRestored={() => {
+                    setHistoryNonce((n) => n + 1);
+                    void reloadLatest();
+                  }}
+                />
+              )}
 
               <Card className="space-y-3">
                 <h2 className="font-bold text-white text-sm">Members</h2>
@@ -466,6 +512,11 @@ export default function FactionPage() {
               {deleting ? 'Deleting…' : 'Delete faction'}
             </Btn>
             <div className="flex gap-2">
+              {conflict && (
+                <Btn ghost className="!min-h-0 !py-1.5 text-xs" disabled={saving} onClick={reloadLatest}>
+                  Reload latest
+                </Btn>
+              )}
               <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(false)}>
                 Cancel
               </Btn>
