@@ -910,7 +910,13 @@ export class AiDriverService {
             return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
           if (session.detached || isFrozen(session)) {
-            return { kind: 'aborted' as const, seat: currentSeat, budgetRemaining: currentRemaining, text: '' };
+            return {
+              kind: 'aborted' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
           }
           // assertRunnable's server-cap check happened before this turn entered
           // the queue. Repeat it under ownership so a preceding Scribe spend
@@ -932,13 +938,11 @@ export class AiDriverService {
             maxTokens,
             tools: toolSchemas,
           });
-          if (aborted || session.detached || isFrozen(session)) {
-            return { kind: 'aborted' as const, seat: currentSeat, budgetRemaining: currentRemaining, text };
-          }
 
-          // Meter this step's REAL usage before releasing the mutex. The SQL
-          // clamp remains defense in depth; another campaign-local spender can
-          // no longer pass a stale budget gate while this provider call runs.
+          // Meter this step's REAL usage before releasing the mutex, including
+          // a completed/partial stream that was frozen before narration/tool
+          // delivery. The SQL clamp remains defense in depth; another local
+          // spender cannot pass a stale budget gate while this call is billed.
           let usage = result?.usage.totalTokens ?? 0;
           // Issue #1076: some providers (Ollama, llama.cpp, LM Studio, some OpenRouter models)
           // omit streaming usage. When that happens usage is 0 despite real content. Estimate
@@ -958,6 +962,15 @@ export class AiDriverService {
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
           });
+          if (aborted || session.detached || isFrozen(session)) {
+            return {
+              kind: 'aborted' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
           return { kind: 'metered' as const, text, result, metered };
         });
 
@@ -970,6 +983,7 @@ export class AiDriverService {
         if (spend.kind === 'aborted') {
           latestSeat = spend.seat;
           budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
           if (spend.text) finalNarration = spend.text;
           break;
