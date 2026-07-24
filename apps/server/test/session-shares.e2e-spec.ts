@@ -354,7 +354,8 @@ describe('session share links (e2e) — truly public, DEV_AUTH unset', () => {
 
   it('notifies affected real members when sharing is enabled and extended', async () => {
     const initial = await playerAgent.get('/api/v1/notifications');
-    expect(initial.body).toEqual(
+    const initialItems = Array.isArray(initial.body) ? initial.body : (initial.body.items ?? []);
+    expect(initialItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'recap_share_enabled',
@@ -370,7 +371,8 @@ describe('session share links (e2e) — truly public, DEV_AUTH unset', () => {
       .send({ expiresAt: futureExpiry(30) });
     expect(extended.status).toBe(200);
     const after = await playerAgent.get('/api/v1/notifications');
-    expect(after.body).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'recap_share_extended', entityId: sessionId })]));
+    const afterItems = Array.isArray(after.body) ? after.body : (after.body.items ?? []);
+    expect(afterItems).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'recap_share_extended', entityId: sessionId })]));
   });
 });
 

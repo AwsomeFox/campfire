@@ -5,3 +5,20 @@ import { NotificationPreferencesUpdate } from '@campfire/schema';
 // stripped (see users.dto.ts / issue #131). Nested quietHours stays partial so a
 // caller can PATCH just one field of the window.
 export class NotificationPreferencesUpdateDto extends createZodDto(NotificationPreferencesUpdate.strict()) {}
+
+import { z } from 'zod';
+
+export const BulkNotificationSchema = z
+  .object({
+    ids: z.array(z.number().int().positive()).optional(),
+    campaignId: z.number().int().positive().optional(),
+    all: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (value) => (value.ids?.length ?? 0) > 0 || value.campaignId !== undefined || value.all === true,
+    { message: 'At least one of ids, campaignId, or all must be provided' },
+  );
+
+export class BulkNotificationDto extends createZodDto(BulkNotificationSchema) {}
+

@@ -79,7 +79,8 @@ describe('inbox terminal idempotency (real SQLite + real HTTP)', () => {
   async function replyNotifications(body: string): Promise<unknown[]> {
     const res = await submitter.get('/api/v1/notifications?limit=200');
     expect(res.status).toBe(200);
-    return res.body.filter(
+    const items = Array.isArray(res.body) ? res.body : (res.body.items ?? []);
+    return items.filter(
       (row: { campaignId: number; type: string; body: string }) =>
         row.campaignId === campaignId && row.type === 'note_reply' && row.body === body,
     );
