@@ -108,6 +108,8 @@ test.describe('statblock labels (issue #763)', () => {
   test('full accessible terms are present; short abbreviations are optional extras', () => {
     for (const adapter of listRuleSystemAdapters()) {
       const p = adapter.presentation;
+      expect(p).toBeDefined();
+      if (!p) continue;
       for (const key of ['rating', 'defense', 'hitPoints', 'abilities', 'actions', 'creatureType'] as const) {
         expect(p[key].full.length).toBeGreaterThan(0);
         if (p[key].short !== undefined) {

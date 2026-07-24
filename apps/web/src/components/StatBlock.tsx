@@ -342,17 +342,19 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
   if (!block) return null;
 
   const { presentation } = block;
+  const sizeText = block.size || '';
   const creatureTypeText = block.creatureType
-    ? `${presentation.creatureType.full}: ${[block.size, block.creatureType].filter(Boolean).join(' ')}`
-    : block.size || '';
+    ? `${presentation.creatureType.full}: ${block.creatureType}`
+    : '';
+  const metaBits = [sizeText, creatureTypeText].filter(Boolean).join(' · ');
   const ratingText = statblockVisibleLabels(block).ratingLine ?? '';
 
   return (
     <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
-      {(creatureTypeText || ratingText) && (
+      {(metaBits || ratingText) && (
         <p className="text-muted" style={{ margin: 0, fontSize: 12.5, fontStyle: 'italic' }}>
-          {creatureTypeText}
-          {creatureTypeText && ratingText ? ' · ' : ''}
+          {metaBits}
+          {metaBits && ratingText ? ' · ' : ''}
           {ratingText}
         </p>
       )}
