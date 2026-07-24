@@ -5,7 +5,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  forwardRef,
 } from '@nestjs/common';
 import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import type { z } from 'zod';
