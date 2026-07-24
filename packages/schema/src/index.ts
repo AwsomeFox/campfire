@@ -4293,6 +4293,26 @@ export const Encounter = z.object({
   // Grid geometry (issue #238). 'square' (default) or 'hex' — a pointy-top hex overlay. Older
   // DBs backfill to 'square' via migration, preserving the original square-only behaviour.
   gridType: GridType.default('square'),
+  // Grid CALIBRATION for aligning the overlay to a map's own printed grid (issue #417).
+  // Every field is expressed in the same isotropic unit — percent of the rendered map's
+  // WIDTH — so the overlay, snapping, and the ruler share ONE transform (see the web
+  // mapRenderedBounds module) that every viewport (DM cockpit + player views) renders
+  // identically. Defaults reproduce the pre-#417 behaviour exactly (origin at the map's
+  // top-left, square cells the width of gridSize, no rotation), so existing encounters are
+  // visually unchanged. All are DM-only PATCHes like the rest of the grid config.
+  //   - gridOffsetX/gridOffsetY: the grid origin, offset from the map's top-left corner
+  //     (percent of map width; a printed grid rarely starts exactly at the corner).
+  //   - gridCellHeight: independent cell HEIGHT (percent of map width); null = square, i.e.
+  //     the same as gridSize. Equal numeric values for gridSize/gridCellHeight => square px.
+  //   - gridRotation: overlay rotation in degrees (a scanned/printed grid is often slightly
+  //     skewed). Bounded to ±45 to keep the cell axes unambiguous.
+  //   - gridOpacity: overlay line opacity (0 = invisible, 1 = solid). Default 0.35 matches
+  //     the historical hardcoded line alpha.
+  gridOffsetX: z.number().min(-100).max(100).default(0),
+  gridOffsetY: z.number().min(-100).max(100).default(0),
+  gridCellHeight: z.number().min(1).max(100).nullable().default(null),
+  gridRotation: z.number().min(-45).max(45).default(0),
+  gridOpacity: z.number().min(0).max(1).default(0.35),
   // Fog of war (issue #40, phase 3). null = never configured (map fully visible). See FogState.
   fog: FogState.nullable().default(null),
   // Shared AoE templates (issue #238) — circle/cone/line shapes every client sees, unlike the
@@ -4333,6 +4353,15 @@ export const EncounterUpdate = z.object({
   gridSnap: z.boolean().optional(),
   // Grid geometry (issue #238) — dm only. 'square' | 'hex'.
   gridType: GridType.optional(),
+  // Grid calibration (issue #417) — dm only. Align the overlay to a map's printed grid:
+  // origin offset, independent cell height, rotation, and overlay opacity. Each field is
+  // independently settable; gridCellHeight: null restores square cells. Omitting a field
+  // leaves it unchanged (the whole endpoint is optimistic-concurrency + DM-gated as before).
+  gridOffsetX: z.number().min(-100).max(100).optional(),
+  gridOffsetY: z.number().min(-100).max(100).optional(),
+  gridCellHeight: z.number().min(1).max(100).nullable().optional(),
+  gridRotation: z.number().min(-45).max(45).optional(),
+  gridOpacity: z.number().min(0).max(1).optional(),
   // Fog of war (issue #40, phase 3) — dm only. Replace the whole fog state (enable/disable +
   // revealed rectangles); null clears it. The dedicated reveal_map_region MCP tool appends
   // a single rectangle for an AI DM without round-tripping the full mask.

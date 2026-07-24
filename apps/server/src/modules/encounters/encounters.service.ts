@@ -108,6 +108,13 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridUnit: row.gridUnit,
     gridSnap: row.gridSnap,
     gridType: (row.gridType as GridType) ?? 'square',
+    // Grid calibration (issue #417). Null-coalesce so rows written before the columns
+    // existed (or a legacy NULL) read as the pre-#417 defaults — top-left square grid.
+    gridOffsetX: row.gridOffsetX ?? 0,
+    gridOffsetY: row.gridOffsetY ?? 0,
+    gridCellHeight: row.gridCellHeight ?? null,
+    gridRotation: row.gridRotation ?? 0,
+    gridOpacity: row.gridOpacity ?? 0.35,
     fog: parseFog(row.fog),
     aoe: parseAoe(row.aoe),
     hidden: row.hidden,
@@ -1047,6 +1054,29 @@ export class EncountersService {
     if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
+    }
+    // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
+    // nullable (null restores square cells); the others carry non-null defaults. Same
+    // null-safe no-op guard as the fields above so an unchanged write produces no audit/SSE.
+    if (input.gridOffsetX !== undefined && input.gridOffsetX !== (encounterRow.gridOffsetX ?? 0)) {
+      set.gridOffsetX = input.gridOffsetX;
+      changedPredicates.push(sql`${encounters.gridOffsetX} IS NOT ${input.gridOffsetX}`);
+    }
+    if (input.gridOffsetY !== undefined && input.gridOffsetY !== (encounterRow.gridOffsetY ?? 0)) {
+      set.gridOffsetY = input.gridOffsetY;
+      changedPredicates.push(sql`${encounters.gridOffsetY} IS NOT ${input.gridOffsetY}`);
+    }
+    if (input.gridCellHeight !== undefined && input.gridCellHeight !== (encounterRow.gridCellHeight ?? null)) {
+      set.gridCellHeight = input.gridCellHeight;
+      changedPredicates.push(sql`${encounters.gridCellHeight} IS NOT ${input.gridCellHeight}`);
+    }
+    if (input.gridRotation !== undefined && input.gridRotation !== (encounterRow.gridRotation ?? 0)) {
+      set.gridRotation = input.gridRotation;
+      changedPredicates.push(sql`${encounters.gridRotation} IS NOT ${input.gridRotation}`);
+    }
+    if (input.gridOpacity !== undefined && input.gridOpacity !== (encounterRow.gridOpacity ?? 0.35)) {
+      set.gridOpacity = input.gridOpacity;
+      changedPredicates.push(sql`${encounters.gridOpacity} IS NOT ${input.gridOpacity}`);
     }
     // Fog of war (issue #40, phase 3). Stored as JSON text; null clears it entirely.
     if (input.fog !== undefined && !isDeepStrictEqual(input.fog, parseFog(encounterRow.fog))) {

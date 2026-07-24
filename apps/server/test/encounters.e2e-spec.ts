@@ -2759,6 +2759,53 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
     expect(res.body.gridScale).toBe(5);
   });
 
+  it('grid calibration (issue #417): defaults are the pre-#417 top-left square grid', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(res.status).toBe(200);
+    expect(res.body.gridOffsetX).toBe(0);
+    expect(res.body.gridOffsetY).toBe(0);
+    expect(res.body.gridCellHeight).toBeNull();
+    expect(res.body.gridRotation).toBe(0);
+    expect(res.body.gridOpacity).toBeCloseTo(0.35, 5);
+  });
+
+  it('grid calibration (issue #417): offset/cellHeight/rotation/opacity round-trip and persist', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .patch(`/api/v1/encounters/${encounterId}`)
+      .set(dm)
+      .send({ gridOffsetX: 3.5, gridOffsetY: -2.25, gridCellHeight: 11, gridRotation: 12.5, gridOpacity: 0.6 });
+    expect(res.status).toBe(200);
+    expect(res.body.gridOffsetX).toBeCloseTo(3.5, 5);
+    expect(res.body.gridOffsetY).toBeCloseTo(-2.25, 5);
+    expect(res.body.gridCellHeight).toBe(11);
+    expect(res.body.gridRotation).toBeCloseTo(12.5, 5);
+    expect(res.body.gridOpacity).toBeCloseTo(0.6, 5);
+
+    // A player sees the same persisted calibration (same transform, every viewport).
+    const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+    expect(getRes.body.gridOffsetX).toBeCloseTo(3.5, 5);
+    expect(getRes.body.gridCellHeight).toBe(11);
+
+    // gridCellHeight: null restores square cells.
+    const cleared = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridCellHeight: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.gridCellHeight).toBeNull();
+  });
+
+  it('grid calibration (issue #417): out-of-range rotation/opacity are rejected (400)', async () => {
+    const server = ctx.app.getHttpServer();
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridRotation: 90 })).status).toBe(400);
+    expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridOpacity: 2 })).status).toBe(400);
+  });
+
+  it('grid calibration (issue #417): a player cannot calibrate (dm only, 403)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(player).send({ gridOffsetX: 10 });
+    expect(res.status).toBe(403);
+  });
+
   it('a bad gridScale (0 / negative) is rejected (400)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridScale: 0 });
