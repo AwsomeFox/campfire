@@ -9,6 +9,7 @@ import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 import { GameIcon } from '../../components/GameIcon';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
@@ -30,6 +31,8 @@ export default function NpcListPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState('');
+  // #754: quick-create defaults to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -64,9 +67,15 @@ export default function NpcListPage() {
     setSaving(true);
     setCreateError(null);
     try {
-      const npc = await api.post<Npc>(`${API}/campaigns/${id}/npcs`, { name: newName.trim(), role: newRole.trim() });
+      const hidden = audienceToHidden(audience);
+      const npc = await api.post<Npc>(`${API}/campaigns/${id}/npcs`, {
+        name: newName.trim(),
+        role: newRole.trim(),
+        hidden,
+      });
       setNewName('');
       setNewRole('');
+      setAudience('dm');
       setCreating(false);
       await load();
       navigate(`/c/${id}/npcs/${npc.id}`);
@@ -123,6 +132,7 @@ export default function NpcListPage() {
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="NPC name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="NPC role" placeholder="Role (e.g. Townmaster)" value={newRole} onChange={(e) => setNewRole(e.target.value)} />
+            <AudienceField value={audience} onChange={setAudience} entityLabel="NPC" name="npc-audience" />
             <div className="flex items-center justify-end gap-2">
               <Btn
                 ghost
@@ -131,6 +141,7 @@ export default function NpcListPage() {
                   setCreating(false);
                   setNewName('');
                   setNewRole('');
+                  setAudience('dm');
                   setCreateError(null);
                 }}
               >

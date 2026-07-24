@@ -74,7 +74,9 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'The Heist', giverNpcId: npcId, dmSecret: 'the vault is a trap' });
+      // #754: quests are private-by-default now; this quest must be player-visible so
+      // the party can add the shared note + in-character comment exercised below.
+      .send({ title: 'The Heist', giverNpcId: npcId, dmSecret: 'the vault is a trap', hidden: false });
     questId = questRes.body.id;
     const objRes = await dmAgent.post(`/api/v1/quests/${questId}/objectives`).send({ text: 'Case the vault' });
     await dmAgent.patch(`/api/v1/quests/${questId}/objectives/${objRes.body.id}`).send({ done: true });

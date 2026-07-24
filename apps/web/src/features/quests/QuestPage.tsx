@@ -29,6 +29,8 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { Toggle } from '../../components/Toggle';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
@@ -39,8 +41,6 @@ import {
   QUEST_BODY_LABEL,
   QUEST_GIVER_HELP,
   QUEST_GIVER_LABEL,
-  QUEST_HIDDEN_HELP,
-  QUEST_HIDDEN_LABEL,
   QUEST_NEW_FORM_PREFIX,
   QUEST_PARENT_HELP,
   QUEST_PARENT_LABEL,
@@ -467,6 +467,20 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {isDm && (
+        <VisibleToPlayersBar
+          visible={!quest.hidden}
+          onHide={async () => {
+            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
+            setQuest({ ...quest, ...updated });
+          }}
+          onUndoHide={async () => {
+            const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
+            setQuest({ ...quest, ...updated });
+          }}
+        />
+      )}
+
       <div>
         <Link to={`/c/${campaignId}/quests`} className="btn btn-ghost" style={{ fontSize: 13 }}>
           {t('quests.back')}
@@ -857,7 +871,8 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const [reward, setReward] = useState('');
   const [giverNpcId, setGiverNpcId] = useState<string>('');
   const [parent, setParent] = useState<string>(parentId ?? '');
-  const [hidden, setHidden] = useState(false);
+  // #754: create defaults to DM-only; AudienceField is the creation-time choice.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [titleError, setTitleError] = useState<string | null>(null);
@@ -875,8 +890,6 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
   const giverHelpId = questFieldHelpId(prefix, 'giver');
   const parentFieldId = questFieldId(prefix, 'parent');
   const parentHelpId = questFieldHelpId(prefix, 'parent');
-  const hiddenId = questFieldId(prefix, 'hidden');
-  const hiddenHelpId = questFieldHelpId(prefix, 'hidden');
   const titleDescribedBy = titleError ? `${titleHelpId} ${titleErrorId}` : titleHelpId;
 
   useEffect(() => {
@@ -940,6 +953,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
     setSaving(true);
     setSaveError(null);
     try {
+      const hidden = audienceToHidden(audience);
       const created = await api.post<Quest>(`${API}/campaigns/${campaignId}/quests`, {
         title: title.trim(),
         body,
@@ -1067,21 +1081,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                   {QUEST_PARENT_HELP}
                 </p>
               </div>
-              <div className="space-y-1">
-                <label htmlFor={hiddenId} className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
-                  <input
-                    id={hiddenId}
-                    type="checkbox"
-                    checked={hidden}
-                    aria-describedby={hiddenHelpId}
-                    onChange={(e) => setHidden(e.target.checked)}
-                  />
-                  <span>{QUEST_HIDDEN_LABEL}</span>
-                </label>
-                <p id={hiddenHelpId} className="text-[11px] text-slate-500 m-0">
-                  {QUEST_HIDDEN_HELP}
-                </p>
-              </div>
+              <AudienceField value={audience} onChange={setAudience} entityLabel="quest" name="quest-audience" />
               <div className="flex justify-end gap-2 pt-2">
                 <Btn ghost onClick={() => navigate(-1)}>
                   {t('quests.cancel')}

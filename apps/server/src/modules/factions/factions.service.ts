@@ -6,7 +6,7 @@ import type { Faction, FactionStanding, FactionWithMembers, Role } from '@campfi
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { factions, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -95,7 +95,8 @@ export class FactionsService {
         body: input.body ?? '',
         goals: input.goals ?? '',
         dmSecret: input.dmSecret ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         reputation: input.reputation ?? 0,
         standing: input.standing ?? 'neutral',
         createdAt: ts,

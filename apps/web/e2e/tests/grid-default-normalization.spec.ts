@@ -33,7 +33,7 @@ function isScaleOnlyDefaultPatch(request: Request): boolean {
 
 async function createGridEncounter(page: Page, name: string): Promise<number> {
   const { campaignId } = seed();
-  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name } });
+  const created = await page.request.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name, hidden: false } });
   expect(created.ok()).toBe(true);
   const encounter = (await created.json()) as EncounterResponse;
   const enabled = await page.request.patch(`/api/v1/encounters/${encounter.id}`, { data: { gridSize: 8 } });

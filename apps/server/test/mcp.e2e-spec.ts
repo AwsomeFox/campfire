@@ -397,8 +397,10 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       arguments: { campaignId, title: 'MCP-created quest', body: 'Written over MCP' },
     });
     expect(result.isError).toBeFalsy();
-    const quest = parseResult(result) as { id: number; title: string };
+    const quest = parseResult(result) as { id: number; title: string; hidden: boolean };
     expect(quest.title).toBe('MCP-created quest');
+    // #754: omit `hidden` on MCP create → DM-only (Zod must not default it to false).
+    expect(quest.hidden).toBe(true);
 
     const restRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/quests`);
     expect(restRes.status).toBe(200);
@@ -597,7 +599,8 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
 
     const visibleRes = await dmClient.callTool({
       name: 'create_timeline_event',
-      arguments: { campaignId, title: 'The Comet Falls', inWorldDate: '3rd of Flamerule', dmSecret: 'it is an omen' },
+      // #754: omit defaults to DM-only; this case needs a player-visible event for dmSecret strip.
+      arguments: { campaignId, title: 'The Comet Falls', inWorldDate: '3rd of Flamerule', dmSecret: 'it is an omen', hidden: false },
     });
     expect(visibleRes.isError).toBeFalsy();
     const visible = parseResult(visibleRes) as { id: number };
@@ -1054,7 +1057,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     // DM seeds an encounter with a monster carrying exact HP.
     const dmC = await mcpClient(dmToken);
     const enc = parseResult(
-      await dmC.callTool({ name: 'create_encounter', arguments: { campaignId, name: 'Secret Ambush' } }),
+      await dmC.callTool({
+        name: 'create_encounter',
+        // #754: omit defaults to DM-only (404 for viewer); this case tests HP banding, so reveal.
+        arguments: { campaignId, name: 'Secret Ambush', hidden: false },
+      }),
     ) as { id: number };
     const added = await dmC.callTool({
       name: 'add_combatant',

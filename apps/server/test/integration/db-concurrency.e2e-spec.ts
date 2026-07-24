@@ -296,7 +296,7 @@ describe('concurrency (real SQLite, atomic writes)', () => {
     const quest = await request(baseUrl)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'Contested' });
+      .send({ title: 'Contested', hidden: false });
     const questId = quest.body.id;
 
     // A player proposes an edit -> one pending proposal.

@@ -7,7 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { npcs, locations, factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
@@ -138,7 +138,8 @@ export class NpcsService {
         body: input.body ?? '',
         dmSecret: input.dmSecret ?? '',
         iconSlug: input.iconSlug ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         createdAt: ts,
         updatedAt: ts,
       })

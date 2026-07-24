@@ -1482,8 +1482,8 @@ export class McpToolsService {
       'create_quest',
       'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
         'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, a ' +
-        'dmSecret field (DM-only text, stripped from non-DM reads), and a hidden flag (true = excluded WHOLESALE ' +
-        'from every non-DM read until the DM reveals it by setting hidden=false — for prepping future content).',
+        'dmSecret field (DM-only text, stripped from non-DM reads), and a hidden flag (omit/true = DM-only prep by ' +
+        'default, issue #754 — excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
       { campaignId: CampaignIdArg, propose: ProposeArg, ...QuestCreate.shape },
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
@@ -1785,7 +1785,10 @@ export class McpToolsService {
         'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
         'idempotent rather than duplicating. A genuinely new name creates a new NPC. DM; with propose:true any ' +
         'member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
-        'an optional locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
+        'an optional locationId, and a hidden flag whose omission depends on the branch: on CREATE, omit (or true) ' +
+        'means DM-only prep by default (issue #754) — excluded WHOLESALE from every non-DM read until revealed via ' +
+        'hidden=false; on UPDATE (an existing name or npcId), omitting hidden leaves the NPC’s current visibility ' +
+        'unchanged, since only supplied fields are applied — pass hidden explicitly to change it.',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
@@ -2862,17 +2865,18 @@ export class McpToolsService {
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
         'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
-        'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Pass hidden=true to keep ' +
-        'the encounter DM-only prep (issue #262): its roster + difficulty stay invisible to players until you reveal it. ' +
-        'To build a balanced fight automatically, call generate_encounter first (non-mutating preview), then create it ' +
-        'here (hidden:true) and add_combatant once per suggested line with its ruleEntryId + count.',
+        'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Omitting hidden ' +
+        'defaults to DM-only prep (issue #754/#262): its roster + difficulty stay invisible to players until you reveal it. ' +
+        'Pass hidden=false only for an intentional public create. To build a balanced fight automatically, call ' +
+        'generate_encounter first (non-mutating preview), then create it here and add_combatant once per suggested line ' +
+        'with its ruleEntryId + count.',
       {
         campaignId: CampaignIdArg,
         name: z.string().min(1).max(120).describe('Encounter name'),
         locationId: Id.optional().describe('Attach the encounter to a location (where it happens)'),
         questId: Id.optional().describe('Attach the encounter to a quest (why it happens)'),
         sessionId: Id.optional().describe('Attach the encounter to a session (when it happens)'),
-        hidden: z.boolean().optional().describe('Create the encounter hidden (DM-only prep) — its roster + difficulty are withheld from players until revealed (issue #262)'),
+        hidden: z.boolean().optional().describe('Omit or true = DM-only prep (default, #754); false = visible to players immediately'),
       },
       async ({ campaignId, name, locationId, questId, sessionId, hidden }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');

@@ -212,6 +212,13 @@ const intOrNull = (v: unknown): number | null => (typeof v === 'number' && Numbe
 const intOr = (v: unknown, fallback: number): number => (typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : fallback);
 const realOrNull = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const boolOf = (v: unknown): boolean => v === true;
+/**
+ * Secrecy flag (`hidden`) coercion for import — fails CLOSED (#754). Only an explicit
+ * boolean `false` reveals an entity; a missing flag OR any non-boolean value (e.g. a
+ * hand-edited export carrying `"true"` or `1`) stays hidden, so a malformed export can
+ * never accidentally reveal a private prep entity to players.
+ */
+const hiddenOf = (v: unknown): boolean => v !== false;
 /** Serialize a JSON-ish export field (object/array) back to the TEXT the column stores. */
 const jsonCol = (v: unknown, fallback: string): string => {
   if (v === undefined || v === null) return fallback;
@@ -1386,7 +1393,8 @@ export class CampaignsService {
             body: str(f.body),
             goals: str(f.goals),
             dmSecret: str(f.dmSecret),
-            hidden: boolOf(f.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(f.hidden),
             reputation: intOr(f.reputation, 0),
             standing: str(f.standing, 'neutral'),
             createdAt: ts,
@@ -1451,7 +1459,8 @@ export class CampaignsService {
             factionId: factionSrc != null ? (factionMap.get(factionSrc) ?? null) : null,
             body: str(n.body),
             dmSecret: str(n.dmSecret),
-            hidden: boolOf(n.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(n.hidden),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -1476,7 +1485,8 @@ export class CampaignsService {
             giverNpcId: giverSrc != null ? (npcMap.get(giverSrc) ?? null) : null,
             reward: str(q.reward),
             dmSecret: str(q.dmSecret),
-            hidden: boolOf(q.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(q.hidden),
             sortOrder: intOr(q.sortOrder, 0),
             createdAt: ts,
             updatedAt: ts,
@@ -1673,6 +1683,8 @@ export class CampaignsService {
             gridUnit: typeof e.gridUnit === 'string' ? e.gridUnit : null,
             gridSnap: boolOf(e.gridSnap),
             fog: e.fog == null ? null : jsonCol(e.fog, ''),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(e.hidden),
             endedAt: typeof e.endedAt === 'string' ? e.endedAt : null,
             createdAt: ts,
             updatedAt: ts,
@@ -1918,7 +1930,8 @@ export class CampaignsService {
             era: str(ev.era),
             sortIndex: intOr(ev.sortIndex, 0),
             dmSecret: str(ev.dmSecret),
-            hidden: boolOf(ev.hidden),
+            // #754: missing hidden on import → DM-only (same as create default).
+            hidden: hiddenOf(ev.hidden),
             createdAt: ts,
             updatedAt: ts,
           })

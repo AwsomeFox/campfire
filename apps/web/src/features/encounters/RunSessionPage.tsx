@@ -57,6 +57,7 @@ import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from 
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
@@ -1148,6 +1149,20 @@ export default function RunSessionPage() {
             refetchEncounter();
           }}
           onDismiss={actionError ? () => setActionError(null) : undefined}
+        />
+      )}
+
+      {isDm && (
+        <VisibleToPlayersBar
+          visible={!encounter.hidden}
+          onHide={async () => {
+            await api.patch(`${API}/encounters/${eid}`, { hidden: true });
+            invalidateEncounter(queryClient, eid);
+          }}
+          onUndoHide={async () => {
+            await api.patch(`${API}/encounters/${eid}`, { hidden: false });
+            invalidateEncounter(queryClient, eid);
+          }}
         />
       )}
 

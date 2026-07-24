@@ -38,7 +38,7 @@ describe('Issue #9: server admin is NOT auto-DM of campaigns they are not a memb
 
     const questRes = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/quests`)
-      .send({ title: 'The Hidden Heir', dmSecret: 'The innkeeper IS the heir' });
+      .send({ title: 'The Hidden Heir', dmSecret: 'The innkeeper IS the heir', hidden: false });
     expect(questRes.status).toBe(201);
     questId = questRes.body.id;
   });
