@@ -58,9 +58,21 @@ function buildService(entities: {
     { listForCampaign: async () => entities.characters ?? [] } as any,
     { listForCampaign: async () => entities.notes ?? [] } as any,
     { listForCampaign: async () => entities.comments ?? [] } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
-    { listForCampaign: noop as any } as any,
+    { listForCampaign: noop as any } as any, // members
+    {
+      listForCampaign: noop as any,
+      listForCampaignExport: async () => ({
+        entries: [],
+        meta: {
+          total: 0,
+          exported: 0,
+          truncated: 0,
+          cutoff: { snapshotMaxId: 0, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
+        },
+      }),
+      finalizeCampaignExportMeta: async (_campaignId: number, meta: unknown) => meta,
+    } as any, // audit
+    { listForCampaign: noop as any } as any, // proposals
     {
       listForCampaign: async () => (entities.encounters ?? []).map((e: any) => ({ id: e.id, name: e.name })),
       getWithCombatantsOrThrow: async (id: number) => (entities.encounters ?? []).find((e: any) => e.id === id),
