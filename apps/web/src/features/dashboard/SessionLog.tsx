@@ -5,6 +5,7 @@ import { isScheduleInProgress, scheduleEndsAtMs } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
 import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { Markdown } from '../../components/Markdown';
@@ -252,6 +253,8 @@ export function SessionLog({
   const upcoming =
     nextSession && (!happening || nextSession.id !== happening.id) ? nextSession : null;
 
+  const { canDmWrite } = useCampaignAccess();
+
   return (
     <section className="card elev-sm dashboard-session-log" aria-labelledby="dashboard-session-log-title">
       <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -283,9 +286,25 @@ export function SessionLog({
           rsvpCue={rsvpCue}
         />
       )}
-      {latest3.length === 0 ? (
-        <EmptyState icon="book-cover" title="No sessions logged yet" />
-      ) : (
+      {latest3.length === 0 && !happening && !upcoming ? (
+        <EmptyState
+          icon="book-cover"
+          title="No sessions logged yet"
+          hint={canDmWrite ? 'Plan upcoming game nights and keep track of session recaps.' : 'Scheduled game nights and past session recaps will appear here.'}
+          action={
+            canDmWrite ? (
+              <>
+                <Link to={`/c/${campaignId}/sessions?tab=schedule&action=new`} className="btn btn-primary" style={{ fontSize: 13, gap: 6 }}>
+                  + Schedule session
+                </Link>
+                <Link to={`/c/${campaignId}/encounters?action=new`} className="btn btn-ghost" style={{ fontSize: 13, gap: 6 }}>
+                  + Create encounter
+                </Link>
+              </>
+            ) : undefined
+          }
+        />
+      ) : latest3.length === 0 ? null : (
         latest3.map((s) => (
           <Link
             key={s.id}

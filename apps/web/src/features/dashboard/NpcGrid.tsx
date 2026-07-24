@@ -1,9 +1,12 @@
 import { Link } from 'react-router-dom';
 import type { Npc } from '@campfire/schema';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
 
 export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] }) {
+  const { canDmWrite } = useCampaignAccess();
+
   return (
     <div className="card elev-sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
@@ -14,7 +17,18 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
         </Link>
       </div>
       {npcs.length === 0 ? (
-        <EmptyState icon="hooded-figure" title="No NPCs yet" />
+        <EmptyState
+          icon="hooded-figure"
+          title="No NPCs yet"
+          hint={canDmWrite ? 'Keep track of key non-player characters, allies, and villains.' : 'Non-player characters will appear here as you encounter them.'}
+          action={
+            canDmWrite ? (
+              <Link to={`/c/${campaignId}/npcs?action=new`} className="btn btn-primary" style={{ fontSize: 13, gap: 6 }}>
+                + Create first NPC
+              </Link>
+            ) : undefined
+          }
+        />
       ) : (
         npcs.map((npc) => (
           <Link
