@@ -35,7 +35,7 @@ test.describe('structured action resolver — multi-client', () => {
     let characterId: number | null = null;
     let encounterId: number | null = null;
     let monsterId: number | null = null;
-    let monsterHp = 0;
+    let monsterHp: number;
     try {
       await dm.post('/api/v1/auth/login', { data: CREDS.dm });
       const playerCtx = await request.newContext({ baseURL });
