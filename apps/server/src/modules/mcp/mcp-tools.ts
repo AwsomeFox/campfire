@@ -933,11 +933,11 @@ export class McpToolsService {
           ),
       },
       async ({ query, type, pack }) => {
-        const results = await this.rules.search(
+        const page = await this.rules.search(
           { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
           5,
         );
-        return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
+        return page.items.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
     );
 
@@ -1814,6 +1814,24 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.npcs.remove(npcId as number, user, role);
         return { ok: true, npcId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_npc_disposition',
+      'Set an NPC\'s disposition (attitude/stance toward the party) in real time (DM). The live social-scene counterpart ' +
+        'to upsert_npc\'s disposition field — allows the AI DM to flip attitude during dialogue without a full NPC proposal. ' +
+        'Disposition is free text (max 40 chars); typical values: friendly, neutral, hostile, suspicious, terrified.',
+      {
+        npcId: Id.describe('NPC id'),
+        disposition: z.string().max(40).describe('New disposition label (e.g. "hostile", "friendly", "suspicious")'),
+      },
+      async ({ npcId, disposition }) => {
+        const row = await this.npcs.getRowOrThrow(npcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.npcs.update(npcId as number, { disposition: disposition as string }, user, role);
       },
     );
 
@@ -3023,7 +3041,7 @@ export class McpToolsService {
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map | quest | faction'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
       },
@@ -3271,8 +3289,8 @@ export class McpToolsService {
       server,
       user,
       'update_scheduled_session',
-      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Moving `scheduledAt` re-notifies ' +
-        'the party.',
+      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
+        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionUpdate.shape },
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
@@ -3286,7 +3304,7 @@ export class McpToolsService {
       server,
       user,
       'cancel_scheduled_session',
-      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs.',
+      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs, and notifying the party.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions') },
       async ({ scheduleId }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);

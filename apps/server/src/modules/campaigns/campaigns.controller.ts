@@ -167,10 +167,11 @@ export class CampaignsController {
     description:
       'dm role required. The deliberate, IRREVERSIBLE second step (issue #116): hard-cascades every child table AND wipes the campaign\'s on-disk upload directory. Works on a live or already-trashed campaign. This is the ONLY path that destroys data + files.',
   })
-  @ApiResponse({ status: 200, description: 'Permanently purged (rows + files removed).' })
+  @ApiResponse({ status: 200, description: 'Metadata removed; filesystem erasure verified unless filesPending is true.' })
   async purge(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
-    return this.campaigns.purge(id, user);
+    const outcome = await this.campaigns.purge(id, user);
+    return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }
 
   @Post(':id/clone')

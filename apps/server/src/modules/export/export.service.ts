@@ -111,6 +111,11 @@ export class ExportService {
   async buildExport(campaignId: number, user: RequestUser) {
     const role = 'dm' as const;
 
+    // Issue #731: capture the audit trail from a stable id ceiling BEFORE the rest of
+    // the export payload is read, so concurrent writes during export show up only in
+    // auditMeta.truncated — never as silently missing rows inside the snapshot.
+    const auditExport = await this.audit.listForCampaignExport(campaignId);
+
     const [
       campaign,
       questList,
@@ -121,7 +126,6 @@ export class ExportService {
       noteList,
       commentList,
       memberList,
-      auditList,
       proposalList,
       encounterList,
       attachmentRows,
@@ -148,7 +152,6 @@ export class ExportService {
       this.notes.listForCampaign(campaignId, user, role, {}),
       this.comments.listForCampaign(campaignId, role),
       this.members.listForCampaign(campaignId),
-      this.audit.listForCampaign(campaignId, 500),
       this.proposals.listForCampaign(campaignId, undefined, role),
       this.encounters.listForCampaign(campaignId),
       this.attachments.listRowsForCampaign(campaignId),
@@ -216,6 +219,8 @@ export class ExportService {
       updatedAt: m.updatedAt,
     }));
 
+    const auditMeta = await this.audit.finalizeCampaignExportMeta(campaignId, auditExport.meta);
+
     return {
       campaign,
       quests: questList,
@@ -226,7 +231,15 @@ export class ExportService {
       notes: noteList,
       comments: commentList,
       members,
-      audit: auditList,
+      audit: auditExport.entries,
+      auditMeta,
+      auditNote:
+        'Campaign portability export (GET /api/v1/campaigns/:campaignId/export) includes the retained audit trail captured in ' +
+        'auditMeta.cutoff — not a full-server backup. A server-wide SQLite/disk backup preserves every table ' +
+        'row (including audit appended after the snapshot and server-admin audit with campaign_id NULL). Imports ' +
+        'do not replay audit history. When auditMeta.truncated > 0, rows are missing from this snapshot ' +
+        '(retention pruning during export and/or audit appended after auditMeta.cutoff.snapshotMaxId); ' +
+        'page GET /api/v1/campaigns/:campaignId/audit for the live log.',
       proposals: proposalList,
       encounters: encountersWithCombatants,
       // Issue #266: these were silently omitted before — a DM's export/backup lost

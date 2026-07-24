@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 import {
   COMPENDIUM_CLEAR_FILTERS_LABEL,
+  COMPENDIUM_LOAD_MORE_LABEL,
   COMPENDIUM_SEARCH_ID,
   COMPENDIUM_SEARCH_LABEL,
   COMPENDIUM_TYPE_FILTER_LABEL,
@@ -60,7 +61,10 @@ async function stubCompendiumBrowse(page: Page, entries: unknown[]) {
           (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q),
       );
     }
-    await route.fulfill({ json: filtered });
+    // Issue #613: search returns a page object, not a bare array.
+    await route.fulfill({
+      json: { items: filtered, total: filtered.length, hasMore: false, limit: 50 },
+    });
   });
 }
 
@@ -218,7 +222,9 @@ test.describe('Compendium accessibility (issue #647)', () => {
             (e.name ?? '').toLowerCase().includes(q) || (e.summary ?? '').toLowerCase().includes(q),
         );
       }
-      await route.fulfill({ json: filtered });
+      await route.fulfill({
+        json: { items: filtered, total: filtered.length, hasMore: false, limit: 50 },
+      });
     });
 
     await page.goto(`/c/${campaignId}/compendium`);
@@ -244,5 +250,62 @@ test.describe('Compendium accessibility (issue #647)', () => {
     expect(searchFetches[priorFetchCount]).toBeNull();
     await expect(page.getByRole('link', { name: /Goblin/ })).toBeVisible();
     await expect(page.getByRole('link', { name: /Fire Bolt/ })).toBeVisible();
+  });
+
+  test('load more appends the next page and shows truncation counts (issue #613)', async ({ page }) => {
+    const { campaignId } = seed();
+    const page1 = Array.from({ length: 50 }, (_, i) => ({
+      id: 6_130_000 + i,
+      slug: `entry-${i}`,
+      name: `Entry ${String(i).padStart(2, '0')}`,
+      type: 'spell',
+      summary: `Summary ${i}`,
+      packSlug: 'e2e-compendium-a11y',
+      body: '',
+      dataJson: '',
+    }));
+    const page2 = [
+      {
+        id: 6_130_050,
+        slug: 'entry-50',
+        name: 'Entry 50',
+        type: 'spell',
+        summary: 'Summary 50',
+        packSlug: 'e2e-compendium-a11y',
+        body: '',
+        dataJson: '',
+      },
+    ];
+
+    await stubCompendiumBrowse(page, page1);
+    await page.route('**/api/v1/rules/search**', async (route) => {
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get('cursor');
+      if (!cursor) {
+        await route.fulfill({
+          json: {
+            items: page1,
+            total: 51,
+            hasMore: true,
+            nextCursor: 'cursor-page-2',
+            limit: 50,
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        json: { items: page2, total: 51, hasMore: false, limit: 50 },
+      });
+    });
+
+    await page.goto(`/c/${campaignId}/compendium`);
+    await expect(page.getByText('Showing 50 of 51', { exact: true })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Entry 00/ })).toBeVisible();
+    await expect(page.getByRole('link', { name: /Entry 50/ })).toHaveCount(0);
+
+    await page.getByRole('button', { name: COMPENDIUM_LOAD_MORE_LABEL }).click();
+    await expect(page.getByRole('link', { name: /Entry 50/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: COMPENDIUM_LOAD_MORE_LABEL })).toHaveCount(0);
+    await expect(page.getByText(/^51 results$/i)).toBeVisible();
   });
 });

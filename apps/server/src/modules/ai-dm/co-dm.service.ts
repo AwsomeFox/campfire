@@ -11,6 +11,7 @@ import {
   NpcCreate,
   LocationCreate,
   QuestCreate,
+  FactionCreate,
   SessionCreate,
   EncounterGenerate,
   GenerateMapParams,
@@ -41,10 +42,12 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
+  quest: 'quest',
+  faction: 'faction',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
-const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat']);
+const MULTI_TARGETS = new Set<CoDmDraftTarget>(['npc', 'location', 'beat', 'quest', 'faction']);
 
 /**
  * Co-DM authoring (issue #313) — the AI drafts content for the DM's approval queue.
@@ -262,7 +265,9 @@ export class CoDmService {
     switch (target) {
       case 'npc':
       case 'location':
-      case 'beat': {
+      case 'beat':
+      case 'quest':
+      case 'faction': {
         if (parsed === null) {
           throw new UnprocessableEntityException(
             `The AI did not return a JSON ${target} draft. Configure a real provider (the default no-op scaffold cannot author content) or retry.`,
@@ -316,6 +321,21 @@ export class CoDmService {
             ...raw,
             seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
           }) as Record<string, unknown>;
+        case 'quest':
+          return QuestCreate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled quest',
+            body: raw.body ?? raw.description ?? '',
+            reward: typeof raw.reward === 'string' ? raw.reward : '',
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
+        case 'faction':
+          return FactionCreate.parse({
+            name: raw.name ?? 'Unnamed faction',
+            kind: typeof raw.kind === 'string' ? raw.kind : '',
+            body: typeof raw.body === 'string' ? raw.body : '',
+            goals: typeof raw.goals === 'string' ? raw.goals : '',
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
       }
     } catch (err) {
       throw new UnprocessableEntityException(
@@ -335,6 +355,8 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
   map: '{"kind"?: "dungeon"|"cave"|"wilderness", "size"?: "small"|"medium"|"large", "theme"?: string}',
+  quest: '{"title": string (required), "body"?: string (markdown quest description), "reward"?: string, "dmSecret"?: string}',
+  faction: '{"name": string (required), "kind"?: string (guild/cult/government/...), "body"?: string, "goals"?: string, "dmSecret"?: string}',
 };
 
 /** A fresh uint32 seed for the encounter generator. */

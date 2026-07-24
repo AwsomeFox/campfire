@@ -46,7 +46,19 @@ function buildService(entities: {
     { listForCampaign: noop as any } as any, // notes
     { listForCampaign: noop as any } as any, // comments
     { listForCampaign: noop as any } as any, // members
-    { listForCampaign: noop as any } as any, // audit
+    {
+      listForCampaign: noop as any,
+      listForCampaignExport: async () => ({
+        entries: [],
+        meta: {
+          total: 0,
+          exported: 0,
+          truncated: 0,
+          cutoff: { snapshotMaxId: 0, capturedAt: new Date(0).toISOString(), oldestExportedCreatedAt: null },
+        },
+      }),
+      finalizeCampaignExportMeta: async (_campaignId: number, meta: unknown) => meta,
+    } as any, // audit
     { listForCampaign: noop as any } as any, // proposals
     {
       listForCampaign: async () => (entities.encounters ?? []).map((e: any) => ({ id: e.id, name: e.name })),

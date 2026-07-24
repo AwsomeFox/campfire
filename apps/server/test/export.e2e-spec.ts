@@ -3,6 +3,9 @@ import path from 'node:path';
 import request from 'supertest';
 import JSZip from 'jszip';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { auditLog } from '../src/db/schema';
+import { AuditService, computeCampaignAuditExportTruncated } from '../src/modules/audit/audit.service';
 
 // Minimal valid 1x1 PNG (smallest possible real PNG payload) — matches the fixture
 // used in attachments.e2e-spec.ts.
@@ -131,6 +134,19 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(res.body.characters[0].dmSecret).toBe('secretly cursed');
     expect(Array.isArray(res.body.members)).toBe(true);
     expect(Array.isArray(res.body.audit)).toBe(true);
+    expect(res.body.auditMeta).toEqual(
+      expect.objectContaining({
+        total: expect.any(Number),
+        exported: expect.any(Number),
+        truncated: expect.any(Number),
+        cutoff: expect.objectContaining({
+          snapshotMaxId: expect.any(Number),
+          capturedAt: expect.any(String),
+        }),
+      }),
+    );
+    expect(res.body.auditMeta.exported).toBe(res.body.audit.length);
+    expect(typeof res.body.auditNote).toBe('string');
     expect(Array.isArray(res.body.proposals)).toBe(true);
     expect(res.body.comments).toEqual(
       expect.arrayContaining([
@@ -291,6 +307,137 @@ describe('export (e2e, real cookie sessions)', () => {
     expect(manifest).toContain('# Attachments');
     expect(manifest).toContain('campaign map');
     expect(manifest).toContain('portrait: Portrait Hero');
+  });
+});
+
+// Issue #731: campaign export must not silently cap audit history at 500 rows.
+describe('export audit history — full snapshot + metadata (e2e, #731)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let db: DrizzleDb;
+  let audit: AuditService;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+    db = ctx.app.get<DrizzleDb>(DB);
+    audit = ctx.app.get(AuditService);
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'audit-export-dm', password: 'dm-password-1' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Audit Export Campaign' });
+    campaignId = campRes.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function seedAuditRows(count: number, detailPrefix: string, targetCampaignId = campaignId): Promise<void> {
+    const base = new Date().toISOString();
+    const batch: (typeof auditLog.$inferInsert)[] = [];
+    for (let i = 0; i < count; i++) {
+      batch.push({
+        campaignId: targetCampaignId,
+        actor: 'export-dm',
+        actorRole: 'dm',
+        action: 'test.export.seed',
+        detail: `${detailPrefix}-${i}`,
+        createdAt: base,
+      });
+    }
+    // Chunk inserts so SQLite stays responsive in CI.
+    const chunk = 100;
+    for (let i = 0; i < batch.length; i += chunk) {
+      await db.insert(auditLog).values(batch.slice(i, i + chunk));
+    }
+  }
+
+  it('exports every retained row when history exceeds 500 (auditMeta matches counts)', async () => {
+    const extra = 520;
+    await seedAuditRows(extra, 'bulk');
+
+    const res = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
+    expect(res.status).toBe(200);
+
+    expect(res.body.audit.length).toBeGreaterThanOrEqual(extra);
+    expect(res.body.auditMeta.exported).toBe(res.body.audit.length);
+    expect(res.body.auditMeta.total).toBe(res.body.auditMeta.exported);
+    expect(res.body.auditMeta.truncated).toBe(0);
+    expect(res.body.auditMeta.cutoff.snapshotMaxId).toBeGreaterThan(0);
+    expect(res.body.auditMeta.cutoff.oldestExportedCreatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(res.body.auditNote).toMatch(/portability export/i);
+    expect(res.body.auditNote).toMatch(/backup/i);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/export/);
+    expect(res.body.auditNote).toMatch(/\/api\/v1\/campaigns\/:campaignId\/audit/);
+  });
+
+  it('concurrent audit inserts during export surface in auditMeta.truncated', async () => {
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Audit Export Concurrent' });
+    const concurrentCampaignId = campRes.body.id;
+    const concurrentExtra = 505;
+    const base = new Date().toISOString();
+    const batch: (typeof auditLog.$inferInsert)[] = [];
+    for (let i = 0; i < concurrentExtra; i++) {
+      batch.push({
+        campaignId: concurrentCampaignId,
+        actor: 'export-dm',
+        actorRole: 'dm',
+        action: 'test.export.concurrent',
+        detail: `concurrent-${i}`,
+        createdAt: base,
+      });
+    }
+    for (let i = 0; i < batch.length; i += 100) {
+      await db.insert(auditLog).values(batch.slice(i, i + 100));
+    }
+
+    let postSnapshotInsertsDone = false;
+    // listForCampaignExport counts post-snapshot rows via countForCampaignAbove —
+    // inject race inserts there so truncated reflects concurrent appends (#731).
+    const realCountAbove = audit.countForCampaignAbove.bind(audit);
+    const countSpy = jest.spyOn(audit, 'countForCampaignAbove').mockImplementation(async (targetCampaignId, minId) => {
+      if (targetCampaignId === concurrentCampaignId && !postSnapshotInsertsDone) {
+        postSnapshotInsertsDone = true;
+        for (let i = 0; i < 20; i++) {
+          await audit.log({
+            actor: 'export-dm',
+            actorRole: 'dm',
+            action: 'test.export.race',
+            campaignId: concurrentCampaignId,
+            detail: `race-${i}`,
+          });
+        }
+      }
+      return realCountAbove(targetCampaignId, minId);
+    });
+
+    let exportRes: request.Response;
+    try {
+      exportRes = await dmAgent.get(`/api/v1/campaigns/${concurrentCampaignId}/export?format=json`);
+    } finally {
+      countSpy.mockRestore();
+    }
+
+    expect(exportRes.status).toBe(200);
+    expect(exportRes.body.auditMeta.exported).toBeGreaterThanOrEqual(concurrentExtra);
+    expect(exportRes.body.auditMeta.exported).toBe(exportRes.body.audit.length);
+
+    const snapshotMaxId = exportRes.body.auditMeta.cutoff.snapshotMaxId as number;
+    const postSnapshotCount = await audit.countForCampaignAbove(concurrentCampaignId, snapshotMaxId);
+    expect(exportRes.body.auditMeta.total).toBe(exportRes.body.auditMeta.exported);
+    expect(exportRes.body.auditMeta.truncated).toBe(
+      computeCampaignAuditExportTruncated(
+        exportRes.body.auditMeta.total,
+        exportRes.body.auditMeta.exported,
+        postSnapshotCount,
+      ),
+    );
+    expect(exportRes.body.auditMeta.truncated).toBe(postSnapshotCount);
+    expect(postSnapshotInsertsDone).toBe(true);
+    expect(postSnapshotCount).toBeGreaterThanOrEqual(20);
   });
 });
 

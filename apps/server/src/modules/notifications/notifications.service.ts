@@ -19,7 +19,26 @@ export interface NotificationEvent {
   entityId?: number | null;
   /** Focus a specific comment inside the parent entity thread (issue #446). */
   commentId?: number | null;
+  /**
+   * Issue #820: optional structured payload persisted as JSON. Schedule
+   * lifecycle events pass ScheduleNotificationData so clients localize time.
+   */
+  data?: Record<string, unknown> | null;
   actorName?: string;
+}
+
+/** Parse the nullable JSON `data` column into a plain object (or null). */
+function parseNotificationData(raw: string | null | undefined): Record<string, unknown> | null {
+  if (raw == null || raw === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* malformed rows degrade to null — title/body remain usable */
+  }
+  return null;
 }
 
 function toDomain(row: typeof notifications.$inferSelect): Notification {
@@ -33,6 +52,7 @@ function toDomain(row: typeof notifications.$inferSelect): Notification {
     entityType: row.entityType as EntityType | null,
     entityId: row.entityId,
     commentId: row.commentId ?? null,
+    data: parseNotificationData(row.data),
     actorName: row.actorName,
     readAt: row.readAt,
     createdAt: row.createdAt,
@@ -97,6 +117,7 @@ export class NotificationsService {
   private async insertRows(recipients: number[], campaignId: number, event: NotificationEvent): Promise<void> {
     if (recipients.length === 0) return;
     const ts = nowIso();
+    const dataJson = event.data == null ? null : JSON.stringify(event.data);
     await this.db.insert(notifications).values(
       recipients.map((userId) => ({
         userId,
@@ -107,6 +128,7 @@ export class NotificationsService {
         entityType: event.entityType ?? null,
         entityId: event.entityId ?? null,
         commentId: event.commentId ?? null,
+        data: dataJson,
         actorName: event.actorName ?? '',
         readAt: null,
         createdAt: ts,

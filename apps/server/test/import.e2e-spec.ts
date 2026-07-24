@@ -181,6 +181,8 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(chars.body[0].id).not.toBe(characterId);
     // Imported PCs come in unowned.
     expect(chars.body[0].ownerUserId).toBeNull();
+    // Safe remote portraits survive JSON import (issue #524 / CodeRabbit on #1229).
+    expect(chars.body[0].portraitUrl).toBe('https://images.example.test/rogue.png');
 
     // Encounters + combatants copied; the character combatant's characterId remapped.
     const encs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);

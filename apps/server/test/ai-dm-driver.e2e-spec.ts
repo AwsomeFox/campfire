@@ -168,6 +168,23 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     expect(again.status).toBe(403);
     expect(again.text).toContain('budget exhausted');
   });
+
+  it('#1076 driver: estimates budget usage when provider omits streaming usage and narration is done-only', async () => {
+    const campaignId = await h.createCampaign('Driver Usage Estimate');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const narration = 'The oracle speaks only in the final frame.';
+    h.script({
+      text: narration,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      streamTextDeltas: false,
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'Ask the oracle.' });
+    expect(res.status).toBe(201);
+    expect(res.body.tokensUsed).toBeGreaterThan(0);
+    expect(res.body.seat.tokensUsed).toBeGreaterThan(0);
+  });
 });
 
 describe('ai-dm driver runtime — gating + access (e2e)', () => {

@@ -19,6 +19,7 @@ import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
 import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -39,6 +40,7 @@ import {
   RouteBoundLoadSequencer,
 } from '../../lib/routeBoundRecord';
 import { useUnsavedWork } from '../../lib/useUnsavedWork';
+import { PageTitle } from '../../components/PageTitle';
 
 export default function CampaignSettingsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -113,10 +115,7 @@ export default function CampaignSettingsPage() {
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        const reduceMotion =
-          typeof window !== 'undefined' &&
-          window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+        el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       });
       return true;
     };
@@ -157,7 +156,8 @@ export default function CampaignSettingsPage() {
 
   if (!isDm) {
     return (
-      <div className="max-w-4xl mx-auto px-4 mt-5">
+      <div className="max-w-4xl mx-auto px-4 mt-5 space-y-3">
+        <PageTitle>Campaign settings</PageTitle>
         <Card className="text-center space-y-1">
           <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p style={{ fontSize: 13, color: 'var(--color-neutral-300)', fontWeight: 600 }}>DM only</p>
@@ -169,7 +169,7 @@ export default function CampaignSettingsPage() {
 
   return (
     <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 640 }}>
-      <h3 style={{ margin: '4px 0 0' }}>Campaign settings</h3>
+      <PageTitle>Campaign settings</PageTitle>
 
       {campaign && settingsReady ? (
         <>

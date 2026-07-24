@@ -4,6 +4,7 @@ import {
   COMPENDIUM_SEARCH_ID,
   COMPENDIUM_SEARCH_LABEL,
   COMPENDIUM_TYPE_FILTER_LABEL,
+  COMPENDIUM_URL_CURSOR,
   COMPENDIUM_URL_Q,
   COMPENDIUM_URL_TYPE,
   applyCompendiumSearchParams,
@@ -55,6 +56,24 @@ test.describe('compendium URL filter params (issue #647)', () => {
     expect(cleared.get(COMPENDIUM_URL_Q)).toBeNull();
     expect(cleared.get(COMPENDIUM_URL_TYPE)).toBeNull();
     expect(cleared.get('tab')).toBe('keep');
+  });
+
+  test('clears cursor when filters change and sets it when provided (issue #613)', () => {
+    const withCursor = applyCompendiumSearchParams(new URLSearchParams('q=fire&cursor=abc'), {
+      q: 'fire',
+      type: 'all',
+      cursor: 'abc',
+    });
+    expect(withCursor.get(COMPENDIUM_URL_CURSOR)).toBe('abc');
+
+    const filterChange = applyCompendiumSearchParams(withCursor, {
+      q: 'goblin',
+      type: 'monster',
+      cursor: null,
+    });
+    expect(filterChange.get(COMPENDIUM_URL_Q)).toBe('goblin');
+    expect(filterChange.get(COMPENDIUM_URL_TYPE)).toBe('monster');
+    expect(filterChange.get(COMPENDIUM_URL_CURSOR)).toBeNull();
   });
 
   test('effective search query skips debounce when URL q changes externally', () => {
@@ -172,6 +191,18 @@ test.describe('compendium results status (issue #647)', () => {
         typeLabel: 'All',
       }),
     ).toBe('12 results.');
+
+    expect(
+      compendiumResultsStatus({
+        loading: false,
+        resultCount: 50,
+        totalCount: 120,
+        hasMore: true,
+        query: '',
+        typeKey: 'all',
+        typeLabel: 'All',
+      }),
+    ).toBe('Showing 50 of 120 results. More available.');
   });
 
   test('suppresses empty/count copy when the search request failed', () => {

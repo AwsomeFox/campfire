@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, HttpStatus, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { listRulePackSources, type RuleEntryType } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -113,17 +113,42 @@ export class RulesController {
   }
 
   @Get('search')
-  @ApiOperation({ summary: 'Search rule entries', description: 'Any authenticated user. Searches across all installed packs unless `pack` is given.' })
+  @ApiOperation({
+    summary: 'Search rule entries',
+    description:
+      'Any authenticated user. Searches across all installed packs unless `pack` is given. ' +
+      'Returns a paginated page (`items`, `total`, `hasMore`, optional `nextCursor`) — default ' +
+      'page size 50, max 100. Empty `q` browses with stable name+id order; continue with `cursor` ' +
+      'from a previous `nextCursor` (issue #613).',
+  })
   @ApiQuery({ name: 'q', required: false, description: 'Free-text search against entry name/summary. Empty returns all (subject to type/pack filters).' })
   @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
-  @ApiResponse({ status: 200, description: 'Matching rule entries.' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
+  @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })
+  @ApiResponse({ status: 200, description: 'Paginated matching rule entries (`items`, `total`, `hasMore`, `nextCursor?`).' })
   search(
     @Query('q') q: string | undefined,
     @Query('type') type: string | undefined,
     @Query('pack') pack: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Query('cursor') cursor: string | undefined,
   ) {
-    return this.rules.search({ q: q ?? '', type: type as RuleEntryType | undefined, pack });
+    let parsedLimit: number | undefined;
+    if (limit !== undefined && limit !== '') {
+      const n = Number(limit);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new BadRequestException('`limit` must be a positive integer');
+      }
+      parsedLimit = n;
+    }
+    return this.rules.search({
+      q: q ?? '',
+      type: type as RuleEntryType | undefined,
+      pack,
+      cursor,
+      limit: parsedLimit,
+    });
   }
 
   @Get('entries/:id')

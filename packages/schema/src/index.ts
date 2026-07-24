@@ -886,6 +886,9 @@ export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
 
+// Schedule notification metadata + locale-aware copy (issue #820).
+export * from './scheduleNotifications';
+
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
@@ -1250,7 +1253,8 @@ export const CommentUpdate = z.object({
 // campaign, the next session gets scheduled (session_scheduled) or a member
 // RSVPs to one (session_rsvp), a quest is completed or revealed to the party
 // (quest_updated), a member submits a proposal to the DM (proposal_submitted) or
-// the DM approves/rejects it (proposal_resolved). Read via
+// the DM approves/rejects it (proposal_resolved), or a member posts to the DM
+// scribe inbox (inbox_submitted, issue #832). Read via
 // GET /notifications (own rows only); real-time push can layer on later — the
 // store is plain rows, transport-agnostic.
 export const NotificationType = z.enum([
@@ -1268,6 +1272,8 @@ export const NotificationType = z.enum([
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
+  // Issue #832: a player (or any member) posted to the DM scribe inbox.
+  'inbox_submitted',
   // The driver AI-DM got stuck / a recovery lever was pulled (issue #314): AI errored/looped,
   // budget exhausted, a ruling was disputed, a table vote resolved, or a human took the seat.
   'ai_dm_alert',
@@ -1288,6 +1294,12 @@ export const Notification = z.object({
    * inside the parent entity's discussion thread (`entityType`/`entityId`).
    */
   commentId: Id.nullable().default(null),
+  /**
+   * Issue #820: optional structured event payload (JSON object). Schedule
+   * lifecycle pings store {@link ScheduleNotificationData} here so clients can
+   * localize the start instant instead of trusting a UTC date baked into title.
+   */
+  data: z.record(z.string(), z.unknown()).nullable().default(null),
   actorName: z.string().max(120).default(''), // display name of who triggered it
   readAt: IsoDate.nullable().default(null), // null = unread
   createdAt: IsoDate,
@@ -2554,11 +2566,36 @@ export const RulePackInstallJob = z.object({
 });
 export type RulePackInstallJob = z.infer<typeof RulePackInstallJob>;
 
+/** Default page size for GET /rules/search (issue #613). */
+export const RULE_SEARCH_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on rule search — clients page with `cursor`, not a huge page. */
+export const RULE_SEARCH_MAX_LIMIT = 100;
+
 export const RuleSearchQuery = z.object({
   q: z.string().max(200).default(''),
   type: RuleEntryType.optional(),
   pack: z.string().max(80).optional(), // pack slug
+  /** Page size (default 50, max 100). Omitted → default; never silently returns a truncated array. */
+  limit: z.number().int().positive().max(RULE_SEARCH_MAX_LIMIT).optional(),
+  /** Opaque stable cursor from a previous page's `nextCursor` (issue #613). */
+  cursor: z.string().max(512).optional(),
 });
+
+/**
+ * Paginated rule-search response (issue #613).
+ *
+ * Replaces the historical bare `RuleEntry[]` (hard-capped at 50 with no totals).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true.
+ */
+export const RuleSearchPage = z.object({
+  items: z.array(RuleEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).optional(),
+  limit: z.number().int().positive(),
+});
+export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an
@@ -3397,7 +3434,7 @@ export type AiDmTurnResult = z.infer<typeof AiDmTurnResult>;
 // (#304/#306); the proposal payload carries their (seeded) params and approval
 // runs the generator. Every draft is metered against the seat budget and the
 // proposer is attributed to the AI seat + model, not a raw token name.
-export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map']);
+export const CoDmDraftTarget = z.enum(['npc', 'location', 'beat', 'recap', 'encounter', 'map', 'quest', 'faction']);
 export type CoDmDraftTarget = z.infer<typeof CoDmDraftTarget>;
 
 // POST /campaigns/:id/ai-dm/draft (dm only) and the draft_content MCP tool.
@@ -4813,6 +4850,34 @@ export const StorageOrphans = z.object({
 });
 export type StorageOrphans = z.infer<typeof StorageOrphans>;
 
+export const FsCleanupPendingItem = z.object({
+  id: z.number().int().positive(),
+  relPath: z.string(),
+  scope: z.enum(['attachment', 'campaign_purge']),
+  // `held` = reserved before metadata commit; drain must not erase until armed.
+  status: z.enum(['held', 'pending', 'failed']),
+  attempts: z.number().int().nonnegative(),
+  lastError: z.string(),
+  updatedAt: IsoDate,
+});
+export type FsCleanupPendingItem = z.infer<typeof FsCleanupPendingItem>;
+
+export const FsCleanupSummary = z.object({
+  pendingCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  /** Total rows in fs_deletion_queue (items may be truncated for the admin UI). */
+  queueCount: z.number().int().nonnegative(),
+  items: z.array(FsCleanupPendingItem),
+});
+export type FsCleanupSummary = z.infer<typeof FsCleanupSummary>;
+
+/** Response when metadata is removed but filesystem erasure may still be in flight (issue #727). */
+export const PermanentDeletionResult = z.object({
+  filesPending: z.boolean(),
+  pendingPaths: z.array(z.string()).optional(),
+});
+export type PermanentDeletionResult = z.infer<typeof PermanentDeletionResult>;
+
 export const StorageStats = z.object({
   totalBytes: z.number().int().nonnegative(), // backward-compatible alias of committedBytes
   committedBytes: z.number().int().nonnegative(), // publicly readable bytes across all campaigns
@@ -4822,6 +4887,7 @@ export const StorageStats = z.object({
   diskBytes: z.number().int().nonnegative(), // actual bytes on disk under uploads/ (originals + thumbs)
   campaigns: z.array(StorageCampaignUsage), // per-campaign breakdown, largest first
   orphans: StorageOrphans,
+  fsCleanup: FsCleanupSummary,
 });
 export type StorageStats = z.infer<typeof StorageStats>;
 

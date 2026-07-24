@@ -459,7 +459,10 @@ domain modules. If the domain modules imported `ProposalsModule` directly
   (no password/session data ever lived on `CampaignMember`). Imports and clones
   never replay exported memberships: only the authenticated caller becomes the
   new campaign's enabled DM, through the same FK-checked membership path used by
-  normal campaign creation. `audit` is capped at the latest 500 entries.
+  normal campaign creation. `audit` carries every retained row in a stable
+  snapshot (`auditMeta` reports total/exported/truncated/cutoff — not capped at
+  500; `truncated` counts snapshot gaps and post-ceiling appends). This is campaign
+  portability, not a full-server DB backup (see `auditNote` in the JSON).
   `Content-Disposition: attachment; filename="campfire-<slug>-<date>.json"`.
 - **mdzip**: a zip (via `jszip`, pure-JS, no native dep) of markdown for every
   first-class export module (or an explicit exclusion in

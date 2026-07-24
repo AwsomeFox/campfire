@@ -53,6 +53,16 @@ async function installOpen5e(
   return pollJob(server, headers, res.body.id, opts);
 }
 
+
+/** Issue #613: /rules/search returns a page object, not a bare array. */
+function searchItems(body: { items?: unknown[] } | unknown[]): any[] {
+  if (Array.isArray(body)) return body;
+  if (body && typeof body === 'object' && Array.isArray((body as { items?: unknown[] }).items)) {
+    return (body as { items: any[] }).items;
+  }
+  throw new Error(`unexpected rules search body: ${JSON.stringify(body)}`);
+}
+
 describe('rules / rule packs (e2e, fake Open5e server)', () => {
   let ctx: TestAppContext;
   let fake: FakeOpen5e;
@@ -111,7 +121,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
       .get('/api/v1/rules/search')
       .query({ q: 'fixture sentinel', type: 'monster' })
       .set(dm);
-    const oldSentinel = oldSentinelSearch.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const oldSentinel = searchItems(oldSentinelSearch.body).find((e: { name: string }) => e.name === 'Fixture Sentinel');
     const db = ctx.app.get<DrizzleDb>(DB);
     db.update(ruleEntries)
       .set({ dataJson: JSON.stringify({ ac: 16, hp: 52 }), updatedAt: new Date().toISOString() })
@@ -135,21 +145,21 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // search: free text finds the fireball spell
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
     expect(searchRes.status).toBe(200);
-    expect(searchRes.body.length).toBeGreaterThan(0);
-    expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchItems(searchRes.body).length).toBeGreaterThan(0);
+    expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
 
     // search: type filter narrows to monsters only
     const monsterSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fixture sentinel', type: 'monster' }).set(dm);
     expect(monsterSearchRes.status).toBe(200);
-    expect(monsterSearchRes.body.length).toBeGreaterThan(0);
-    for (const e of monsterSearchRes.body) expect(e.type).toBe('monster');
-    expect(monsterSearchRes.body.some((e: { name: string }) => e.name === 'Fixture Sentinel')).toBe(true);
+    expect(searchItems(monsterSearchRes.body).length).toBeGreaterThan(0);
+    for (const e of searchItems(monsterSearchRes.body)) expect(e.type).toBe('monster');
+    expect(searchItems(monsterSearchRes.body).some((e: { name: string }) => e.name === 'Fixture Sentinel')).toBe(true);
 
     // Issue #621 regression: live Open5e v2 combines regular, reaction and legendary
     // entries in actions[] (partitioned by action_type) and calls passive abilities
     // traits[]. The importer must preserve every category, raw description, and useful
     // structured mechanics in the shared dataJson returned by search and entry reads.
-    const sentinel = monsterSearchRes.body.find((e: { name: string }) => e.name === 'Fixture Sentinel');
+    const sentinel = searchItems(monsterSearchRes.body).find((e: { name: string }) => e.name === 'Fixture Sentinel');
     const sentinelData = JSON.parse(sentinel.dataJson);
     expect(sentinelData.specialAbilities).toEqual([
       expect.objectContaining({ name: 'Immutable Form', desc: expect.stringContaining('alter its form') }),
@@ -183,49 +193,49 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // search: pack filter
     const packSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', pack: 'open5e-srd' }).set(dm);
     expect(packSearchRes.status).toBe(200);
-    expect(packSearchRes.body.some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
+    expect(searchItems(packSearchRes.body).some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
 
     // issue #53 regression: a DEFAULT install (all sections) must actually ship
     // monsters, spells, AND magic items — not just conditions. Monster (Owlbear) and
     // spell (Fireball) are asserted above; assert an item is searchable too.
     const itemSearchRes = await request(server).get('/api/v1/rules/search').query({ q: 'bag of holding', type: 'item' }).set(dm);
     expect(itemSearchRes.status).toBe(200);
-    for (const e of itemSearchRes.body) expect(e.type).toBe('item');
-    expect(itemSearchRes.body.some((e: { name: string }) => e.name === 'Bag of Holding')).toBe(true);
+    for (const e of searchItems(itemSearchRes.body)) expect(e.type).toBe('item');
+    expect(searchItems(itemSearchRes.body).some((e: { name: string }) => e.name === 'Bag of Holding')).toBe(true);
 
     // issue #53 root cause was a pagination failure on large (multi-page) sections. The
     // fake serves spells across TWO pages; Mage Armor lives on page 2, so finding it
     // proves the importer followed the `next` link and imported page-2 entries.
     const pagedSpellRes = await request(server).get('/api/v1/rules/search').query({ q: 'mage armor', type: 'spell' }).set(dm);
     expect(pagedSpellRes.status).toBe(200);
-    expect(pagedSpellRes.body.some((e: { name: string }) => e.name === 'Mage Armor')).toBe(true);
+    expect(searchItems(pagedSpellRes.body).some((e: { name: string }) => e.name === 'Mage Armor')).toBe(true);
 
     // search ranking (issue #33): "poisoned" matches both Poisoned (by name) and
     // Petrified (whose body mentions the Poisoned condition, and which was imported
     // first, so it has the lower rowid) — the exact-name match must rank first.
     const rankedRes = await request(server).get('/api/v1/rules/search').query({ q: 'poisoned' }).set(dm);
     expect(rankedRes.status).toBe(200);
-    expect(rankedRes.body.length).toBeGreaterThanOrEqual(2); // both condition entries matched
-    expect(rankedRes.body[0].name).toBe('Poisoned');
-    expect(rankedRes.body.some((e: { name: string }) => e.name === 'Petrified')).toBe(true);
+    expect(searchItems(rankedRes.body).length).toBeGreaterThanOrEqual(2); // both condition entries matched
+    expect(searchItems(rankedRes.body)[0].name).toBe('Poisoned');
+    expect(searchItems(rankedRes.body).some((e: { name: string }) => e.name === 'Petrified')).toBe(true);
 
     // ...and the exact-name bucket is case-insensitive.
     const upperRes = await request(server).get('/api/v1/rules/search').query({ q: 'POISONED' }).set(dm);
-    expect(upperRes.body[0].name).toBe('Poisoned');
+    expect(searchItems(upperRes.body)[0].name).toBe('Poisoned');
 
     // Prefix name matches also outrank body-only matches: "poison" is a prefix of
     // "Poisoned" but only appears inside Petrified's body.
     const prefixRes = await request(server).get('/api/v1/rules/search').query({ q: 'poison' }).set(dm);
-    expect(prefixRes.body[0].name).toBe('Poisoned');
+    expect(searchItems(prefixRes.body)[0].name).toBe('Poisoned');
 
     // search: no query returns entries (optionally filtered), not an error
     const browseRes = await request(server).get('/api/v1/rules/search').query({ type: 'condition' }).set(dm);
     expect(browseRes.status).toBe(200);
-    expect(browseRes.body.length).toBeGreaterThanOrEqual(2);
-    for (const e of browseRes.body) expect(e.type).toBe('condition');
+    expect(searchItems(browseRes.body).length).toBeGreaterThanOrEqual(2);
+    for (const e of searchItems(browseRes.body)) expect(e.type).toBe('condition');
 
     // entry fetch by id
-    const fireball = searchRes.body.find((e: { name: string }) => e.name === 'Fireball');
+    const fireball = searchItems(searchRes.body).find((e: { name: string }) => e.name === 'Fireball');
     const entryRes = await request(server).get(`/api/v1/rules/entries/${fireball.id}`).set(dm);
     expect(entryRes.status).toBe(200);
     expect(entryRes.body.name).toBe('Fireball');
@@ -235,7 +245,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // any authed role (not just dm) can read
     const playerSearch = await request(server).get('/api/v1/rules/search').query({ q: 'prone' }).set(player);
     expect(playerSearch.status).toBe(200);
-    expect(playerSearch.body.some((e: { name: string }) => e.name === 'Prone')).toBe(true);
+    expect(searchItems(playerSearch.body).some((e: { name: string }) => e.name === 'Prone')).toBe(true);
 
     // uninstall
     const uninstallRes = await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dm);
@@ -245,7 +255,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(afterList.body).toEqual([]);
 
     const afterSearch = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
-    expect(afterSearch.body).toEqual([]);
+    expect(searchItems(afterSearch.body)).toEqual([]);
 
     const afterEntry = await request(server).get(`/api/v1/rules/entries/${fireball.id}`).set(dm);
     expect(afterEntry.status).toBe(404);
@@ -261,7 +271,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
 
     try {
       const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
-      const fireball = searchRes.body.find((e: { name: string }) => e.name === 'Fireball');
+      const fireball = searchItems(searchRes.body).find((e: { name: string }) => e.name === 'Fireball');
       expect(fireball).toBeDefined();
 
       // Imported entries have no override — the field is present and empty.
@@ -304,7 +314,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(job.progress.length).toBe(1); // only the requested section is tracked
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin' }).set(dm);
-    expect(searchRes.body).toEqual([]); // creatures weren't imported
+    expect(searchItems(searchRes.body)).toEqual([]); // creatures weren't imported
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
@@ -319,8 +329,8 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // classes: served from /v2/classes/; empty desc means the body comes from features[].
     const classSearch = await request(server).get('/api/v1/rules/search').query({ q: 'barbarian', type: 'class' }).set(dm);
     expect(classSearch.status).toBe(200);
-    for (const e of classSearch.body) expect(e.type).toBe('class');
-    const barbarian = classSearch.body.find((e: { name: string }) => e.name === 'Barbarian');
+    for (const e of searchItems(classSearch.body)) expect(e.type).toBe('class');
+    const barbarian = searchItems(classSearch.body).find((e: { name: string }) => e.name === 'Barbarian');
     expect(barbarian).toBeDefined();
     expect(barbarian.body).toContain('### Rage');
     expect(barbarian.body).toContain('primal ferocity');
@@ -331,9 +341,9 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     expect(barbarianData.subclassOf).toBeNull();
 
     // subclasses share the classes list, distinguished via subclass_of.
-    const berserker = (await request(server).get('/api/v1/rules/search').query({ q: 'berserker' }).set(dm)).body.find(
-      (e: { name: string }) => e.name === 'Path of the Berserker',
-    );
+    const berserker = searchItems(
+      (await request(server).get('/api/v1/rules/search').query({ q: 'berserker' }).set(dm)).body,
+    ).find((e: { name: string }) => e.name === 'Path of the Berserker');
     expect(berserker).toBeDefined();
     expect(berserker.type).toBe('class');
     expect(JSON.parse(berserker.dataJson).subclassOf).toBe('Barbarian');
@@ -342,12 +352,12 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // races: fetched from /v2/species/ (v2 has no /races/ route) but exposed as type 'race'.
     const raceSearch = await request(server).get('/api/v1/rules/search').query({ q: 'dwarf', type: 'race' }).set(dm);
     expect(raceSearch.status).toBe(200);
-    for (const e of raceSearch.body) expect(e.type).toBe('race');
-    const dwarf = raceSearch.body.find((e: { name: string }) => e.name === 'Dwarf');
+    for (const e of searchItems(raceSearch.body)) expect(e.type).toBe('race');
+    const dwarf = searchItems(raceSearch.body).find((e: { name: string }) => e.name === 'Dwarf');
     expect(dwarf).toBeDefined();
     expect(dwarf.body).toContain('### Darkvision');
     expect(dwarf.summary).toContain('Bold and hardy');
-    const hillDwarf = raceSearch.body.find((e: { name: string }) => e.name === 'Hill Dwarf');
+    const hillDwarf = searchItems(raceSearch.body).find((e: { name: string }) => e.name === 'Hill Dwarf');
     expect(hillDwarf).toBeDefined();
     const hillDwarfData = JSON.parse(hillDwarf.dataJson);
     expect(hillDwarfData.isSubspecies).toBe(true);
@@ -356,7 +366,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     // feats: prerequisite surfaces in the summary, benefits become body bullets.
     const featSearch = await request(server).get('/api/v1/rules/search').query({ q: 'grappler', type: 'feat' }).set(dm);
     expect(featSearch.status).toBe(200);
-    const grappler = featSearch.body.find((e: { name: string }) => e.name === 'Grappler');
+    const grappler = searchItems(featSearch.body).find((e: { name: string }) => e.name === 'Grappler');
     expect(grappler).toBeDefined();
     expect(grappler.type).toBe('feat');
     expect(grappler.summary).toBe('Prerequisite: Strength 13 or higher');
@@ -369,7 +379,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
 
     // sections not requested weren't imported.
     const spellSearch = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dm);
-    expect(spellSearch.body).toEqual([]);
+    expect(searchItems(spellSearch.body)).toEqual([]);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
@@ -398,7 +408,7 @@ describe('rules / rule packs (e2e, fake Open5e server)', () => {
     const packId = job.pack.id;
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin' }).set(dm);
-    const goblinEntry = searchRes.body.find((e: { name: string }) => e.name === 'Goblin');
+    const goblinEntry = searchItems(searchRes.body).find((e: { name: string }) => e.name === 'Goblin');
     expect(goblinEntry).toBeDefined();
 
     const combatantRes = await request(server)
@@ -486,9 +496,9 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
 
     // entries are searchable under the new pack, scoped by its slug
     const spellRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', pack: 'pf2e-srd' }).set(uploader);
-    expect(spellRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchItems(spellRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
     const classRes = await request(server).get('/api/v1/rules/search').query({ q: 'fighter', type: 'class' }).set(uploader);
-    expect(classRes.body.some((e: { name: string }) => e.name === 'Fighter')).toBe(true);
+    expect(searchItems(classRes.body).some((e: { name: string }) => e.name === 'Fighter')).toBe(true);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(uploader);
   });
@@ -523,9 +533,9 @@ describe('rules / rule packs — generic upload (issue #19)', () => {
 
     // a global search (no pack filter) sees entries from both packs
     const proneRes = await request(server).get('/api/v1/rules/search').query({ q: 'prone' }).set(uploader);
-    expect(proneRes.body.some((e: { name: string }) => e.name === 'Prone')).toBe(true); // from open5e
+    expect(searchItems(proneRes.body).some((e: { name: string }) => e.name === 'Prone')).toBe(true); // from open5e
     const fighterRes = await request(server).get('/api/v1/rules/search').query({ q: 'fighter' }).set(uploader);
-    expect(fighterRes.body.some((e: { name: string }) => e.name === 'Fighter')).toBe(true); // from upload
+    expect(searchItems(fighterRes.body).some((e: { name: string }) => e.name === 'Fighter')).toBe(true); // from upload
 
     await request(server).delete(`/api/v1/rules/packs/${open5eJob.pack.id}`).set(uploader);
     await request(server).delete(`/api/v1/rules/packs/${uploadJob.pack.id}`).set(uploader);
@@ -592,14 +602,14 @@ describe('rules / rule packs — Open5e import de-dupes same-name entries + labe
 
     // Fireball: exactly one row, sourced from SRD 5.1 (the canonical pick), not A5e/SRD 5.2.
     const fireballRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dedupeDm);
-    const fireballs = fireballRes.body.filter((e: { name: string }) => e.name === 'Fireball');
+    const fireballs = searchItems(fireballRes.body).filter((e: { name: string }) => e.name === 'Fireball');
     expect(fireballs).toHaveLength(1);
     expect(fireballs[0].source).toBe('System Reference Document 5.1');
     expect(fireballs[0].body).toContain('SRD 5.1');
 
     // Goblin: same — one row, canonical source, distinguishable in the picker.
     const goblinRes = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', type: 'monster' }).set(dedupeDm);
-    const goblins = goblinRes.body.filter((e: { name: string }) => e.name === 'Goblin');
+    const goblins = searchItems(goblinRes.body).filter((e: { name: string }) => e.name === 'Goblin');
     expect(goblins).toHaveLength(1);
     expect(goblins[0].source).toBe('System Reference Document 5.1');
 
@@ -888,8 +898,8 @@ describe('rules / rule packs — Open5e importer hardening (e2e, fake server wit
     expect(fake.evilWasHit()).toBe(false);
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(hardeningDm);
-    expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
-    expect(searchRes.body.some((e: { name: string }) => e.name === 'Should Never Be Imported')).toBe(false);
+    expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Should Never Be Imported')).toBe(false);
 
     // Skip accounting was logged (both the per-section summary and the malformed row).
     const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
@@ -930,7 +940,7 @@ describe('rules / rule packs — Open5e importer retry on transient failure (e2e
     expect(fake.spellsRequestCount()).toBe(3);
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(retryDm);
-    expect(searchRes.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(retryDm);
   }, 20_000); // backoff sleeps (1s + 3s) push this past jest's default 5s timeout
@@ -976,9 +986,9 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
 
     // Search now finds both the earlier conditions and the newly-added spells.
     const searchConditions = await request(server).get('/api/v1/rules/search').query({ q: 'prone' }).set(dmHeaders);
-    expect(searchConditions.body.some((e: { name: string }) => e.name === 'Prone')).toBe(true);
+    expect(searchItems(searchConditions.body).some((e: { name: string }) => e.name === 'Prone')).toBe(true);
     const searchSpells = await request(server).get('/api/v1/rules/search').query({ q: 'fireball' }).set(dmHeaders);
-    expect(searchSpells.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+    expect(searchItems(searchSpells.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
 
     // Reinstalling conditions again: everything requested is already present -> outcome
     // 'updated', added:0, skippedExisting matches the conditions count.
@@ -1097,7 +1107,7 @@ describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', 
     // Creature -> monster, with the PF2e statblock (level as CR, ability MODS) in dataJson.
     const monsterRes = await request(server).get('/api/v1/rules/search').query({ q: 'Goblin', type: 'monster' }).set(dm);
     expect(monsterRes.status).toBe(200);
-    const goblin = monsterRes.body.find((e: { name: string }) => e.name === 'Goblin Warrior');
+    const goblin = searchItems(monsterRes.body).find((e: { name: string }) => e.name === 'Goblin Warrior');
     expect(goblin).toBeDefined();
     expect(goblin.source).toBe('Pathfinder Monster Core');
     const data = JSON.parse(goblin.dataJson);
@@ -1124,7 +1134,7 @@ describe('rules / rule packs — Pathfinder 2e install (e2e, fake AoN server)', 
     for (const [name, type] of typesToProbe) {
       const r = await request(server).get('/api/v1/rules/search').query({ q: name, type }).set(dm);
       expect(r.status).toBe(200);
-      expect(r.body.some((e: { name: string }) => e.name === name)).toBe(true);
+      expect(searchItems(r.body).some((e: { name: string }) => e.name === name)).toBe(true);
     }
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
@@ -1167,7 +1177,7 @@ describe('rules / rule packs — cross-section (type,slug) collision de-dupes (i
 
     const cleaveRes = await request(server).get('/api/v1/rules/search').query({ q: 'Cleave', type: 'feat' }).set(dm);
     expect(cleaveRes.status).toBe(200);
-    const cleaves = cleaveRes.body.filter((e: { name: string }) => e.name === 'Cleave');
+    const cleaves = searchItems(cleaveRes.body).filter((e: { name: string }) => e.name === 'Cleave');
     expect(cleaves).toHaveLength(1); // the two cross-section rows collapsed to one
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
@@ -1214,9 +1224,9 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(job.pack.slug).toBe('pathfinder-1e');
 
       const spell = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dm);
-      expect(spell.body.some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
+      expect(searchItems(spell.body).some((e: { name: string }) => e.name === 'Fireball')).toBe(true);
       const monster = await request(server).get('/api/v1/rules/search').query({ q: 'goblin', type: 'monster' }).set(dm);
-      expect(monster.body.some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
+      expect(searchItems(monster.body).some((e: { name: string }) => e.name === 'Goblin')).toBe(true);
 
       // A section foreign to pf1e (Starfinder's 'starships') is rejected 400 synchronously —
       // no job enqueued.
@@ -1239,10 +1249,10 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(job.pack.slug).toBe('starfinder-1e');
 
       const spell = await request(server).get('/api/v1/rules/search').query({ q: 'magic missile', type: 'spell' }).set(dm);
-      expect(spell.body.some((e: { name: string }) => e.name === 'Magic Missile')).toBe(true);
+      expect(searchItems(spell.body).some((e: { name: string }) => e.name === 'Magic Missile')).toBe(true);
       // Starfinder's own sections (starships) imported alongside the 5e-shaped ones.
       const ship = await request(server).get('/api/v1/rules/search').query({ q: 'pegasus' }).set(dm);
-      expect(ship.body.some((e: { name: string }) => e.name === 'Pegasus')).toBe(true);
+      expect(searchItems(ship.body).some((e: { name: string }) => e.name === 'Pegasus')).toBe(true);
 
       // 'banes' (Open Legend's) is not a Starfinder section -> 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'starfinder', url: fake.baseUrl, sections: ['banes'] });
@@ -1263,7 +1273,7 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(job.pack.slug).toBe('archmage-srd');
 
       const monster = await request(server).get('/api/v1/rules/search').query({ q: 'bear', type: 'monster' }).set(dm);
-      expect(monster.body.some((e: { name: string }) => e.name === 'Bear')).toBe(true);
+      expect(searchItems(monster.body).some((e: { name: string }) => e.name === 'Bear')).toBe(true);
 
       // 13th Age exposes only monsters + conditions; 'spells' is foreign -> 400.
       const bad = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'archmage', url: fake.baseUrl, sections: ['spells'] });
@@ -1287,11 +1297,11 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(job.pack.license).toContain('Open Legend Community License');
 
       const boon = await request(server).get('/api/v1/rules/search').query({ q: 'haste', type: 'condition' }).set(dm);
-      expect(boon.body.some((e: { name: string }) => e.name === 'Haste')).toBe(true);
+      expect(searchItems(boon.body).some((e: { name: string }) => e.name === 'Haste')).toBe(true);
       const bane = await request(server).get('/api/v1/rules/search').query({ q: 'blinded', type: 'condition' }).set(dm);
-      expect(bane.body.some((e: { name: string }) => e.name === 'Blinded')).toBe(true);
+      expect(searchItems(bane.body).some((e: { name: string }) => e.name === 'Blinded')).toBe(true);
       const feat = await request(server).get('/api/v1/rules/search').query({ q: 'combat momentum', type: 'feat' }).set(dm);
-      expect(feat.body.some((e: { name: string }) => e.name === 'Combat Momentum')).toBe(true);
+      expect(searchItems(feat.body).some((e: { name: string }) => e.name === 'Combat Momentum')).toBe(true);
 
       // Issue #380 regression: the admin picker offers exactly these three sections for
       // open-legend (apps/web src/lib/rules.ts RULE_SYSTEMS). The default install above checks
@@ -1328,7 +1338,7 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
       expect(dflt.status).toBe('completed');
       expect(dflt.pack.slug).toBe('basic-fantasy');
       const monster = await request(server).get('/api/v1/rules/search').query({ q: 'skeleton', type: 'monster' }).set(dm);
-      expect(monster.body.some((e: { name: string }) => e.name === 'Skeleton')).toBe(true);
+      expect(searchItems(monster.body).some((e: { name: string }) => e.name === 'Skeleton')).toBe(true);
       await request(server).delete(`/api/v1/rules/packs/${dflt.pack.id}`).set(dm);
 
       // The `system` selector installs under the chosen retroclone's slug — the slug the
@@ -1459,7 +1469,7 @@ liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #
     expect(job.pack.license).toContain('Open Legend Community License');
 
     const boon = await request(server).get('/api/v1/rules/search').query({ q: 'haste', type: 'condition' }).set(dm);
-    expect(boon.body.some((e: { name: string }) => e.name === 'Haste')).toBe(true);
+    expect(searchItems(boon.body).some((e: { name: string }) => e.name === 'Haste')).toBe(true);
 
     await request(server).delete(`/api/v1/rules/packs/${job.pack.id}`).set(dm);
   });
@@ -1543,7 +1553,7 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
 
     // Each entry surfaces its OWN license — NOT the pack's CC-BY-4.0 blanket.
     const oglRes = await request(server).get('/api/v1/rules/search').query({ q: 'OGL Fireball', pack: 'mixed-licensing-pack' }).set(uploader);
-    const ogl = oglRes.body.find((e: { name: string }) => e.name === 'OGL Fireball');
+    const ogl = searchItems(oglRes.body).find((e: { name: string }) => e.name === 'OGL Fireball');
     expect(ogl).toBeTruthy();
     const oglEntry = await request(server).get(`/api/v1/rules/entries/${ogl.id}`).set(uploader);
     expect(oglEntry.status).toBe(200);
@@ -1553,14 +1563,14 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
     expect(oglEntry.body.sourceUrl).toBe('https://example.com/mixed/ogl-fireball');
 
     const orcRes = await request(server).get('/api/v1/rules/search').query({ q: 'ORC Goblin', pack: 'mixed-licensing-pack' }).set(uploader);
-    const orc = orcRes.body.find((e: { name: string }) => e.name === 'ORC Goblin');
+    const orc = searchItems(orcRes.body).find((e: { name: string }) => e.name === 'ORC Goblin');
     expect(orc).toBeTruthy();
     const orcEntry = await request(server).get(`/api/v1/rules/entries/${orc.id}`).set(uploader);
     expect(orcEntry.body.license).toBe('ORC');
     expect(orcEntry.body.author).toBe('ORC Studio');
 
     const cc0Res = await request(server).get('/api/v1/rules/search').query({ q: 'CC0 Sword', pack: 'mixed-licensing-pack' }).set(uploader);
-    const cc0 = cc0Res.body.find((e: { name: string }) => e.name === 'CC0 Sword');
+    const cc0 = searchItems(cc0Res.body).find((e: { name: string }) => e.name === 'CC0 Sword');
     expect(cc0).toBeTruthy();
     const cc0Entry = await request(server).get(`/api/v1/rules/entries/${cc0.id}`).set(uploader);
     expect(cc0Entry.body.license).toBe('CC0');
@@ -1583,7 +1593,7 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
     expect(job.status).toBe('completed');
 
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Uniform Magic Missile', pack: 'uniform-ogl-pack' }).set(uploader);
-    const found = searchRes.body.find((e: { name: string }) => e.name === 'Uniform Magic Missile');
+    const found = searchItems(searchRes.body).find((e: { name: string }) => e.name === 'Uniform Magic Missile');
     const entry = await request(server).get(`/api/v1/rules/entries/${found.id}`).set(uploader);
     // The entry's effective license is the pack's OGL — stored ON the entry so the reader
     // can trust entry.license without needing the pack row (the pre-#734 reader labelled
@@ -1625,7 +1635,7 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
     const listRes = await request(server).get('/api/v1/rules/packs').set(uploader);
     expect(listRes.body.some((p: { slug: string }) => p.slug === 'smuggler-pack')).toBe(false);
     const searchRes = await request(server).get('/api/v1/rules/search').query({ q: 'Proprietary Boss' }).set(uploader);
-    expect(searchRes.body.some((e: { name: string }) => e.name === 'Proprietary Boss')).toBe(false);
+    expect(searchItems(searchRes.body).some((e: { name: string }) => e.name === 'Proprietary Boss')).toBe(false);
   });
 
   it('rejects an entry that has no per-entry license when the pack license itself is non-open', async () => {
@@ -1641,5 +1651,123 @@ describe('rules / rule packs — per-entry licensing (issue #734)', () => {
     });
     expect(res.status).toBe(400);
     expect(String(res.body.message)).toMatch(/open license/i);
+  });
+});
+
+
+describe('rules search pagination (issue #613)', () => {
+  let ctx: TestAppContext;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function uploadMany(names: string[], packSlug: string) {
+    const server = ctx.app.getHttpServer();
+    const entries = names.map((name, i) => ({
+      slug: `${packSlug}-${i}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+      name,
+      type: 'monster' as const,
+      summary: `${name} summary`,
+      body: `${name} body`,
+    }));
+    const res = await request(server)
+      .post('/api/v1/rules/packs/upload')
+      .set(dm)
+      .send({
+        source: 'upload',
+        pack: {
+          slug: packSlug,
+          name: packSlug,
+          version: '1',
+          license: 'CC0',
+          sourceUrl: 'https://example.com/' + packSlug,
+        },
+        entries,
+      });
+    expect(res.status).toBe(202);
+    const job = await pollJob(server, dm, res.body.id);
+    expect(job.status).toBe('completed');
+    return job.pack.id as number;
+  }
+
+  it('returns totals/hasMore/nextCursor and pages stably across multi-pack ties', async () => {
+    const server = ctx.app.getHttpServer();
+    // Two packs with identical names — id tiebreak must keep order stable across pages.
+    const packA = await uploadMany(
+      Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
+      'page-pack-a',
+    );
+    const packB = await uploadMany(
+      Array.from({ length: 30 }, (_, i) => `Alpha Twin ${String(i).padStart(2, '0')}`),
+      'page-pack-b',
+    );
+    const packC = await uploadMany(
+      Array.from({ length: 25 }, (_, i) => `Browse Node ${String(i).padStart(2, '0')}`),
+      'page-pack-c',
+    );
+
+    const page1 = await request(server).get('/api/v1/rules/search').query({ limit: 20 }).set(dm);
+    expect(page1.status).toBe(200);
+    expect(page1.body.items).toHaveLength(20);
+    expect(page1.body.total).toBeGreaterThanOrEqual(85);
+    expect(page1.body.hasMore).toBe(true);
+    expect(typeof page1.body.nextCursor).toBe('string');
+    expect(page1.body.limit).toBe(20);
+
+    // Deterministic empty-query order: name asc, then id asc.
+    const names1 = page1.body.items.map((e: { name: string }) => e.name);
+    const sorted = [...names1].sort((a, b) => a.localeCompare(b, 'en'));
+    expect(names1).toEqual(sorted);
+
+    const page2 = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ limit: 20, cursor: page1.body.nextCursor })
+      .set(dm);
+    expect(page2.status).toBe(200);
+    expect(page2.body.items.length).toBeGreaterThan(0);
+    expect(page2.body.total).toBe(page1.body.total);
+
+    const ids1 = new Set(page1.body.items.map((e: { id: number }) => e.id));
+    for (const e of page2.body.items) {
+      expect(ids1.has(e.id)).toBe(false);
+    }
+
+    // Tie/insertion: adding mid-alphabet names grows total; first-page order stays name-sorted.
+    const beforeTotal = page1.body.total;
+    const packD = await uploadMany(['Alpha Twin 00', 'Browse Node 99'], 'page-pack-d-insert');
+    const page1b = await request(server).get('/api/v1/rules/search').query({ limit: 20 }).set(dm);
+    expect(page1b.body.total).toBe(beforeTotal + 2);
+    expect(page1b.body.items[0].name <= page1b.body.items[1].name).toBe(true);
+
+    // Ranked search pages with hasMore when many ties share a query.
+    const ranked1 = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'Alpha Twin', limit: 15 })
+      .set(dm);
+    expect(ranked1.status).toBe(200);
+    expect(ranked1.body.total).toBeGreaterThan(15);
+    expect(ranked1.body.hasMore).toBe(true);
+    expect(ranked1.body.items).toHaveLength(15);
+    const ranked2 = await request(server)
+      .get('/api/v1/rules/search')
+      .query({ q: 'Alpha Twin', limit: 15, cursor: ranked1.body.nextCursor })
+      .set(dm);
+    expect(ranked2.status).toBe(200);
+    const rankedIds = new Set(ranked1.body.items.map((e: { id: number }) => e.id));
+    for (const e of ranked2.body.items) expect(rankedIds.has(e.id)).toBe(false);
+
+    // Invalid cursor → 400
+    const bad = await request(server).get('/api/v1/rules/search').query({ cursor: 'not-a-cursor' }).set(dm);
+    expect(bad.status).toBe(400);
+
+    await request(server).delete(`/api/v1/rules/packs/${packA}`).set(dm);
+    await request(server).delete(`/api/v1/rules/packs/${packB}`).set(dm);
+    await request(server).delete(`/api/v1/rules/packs/${packC}`).set(dm);
+    await request(server).delete(`/api/v1/rules/packs/${packD}`).set(dm);
   });
 });

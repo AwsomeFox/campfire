@@ -16,6 +16,7 @@ import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
+import { PageTitle } from '../../components/PageTitle';
 
 // "Updated Xd ago", mirroring the dashboard's NotesQuickRail phrasing so relative
 // times read consistently across the app.
@@ -151,7 +152,7 @@ export default function QuestListPage() {
   return (
     <div data-testid="quest-list-surface" className="max-w-4xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <h3 style={{ margin: '4px 0 0' }}>{t('quests.title')}</h3>
+        <PageTitle>{t('quests.title')}</PageTitle>
         <div style={{ flex: 1 }} />
         {isDm && (
           <Link to={`/c/${cid}/quests/new`} className="btn btn-primary" style={{ fontSize: 13 }}>
