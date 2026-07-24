@@ -37,15 +37,21 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
   );
   const [message, setMessage] = useState<string | null>(null);
   const sentinelRef = useRef<WakeLockSentinel | null>(null);
+  // Invalidate in-flight acquire() calls when disabled, unmounted, or superseded.
+  const acquireGenerationRef = useRef(0);
   // Track whether we're still mounted to avoid state updates after unmount.
   const mountedRef = useRef(true);
   // Track the current `enabled` value for the visibility handler.
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
-  const acquire = useCallback(async () => {
+  const invalidateAcquire = useCallback(() => {
+    acquireGenerationRef.current += 1;
+  }, []);
+
+  const acquire = useCallback(async (generation: number) => {
     if (!wakeLockSupported()) {
-      if (mountedRef.current) {
+      if (mountedRef.current && enabledRef.current && generation === acquireGenerationRef.current) {
         setStatus('unavailable');
         setMessage(
           'Screen Wake Lock is not supported in this browser. To keep your display awake, check your OS power/sleep settings or use a browser that supports the Wake Lock API (Chrome, Edge, or Opera on desktop/Android).',
@@ -55,8 +61,12 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
     }
     try {
       const sentinel = await navigator.wakeLock.request('screen');
-      if (!mountedRef.current) {
-        // Component unmounted during the async request — release immediately.
+      if (
+        !mountedRef.current ||
+        !enabledRef.current ||
+        generation !== acquireGenerationRef.current
+      ) {
+        // Disabled, unmounted, or superseded during the async request — release immediately.
         void sentinel.release();
         return;
       }
@@ -72,7 +82,13 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
         }
       });
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (
+        !mountedRef.current ||
+        !enabledRef.current ||
+        generation !== acquireGenerationRef.current
+      ) {
+        return;
+      }
       sentinelRef.current = null;
       setStatus('error');
       const detail = err instanceof Error ? err.message : 'Unknown error';
@@ -98,17 +114,24 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
     }
   }, []);
 
+  const requestAcquire = useCallback(() => {
+    const generation = ++acquireGenerationRef.current;
+    void acquire(generation);
+  }, [acquire]);
+
   // Acquire/release based on `enabled`; cleanup releases on disable or unmount.
   useEffect(() => {
     if (!enabled) {
+      invalidateAcquire();
       void release();
       return;
     }
-    void acquire();
+    requestAcquire();
     return () => {
+      invalidateAcquire();
       void release();
     };
-  }, [enabled, acquire, release]);
+  }, [enabled, invalidateAcquire, release, requestAcquire]);
 
   // Reacquire after visibility restoration.
   useEffect(() => {
@@ -121,7 +144,7 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
         mountedRef.current &&
         sentinelRef.current == null
       ) {
-        void acquire();
+        requestAcquire();
       }
     }
 
@@ -129,7 +152,7 @@ export function useWakeLock(enabled: boolean): UseWakeLockResult {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [enabled, acquire]);
+  }, [enabled, requestAcquire]);
 
   // Track mount state for async acquire guards.
   useEffect(() => {
