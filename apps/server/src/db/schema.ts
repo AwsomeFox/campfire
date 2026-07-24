@@ -1105,6 +1105,7 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   lastTurnAt: text('last_turn_at'),
+  /** Proactive DM settings per campaign (#1044). */
   proactiveSettings: text('proactive_settings', { mode: 'json' }).$type<AiDmProactiveSettings>().default({} as any),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
