@@ -1156,13 +1156,20 @@ export class AiDriverService {
       executed.push({ name: call.name, isError: res.isError, proposed });
 
       // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
+      // #1072: include a redaction-safe args summary so the DM can inspect WHY the AI acted,
+      // not just WHICH tool it called. Secrets/apiKeys/passwords are always redacted; long
+      // strings are truncated; nested objects/arrays are shown as shape-only placeholders.
+      const argsSummary = summarizeToolArgs(args);
       await this.audit.log({
         actor,
         actorRole: 'dm',
         action: 'ai-dm.driver.tool',
         entityType: 'ai-dm',
         campaignId,
-        detail: `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
+        detail:
+          `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''}` +
+          `${argsSummary ? ` args={${argsSummary}}` : ''}` +
+          ` by ${triggeredBy.id}`,
       });
 
       if (res.isError) toolErrored = true;
@@ -1865,6 +1872,57 @@ function clamp(value: number, min: number, max: number): number {
 /** Stable key for a per-entity secret-read approval (issue #557). */
 function approvalKey(tool: string, entityId: number): string {
   return `${tool}:${entityId}`;
+}
+
+/**
+ * Field names whose values are ALWAYS redacted in the audit-args summary (#1072).
+ * Case-insensitive substring match. This is a defense-in-depth belt for values that
+ * should never appear in a DM-visible audit line even though the DM has broad read
+ * access — the audit is queryable and searchable, so keeping raw secrets out of it
+ * limits blast radius if the audit itself is exported or copy-pasted.
+ */
+const REDACTED_ARG_KEYS = ['apikey', 'password', 'dmsecret', 'secret', 'token', 'authorization', 'bearer'];
+
+/**
+ * Summarize a tool-call args object into a redaction-safe, DM-readable string (#1072).
+ * The summary is a compact `key=value` list where:
+ *   - primitive fields (number, boolean, null) render as-is
+ *   - string fields are truncated to 60 chars with a trailing "…"
+ *   - object/array fields render as `<object>` or `<array[N]>` (structure only, no content)
+ *   - any key matching {@link REDACTED_ARG_KEYS} renders as `<redacted>`
+ * The total output is bounded to ~400 characters so audit rows stay grep-friendly.
+ */
+export function summarizeToolArgs(args: Record<string, unknown> | undefined | null): string {
+  if (!args || typeof args !== 'object') return '';
+  const parts: string[] = [];
+  let totalLen = 0;
+  const MAX_TOTAL = 400;
+  for (const [key, value] of Object.entries(args)) {
+    if (totalLen >= MAX_TOTAL) {
+      parts.push('…');
+      break;
+    }
+    const lower = key.toLowerCase();
+    const isSecret = REDACTED_ARG_KEYS.some((k) => lower.includes(k));
+    let rendered: string;
+    if (isSecret) {
+      rendered = '<redacted>';
+    } else if (value === null || value === undefined) {
+      rendered = 'null';
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      rendered = String(value);
+    } else if (typeof value === 'string') {
+      rendered = value.length <= 60 ? JSON.stringify(value) : JSON.stringify(value.slice(0, 60) + '…');
+    } else if (Array.isArray(value)) {
+      rendered = `<array[${value.length}]>`;
+    } else {
+      rendered = '<object>';
+    }
+    const entry = `${key}=${rendered}`;
+    totalLen += entry.length + 2; // +2 for ", "
+    parts.push(entry);
+  }
+  return parts.join(', ');
 }
 
 /**
