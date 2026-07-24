@@ -42,6 +42,9 @@ describe('campaign import (e2e, real cookie sessions)', () => {
   let npcId: number;
   let questId: number;
   let characterId: number;
+  let encounterId: number;
+  let factionId: number;
+  let sessionId: number;
   let exportDoc: Record<string, unknown>;
 
   beforeAll(async () => {
@@ -83,7 +86,8 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     await dmAgent.post(`/api/v1/quests/${questId}/status`).send({ status: 'active' });
 
     // Play state: session, character, encounter+combatant, a shared note linked to the quest.
-    await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The crew assembled.' });
+    const sessionRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The crew assembled.' });
+    sessionId = sessionRes.body.id;
     const charRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
       name: 'Rogue',
       className: 'Thief',
@@ -92,7 +96,24 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     });
     characterId = charRes.body.id;
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Vault Guards' });
+    encounterId = encRes.body.id;
     await dmAgent.post(`/api/v1/encounters/${encRes.body.id}/combatants`).send({ kind: 'monster', name: 'Guard', hpMax: 11 });
+
+    // Issue #436: faction + encounter note anchors, scheduled session + RSVP, attendance.
+    const factionRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/factions`).send({ name: 'Thieves Guild' });
+    factionId = factionRes.body.id;
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Guild contact: Raven', visibility: 'dm_shared', entityType: 'faction', entityId: factionId });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Guard patrol pattern', visibility: 'dm_shared', entityType: 'encounter', entityId: encounterId });
+    const scheduleRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: '2099-07-01T20:00:00.000Z', title: 'Heist night', notes: 'Dark moon' });
+    await playerAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'maybe', note: 'Checking schedule' });
+    await dmAgent.put(`/api/v1/sessions/${sessionId}/attendance`).send({ characterIds: [characterId] });
+
     await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .send({ body: 'Quest intel for the party', visibility: 'party_shared', entityType: 'quest', entityId: questId });
@@ -202,6 +223,27 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(shared).toBeDefined();
     expect(shared.entityType).toBe('quest');
     expect(shared.entityId).toBe(q.id);
+
+    // Issue #436: faction + encounter note anchors remapped on import.
+    const factionNote = importedNotes.body.items.find((n: { body: string }) => n.body === 'Guild contact: Raven');
+    const encounterNote = importedNotes.body.items.find((n: { body: string }) => n.body === 'Guard patrol pattern');
+    const importedFactions = await dmAgent.get(`/api/v1/campaigns/${imported.id}/factions`);
+    const importedEncs = await dmAgent.get(`/api/v1/campaigns/${imported.id}/encounters`);
+    expect(factionNote).toMatchObject({ entityType: 'faction', entityId: importedFactions.body[0].id });
+    expect(encounterNote).toMatchObject({ entityType: 'encounter', entityId: importedEncs.body[0].id });
+
+    // Scheduled sessions + RSVPs round-trip with remapped schedule ids.
+    expect(Array.isArray(exportDoc.scheduledSessions)).toBe(true);
+    const schedules = await dmAgent.get(`/api/v1/campaigns/${imported.id}/schedule`);
+    expect(schedules.body.length).toBe(1);
+    expect(schedules.body[0].title).toBe('Heist night');
+    expect(schedules.body[0].rsvps.some((r: { status: string; note: string }) => r.status === 'maybe' && r.note === 'Checking schedule')).toBe(true);
+
+    // Session attendance remapped to imported session + character ids.
+    const attendance = await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/attendance`);
+    expect(attendance.body).toEqual([
+      expect.objectContaining({ characterId: chars.body[0].id, characterName: 'Rogue' }),
+    ]);
 
     // Comments round-trip with anchor/parent/character ids remapped and immutable
     // character display history preserved. Import ownership moves to the importer

@@ -458,6 +458,36 @@ export class SessionsService {
   // ----- attendance (issue #121): which characters played a session -----
 
   /**
+   * Bulk attendance read for campaign export (issue #436): one query for every
+   * session in the campaign instead of N per-session getAttendance calls.
+   */
+  async listAttendanceForCampaign(
+    campaignId: number,
+  ): Promise<Array<{ sessionId: number; characterId: number; characterName: string }>> {
+    const sessionRows = await this.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
+    if (sessionRows.length === 0) return [];
+
+    const sessionIds = sessionRows.map((r) => r.id);
+    const rows = await this.db
+      .select({ attendee: sessionAttendees, currentCharacterName: characters.name })
+      .from(sessionAttendees)
+      .innerJoin(sessions, eq(sessionAttendees.sessionId, sessions.id))
+      .leftJoin(
+        characters,
+        and(eq(sessionAttendees.characterId, characters.id), eq(characters.campaignId, campaignId)),
+      )
+      .where(inArray(sessionAttendees.sessionId, sessionIds));
+    return rows.map(({ attendee, currentCharacterName }) => ({
+      sessionId: attendee.sessionId,
+      characterId: attendee.characterId,
+      characterName: currentCharacterName ?? attendee.characterName,
+    }));
+  }
+
+  /**
    * The roster that played a session. Any member may read.
    *
    * `character_name` is the write-time snapshot kept for compatibility and as a

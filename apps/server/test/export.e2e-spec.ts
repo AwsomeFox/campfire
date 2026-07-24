@@ -24,6 +24,9 @@ describe('export (e2e, real cookie sessions)', () => {
   let portraitAttachmentId: number;
   let portraitCharacterId: number;
   let playerCharacterId: number;
+  let sessionId: number;
+  let factionId: number;
+  let encounterId: number;
 
   beforeAll(async () => {
     ctx = await createTestAppNoDevAuth();
@@ -50,6 +53,7 @@ describe('export (e2e, real cookie sessions)', () => {
     const recap = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/sessions`)
       .send({ number: 1, recap: 'The party arrived.', dmSecret: 'next week: the betrayal' });
+    sessionId = recap.body.id;
     await dmAgent
       .post(`/api/v1/sessions/${recap.body.id}/shares`)
       .send({ label: 'Must not leave the server', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() });
@@ -64,10 +68,25 @@ describe('export (e2e, real cookie sessions)', () => {
 
     // Round-2 finding #6: export must include encounters (with combatants).
     const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Ambush at the Bridge' });
-    const encounterId = encRes.body.id;
+    encounterId = encRes.body.id;
     await dmAgent
       .post(`/api/v1/encounters/${encounterId}/combatants`)
       .send({ kind: 'monster', name: 'Bridge Troll', hpMax: 40 });
+
+    // Issue #436: faction + encounter note anchors, scheduled session + RSVP, attendance.
+    const factionRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/factions`).send({ name: 'River Guild' });
+    factionId = factionRes.body.id;
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Guild owes a favor', visibility: 'dm_shared', entityType: 'faction', entityId: factionId });
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Troll weakness: fire', visibility: 'dm_shared', entityType: 'encounter', entityId: encounterId });
+
+    const scheduleRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: '2099-06-15T18:00:00.000Z', title: 'Bridge rematch', notes: 'Bring torches' });
+    await playerAgent.put(`/api/v1/schedule/${scheduleRes.body.id}/rsvp`).send({ status: 'yes', note: 'Ready' });
 
     // Issue #87: attachments (map + portrait) must be embedded in the export, and
     // their references (campaign.mapAttachmentId, character.portraitUrl) must resolve.
@@ -87,6 +106,9 @@ describe('export (e2e, real cookie sessions)', () => {
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .send({ name: 'Portrait Hero', portraitUrl: `/api/v1/attachments/${portraitAttachmentId}/file` });
     portraitCharacterId = portraitCharRes.body.id;
+    await dmAgent
+      .put(`/api/v1/sessions/${sessionId}/attendance`)
+      .send({ characterIds: [portraitCharacterId] });
 
     const playerCharacter = await playerAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)
@@ -187,6 +209,24 @@ describe('export (e2e, real cookie sessions)', () => {
     // character.portraitUrl ends in the manifest entry's fileRoute.
     const hero = res.body.characters.find((c: { id: number }) => c.id === portraitCharacterId);
     expect(hero.portraitUrl.endsWith(portraitEntry.fileRoute)).toBe(true);
+
+    // Issue #436: schedules, attendance, and note anchors on faction + encounter.
+    expect(Array.isArray(res.body.scheduledSessions)).toBe(true);
+    expect(res.body.scheduledSessions.length).toBe(1);
+    expect(res.body.scheduledSessions[0].title).toBe('Bridge rematch');
+    expect(res.body.scheduledSessions[0].rsvps.some((r: { status: string; note: string }) => r.status === 'yes' && r.note === 'Ready')).toBe(true);
+    expect(Array.isArray(res.body.sessionAttendance)).toBe(true);
+    expect(res.body.sessionAttendance).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          characterId: portraitCharacterId,
+          characterName: 'Portrait Hero',
+        }),
+      ]),
+    );
+    expect(res.body.notes.some((n: { body: string; entityType: string; entityId: number }) => n.body === 'Guild owes a favor' && n.entityType === 'faction' && n.entityId === factionId)).toBe(true);
+    expect(res.body.notes.some((n: { body: string; entityType: string; entityId: number }) => n.body === 'Troll weakness: fire' && n.entityType === 'encounter' && n.entityId === encounterId)).toBe(true);
   });
 
   it('403 for player (non-dm)', async () => {
