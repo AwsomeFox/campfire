@@ -15,6 +15,7 @@ import {
   scheduleEndsAtMs,
 } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
@@ -831,7 +832,11 @@ function FeedCard({
   const feed = feedPanel.data;
   const feedError = feedPanel.error;
 
-  const absoluteUrl = feed?.url ? `${window.location.origin}${feed.url}` : null;
+  // The server emits the ICS feed URL unprefixed (it has no knowledge of the
+  // reverse-proxy subpath — the proxy strips the prefix before forwarding, so
+  // routing is root-relative inside Nest). The browser, though, must hit the
+  // prefixed URL. joinPublicBase re-adds the deployment prefix (issue #798).
+  const absoluteUrl = feed?.url ? `${window.location.origin}${joinPublicBase(feed.url)}` : null;
 
   async function rotate() {
     setBusy(true);

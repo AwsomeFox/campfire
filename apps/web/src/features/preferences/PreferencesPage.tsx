@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import type { TextSize, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import {
   localeController,
   isSupportedLanguage,
@@ -55,7 +56,7 @@ export default function PreferencesPage() {
   const { t } = useTranslation();
   const { me, refresh } = useAuth();
   const user = me?.user ?? null;
-  const mcpUrl = `${window.location.origin}/mcp`;
+  const mcpUrl = `${window.location.origin}${joinPublicBase('/mcp')}`;
   const [lang, setLang] = useState<LocalePreference>(() => localeController.preference);
 
   useEffect(() => localeController.subscribe(() => setLang(localeController.preference)), []);

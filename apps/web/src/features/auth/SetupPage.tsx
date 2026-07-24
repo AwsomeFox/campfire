@@ -7,6 +7,7 @@
 import { useLayoutEffect, useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { useAuth } from '../../app/auth';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { PasswordInput } from '../../components/PasswordInput';
@@ -120,7 +121,7 @@ export function SetupPage() {
         // bootstrap form on screen that can never succeed again.
         const statusOk = await refreshAuthStatus();
         if (!statusOk) {
-          window.location.replace('/login');
+          window.location.replace(joinPublicBase('/login'));
           return;
         }
         navigate('/login', { replace: true });
@@ -148,7 +149,7 @@ export function SetupPage() {
         // refreshAuthStatus no longer throws (#801); a failed status leaves the
         // stale setupRequired=true answer in place. Hard-reload so both
         // providers rebuild from the server instead of bouncing back to /setup.
-        window.location.replace('/');
+        window.location.replace(joinPublicBase('/'));
         return;
       }
       navigate('/', { replace: true });
@@ -156,7 +157,7 @@ export function SetupPage() {
       // The account already exists and the one-time setup endpoint is now
       // closed. If either cache refresh fails, never strand the new admin on a
       // form that can no longer succeed: rebuild both providers from the server.
-      window.location.replace('/');
+      window.location.replace(joinPublicBase('/'));
     }
   }
 

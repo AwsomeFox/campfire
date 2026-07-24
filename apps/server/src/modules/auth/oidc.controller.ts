@@ -13,7 +13,7 @@ import {
   OIDC_TEST_FLOW_COOKIE_NAME,
 } from './auth.constants';
 import { sessionCookieOptions } from './session-cookie';
-import { resolveCookieSecure } from '../../common/security-config';
+import { resolveCookieSecure, joinPublicBase } from '../../common/security-config';
 import { safeInternalPath } from './safe-internal-path';
 import {
   classifyOidcRecovery,
@@ -25,7 +25,11 @@ function flowCookieOptions() {
   return {
     httpOnly: true,
     sameSite: 'lax' as const,
-    path: '/api/v1/auth/oidc',
+    // Issue #798: the browser sees the OIDC flow URLs under the public base
+    // (e.g. /campfire/api/v1/auth/oidc/callback), so the flow cookie must be
+    // scoped to that prefixed path or it would never be sent back. Under a
+    // root deployment joinPublicBase() returns the path unchanged.
+    path: joinPublicBase('/api/v1/auth/oidc'),
     maxAge: OIDC_FLOW_COOKIE_MAX_AGE_MS,
     secure: resolveCookieSecure(),
   };
@@ -77,8 +81,8 @@ export class OidcController {
   @ApiResponse({ status: 302, description: 'Redirect to the IdP authorization endpoint, or same-origin `/login/sso-error` with only a safe category and support reference when the flow cannot start.' })
   async login(@Req() req: Request, @Res() res: Response): Promise<void> {
     // Discard any abandoned flow before creating a fresh state/verifier pair.
-    res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
-    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+    res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
+    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
     try {
       if (!(await this.oidc.isEnabled())) {
         throw new OidcRecoveryFailure('provider_unavailable', 'oidc_not_configured');
@@ -124,24 +128,24 @@ export class OidcController {
       callbackState &&
       (await this.oidc.matchesActiveTestLogin(testFlowToken, callbackState))
     ) {
-      res.clearCookie(OIDC_TEST_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+      res.clearCookie(OIDC_TEST_FLOW_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
       // Also clear any abandoned real login flow so it cannot race the diagnostic.
-      res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
-      res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+      res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
+      res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
       try {
         await this.oidc.completeTestLogin(testFlowToken, req.query as Record<string, unknown>);
       } catch {
         // completeTestLogin already persists structured failures; a throw here
         // is unexpected — still send the admin back to the diagnostics UI.
       }
-      res.redirect(302, '/admin/auth?oidcDiag=1');
+      res.redirect(302, joinPublicBase('/admin/auth?oidcDiag=1'));
       return;
     }
 
     const flowCookie = req.cookies?.[OIDC_FLOW_COOKIE_NAME] as string | undefined;
     const returnCookie = req.cookies?.[OIDC_RETURN_COOKIE_NAME] as string | undefined;
-    res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
-    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: '/api/v1/auth/oidc' });
+    res.clearCookie(OIDC_FLOW_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
+    res.clearCookie(OIDC_RETURN_COOKIE_NAME, { path: joinPublicBase('/api/v1/auth/oidc') });
     try {
       if (!(await this.oidc.isEnabled())) {
         throw new OidcRecoveryFailure('provider_unavailable', 'oidc_not_configured');
@@ -166,8 +170,7 @@ export class OidcController {
       const { token } = await this.auth.issueSessionFor(user.id);
 
       res.cookie(SESSION_COOKIE_NAME, token, sessionCookieOptions());
-      // Re-validate the cookie value at use time — never trust a client-set return path.
-      res.redirect(safeInternalPath(returnCookie) ?? '/');
+      res.redirect(joinPublicBase(safeInternalPath(returnCookie) ?? '/'));
     } catch (error) {
       this.redirectToRecovery(res, 'callback', error);
     }
@@ -186,6 +189,8 @@ export class OidcController {
       category: classification.category,
       ref: reference,
     });
-    res.redirect(302, `/login/sso-error?${query.toString()}`);
+    // Issue #798: same-origin recovery page lives under the public base —
+    // redirect to the prefixed path so the SPA router can handle it.
+    res.redirect(302, joinPublicBase(`/login/sso-error?${query.toString()}`));
   }
 }

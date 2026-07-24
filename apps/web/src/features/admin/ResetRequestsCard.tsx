@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { PasswordResetRequest, PasswordResetApproval } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { Card, Btn } from '../../components/ui';
 import { CopyControl } from '../../components/CopyControl';
 
@@ -78,7 +79,7 @@ export function ResetRequestsCard() {
           {requests.map((r) => {
             const approval = codes[r.id];
             const resetUrl = approval
-              ? `${window.location.origin}/reset-password?code=${approval.code}`
+              ? `${window.location.origin}${joinPublicBase('/reset-password')}?code=${approval.code}`
               : null;
             const resetLinkId = `reset-link-${r.id}`;
             return (

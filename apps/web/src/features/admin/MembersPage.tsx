@@ -15,6 +15,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
 import { useCampaign, useCampaigns } from '../../app/CampaignContext';
@@ -191,7 +192,7 @@ export default function MembersPage() {
 }
 
 function inviteLinkFor(code: string): string {
-  return `${window.location.origin}/join/${code}`;
+  return `${window.location.origin}${joinPublicBase('/join/')}${code}`;
 }
 
 /** "expires in 6d" / "expires in 3h" — invites are short-lived, no need for finer grain. */
