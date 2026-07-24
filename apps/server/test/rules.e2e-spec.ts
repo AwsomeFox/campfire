@@ -1363,10 +1363,12 @@ describe('rules / rule packs — sibling importer install wiring (e2e, fake upst
     }
   });
 
-  it('source: cepheus -> Cepheus importer -> cepheus-srd pack of section entries; no url needed', async () => {
+  it('source: cepheus -> Cepheus importer -> cepheus-srd pack of section entries (installable without a url, but accepts a url override pointed at the fake mdBook server here)', async () => {
     const { startFakeCepheus } = await import('./fake-cepheus');
     const fake = await startFakeCepheus();
     try {
+      // Cepheus is installableWithoutUrl by default (its live default base URL is wired); the
+      // test passes a `url` override so the whole install runs offline against the fake server.
       const job = await installSource({ source: 'cepheus', url: fake.baseUrl });
       expect(job.status).toBe('completed');
       expect(job.pack.slug).toBe('cepheus-srd');

@@ -97,9 +97,11 @@ import {
 import {
   ALL_CEPHEUS_SECTIONS,
   CEPHEUS_DEFAULT_BASE_URL,
+  CEPHEUS_FETCH_CONCURRENCY,
   CEPHEUS_LICENSE,
   CEPHEUS_PACK_NAME,
   CEPHEUS_PACK_SLUG,
+  createFetchLimiter,
   fetchCepheusSection,
   type CepheusSection,
 } from './cepheus-importer';
@@ -1147,9 +1149,13 @@ export class RulesService {
     // per-statblock filter (a foreign `sections` value was already rejected 400 before enqueue).
     const sections: CepheusSection[] = ALL_CEPHEUS_SECTIONS;
 
+    // One limiter shared across all books bounds the TOTAL in-flight raw-CDN fetches for the
+    // whole install (books are fetched concurrently, so without a shared cap the burst would be
+    // books × chapters). Chapters still complete in a deterministic order within each book.
+    const fetchLimiter = createFetchLimiter(CEPHEUS_FETCH_CONCURRENCY);
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
-        const r = await fetchCepheusSection(baseUrl, s);
+        const r = await fetchCepheusSection(baseUrl, s, undefined, fetchLimiter);
         onSectionDone?.(s, r.entries.length);
         return r;
       }),

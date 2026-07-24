@@ -12,6 +12,9 @@ import {
   ALL_CEPHEUS_SECTIONS,
 } from '../../src/modules/rules/cepheus-importer';
 import { startFakeCepheus, type FakeCepheus } from '../fake-cepheus';
+import { createServer, type Server as HttpServer } from 'node:http';
+
+const BODY_CAP = 50_000; // RuleEntry.body schema cap (packages/schema); no entry may exceed it.
 
 /**
  * Unit tests for the Cepheus Engine SRD importer (issue #406), the Markdown analogue of the
@@ -73,7 +76,7 @@ describe('cepheus-importer — chapter → section entries', () => {
     const big =
       '# Equipment\n\nIntro paragraph.\n\n' +
       ['Armor', 'Weapons', 'Computers'].map((h) => `## ${h}\n\n${'word '.repeat(12000)}`).join('\n\n');
-    const entries = buildChapterEntries(chapter, big);
+    const entries = buildChapterEntries(chapter, big, { warn() {}, info() {} });
 
     // A lead entry (chapter intro) plus one per ## heading.
     expect(entries.length).toBeGreaterThan(1);
@@ -96,6 +99,76 @@ describe('cepheus-importer — chapter → section entries', () => {
   it('returns no entries for an empty chapter body', () => {
     const chapter = { path: 'book1/skills.md', title: 'Skills', section: 'book1' as const };
     expect(buildChapterEntries(chapter, '   \n\n')).toEqual([]);
+  });
+
+  it('splits an oversized `##` block (bigger than the cap on its own) at `###`/paragraphs WITHOUT losing content', () => {
+    const chapter = { path: 'book1/character-creation.md', title: 'Character Creation', section: 'book1' as const };
+    // One `##` block whose body alone far exceeds the cap, built from many `###` sub-sections,
+    // each carrying a UNIQUE token so we can prove every piece survives the split.
+    const subCount = 24;
+    const subs = Array.from(
+      { length: subCount },
+      (_, i) => `### Sub Section ${i}\n\nTOKEN_${i} ${'careerword '.repeat(1800)}`,
+    );
+    const md = `# Character Creation\n\nChapter intro paragraph.\n\n## Careers\n\n${subs.join('\n\n')}`;
+    expect(md.length).toBeGreaterThan(BODY_CAP); // precondition: the `##` block is genuinely oversized
+
+    const entries = buildChapterEntries(chapter, md, { warn() {}, info() {} });
+
+    // Fans out into multiple entries, none over the body cap.
+    expect(entries.length).toBeGreaterThan(1);
+    for (const e of entries) {
+      expect(e.body.length).toBeLessThanOrEqual(BODY_CAP);
+      expect(e.type).toBe('section');
+      expect(e.license).toBe(CEPHEUS_LICENSE);
+    }
+    // Slugs are unique and derive from the chapter + heading, with numbered continuations.
+    const slugs = entries.map((e) => e.slug);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    expect(slugs).toContain('book1-character-creation'); // chapter-intro lead entry
+    expect(slugs.some((s) => s.startsWith('book1-character-creation--careers'))).toBe(true);
+    // NO content lost: every unique token appears in exactly one entry body.
+    const combined = entries.map((e) => e.body).join('\n');
+    for (let i = 0; i < subCount; i++) {
+      expect(combined).toContain(`TOKEN_${i}`);
+    }
+  });
+
+  it('splits an oversized chapter with NO `##` headings at paragraph boundaries WITHOUT losing content', () => {
+    const chapter = { path: 'book3/worlds.md', title: 'Worlds', section: 'book3' as const };
+    const paraCount = 40;
+    const paras = Array.from({ length: paraCount }, (_, i) => `NOHEAD_${i} ${'worldword '.repeat(1600)}`);
+    const md = `# Worlds\n\n${paras.join('\n\n')}`; // a single `#` title, then many big paragraphs, no `##`
+    expect(md.length).toBeGreaterThan(BODY_CAP);
+
+    const entries = buildChapterEntries(chapter, md, { warn() {}, info() {} });
+
+    expect(entries.length).toBeGreaterThan(1);
+    for (const e of entries) expect(e.body.length).toBeLessThanOrEqual(BODY_CAP);
+    // First entry keeps the chapter slug; overflow spills into `…-part-N` continuations.
+    expect(entries[0].slug).toBe('book3-worlds');
+    expect(entries.slice(1).every((e) => e.slug.startsWith('book3-worlds-part-'))).toBe(true);
+    const combined = entries.map((e) => e.body).join('\n');
+    for (let i = 0; i < paraCount; i++) {
+      expect(combined).toContain(`NOHEAD_${i}`);
+    }
+  });
+
+  it('hard-chunks a single indivisible over-cap unit on char boundaries (lossless) and warns', () => {
+    const chapter = { path: 'book1/equipment.md', title: 'Equipment', section: 'book1' as const };
+    const solid = 'X'.repeat(BODY_CAP + 10_000); // one unbroken run — no heading/paragraph boundary
+    const md = `# Equipment\n\n${solid}`;
+    const warns: string[] = [];
+
+    const entries = buildChapterEntries(chapter, md, { warn: (m) => warns.push(m), info() {} });
+
+    expect(entries.length).toBeGreaterThan(1);
+    for (const e of entries) expect(e.body.length).toBeLessThanOrEqual(BODY_CAP);
+    // A warning was logged for the indivisible unit, but the text was preserved, not truncated:
+    // every 'X' survives across the continuation entries.
+    expect(warns.some((w) => /hard-chunk/i.test(w))).toBe(true);
+    const totalX = entries.reduce((sum, e) => sum + (e.body.match(/X/g)?.length ?? 0), 0);
+    expect(totalX).toBe(solid.length);
   });
 
   it('the chapter manifest mirrors the mdBook books and excludes interactive tool pages', () => {
@@ -143,5 +216,52 @@ describe('cepheus-importer — section fetch/parse (fake mdBook server)', () => 
     for (const e of entries) expect(e.body.length).toBeLessThanOrEqual(50_000);
     // The non-oversized chapters remain a single entry each.
     expect(entries.some((e) => e.slug === 'book1-skills')).toBe(true);
+  });
+});
+
+describe('cepheus-importer — HTTP 429 retry (Retry-After honored)', () => {
+  let server: HttpServer;
+  let baseUrl: string;
+  const hits = new Map<string, number>();
+
+  beforeAll(async () => {
+    // Serve HTTP 429 (with Retry-After: 0) on the FIRST hit of each path, then a real chapter
+    // on the retry — proving 429 is treated as transient and the backoff respects Retry-After.
+    server = createServer((req, res) => {
+      const key = req.url ?? '';
+      const n = (hits.get(key) ?? 0) + 1;
+      hits.set(key, n);
+      if (n === 1) {
+        res.statusCode = 429;
+        res.setHeader('Retry-After', '0'); // retry immediately
+        res.end('rate limited');
+        return;
+      }
+      res.setHeader('content-type', 'text/markdown');
+      res.end(`# Chapter ${key}\n\nOpen game content body for ${key}.`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('failed to bind fake 429 server');
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+  });
+
+  it('retries a 429 and completes the book once the rate limit clears', async () => {
+    const warns: string[] = [];
+    const { entries, skippedCount } = await fetchCepheusSection(baseUrl, 'reference', {
+      warn: (m) => warns.push(m),
+      info() {},
+    });
+
+    // reference = about + introduction + legal → all 3 fetched (each after one 429 retry).
+    expect(entries.map((e) => e.slug).sort()).toEqual(['about', 'introduction', 'legal'].sort());
+    expect(skippedCount).toBe(0);
+    // Each chapter was hit twice (429, then 200) and the retry logged a 429 reason.
+    for (const [, count] of hits) expect(count).toBe(2);
+    expect(warns.some((w) => /HTTP 429/.test(w))).toBe(true);
   });
 });
