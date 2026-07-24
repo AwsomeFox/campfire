@@ -376,8 +376,9 @@ describe('membership + effective roles (e2e, real cookie sessions)', () => {
 
       const aliceNotes = await aliceAgent.get('/api/v1/notifications');
       expect(aliceNotes.status).toBe(200);
+      const aliceItems = Array.isArray(aliceNotes.body) ? aliceNotes.body : (aliceNotes.body.items ?? []);
       expect(
-        aliceNotes.body.some(
+        aliceItems.some(
           (n: { type: string; entityId: number | null }) =>
             n.type === 'character_reassigned' && n.entityId === ariaId,
         ),

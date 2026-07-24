@@ -191,8 +191,29 @@ export class CampaignsController {
     return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }
 
+  @Get(':id/clone/preview')
+  @ApiOperation({
+    summary: 'Preview what a campaign clone would copy',
+    description:
+      "dm role required. Returns a versioned manifest (issue #435) with per-module entity counts, what will be included or excluded for the requested mode ('full' default, or 'template'), and warnings (private notes omitted, missing attachment bytes, template play-state strip).",
+  })
+  @ApiResponse({ status: 200, description: 'Clone preview manifest.' })
+  @ApiResponse({ status: 403, description: 'Not a dm of the source campaign.' })
+  async clonePreview(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('mode') mode: string | undefined,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireRole(user, id, 'dm');
+    const parsed = mode == null ? 'full' : mode;
+    if (parsed !== 'full' && parsed !== 'template') {
+      throw new BadRequestException(`Unknown clone mode: ${parsed}`);
+    }
+    return this.campaigns.clonePreview(id, parsed, user);
+  }
+
   @Post(':id/clone')
-  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, characters, sessions, notes and encounters with all cross-references remapped; cloned encounters reset to 'preparing' with round and turnIndex reset to 0, currentCombatantId and endedAt cleared, and combatants restored to full HP (hpCurrent = hpMax) with conditions and initiative cleared (issue #548); encounter hidden is preserved (issue #262). mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored) and strips play state. Members, attachments, tokens, audit history and proposals are never copied." })
+  @ApiOperation({ summary: 'Clone a campaign (duplicate or start from template)', description: "dm role required on the source campaign; the caller becomes the clone's dm. mode='full' (default) duplicates quests, npcs, locations, factions, characters, sessions, notes, encounters, storylines, timeline, session-zero charter, inventory/treasury, prose revisions, and map/portrait attachments with all cross-references remapped; cloned encounters reset to 'preparing' with round and turnIndex reset to 0, currentCombatantId and endedAt cleared, and combatants restored to full HP (hpCurrent = hpMax) with conditions and initiative cleared (issue #548); encounter hidden is preserved (issue #262). mode='template' copies prep only (quests reset to available, objectives unchecked, locations unexplored, storylines/timeline/session-zero retained) and strips play state. Members, audit history, proposals, and participant support preferences are never copied. Use GET /campaigns/:id/clone/preview for a manifest of counts and warnings (issue #435)." })
   @ApiResponse({ status: 201, description: 'The newly created campaign.' })
   @ApiResponse({ status: 403, description: 'Not a dm of the source campaign.' })
   async clone(@Param('id', ParseIntPipe) id: number, @Body() body: CampaignCloneDto, @CurrentUser() user: RequestUser) {

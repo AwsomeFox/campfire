@@ -236,6 +236,14 @@ export const router = createBrowserRouter(
             element: lazyPage(() => import('../features/admin/TokensPage')),
           },
           {
+            path: '/notifications',
+            element: lazyPage(() => import('../features/notifications/NotificationsPage')),
+          },
+          {
+            path: '/c/:campaignId/notifications',
+            element: lazyPage(() => import('../features/notifications/NotificationsPage')),
+          },
+          {
             path: '/preferences',
             element: lazyPage(() => import('../features/preferences/PreferencesPage')),
           },

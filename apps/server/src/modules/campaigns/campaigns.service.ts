@@ -8,12 +8,14 @@ import type { z } from 'zod';
 import {
   CAMPAIGN_PURGE_CONFIRM_TOKEN,
   CampaignClone,
+  CampaignCloneMode,
   CampaignCreate,
   CampaignImport,
   CampaignPurge,
   CampaignUpdate,
+  CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
 } from '@campfire/schema';
-import type { Campaign, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -77,12 +79,14 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
-import { copyAttachmentBytes, remapAttachmentFileUrl } from '../attachments/attachment-copy';
+import { copyAttachmentBytes, remapAttachmentFileUrl, attachmentUploadPath } from '../attachments/attachment-copy';
 import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
 import { uploadsRoot } from '../attachments/uploads-path';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
+import { APP_VERSION } from '../../common/build-metadata';
+import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -614,44 +618,32 @@ export class CampaignsService {
   }
 
   /**
-   * Clone a campaign into a brand-new one owned by the caller (issue #17 —
-   * campaign templates / cloning). Two modes:
-   *
-   *  - 'full' (default): faithful duplicate — quests (+objectives), npcs,
-   *    locations, factions, characters, sessions, notes, encounters
-   *    (+combatants), and discussion threads, with every intra-campaign
-   *    reference (quest parent/giver, npc location/faction, combatant
-   *    character, note/comment entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids. Encounter runtime combat state
-   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
-   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
-   *  - 'template': prep only — quests/npcs/locations/factions copied but play
-   *    state stripped: quest statuses reset to 'available', objectives
-   *    unchecked, locations back to 'unexplored', and sessions/notes/
-   *    characters/encounters/comments/session-count/current-location not
-   *    copied at all.
-   *
-   * Never copied in either mode: members (only the caller becomes dm — cloning
-   * must not silently grant other users access to the new campaign), api
-   * tokens, audit history, proposals, and campaign/encounter map attachments
-   * (mapAttachmentId stays null). Character portrait attachments ARE copied
-   * and remapped (#524) so cloned sheets keep working when the source campaign
-   * is later deleted. Other members' private notes are also excluded — same
-   * visibility rule as GET /notes and the export module: the cloning dm cannot
-   * read them, so the clone must not carry them either.
-   *
-   * All inserts run in one synchronous db.transaction() (better-sqlite3 —
-   * same pattern as remove()/RulesService.installOpen5eSrd), so a mid-clone
-   * failure never leaves a half-copied campaign behind.
+   * Preview what a clone would copy (issue #435) — versioned manifest with per-
+   * module counts, inclusions/exclusions for the requested mode, and warnings
+   * (private notes omitted, dangling attachment bytes, template play-state strip).
    */
-  async clone(id: number, input: CampaignCloneInput, user: RequestUser): Promise<Campaign> {
+  async clonePreview(id: number, mode: CampaignCloneMode, user: RequestUser): Promise<CampaignClonePreview> {
+    const template = mode === 'template';
     const source = await this.getOrThrow(id);
-    const template = input.mode === 'template';
-    const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
 
-    // Read everything up front — only the writes need the transaction. Trashed
-    // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
-    const [locationRows, factionRows, npcRows, questRows, characterRows, sessionRows, noteRows, encounterRows, commentRows] = await Promise.all([
+    const [
+      locationRows,
+      factionRows,
+      npcRows,
+      questRows,
+      characterRows,
+      sessionRows,
+      noteRows,
+      encounterRows,
+      commentRows,
+      storyArcRows,
+      timelineEventRows,
+      [timelineCalendarRow],
+      [sessionZeroRow],
+      inventoryRows,
+      [treasuryRow],
+      revisionRows,
+    ] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
       this.db.select().from(factions).where(eq(factions.campaignId, id)),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
@@ -661,7 +653,277 @@ export class CampaignsService {
       this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
       this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
       this.db.select().from(comments).where(eq(comments.campaignId, id)),
+      this.db.select().from(storyArcs).where(eq(storyArcs.campaignId, id)),
+      this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
+      this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
+      this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
+      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
+      this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
     ]);
+
+    const arcIds = storyArcRows.map((r) => r.id);
+    const beatRows = arcIds.length
+      ? await this.db.select().from(storyBeats).where(inArray(storyBeats.arcId, arcIds))
+      : [];
+    const beatIds = beatRows.map((r) => r.id);
+    const branchRows = beatIds.length
+      ? await this.db.select().from(storyBranches).where(inArray(storyBranches.beatId, beatIds))
+      : [];
+
+    const questIds = questRows.map((r) => r.id);
+    const objectiveCount = questIds.length
+      ? (await this.db.select({ n: count() }).from(questObjectives).where(inArray(questObjectives.questId, questIds)))[0]?.n ?? 0
+      : 0;
+
+    const encounterIds = encounterRows.map((r) => r.id);
+    const combatantCount = encounterIds.length
+      ? (await this.db.select({ n: count() }).from(combatants).where(inArray(combatants.encounterId, encounterIds)))[0]?.n ?? 0
+      : 0;
+
+    const privateNoteCount = noteRows.filter(
+      (n) => n.visibility === 'private' && n.authorUserId !== user.id,
+    ).length;
+    const cloneableNoteCount = noteRows.length - privateNoteCount;
+
+    const attachmentIds = new Set<number>();
+    if (source.mapAttachmentId != null) attachmentIds.add(source.mapAttachmentId);
+    if (!template) {
+      for (const c of characterRows) {
+        const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
+        if (aid != null) attachmentIds.add(aid);
+      }
+      for (const c of commentRows) {
+        const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
+        if (aid != null) attachmentIds.add(aid);
+      }
+      for (const e of encounterRows) {
+        if (e.mapAttachmentId != null) attachmentIds.add(e.mapAttachmentId);
+      }
+    }
+    const attachmentRows = attachmentIds.size
+      ? await this.db
+          .select()
+          .from(attachments)
+          .where(
+            and(
+              eq(attachments.campaignId, id),
+              inArray(attachments.id, [...attachmentIds]),
+              eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+            ),
+          )
+      : [];
+
+    const treasuryHasCoins = treasuryRow
+      ? treasuryRow.cp > 0 || treasuryRow.sp > 0 || treasuryRow.ep > 0 || treasuryRow.gp > 0 || treasuryRow.pp > 0
+      : false;
+    const sessionZeroPresent = sessionZeroRow
+      ? (() => {
+          try {
+            const lines = JSON.parse(sessionZeroRow.lines) as unknown;
+            const veils = JSON.parse(sessionZeroRow.veils) as unknown;
+            const tools = JSON.parse(sessionZeroRow.safetyTools) as unknown;
+            return (
+              (Array.isArray(lines) && lines.length > 0) ||
+              (Array.isArray(veils) && veils.length > 0) ||
+              (Array.isArray(tools) && tools.length > 0) ||
+              Boolean(sessionZeroRow.houseRules) ||
+              Boolean(sessionZeroRow.toneAndExpectations)
+            );
+          } catch {
+            return Boolean(sessionZeroRow.houseRules) || Boolean(sessionZeroRow.toneAndExpectations);
+          }
+        })()
+      : false;
+    const timelineCalendarPresent = timelineCalendarRow
+      ? Boolean(timelineCalendarRow.currentDate) || Boolean(timelineCalendarRow.note)
+      : false;
+
+    const mapAttachmentRows = attachmentRows.filter((a) => a.kind === 'map');
+    const portraitAttachmentRows = attachmentRows.filter((a) => a.kind === 'portrait');
+
+    const counts: Record<string, number> = {
+      locations: locationRows.length,
+      factions: factionRows.length,
+      npcs: npcRows.length,
+      quests: questRows.length,
+      questObjectives: objectiveCount,
+      storyArcs: storyArcRows.length,
+      storyBeats: beatRows.length,
+      storyBranches: branchRows.length,
+      timelineEvents: timelineEventRows.length,
+      timelineCalendar: timelineCalendarPresent ? 1 : 0,
+      sessionZero: sessionZeroPresent ? 1 : 0,
+      characters: characterRows.length,
+      sessions: sessionRows.length,
+      notes: noteRows.length,
+      notesCloneable: cloneableNoteCount,
+      comments: commentRows.length,
+      encounters: encounterRows.length,
+      combatants: combatantCount,
+      inventory: inventoryRows.length,
+      treasury: treasuryHasCoins ? 1 : 0,
+      revisions: revisionRows.length,
+      attachments: attachmentRows.length,
+      mapAttachments: mapAttachmentRows.length,
+    };
+
+    const prepInclusion = (count: number, note?: string) => ({
+      included: true,
+      count,
+      ...(note ? { note } : {}),
+    });
+    const playInclusion = (count: number, note?: string) =>
+      template ? { included: false, count: 0, note: note ?? 'Omitted in template mode (play state reset).' } : { included: true, count, ...(note ? { note } : {}) };
+
+    const inclusions: CampaignClonePreview['inclusions'] = {
+      locations: prepInclusion(locationRows.length, template ? 'Statuses reset to unexplored.' : undefined),
+      factions: prepInclusion(factionRows.length),
+      npcs: prepInclusion(npcRows.length),
+      quests: prepInclusion(questRows.length, template ? 'Statuses reset to available; objectives unchecked.' : undefined),
+      questObjectives: prepInclusion(objectiveCount, template ? 'Copied unchecked.' : undefined),
+      storyArcs: prepInclusion(storyArcRows.length),
+      storyBeats: prepInclusion(
+        beatRows.length,
+        template ? 'Play links (session/quest/encounter) are not carried over.' : undefined,
+      ),
+      storyBranches: prepInclusion(branchRows.length),
+      timelineEvents: prepInclusion(timelineEventRows.length),
+      timelineCalendar: prepInclusion(timelineCalendarPresent ? 1 : 0),
+      sessionZero: prepInclusion(sessionZeroPresent ? 1 : 0),
+      characters: playInclusion(characterRows.length),
+      sessions: playInclusion(sessionRows.length),
+      notes: playInclusion(cloneableNoteCount, 'Other members\' private notes are never copied.'),
+      comments: playInclusion(commentRows.length),
+      encounters: playInclusion(encounterRows.length, 'Combat state resets to preparing with full HP.'),
+      combatants: playInclusion(combatantCount),
+      inventory: playInclusion(inventoryRows.length),
+      treasury: playInclusion(treasuryHasCoins ? 1 : 0),
+      revisions: playInclusion(revisionRows.length, 'Prose history for copied entities only; dangling links drop.'),
+      mapAttachments: {
+        included: mapAttachmentRows.length > 0,
+        count: mapAttachmentRows.length,
+        note: 'Campaign and encounter map bytes are copied when present on disk.',
+      },
+      portraitAttachments: playInclusion(
+        portraitAttachmentRows.length,
+        'Portrait bytes copy in full mode only.',
+      ),
+    };
+
+    const exclusions: CampaignClonePreview['exclusions'] = [
+      { module: 'members', reason: 'Only the cloning DM becomes a member of the new campaign.' },
+      { module: 'audit', reason: 'Audit history is install-specific and never duplicated.' },
+      { module: 'proposals', reason: 'Pending proposals are not copied.' },
+      { module: 'apiTokens', reason: 'API tokens are not copied.' },
+      { module: 'participantSupportPreferences', reason: 'Participant-owned support preferences are never cloned (issue #877).' },
+      { module: 'sessionShares', reason: 'Session capability links and RSVP scheduling are not copied.' },
+      { module: 'diceRolls', reason: 'Shared dice log entries are not copied.' },
+    ];
+
+    const warnings: CampaignClonePreview['warnings'] = [];
+    if (privateNoteCount > 0) {
+      warnings.push({
+        code: 'private_notes_excluded',
+        message: `${privateNoteCount} private note(s) from other members will not be copied (invisible to the cloning DM).`,
+      });
+    }
+    for (const a of attachmentRows) {
+      const onDisk = fs.existsSync(attachmentUploadPath(id, a.id, a.mime));
+      if (!onDisk) {
+        warnings.push({
+          code: 'attachment_bytes_missing',
+          message: `Attachment #${a.id} (${a.kind}: ${a.filename}) is missing on disk — the clone will keep the row but GET may 404 until re-uploaded.`,
+        });
+      }
+    }
+    if (template) {
+      warnings.push({
+        code: 'template_play_state_reset',
+        message: 'Template mode copies world prep only and strips sessions, characters, encounters, inventory, treasury, notes, comments, and revisions.',
+      });
+    }
+
+    return {
+      app: 'campfire',
+      kind: 'campaign-clone-preview',
+      formatVersion: CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
+      appVersion: APP_VERSION,
+      schemaVersion: CURRENT_SCHEMA_REVISION,
+      campaignId: id,
+      mode,
+      createdAt: nowIso(),
+      counts,
+      inclusions,
+      exclusions,
+      warnings,
+    };
+  }
+
+  /**
+   * Clone a campaign into a brand-new one owned by the caller (issue #17 —
+   * campaign templates / cloning). Two modes:
+   *
+   *  - 'full' (default): faithful duplicate — quests (+objectives), npcs,
+   *    locations, factions, characters, sessions, notes, encounters
+   *    (+combatants), and discussion threads, with every intra-campaign
+   *    reference remapped to the cloned rows' new ids. Encounter runtime
+   *    combat state resets to a fresh 'preparing' fight (issue #548).
+   *  - 'template': prep only — play state stripped; storylines/timeline/
+   *    session-zero charter still copy.
+   *
+   * See clonePreview() for the versioned manifest of counts and warnings (#435).
+   */
+  async clone(id: number, input: CampaignCloneInput, user: RequestUser): Promise<Campaign> {
+    const source = await this.getOrThrow(id);
+    const template = input.mode === 'template';
+    const name = (input.name ?? `${source.name} (copy)`).slice(0, 120);
+
+    // Read everything up front — only the writes need the transaction. Trashed
+    // (soft-deleted, #116) entities are excluded so a clone never resurrects them.
+    const [
+      locationRows,
+      factionRows,
+      npcRows,
+      questRows,
+      characterRows,
+      sessionRows,
+      noteRows,
+      encounterRows,
+      commentRows,
+      storyArcRows,
+      timelineEventRows,
+      [timelineCalendarRow],
+      [sessionZeroRow],
+      inventoryRows,
+      [treasuryRow],
+      revisionRows,
+    ] = await Promise.all([
+      this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
+      this.db.select().from(factions).where(eq(factions.campaignId, id)),
+      this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
+      this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
+      this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
+      this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
+      this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
+      this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+      this.db.select().from(comments).where(eq(comments.campaignId, id)),
+      this.db.select().from(storyArcs).where(eq(storyArcs.campaignId, id)),
+      this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
+      this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
+      this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
+      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
+      this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
+    ]);
+    const arcIds = storyArcRows.map((r) => r.id);
+    const beatRows = arcIds.length
+      ? await this.db.select().from(storyBeats).where(inArray(storyBeats.arcId, arcIds))
+      : [];
+    const beatIds = beatRows.map((r) => r.id);
+    const branchRows = beatIds.length
+      ? await this.db.select().from(storyBranches).where(inArray(storyBranches.beatId, beatIds))
+      : [];
     const questIds = questRows.map((r) => r.id);
     const objectiveRows = questIds.length
       ? await this.db.select().from(questObjectives).where(inArray(questObjectives.questId, questIds))
@@ -677,36 +939,41 @@ export class CampaignsService {
       this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
     ]);
 
-    // Issue #524: portrait attachments referenced by characters (and comment avatar
-    // snapshots of those same ids) are copied into the clone — collect their rows now
-    // so the tx can insert remapped attachment rows before character inserts.
-    const portraitSrcIds = new Set<number>();
+    // Issue #524/#435: portrait and map attachments referenced by characters,
+    // comment avatar snapshots, the campaign map, and encounter maps are copied
+    // into the clone — collect their rows now so the tx can insert remapped
+    // attachment rows before entity inserts that point at them.
+    const attachmentSrcIds = new Set<number>();
+    if (source.mapAttachmentId != null) attachmentSrcIds.add(source.mapAttachmentId);
     if (!template) {
       for (const c of characterRows) {
         const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
-        if (aid != null) portraitSrcIds.add(aid);
+        if (aid != null) attachmentSrcIds.add(aid);
       }
       for (const c of commentRows) {
         const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
-        if (aid != null) portraitSrcIds.add(aid);
+        if (aid != null) attachmentSrcIds.add(aid);
+      }
+      for (const e of encounterRows) {
+        if (e.mapAttachmentId != null) attachmentSrcIds.add(e.mapAttachmentId);
       }
     }
-    const portraitAttRows = portraitSrcIds.size
+    const attachmentAttRows = attachmentSrcIds.size
       ? await this.db
           .select()
           .from(attachments)
           .where(
             and(
               eq(attachments.campaignId, id),
-              inArray(attachments.id, [...portraitSrcIds]),
+              inArray(attachments.id, [...attachmentSrcIds]),
               eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
             ),
           )
       : [];
 
     const ts = nowIso();
-    /** Portrait byte copies deferred until after the DB tx commits (#524 / #725 shape). */
-    const pendingPortraitCopies: {
+    /** Attachment byte copies deferred until after the DB tx commits (#524 / #725 shape). */
+    const pendingAttachmentCopies: {
       srcCampaignId: number;
       dstCampaignId: number;
       srcAttachmentId: number;
@@ -729,7 +996,7 @@ export class CampaignsService {
           publicInvitesEnabled: source.publicInvitesEnabled,
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
-          mapAttachmentId: null, // attachments (on-disk files) are not cloned
+          mapAttachmentId: null, // remapped below once attachment rows exist (#435)
           createdAt: ts,
           updatedAt: ts,
         })
@@ -854,53 +1121,62 @@ export class CampaignsService {
           .run();
       }
 
-      if (!template) {
-        // Issue #524: recreate portrait attachment rows under the clone and remap
-        // every character.portraitUrl / comment avatar that pointed at them. Bytes
-        // are published after the tx commits (pendingPortraitCopies) via the shared
-        // copyAttachmentBytes helper — same remap shape as importCampaign.
-        const attMap = new Map<number, number>();
-        for (const a of portraitAttRows) {
-          const [row] = tx
-            .insert(attachments)
-            .values({
-              campaignId: cloneId,
-              uploaderUserId: a.uploaderUserId,
-              kind: a.kind,
-              filename: a.filename,
-              mime: a.mime,
-              size: a.size,
-              hidden: a.hidden,
-              state: ATTACHMENT_STATE_COMMITTED,
-              createdAt: ts,
-              updatedAt: ts,
-            })
-            .returning()
-            .all();
-          attMap.set(a.id, row.id);
-          pendingPortraitCopies.push({
-            srcCampaignId: id,
-            dstCampaignId: cloneId,
-            srcAttachmentId: a.id,
-            dstAttachmentId: row.id,
+      // Issue #524/#435: recreate attachment rows (portraits + maps) under the clone.
+      // Bytes publish after the tx commits via copyAttachmentBytes.
+      const attMap = new Map<number, number>();
+      for (const a of attachmentAttRows) {
+        const [row] = tx
+          .insert(attachments)
+          .values({
+            campaignId: cloneId,
+            uploaderUserId: a.uploaderUserId,
+            kind: a.kind,
+            filename: a.filename,
             mime: a.mime,
-          });
-        }
-        /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
-        const remapClonedPortraitUrl = (url: string | null): string | null => {
-          if (url == null) return null;
-          const remapped = remapAttachmentFileUrl(url, attMap);
-          if (remapped != null) return remapped;
-          // Dangling local attachment ref (bytes not copied) — drop rather than orphan.
-          if (historicalAvatarAttachmentId(url) != null) return null;
-          return url;
-        };
+            size: a.size,
+            hidden: a.hidden,
+            state: ATTACHMENT_STATE_COMMITTED,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        attMap.set(a.id, row.id);
+        pendingAttachmentCopies.push({
+          srcCampaignId: id,
+          dstCampaignId: cloneId,
+          srcAttachmentId: a.id,
+          dstAttachmentId: row.id,
+          mime: a.mime,
+        });
+      }
+      /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
+      const remapClonedPortraitUrl = (url: string | null): string | null => {
+        if (url == null) return null;
+        const remapped = remapAttachmentFileUrl(url, attMap);
+        if (remapped != null) return remapped;
+        if (historicalAvatarAttachmentId(url) != null) return null;
+        return url;
+      };
+      const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
+        const safe = safeHistoricalAvatarUrl(url);
+        if (!safe) return null;
+        const remapped = remapAttachmentFileUrl(safe, attMap);
+        if (remapped != null) return remapped;
+        if (historicalAvatarAttachmentId(safe) != null) return null;
+        return safe;
+      };
 
-        const charMap = new Map<number, number>();
+      const charMap = new Map<number, number>();
+      const sessionMap = new Map<number, number>();
+      const encounterMap = new Map<number, number>();
+      const noteMap = new Map<number, number>();
+      const commentMap = new Map<number, number>();
+      const timelineEventMap = new Map<number, number>();
+      const beatMap = new Map<number, number>();
+
+      if (!template) {
         for (const c of characterRows) {
-          // Spread every persisted column (#524) so NOT NULL fields with defaults
-          // (xp, status, skills, actions, spellSlots, dmSecret, hpTemp, death_*)
-          // cannot silently reset — only id/campaignId/timestamps/deletedAt are replaced.
           const {
             id: _srcId,
             campaignId: _srcCampaignId,
@@ -924,7 +1200,6 @@ export class CampaignsService {
           charMap.set(c.id, row.id);
         }
 
-        const sessionMap = new Map<number, number>();
         for (const s of sessionRows) {
           const [row] = tx
             .insert(sessions)
@@ -934,6 +1209,7 @@ export class CampaignsService {
               title: s.title,
               playedAt: s.playedAt,
               recap: s.recap,
+              dmSecret: s.dmSecret,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -942,63 +1218,66 @@ export class CampaignsService {
           sessionMap.set(s.id, row.id);
         }
 
-        const entityMaps: Record<string, Map<number, number>> = {
-          quest: questMap,
-          npc: npcMap,
-          faction: factionMap,
-          location: locMap,
-          character: charMap,
-          session: sessionMap,
-        };
-        for (const n of noteRows) {
-          // Other members' private notes are invisible to the cloning dm — exclude
-          // them (same rule as NotesService.listForCampaign / the export module).
-          if (n.visibility === 'private' && n.authorUserId !== user.id) continue;
-          let entityType = n.entityType;
-          let entityId: number | null = null;
-          if (n.entityType === 'campaign') {
-            entityId = cloneId;
-          } else if (n.entityType != null && n.entityId != null) {
-            entityId = entityMaps[n.entityType]?.get(n.entityId) ?? null;
-            if (entityId == null) entityType = null; // dangling link in the source — drop it, don't point at a stale id
-          }
-          tx.insert(notes)
+        for (const item of inventoryRows) {
+          const ownerType = item.ownerType === 'character' ? 'character' : 'party';
+          const mappedChar = item.characterId != null ? (charMap.get(item.characterId) ?? null) : null;
+          const resolvedOwner = ownerType === 'character' && mappedChar != null ? 'character' : 'party';
+          tx.insert(inventoryItems)
             .values({
               campaignId: cloneId,
-              authorUserId: n.authorUserId,
-              authorName: n.authorName,
-              kind: n.kind,
-              visibility: n.visibility,
-              entityType,
-              entityId,
-              body: n.body,
-              resolved: n.resolved,
-              resolvedNote: n.resolvedNote,
+              ownerType: resolvedOwner,
+              characterId: resolvedOwner === 'character' ? mappedChar : null,
+              name: item.name,
+              qty: item.qty,
+              notes: item.notes,
+              iconSlug: item.iconSlug,
               createdAt: ts,
               updatedAt: ts,
             })
             .run();
         }
 
-        const encounterMap = new Map<number, number>();
+        if (treasuryRow) {
+          const treasuryCoins = {
+            cp: treasuryRow.cp,
+            sp: treasuryRow.sp,
+            ep: treasuryRow.ep,
+            gp: treasuryRow.gp,
+            pp: treasuryRow.pp,
+          };
+          if (treasuryCoins.cp || treasuryCoins.sp || treasuryCoins.ep || treasuryCoins.gp || treasuryCoins.pp) {
+            tx.insert(partyTreasury).values({ campaignId: cloneId, ...treasuryCoins, updatedAt: ts }).run();
+          }
+        }
+
         for (const e of encounterRows) {
           const [row] = tx
             .insert(encounters)
             .values({
               campaignId: cloneId,
               name: e.name,
-              // Fresh fights only — never copy live/ended combat runtime (issue #548).
               status: 'preparing',
               round: 0,
               turnIndex: 0,
               currentCombatantId: null,
-              // Where/why/when links (issue #126/#864): remap through the clone maps.
-              // A dangling/cross-campaign source link drops to null rather than copying
-              // a stale foreign id into the new campaign.
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
-              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              mapAttachmentId:
+                e.mapAttachmentId != null ? (attMap.get(e.mapAttachmentId) ?? null) : null,
+              gridSize: e.gridSize,
+              gridScale: e.gridScale,
+              gridUnit: e.gridUnit,
+              gridSnap: e.gridSnap,
+              gridType: e.gridType,
+              aoe: e.aoe,
+              gridOffsetX: e.gridOffsetX,
+              gridOffsetY: e.gridOffsetY,
+              gridCellHeight: e.gridCellHeight,
+              gridRotation: e.gridRotation,
+              gridOpacity: e.gridOpacity,
+              fog: e.fog,
+              hidden: e.hidden,
               endedAt: null,
               createdAt: ts,
               updatedAt: ts,
@@ -1021,22 +1300,54 @@ export class CampaignsService {
                 hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
                 conditions: '[]',
-                ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
+                ruleEntryId: c.ruleEntryId,
                 sortOrder: c.sortOrder,
-                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
                 sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
         }
 
-        // Full clones retain discussion history; templates deliberately strip it
-        // with the rest of play state. Anchor ids, reply parents, and live speaking
-        // character ids are remapped. Account/character display names stay as posted.
-        // Issue #524: attachment-backed avatars remap through attMap when that
-        // portrait was copied; otherwise drop the local ref. Safe remote HTTPS
-        // portraits are preserved. Campaign mapAttachmentId stays null (maps still
-        // not cloned). Every EntityType that clone materializes gets a remap map.
+        const entityMaps: Record<string, Map<number, number>> = {
+          quest: questMap,
+          npc: npcMap,
+          faction: factionMap,
+          location: locMap,
+          character: charMap,
+          session: sessionMap,
+          encounter: encounterMap,
+        };
+        for (const n of noteRows) {
+          if (n.visibility === 'private' && n.authorUserId !== user.id) continue;
+          let entityType = n.entityType;
+          let entityId: number | null = null;
+          if (n.entityType === 'campaign') {
+            entityId = cloneId;
+          } else if (n.entityType != null && n.entityId != null) {
+            entityId = entityMaps[n.entityType]?.get(n.entityId) ?? null;
+            if (entityId == null) entityType = null;
+          }
+          const [noteRow] = tx
+            .insert(notes)
+            .values({
+              campaignId: cloneId,
+              authorUserId: n.authorUserId,
+              authorName: n.authorName,
+              kind: n.kind,
+              visibility: n.visibility,
+              entityType,
+              entityId,
+              body: n.body,
+              resolved: n.resolved,
+              resolvedNote: n.resolvedNote,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          noteMap.set(n.id, noteRow.id);
+        }
+
         const commentEntityMaps: Record<string, Map<number, number>> = {
           quest: questMap,
           npc: npcMap,
@@ -1046,17 +1357,6 @@ export class CampaignsService {
           session: sessionMap,
           encounter: encounterMap,
         };
-        const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
-          const safe = safeHistoricalAvatarUrl(url);
-          if (!safe) return null;
-          const remapped = remapAttachmentFileUrl(safe, attMap);
-          if (remapped != null) return remapped;
-          if (historicalAvatarAttachmentId(safe) != null) return null;
-          return safe;
-        };
-        // Two linear passes (roots, then one-level replies) — comments nest at most
-        // one deep, so quadratic "scan until progressed" is unnecessary.
-        const commentMap = new Map<number, number>();
         const insertClonedComment = (c: (typeof commentRows)[number], parentId: number | null) => {
           const entityId = c.entityType === 'campaign'
             ? cloneId
@@ -1092,8 +1392,7 @@ export class CampaignsService {
         }
         for (const c of commentRows) {
           if (c.parentId == null) continue;
-          const parentId = commentMap.get(c.parentId) ?? null;
-          insertClonedComment(c, parentId);
+          insertClonedComment(c, commentMap.get(c.parentId) ?? null);
         }
 
         if (source.currentLocationId != null) {
@@ -1101,6 +1400,189 @@ export class CampaignsService {
           if (currentLocationId != null) {
             tx.update(campaigns).set({ currentLocationId }).where(eq(campaigns.id, cloneId)).run();
           }
+        }
+      }
+
+      // Storylines (issue #27/#435): arcs → beats → branches in both modes.
+      const arcMap = new Map<number, number>();
+      for (const arc of storyArcRows) {
+        const [row] = tx
+          .insert(storyArcs)
+          .values({
+            campaignId: cloneId,
+            title: arc.title,
+            summary: arc.summary,
+            status: arc.status,
+            sortOrder: arc.sortOrder,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        arcMap.set(arc.id, row.id);
+      }
+      const beatsByArc = new Map<number, typeof beatRows>();
+      for (const beat of beatRows) {
+        const list = beatsByArc.get(beat.arcId);
+        if (list) list.push(beat);
+        else beatsByArc.set(beat.arcId, [beat]);
+      }
+      for (const arc of storyArcRows) {
+        const newArcId = arcMap.get(arc.id);
+        if (newArcId == null) continue;
+        for (const beat of beatsByArc.get(arc.id) ?? []) {
+          const [row] = tx
+            .insert(storyBeats)
+            .values({
+              campaignId: cloneId,
+              arcId: newArcId,
+              title: beat.title,
+              body: beat.body,
+              status: beat.status,
+              sortOrder: beat.sortOrder,
+              sessionId:
+                !template && beat.sessionId != null ? (sessionMap.get(beat.sessionId) ?? null) : null,
+              questId: !template && beat.questId != null ? (questMap.get(beat.questId) ?? null) : null,
+              encounterId:
+                !template && beat.encounterId != null ? (encounterMap.get(beat.encounterId) ?? null) : null,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          beatMap.set(beat.id, row.id);
+        }
+      }
+      for (const branch of branchRows) {
+        const fromBeatId = beatMap.get(branch.beatId);
+        if (fromBeatId == null) continue;
+        tx.insert(storyBranches)
+          .values({
+            beatId: fromBeatId,
+            toBeatId: branch.toBeatId != null ? (beatMap.get(branch.toBeatId) ?? null) : null,
+            label: branch.label,
+            sortOrder: branch.sortOrder,
+          })
+          .run();
+      }
+
+      for (const ev of timelineEventRows) {
+        const [row] = tx
+          .insert(timelineEvents)
+          .values({
+            campaignId: cloneId,
+            title: ev.title,
+            inWorldDate: ev.inWorldDate,
+            body: ev.body,
+            era: ev.era,
+            sortIndex: ev.sortIndex,
+            dmSecret: ev.dmSecret,
+            hidden: ev.hidden,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        timelineEventMap.set(ev.id, row.id);
+      }
+
+      if (timelineCalendarRow) {
+        const calendarDate = timelineCalendarRow.currentDate;
+        const calendarNote = timelineCalendarRow.note;
+        if (calendarDate || calendarNote) {
+          tx.insert(timelineCalendars)
+            .values({
+              campaignId: cloneId,
+              currentDate: calendarDate,
+              note: calendarNote,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
+      }
+
+      if (sessionZeroRow) {
+        tx.insert(sessionZero)
+          .values({
+            campaignId: cloneId,
+            lines: sessionZeroRow.lines,
+            veils: sessionZeroRow.veils,
+            safetyTools: sessionZeroRow.safetyTools,
+            houseRules: sessionZeroRow.houseRules,
+            toneAndExpectations: sessionZeroRow.toneAndExpectations,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .run();
+      }
+
+      if (!template) {
+        const revisionEntityMaps: Record<string, Map<number, number>> = {
+          session: sessionMap,
+          quest: questMap,
+          npc: npcMap,
+          location: locMap,
+          faction: factionMap,
+          note: noteMap,
+          timeline_event: timelineEventMap,
+          story_beat: beatMap,
+          comment: commentMap,
+        };
+        const campaignScopedRevision = new Map<number, number>([[id, cloneId]]);
+        const revisionIdMap = new Map<number, number>();
+        const revisionSourceKinds = new Set(['human', 'ai', 'tool']);
+        const revisionSource = (value: string): 'human' | 'ai' | 'tool' =>
+          revisionSourceKinds.has(value) ? (value as 'human' | 'ai' | 'tool') : 'human';
+        const resolveRevisionEntityId = (entityType: string, sourceEntityId: number): number | undefined => {
+          if (entityType === 'timeline_calendar' || entityType === 'session_zero') {
+            return campaignScopedRevision.get(sourceEntityId);
+          }
+          return revisionEntityMaps[entityType]?.get(sourceEntityId);
+        };
+        for (const rev of revisionRows) {
+          const entityId = resolveRevisionEntityId(rev.entityType, rev.entityId);
+          if (entityId == null) continue;
+          const [row] = tx
+            .insert(entityRevisions)
+            .values({
+              campaignId: cloneId,
+              entityType: rev.entityType,
+              entityId,
+              snapshot: rev.snapshot,
+              authorUserId: rev.authorUserId,
+              authorName: rev.authorName,
+              authorSource: revisionSource(rev.authorSource),
+              authorSourceDetail: rev.authorSourceDetail,
+              createdAt: rev.createdAt,
+              replacedByUserId: rev.replacedByUserId,
+              replacedByName: rev.replacedByName,
+              replacedBySource: revisionSource(rev.replacedBySource),
+              replacedBySourceDetail: rev.replacedBySourceDetail,
+              replacedAt: rev.replacedAt,
+              restoredFromRevisionId: null,
+              authorshipKnown: rev.authorshipKnown,
+            })
+            .returning()
+            .all();
+          revisionIdMap.set(rev.id, row.id);
+        }
+        for (const rev of revisionRows) {
+          const newRevisionId = revisionIdMap.get(rev.id);
+          if (newRevisionId == null || rev.restoredFromRevisionId == null) continue;
+          const remapped = revisionIdMap.get(rev.restoredFromRevisionId);
+          if (remapped == null) continue;
+          tx.update(entityRevisions)
+            .set({ restoredFromRevisionId: remapped })
+            .where(eq(entityRevisions.id, newRevisionId))
+            .run();
+        }
+      }
+
+      if (source.mapAttachmentId != null) {
+        const mapAttachmentId = attMap.get(source.mapAttachmentId);
+        if (mapAttachmentId != null) {
+          tx.update(campaigns).set({ mapAttachmentId }).where(eq(campaigns.id, cloneId)).run();
         }
       }
 
@@ -1135,15 +1617,13 @@ export class CampaignsService {
       return cloneId;
     });
 
-    // Issue #524: publish portrait bytes after the entity rows committed, so a
-    // rolled-back clone never leaves half-written uploads. Missing source files
-    // degrade to the #84 row-without-file shape (GET 404s that one portrait).
-    for (const p of pendingPortraitCopies) {
+    // Issue #524/#435: publish attachment bytes after the entity rows committed.
+    for (const p of pendingAttachmentCopies) {
       try {
         copyAttachmentBytes(p);
       } catch (err) {
         importLog.warn(
-          `clone portrait copy failed src=${p.srcCampaignId}/${p.srcAttachmentId} -> ${p.dstCampaignId}/${p.dstAttachmentId}: ${
+          `clone attachment copy failed src=${p.srcCampaignId}/${p.srcAttachmentId} -> ${p.dstCampaignId}/${p.dstAttachmentId}: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -1248,6 +1728,9 @@ export class CampaignsService {
     const treasurySrc = asRec(doc.treasury);
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
+    // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
+    const scheduledSessionRows = asArr(doc.scheduledSessions);
+    const sessionAttendanceRows = asArr(doc.sessionAttendance);
 
     // Issue #1078: AI seat + scribe config from the export document.
     const aiSeatSrc = asRec(doc.aiSeat);
@@ -1397,6 +1880,39 @@ export class CampaignsService {
         // staged file, so the publish step renames the right staging entry to it.
         const pw = pendingWrites.find((p) => p.srcId === a.srcId);
         if (pw) pw.finalRelPath = path.join(String(cid), `${row.id}.${ext}`);
+      }
+
+      // Scheduled sessions (issue #436): planned game nights with RSVPs. Inserted
+      // early — no cross-refs to other entity types. RSVP userIds are install-local,
+      // so reassign to the importer while preserving userName/status/note provenance.
+      for (const s of scheduledSessionRows) {
+        const [row] = tx
+          .insert(scheduledSessions)
+          .values({
+            campaignId: cid,
+            scheduledAt: typeof s.scheduledAt === 'string' ? s.scheduledAt : ts,
+            durationMinutes: intOr(s.durationMinutes, 240),
+            title: str(s.title),
+            location: str(s.location),
+            notes: str(s.notes),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        for (const rsvp of asArr(s.rsvps)) {
+          tx.insert(sessionRsvps)
+            .values({
+              scheduledSessionId: row.id,
+              userId: importerId,
+              userName: str(rsvp.userName),
+              status: str(rsvp.status, 'maybe'),
+              note: str(rsvp.note),
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .run();
+        }
       }
 
       // Factions (issue #266) before npcs — an npc's factionId points at one, so the
@@ -1625,44 +2141,22 @@ export class CampaignsService {
         if (srcId != null) sessionMap.set(srcId, row.id);
       }
 
-      const entityMaps: Record<string, Map<number, number>> = {
-        quest: questMap,
-        npc: npcMap,
-        location: locMap,
-        character: charMap,
-        session: sessionMap,
-      };
-      const noteMap = new Map<number, number>();
-      for (const n of noteRows) {
-        let entityType = typeof n.entityType === 'string' ? n.entityType : null;
-        let entityId: number | null = null;
-        const entitySrc = intOrNull(n.entityId);
-        if (entityType === 'campaign') {
-          entityId = cid;
-        } else if (entityType != null && entitySrc != null) {
-          entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
-          if (entityId == null) entityType = null; // dangling link in the source — drop it
-        }
-        const noteSrcId = intOrNull(n.id);
-        const [noteRow] = tx
-          .insert(notes)
+      // Session attendance (issue #436): which characters played each session.
+      // Requires sessionMap + charMap; dangling refs are dropped.
+      for (const a of sessionAttendanceRows) {
+        const sessionSrc = intOrNull(a.sessionId);
+        const charSrc = intOrNull(a.characterId);
+        const sessionId = sessionSrc != null ? sessionMap.get(sessionSrc) : undefined;
+        const characterId = charSrc != null ? charMap.get(charSrc) : undefined;
+        if (sessionId == null || characterId == null) continue;
+        tx.insert(sessionAttendees)
           .values({
-            campaignId: cid,
-            authorUserId: importerId, // author ids are per-install — the importer owns imported notes
-            authorName: str(n.authorName),
-            kind: str(n.kind, 'note'),
-            visibility: str(n.visibility, 'private'),
-            entityType,
-            entityId,
-            body: str(n.body),
-            resolved: boolOf(n.resolved),
-            resolvedNote: str(n.resolvedNote),
+            sessionId,
+            characterId,
+            characterName: str(a.characterName),
             createdAt: ts,
-            updatedAt: ts,
           })
-          .returning()
-          .all();
-        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
+          .run();
       }
 
       const encounterMap = new Map<number, number>();
@@ -1753,6 +2247,54 @@ export class CampaignsService {
             tx.update(encounters).set({ currentCombatantId }).where(eq(encounters.id, row.id)).run();
           }
         }
+      }
+
+      // Notes (issue #436): inserted AFTER encounters so faction + encounter anchors
+      // remap correctly. Whisper recipientUserId is install-local — cleared on import.
+      const entityMaps: Record<string, Map<number, number>> = {
+        quest: questMap,
+        npc: npcMap,
+        faction: factionMap,
+        location: locMap,
+        character: charMap,
+        session: sessionMap,
+        encounter: encounterMap,
+      };
+      const noteMap = new Map<number, number>();
+      for (const n of noteRows) {
+        let entityType = typeof n.entityType === 'string' ? n.entityType : null;
+        let entityId: number | null = null;
+        const entitySrc = intOrNull(n.entityId);
+        if (entityType === 'campaign') {
+          entityId = cid;
+        } else if (entityType != null && entitySrc != null) {
+          entityId = entityMaps[entityType]?.get(entitySrc) ?? null;
+          if (entityId == null) entityType = null; // dangling link in the source — drop it
+        }
+        const noteSrcId = intOrNull(n.id);
+        const rawVisibility = str(n.visibility, 'private');
+        // Whisper targets are install-local — downgrade to dm_shared so the row stays valid.
+        const visibility = rawVisibility === 'whisper' ? 'dm_shared' : rawVisibility;
+        const [noteRow] = tx
+          .insert(notes)
+          .values({
+            campaignId: cid,
+            authorUserId: importerId, // author ids are per-install — the importer owns imported notes
+            authorName: str(n.authorName),
+            kind: str(n.kind, 'note'),
+            visibility,
+            recipientUserId: null,
+            entityType,
+            entityId,
+            body: str(n.body),
+            resolved: boolOf(n.resolved),
+            resolvedNote: str(n.resolvedNote),
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        if (noteSrcId != null) noteMap.set(noteSrcId, noteRow.id);
       }
 
       // Discussion history (issue #787): rebuild anchors and one-level parent

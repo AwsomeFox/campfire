@@ -496,6 +496,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
      * exact seed, keeping a generated map attributable + reproducible.
      */
     auditDetail?: string,
+    auditAction: string = 'attachment.generate',
   ): Promise<Attachment> {
     return this.createAndPublish(
       campaignId,
@@ -503,7 +504,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
       file,
       user,
       role,
-      'attachment.generate',
+      auditAction,
       auditDetail,
     );
   }
@@ -530,7 +531,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     file: { filename: string; mime: string; bytes: Buffer },
     user: RequestUser,
     role: Role,
-    auditAction: 'attachment.upload' | 'attachment.generate',
+    auditAction: string = 'attachment.upload',
     auditDetail?: string,
   ): Promise<Attachment> {
     const row = await this.reserveQuota(campaignId, kind, file, user);
@@ -735,7 +736,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     row: typeof attachments.$inferSelect,
     user: RequestUser,
     role: Role,
-    action: 'attachment.upload' | 'attachment.generate',
+    action: string,
     auditDetail?: string,
   ): typeof attachments.$inferSelect {
     return this.db.transaction((tx) => {

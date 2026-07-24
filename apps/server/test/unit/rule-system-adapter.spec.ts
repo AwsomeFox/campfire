@@ -12,6 +12,9 @@ import {
   StarfinderAdapter,
   Archmage13aAdapter,
   OsrAdapter,
+  xpProgressForCharacter,
+  xpProgressionFromThresholds,
+  xpProgressionSupported,
 } from '@campfire/schema';
 
 /**
@@ -237,5 +240,73 @@ describe('RuleSystemAdapter — maxLevel per system (issue #535)', () => {
     const blockedAtNoCap = 20 >= OpenLegendAdapter.maxLevel; // 20 >= Infinity → false, allowed
     expect(blockedAtFiveE).toBe(true);
     expect(blockedAtNoCap).toBe(false);
+  });
+});
+
+/**
+ * XP progression per rule system (issue #441). Thresholds and advisory readiness badges
+ * live on each adapter so PF2e/OSR campaigns don't inherit 5e PHB guidance.
+ */
+describe('RuleSystemAdapter — XP progression per system (issue #441)', () => {
+  it('5e-family adapters opt into XP thresholds with both methods defined', () => {
+    for (const adapter of [Dnd5eAdapter, Pathfinder1eAdapter, Pf2eAdapter, StarfinderAdapter]) {
+      expect(adapter.supportsXpProgression).toBe(true);
+      expect(typeof adapter.xpForLevel).toBe('function');
+      expect(typeof adapter.levelForXp).toBe('function');
+    }
+  });
+
+  it('milestone-first systems do not model XP thresholds', () => {
+    expect(OpenLegendAdapter.supportsXpProgression).not.toBe(true);
+    expect(OsrAdapter.supportsXpProgression).not.toBe(true);
+    expect(Archmage13aAdapter.supportsXpProgression).not.toBe(true);
+  });
+
+  it('5e PHB table: level 5 requires 6,500 XP cumulative', () => {
+    expect(Dnd5eAdapter.xpForLevel!(5)).toBe(6_500);
+    expect(Dnd5eAdapter.levelForXp!(6_499)).toBe(4);
+    expect(Dnd5eAdapter.levelForXp!(6_500)).toBe(5);
+  });
+
+  it('PF2e uses 1,000 XP per level (cumulative)', () => {
+    expect(Pf2eAdapter.xpForLevel!(3)).toBe(2_000);
+    expect(Pf2eAdapter.levelForXp!(2_999)).toBe(3);
+    expect(Pf2eAdapter.levelForXp!(3_000)).toBe(4);
+  });
+
+  it('PF1e uses the 3.5e/PF1 cumulative table (differs from 5e)', () => {
+    expect(Pathfinder1eAdapter.xpForLevel!(5)).toBe(10_000);
+    expect(Dnd5eAdapter.xpForLevel!(5)).toBe(6_500);
+  });
+
+  it('13th Age does not model XP thresholds (milestone-first)', () => {
+    expect(Archmage13aAdapter.maxLevel).toBe(10);
+    expect(xpProgressionSupported(Archmage13aAdapter)).toBe(false);
+  });
+
+  it('xpProgressionFromThresholds rejects an empty threshold table', () => {
+    expect(() => xpProgressionFromThresholds([], 20)).toThrow(/must not be empty/);
+  });
+
+  it('xpProgressionFromThresholds rejects non-monotonic thresholds', () => {
+    expect(() => xpProgressionFromThresholds([0, 1000, 500, 2000], 4)).toThrow(/strictly increasing/);
+  });
+
+  it('xpProgressionFromThresholds rejects threshold tables shorter than maxLevel', () => {
+    expect(() => xpProgressionFromThresholds([0, 1000], 5)).toThrow(/must be >= maxLevel/);
+  });
+
+  it('xpProgressForCharacter computes advisory progress for 5e', () => {
+    const p = xpProgressForCharacter(Dnd5eAdapter, 4, 6_499);
+    expect(p.supported).toBe(true);
+    expect(p.ready).toBe(false);
+    expect(p.pct).toBeCloseTo(99.9, 0);
+  });
+
+  it('xpProgressForCharacter returns supported:false for milestone-first adapters', () => {
+    const p = xpProgressForCharacter(Archmage13aAdapter, 5, 100_000);
+    expect(p.supported).toBe(false);
+    expect(p.ready).toBe(false);
+    expect(p.pct).toBe(0);
   });
 });
