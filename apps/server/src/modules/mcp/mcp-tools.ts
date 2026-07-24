@@ -66,6 +66,7 @@ import {
   CommentUpdate,
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
+  RsvpSetBody,
   RsvpSet,
   GenerateMapParams,
   CoDmDraftTarget,
@@ -3347,7 +3348,7 @@ export class McpToolsService {
       'set_rsvp',
       'Any member: set YOUR OWN availability (RSVP) for a scheduled game night — status yes|no|maybe with an optional ' +
         'note. Upserts your single RSVP; notifies the DM(s).',
-      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...RsvpSet.shape },
+      { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...RsvpSetBody.shape },
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
         const validated = RsvpSet.parse(fields);

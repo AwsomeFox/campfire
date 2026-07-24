@@ -877,7 +877,15 @@ export const SessionRsvp = z.object({
   ...timestamps,
 });
 export type SessionRsvp = z.infer<typeof SessionRsvp>;
-export const RsvpSet = z.object({ status: RsvpStatus, note: z.string().max(500).optional() });
+export const RsvpSetBody = z.object({ status: RsvpStatus.optional(), note: z.string().max(500).optional() });
+export const RSVP_SET_REQUIRED_MESSAGE = 'status or note is required';
+export function hasAnyRsvpSetField(value: z.infer<typeof RsvpSetBody>): boolean {
+  return value.status !== undefined || value.note !== undefined;
+}
+export const RsvpSet = RsvpSetBody
+  .refine(hasAnyRsvpSetField, {
+    message: RSVP_SET_REQUIRED_MESSAGE,
+  });
 export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
