@@ -87,6 +87,7 @@ import {
   RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
   rsvpNoteSaveRequest,
   rsvpNoteTooLongMessage,
+  syncRsvpNoteDraft,
 } from '../../src/features/sessions/schedulePanelA11y';
 
 test.describe('RSVP note editor copy (issue #552)', () => {
@@ -130,13 +131,31 @@ test.describe('rsvpNoteSaveRequest (issue #552)', () => {
   test('sends empty string to explicitly clear an existing note', () => {
     const req = rsvpNoteSaveRequest('yes', 'brought snacks', '');
     expect(req).toEqual({ status: 'yes', note: '' });
-    // A whitespace-only draft is treated the same as empty (both clear).
     expect(rsvpNoteSaveRequest('yes', 'brought snacks', '   ')).toEqual({ status: 'yes', note: '' });
+  });
+
+  test('clears a whitespace-only persisted note when the draft is empty', () => {
+    expect(rsvpNoteSaveRequest('yes', '   ', '')).toEqual({ status: 'yes', note: '' });
+    expect(rsvpNoteSaveRequest('yes', '   ', '   ')).toBeNull();
   });
 
   test('preserves the caller-picked status regardless of prior state', () => {
     // A user changing status AND note in the same edit must send both.
     const req = rsvpNoteSaveRequest('no', 'planning to attend', 'sorry, sick');
     expect(req).toEqual({ status: 'no', note: 'sorry, sick' });
+  });
+});
+
+test.describe('syncRsvpNoteDraft (issue #552)', () => {
+  test('resets the draft when the schedule row changes', () => {
+    expect(syncRsvpNoteDraft('local edit', 'old note', 'new note', true)).toBe('new note');
+  });
+
+  test('adopts a server refresh when the draft still matches the last synced value', () => {
+    expect(syncRsvpNoteDraft('note A', 'note A', 'note B', false)).toBe('note B');
+  });
+
+  test('preserves in-flight typing when the draft diverged from the last synced value', () => {
+    expect(syncRsvpNoteDraft('typing…', 'note A', 'note B', false)).toBe('typing…');
   });
 });

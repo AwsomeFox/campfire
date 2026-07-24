@@ -5,7 +5,7 @@
  * DM: schedule/edit/cancel sessions, enable/rotate/disable the feed.
  * Everyone: see what's coming, one-tap RSVP.
  */
-import { useCallback, useEffect, useId, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
@@ -53,6 +53,7 @@ import {
   rsvpDisplayStatus,
   rsvpNoteSaveRequest,
   rsvpNoteTooLongMessage,
+  syncRsvpNoteDraft,
   rsvpSavedAnnouncement,
   rsvpStatusSummary,
   SCHEDULE_DURATION_HELP,
@@ -318,14 +319,24 @@ function ScheduleItem({
   const [noteDraft, setNoteDraft] = useState<string>(persistedNote);
   const [noteSaving, setNoteSaving] = useState(false);
   const [noteError, setNoteError] = useState<string | null>(null);
+  const lastScheduleIdRef = useRef(schedule.id);
+  const lastSyncedPersistedRef = useRef(persistedNote);
 
   useEffect(() => {
     dispatchRsvp({ type: 'sync', persisted: mine?.status ?? null });
-    // Keep the draft aligned with the server-authoritative note when the
-    // schedule row reloads. Do NOT clobber the operator's in-flight edit; only
-    // sync when nothing local has changed.
-    setNoteDraft((prev) => (prev === persistedNote || prev === '' ? persistedNote : prev));
-  }, [mine?.status, persistedNote]);
+    const scheduleChanged = lastScheduleIdRef.current !== schedule.id;
+    if (scheduleChanged) lastScheduleIdRef.current = schedule.id;
+    setNoteDraft((prev) => {
+      const next = syncRsvpNoteDraft(
+        prev,
+        lastSyncedPersistedRef.current,
+        persistedNote,
+        scheduleChanged,
+      );
+      lastSyncedPersistedRef.current = persistedNote;
+      return next;
+    });
+  }, [mine?.status, persistedNote, schedule.id]);
 
   const displayRsvp = rsvpDisplayStatus(rsvpState);
   const rsvpSaving = rsvpState.phase === 'saving';
@@ -378,6 +389,7 @@ function ScheduleItem({
       // Optimistically reflect the saved value; the onChange refresh below
       // will bring the authoritative row.
       setNoteDraft(request.note);
+      lastSyncedPersistedRef.current = request.note;
       onChange();
     } catch {
       setNoteError(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT);

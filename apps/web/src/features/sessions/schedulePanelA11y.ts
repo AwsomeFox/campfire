@@ -266,6 +266,26 @@ export function rsvpNoteSaveRequest(
   if (!status) return null;
   const trimmed = draft.trim();
   const persistedTrimmed = persistedNote.trim();
-  if (trimmed === persistedTrimmed) return null;
+  if (trimmed === persistedTrimmed) {
+    // Whitespace-only persisted notes trim to '' but still occupy server storage —
+    // an empty draft must clear them.
+    if (trimmed === '' && persistedNote !== '') return { status, note: '' };
+    return null;
+  }
   return { status, note: trimmed };
+}
+
+/**
+ * Reconcile a local RSVP-note draft with a server refresh (#552). When the
+ * schedule row changes, always take the authoritative note. Otherwise preserve
+ * in-flight typing only while the draft still matches what we last synced from.
+ */
+export function syncRsvpNoteDraft(
+  draft: string,
+  lastSyncedPersisted: string,
+  nextPersisted: string,
+  scheduleChanged: boolean,
+): string {
+  if (scheduleChanged) return nextPersisted;
+  return draft.trim() === lastSyncedPersisted.trim() ? nextPersisted : draft;
 }
