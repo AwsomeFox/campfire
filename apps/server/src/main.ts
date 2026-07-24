@@ -102,8 +102,8 @@ export function configureApp(app: INestApplication): void {
   // resource-exhaustion vector on any authenticated (or unauthenticated, e.g. /auth/login)
   // write endpoint. Multipart uploads (attachments) go through multer's own FileInterceptor
   // size limit, not these parsers, so this cap doesn't affect them.
-  app.use(express.json({ limit: '1mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+  app.use(express.json({ limit: '16mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '16mb' }));
   // Issue #682 — stamp a per-request id on EVERY response (not just errors).
   // Accepts an inbound `X-Request-Id` header (validated, length-capped, charset-
   // restricted to defeat log-injection) so a downstream caller's correlation id
