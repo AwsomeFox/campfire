@@ -342,10 +342,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       // Notes: shared note copied with its entity link remapped to the cloned
       // quest; the player's private note (invisible to the dm) is not carried over.
       const clonedNotes = await dmAgent.get(`/api/v1/campaigns/${clone.id}/notes`);
-      const bodies = clonedNotes.body.map((n: { body: string }) => n.body);
+      const bodies = clonedNotes.body.items.map((n: { body: string }) => n.body);
       expect(bodies).toContain('Shared quest intel');
       expect(bodies).not.toContain('My private player diary');
-      const shared = clonedNotes.body.find((n: { body: string }) => n.body === 'Shared quest intel');
+      const shared = clonedNotes.body.items.find((n: { body: string }) => n.body === 'Shared quest intel');
       expect(shared.entityType).toBe('quest');
       expect(shared.entityId).toBe(q.id);
 
@@ -514,7 +514,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const encs = await dmAgent.get(`/api/v1/campaigns/${clone.id}/encounters`);
     expect(encs.body.length).toBe(0);
     const clonedNotes = await dmAgent.get(`/api/v1/campaigns/${clone.id}/notes`);
-    expect(clonedNotes.body.length).toBe(0);
+    expect(clonedNotes.body.total).toBe(0);
   });
 
   it('full clone preserves encounter hidden flag (issue #262)', async () => {

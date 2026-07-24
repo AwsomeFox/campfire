@@ -119,20 +119,24 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
 
     const targetList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(target);
     expect(targetList.status).toBe(200);
-    expect(targetList.body.some((n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'))).toBe(
-      true,
-    );
+    expect(
+      targetList.body.items.some(
+        (n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'),
+      ),
+    ).toBe(true);
 
     const otherList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(other);
     expect(otherList.status).toBe(200);
-    expect(otherList.body.some((n: { body: string }) => n.body.includes('false bottom'))).toBe(false);
+    expect(otherList.body.items.some((n: { body: string }) => n.body.includes('false bottom'))).toBe(false);
 
     // DM oversight: the whisper still enters the campaign record.
     const dmList = await request(h.server).get(`/api/v1/campaigns/${campaignId}/notes`).set(dm);
     expect(dmList.status).toBe(200);
-    expect(dmList.body.some((n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'))).toBe(
-      true,
-    );
+    expect(
+      dmList.body.items.some(
+        (n: { body: string; visibility: string }) => n.visibility === 'whisper' && n.body.includes('false bottom'),
+      ),
+    ).toBe(true);
   });
 
   // ── #1021 ────────────────────────────────────────────────────────────────────

@@ -77,7 +77,9 @@ test.describe('AI table transcript scroll (#590)', () => {
   test('opens at the latest line when the transcript is hydrated from storage', async ({ page }) => {
     const { campaignId } = seed();
     const entries = seedLongTranscript(campaignId);
-    await page.setViewportSize({ width: 800, height: 520 });
+    // Tall enough that the transcript keeps a real overflow box after chrome/combat
+    // banners settle — short 520px viewports crushed clientHeight to ~50px in CI.
+    await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
     await page.addInitScript(
       ({ key, payload }) => {
@@ -106,7 +108,7 @@ test.describe('AI table transcript scroll (#590)', () => {
   test('stops tail follow when reading history and offers jump-to-latest with unread count', async ({ page }) => {
     const { campaignId } = seed();
     const entries = seedLongTranscript(campaignId);
-    await page.setViewportSize({ width: 800, height: 520 });
+    await page.setViewportSize({ width: 800, height: 900 });
     await mockDriverTable(page, campaignId);
     await page.addInitScript(
       ({ key, payload }) => {

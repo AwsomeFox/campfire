@@ -426,8 +426,9 @@ function LayoutContent() {
     let cancelled = false;
     (async () => {
       try {
-        const items = await api.get<unknown[]>(`${API}/campaigns/${campaignId}/inbox`);
-        if (!cancelled) setInboxCount(items.length);
+        // Use total from the bounded page (issue #608) — never fetch every body for a badge.
+        const page = await api.get<{ total: number }>(`${API}/campaigns/${campaignId}/inbox?limit=1`);
+        if (!cancelled) setInboxCount(page.total);
       } catch {
         if (!cancelled) setInboxCount(0);
       }
