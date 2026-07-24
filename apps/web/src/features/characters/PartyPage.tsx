@@ -259,10 +259,10 @@ function CharacterCard({
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <p className="font-bold text-white text-[15px] truncate">{character.name}</p>
+                <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
                 {!isActive && <StatusTag status={character.status} className="shrink-0" />}
               </div>
-              <p className="text-[11.5px] text-slate-500 truncate">
+              <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`} aria-label={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`}>
                 {character.className || 'Unknown class'} · Lv {character.level}
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
@@ -491,7 +491,7 @@ function AwardXpForm({
                             onChange={(event) => selectRecipient(character, event.target.checked)}
                             aria-label={`Select ${character.name} (${STATUS_LABEL[character.status]}) for XP award`}
                           />
-                          <span>{character.name}</span>
+                          <span className="cf-name-reveal inline-block max-w-full" title={character.name} aria-label={character.name}>{character.name}</span>
                         </label>
                       </td>
                       <td className="px-3 py-2">{STATUS_LABEL[character.status]}</td>
