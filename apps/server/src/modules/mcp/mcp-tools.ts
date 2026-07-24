@@ -1777,8 +1777,10 @@ export class McpToolsService {
         'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
         'idempotent rather than duplicating. A genuinely new name creates a new NPC. DM; with propose:true any ' +
         'member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
-        'an optional locationId, and a hidden flag (omit/true = DM-only prep by default, issue #754 — excluded WHOLESALE ' +
-        'from every non-DM read until revealed via hidden=false).',
+        'an optional locationId, and a hidden flag whose omission depends on the branch: on CREATE, omit (or true) ' +
+        'means DM-only prep by default (issue #754) — excluded WHOLESALE from every non-DM read until revealed via ' +
+        'hidden=false; on UPDATE (an existing name or npcId), omitting hidden leaves the NPC’s current visibility ' +
+        'unchanged, since only supplied fields are applied — pass hidden explicitly to change it.',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),

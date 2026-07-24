@@ -247,7 +247,9 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     const server = ctx.app.getHttpServer();
     const conn = await openStream(campaignId, player);
 
-    const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Doomed' });
+    // #754: prep entities are private-by-default; this asserts a player's stream
+    // receives the delete signal, so the encounter must be created player-visible.
+    const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Doomed', hidden: false });
     const encounterId = createRes.body.id;
 
     expect((await request(server).delete(`/api/v1/encounters/${encounterId}`).set(dm)).status).toBe(200);
@@ -277,7 +279,9 @@ describe('campaign events SSE (e2e, dev auth)', () => {
     const encRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .set(dm)
-      .send({ name: 'Sheet sync fight' });
+      // #754: player-visible so the sheet-HP mirror emits encounter.updated onto
+      // the player's stream (hidden encounters are gated off the shared stream).
+      .send({ name: 'Sheet sync fight', hidden: false });
     expect(encRes.status).toBe(201);
     const encounterId = encRes.body.id as number;
     const combatant = (encRes.body.combatants as Array<{ id: number; characterId: number | null }>).find(

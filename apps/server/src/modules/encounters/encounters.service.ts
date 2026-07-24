@@ -1106,6 +1106,11 @@ export class EncountersService {
     if (viewerRole !== undefined && !isVisibleTo({ hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
+    // #754: never fan a hidden encounter's ping — which carries map coordinates —
+    // onto the shared campaign stream, or both its existence and the ping payload
+    // leak to players. The DM's request still succeeds (they can see it); once the
+    // encounter is revealed the ping can be re-issued.
+    if (hidden) return;
     this.events.emit({ type: 'encounter.ping', campaignId, encounterId, ping });
   }
 
