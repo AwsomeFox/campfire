@@ -72,19 +72,24 @@ test.describe('structured action resolver — multi-client', () => {
 
       const mon = await (
         await dm.post(`/api/v1/encounters/${encounterId}/combatants`, {
-          data: { kind: 'monster', name: 'Target Dummy', hpCurrent: 40, hpMax: 40, ac: 10 },
+          data: { kind: 'monster', name: 'Target Dummy', hpMax: 40, ac: 10 },
         })
       ).json();
       monsterId = mon.id;
       monsterHp = mon.hpCurrent;
-      await dm.post(`/api/v1/encounters/${encounterId}/start`);
+      const rollRes = await dm.post(`/api/v1/encounters/${encounterId}/roll-initiative`);
+      expect(rollRes.ok(), `roll-initiative: ${await rollRes.text()}`).toBeTruthy();
+      const startRes = await dm.post(`/api/v1/encounters/${encounterId}/start`);
+      expect(startRes.ok(), `start: ${await startRes.text()}`).toBeTruthy();
 
       await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
       await expect(page.getByText('Resolver PC', { exact: false }).first()).toBeVisible();
+      await expect(page.getByText('Target Dummy', { exact: true })).toBeVisible();
       await expect(page.getByTestId('action-notes')).toHaveText('Three rays of fire.');
 
       await page.getByTestId('action-use-control').click();
       await expect(page.getByTestId('action-use-panel')).toBeVisible();
+      await expect(page.getByTestId('action-use-targets').getByRole('button', { name: 'Target Dummy' })).toBeVisible();
       await page.getByTestId('action-use-targets').getByRole('button', { name: 'Target Dummy' }).click();
       await page.getByTestId('action-use-preview').click();
       await expect(page.getByTestId('action-use-preview-text')).toBeVisible({ timeout: 10_000 });
