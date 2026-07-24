@@ -365,11 +365,7 @@ export class ExportService {
 
     const writeFile = (path: string, content: string | Buffer) => {
       zip.file(path, content);
-      if (typeof content === 'string') {
-        fileChecksums[path] = sha256Hex(content);
-      } else {
-        fileChecksums[path] = sha256Hex(content);
-      }
+      fileChecksums[path] = sha256Hex(content);
     };
 
     const writeRecord = (
