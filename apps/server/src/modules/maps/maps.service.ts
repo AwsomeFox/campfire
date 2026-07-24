@@ -224,9 +224,11 @@ export class MapsService {
     // Provenance in the audit trail (issue #411): name the source this map came from, mirroring
     // the `map:generator-builtin:seed=` detail the first-party generator records — so an
     // imported map is always attributable to its origin (curated source id) from the log alone.
-    const auditDetail = attribution.sourceId
-      ? `map:import:source=${attribution.sourceId}`
-      : undefined;
+    // Derive the audit source id from the CURATED lookup, never the raw client-supplied
+    // `attribution.sourceId` (which is only length-constrained in the schema and could carry
+    // `:`/newlines that break the `map:import:source=<id>` format or pollute the audit log).
+    // Omit the detail entirely for an unknown/unrecognized source.
+    const auditDetail = source ? `map:import:source=${source.id}` : undefined;
 
     const attachment = await this.attachments.createGenerated(
       campaignId,

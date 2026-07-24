@@ -159,6 +159,9 @@ export function ExternalGeneratorCard({
     setPreviewUrl(null);
     setDims(null);
     setProblem(null);
+    // Reset the title too, so the next staged file doesn't inherit the previous map's
+    // title (which would produce a wrong attachment filename/attribution).
+    setTitle('');
   }
 
   const canImport = file != null && problem == null && !busy;
