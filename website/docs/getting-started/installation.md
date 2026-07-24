@@ -112,6 +112,7 @@ the server as a blind SSRF proxy on a shared multi-tenant host.
 | `BACKUP_SCHEDULE_ENABLED` | *(unset)* | Set to `1` to enable periodic on-disk backups. Off by default |
 | `BACKUP_INTERVAL_HOURS` | `24` | Hours between scheduled backups (only when scheduling is enabled) |
 | `BACKUP_DIR` | `$DATA_DIR/backups` | Where scheduled backup archives are written (only when scheduling is enabled) |
+| `BACKUP_KEY_PASSPHRASE` | *(unset)* | When set (≥12 characters), scheduled backups wrap the auto-generated `ai-config.key` in an encrypted envelope inside the archive (#496). Interactive downloads use `POST /api/v1/backup/download` with the same passphrase in the JSON body. |
 
 Local username/password auth works out of the box; OIDC is entirely optional and
 layered on when those variables are set.

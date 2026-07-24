@@ -80,6 +80,21 @@ export class MockAiProvider implements AiProvider {
     this.queue = opts.responses ?? [];
   }
 
+  /**
+   * Drop unconsumed canned responses and rewind the cursor. Call between tests that share
+   * one harness — a tool_error / budget_exhausted stop can leave queued turns that would
+   * otherwise bleed into the next case.
+   */
+  clearResponses(): void {
+    this.queue.length = 0;
+    this.cursor = 0;
+  }
+
+  /** Clear the request log (pairs with {@link clearResponses} for isolation). */
+  clearReceived(): void {
+    this.received.length = 0;
+  }
+
   /** Next canned response (or an echo fallback), advancing the cursor. */
   private next(): MockResponse {
     const r = this.cursor < this.queue.length ? this.queue[this.cursor] : {};

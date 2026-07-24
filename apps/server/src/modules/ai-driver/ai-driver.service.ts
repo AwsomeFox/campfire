@@ -7,6 +7,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
+import { EncountersService } from '../encounters/encounters.service';
 import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
@@ -20,6 +21,11 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  formatCalendarForPrompt,
+  formatListForPrompt,
+  formatLocationEnvironmentFromSummary,
+} from './world-state-prompt';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -48,6 +54,7 @@ export type AiDmStopReason =
   | 'tool_error' // a tool call returned an error (hand-off point for the stuck ladder, #314)
   | 'max_steps' // the tool loop hit its iteration ceiling
   | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
+  | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
   | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
@@ -80,15 +87,20 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
 /**
+ * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
+ * it at compile time but concurrent pause/takeover can change it at runtime. Returns true for
+ * deliberate DM freeze states (`paused` / `human_control`).
+ */
+export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
+  return state === 'paused' || state === 'human_control';
+}
+
+/**
  * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
- * (#1057) to abort early when a concurrent lever fires mid-turn. TS narrows `session.state`
- * inside the loop (where the initial guard proved it was `running`), so a plain comparison is
- * flagged as TS2367; this helper performs a runtime-safe check on the mutable property that
- * cannot be narrowed away, because the lever handlers mutate the object between await points.
+ * (#1057) to abort early with stopReason `'frozen'` when a concurrent lever fires mid-turn.
  */
 function isFrozen(session: AiDmSessionState): boolean {
-  const s: string = session.state;
-  return s === 'paused' || s === 'human_control';
+  return isMidTurnFrozenState(session.state);
 }
 
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
@@ -284,7 +296,10 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
-  // encounter / turn flow
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
+  // encounter / turn flow — includes create_encounter so the AI can originate a fight
+  // during play (#1075).
+  'create_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',
@@ -310,9 +325,13 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_encounter',
   // private information delivery (#1023)
   'whisper_to_player',
-  // economy / loot (#1021) — parity with award_xp
+  // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
+  // (guardDriverLivePlayArgs): adjust_treasury allows positive bounded delta grants only.
   'adjust_treasury',
   'add_inventory_item',
+  // update_inventory_item: grant-only — guardDriverLivePlayArgs enforces positive qtyDelta
+  // only; absolute qty, zero/negative qtyDelta, and owner moves are refused at execution.
+  'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
 ]);
@@ -322,6 +341,37 @@ const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
 /** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
 export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
+/** Per-call treasury grant cap (per denomination) for autonomous live play. */
+export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+
+/** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
+const DRIVER_LOOT_COMBAT_LOG_TOOLS = new Set(['adjust_treasury', 'add_inventory_item', 'update_inventory_item']);
+
+const TREASURY_DENOMS = ['pp', 'gp', 'ep', 'sp', 'cp'] as const;
+
+/** Human-readable combat-log detail for a successful driver loot/treasury grant. */
+export function formatDriverLootCombatLogDetail(toolName: string, args: Record<string, unknown>): string | null {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return 'Granted treasury';
+    const rec = delta as Record<string, unknown>;
+    const parts = TREASURY_DENOMS.filter((d) => typeof rec[d] === 'number' && (rec[d] as number) > 0).map(
+      (d) => `+${rec[d] as number} ${d}`,
+    );
+    return parts.length > 0 ? `Granted treasury (${parts.join(', ')})` : 'Granted treasury';
+  }
+  if (toolName === 'add_inventory_item') {
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'item';
+    const qty = typeof args.qty === 'number' && Number.isFinite(args.qty) ? args.qty : 1;
+    return `Granted item: ${name} ×${qty}`;
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : null;
+    if (qtyDelta != null && qtyDelta > 0) return `Increased party item quantity by +${qtyDelta}`;
+    return 'Updated party inventory';
+  }
+  return null;
+}
 
 /**
  * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
@@ -366,6 +416,9 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
  *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
+ *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
+ *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
@@ -403,6 +456,95 @@ export function guardDriverLivePlayArgs(
           code: 'forbidden_map_link',
           message:
             'The driver may only link mapAttachmentId to a map it generated this session, or pass null to detach.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'adjust_treasury') {
+    if ('set' in args && args.set !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
+      };
+    }
+    if (!('delta' in args) || typeof args.delta !== 'object' || args.delta === null || Array.isArray(args.delta)) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide a treasury delta object with positive grant values.',
+      };
+    }
+    const delta = args.delta as Record<string, unknown>;
+    const entries = Object.entries(delta).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide at least one treasury denomination delta.',
+      };
+    }
+    for (const [denom, value] of entries) {
+      if (!['cp', 'sp', 'ep', 'gp', 'pp'].includes(denom)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: `Unsupported treasury denomination "${denom}".`,
+        };
+      }
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: 'Treasury delta values must be integers.',
+        };
+      }
+      if (value <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_spend',
+          message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+        };
+      }
+      if (value > DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_grant_limit',
+          message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'update_inventory_item') {
+    // Only grant-only quantity operations are allowed: positive qtyDelta (atomic increment).
+    // Any absolute qty write (even a positive value can reduce below current), zero/negative
+    // qtyDelta, and owner moves (ownerType/characterId) are all refused to preserve the
+    // no-destruction boundary.
+    if ('qty' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not set an absolute qty on update_inventory_item; use a positive qtyDelta to grant.',
+      };
+    }
+    if ('ownerType' in args || 'characterId' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not move inventory items between owners (ownerType/characterId are not allowed).',
+      };
+    }
+    if ('qtyDelta' in args) {
+      const delta = args.qtyDelta;
+      if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_inventory_reduction',
+          message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
         };
       }
     }
@@ -641,6 +783,7 @@ export class AiDriverService {
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
+    private readonly encounters: EncountersService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -886,11 +1029,15 @@ export class AiDriverService {
       for (let step = 0; step < maxSteps; step++) {
         // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
         // before the next provider call so we cannot interleave with a replacement session.
-        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
-        // 'paused' or 'human_control'; abort early so the AI doesn't burn further budget,
-        // stream narration, or execute tool calls against a table that's now human-owned.
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          break;
+        }
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'. Distinct from `'aborted'` (mode-switch teardown): the
+        // stuck ladder must not park on top of the human's explicit freeze.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           break;
         }
         if (budgetRemaining <= 0) {
@@ -909,9 +1056,20 @@ export class AiDriverService {
           if (currentRemaining <= 0) {
             return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
-          if (session.detached || isFrozen(session)) {
+          // Detach (#1071) vs freeze (#1057) must stay distinct — `frozen` keeps the stuck
+          // ladder from parking on top of an explicit human pause/takeover.
+          if (session.detached) {
             return {
               kind: 'aborted' as const,
+              seat: currentSeat,
+              budgetRemaining: currentRemaining,
+              text: '',
+              metered: null,
+            };
+          }
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
               seat: currentSeat,
               budgetRemaining: currentRemaining,
               text: '',
@@ -962,9 +1120,20 @@ export class AiDriverService {
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
           });
-          if (aborted || session.detached || isFrozen(session)) {
+          // streamStep sets `aborted` only on mode-switch detach mid-stream (#1071).
+          if (aborted || session.detached) {
             return {
               kind: 'aborted' as const,
+              seat: metered.seat,
+              budgetRemaining: metered.budgetRemaining,
+              text,
+              metered,
+            };
+          }
+          // #1057: re-check after streaming — a pause/takeover can land while we streamed.
+          if (isFrozen(session)) {
+            return {
+              kind: 'frozen' as const,
               seat: metered.seat,
               budgetRemaining: metered.budgetRemaining,
               text,
@@ -988,14 +1157,27 @@ export class AiDriverService {
           if (spend.text) finalNarration = spend.text;
           break;
         }
+        if (spend.kind === 'frozen') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'frozen';
+          if (spend.text) finalNarration = spend.text;
+          break;
+        }
 
         const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           if (text) finalNarration = text;
           break;
         }
@@ -1024,8 +1206,13 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          break;
+        }
+        // #1057: re-check after tool execution — a pause/takeover can land between steps.
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           break;
         }
         if (toolErrored) {
@@ -1377,14 +1564,39 @@ export class AiDriverService {
       executed.push({ name: call.name, isError: res.isError, proposed });
 
       // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
+      // #1072: include a redaction-safe args summary so the DM can inspect WHY the AI acted,
+      // not just WHICH tool it called. Secrets/apiKeys/passwords are always redacted; long
+      // strings are truncated; nested objects/arrays are shown as shape-only placeholders.
+      const argsSummary = summarizeToolArgs(args);
       await this.audit.log({
         actor,
         actorRole: 'dm',
         action: 'ai-dm.driver.tool',
         entityType: 'ai-dm',
         campaignId,
-        detail: `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
+        detail:
+          `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''}` +
+          `${argsSummary ? ` args={${argsSummary}}` : ''}` +
+          ` by ${triggeredBy.id}`,
       });
+
+      // (7) #1021 — persist successful loot/treasury grants on the active encounter's
+      // combat log so awards survive reload (toast alone is not enough). Best-effort:
+      // a log failure must not fail the grant that already committed.
+      if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        const detail = formatDriverLootCombatLogDetail(call.name, args);
+        if (detail) {
+          try {
+            await this.encounters.appendActiveEncounterNote(campaignId, detail);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to append loot combat-log note after ${call.name} for campaign ${campaignId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      }
 
       if (res.isError) toolErrored = true;
     }
@@ -1976,6 +2188,34 @@ export class AiDriverService {
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
 
+    // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
+    // AI can narrate coherently without needing to chain read tools every turn. All reads go
+    // through the player-scoped contextToolset so hidden entities / dmSecret / unexplored
+    // locations stay excluded (same secrecy guarantee as the campaign summary above).
+    //
+    // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
+    // the turn. The system prompt is read fresh every turn, so world-state changes propagate
+    // to the next player interaction without a cache-invalidation step. Calendar / encounters /
+    // party are fetched in parallel; location/environment is derived from the summary payload
+    // (currentLocation + dangerLevel) to avoid a redundant tool round-trip.
+    const [calendarRaw, activeEncountersRaw, partyRaw] = await Promise.all([
+      safeRead(contextToolset, 'get_calendar', { campaignId }),
+      safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
+      safeRead(contextToolset, 'get_party', { campaignId }),
+    ]);
+
+    const calendar = formatCalendarForPrompt(calendarRaw);
+    if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
+
+    const activeEncounters = formatListForPrompt(activeEncountersRaw);
+    if (activeEncounters) parts.push(`## Running encounters\n${activeEncounters}`);
+
+    const party = formatListForPrompt(partyRaw);
+    if (party) parts.push(`## Party status\n${party}`);
+
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);
+
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
     // every turn, so revocation cannot linger in a cached prompt.
@@ -2089,17 +2329,95 @@ function approvalKey(tool: string, entityId: number): string {
 }
 
 /**
+ * Field names whose values are ALWAYS redacted in the audit-args summary (#1072).
+ * Case-insensitive substring match. This is a defense-in-depth belt for values that
+ * should never appear in a DM-visible audit line even though the DM has broad read
+ * access — the audit is queryable and searchable, so keeping raw secrets out of it
+ * limits blast radius if the audit itself is exported or copy-pasted.
+ */
+const REDACTED_ARG_KEYS = ['apikey', 'password', 'dmsecret', 'secret', 'token', 'authorization', 'bearer'];
+
+/** Battle-map coordinates — must not match the `token` secret substring (#1248). */
+const NON_SECRET_ARG_KEYS = new Set(['tokenx', 'tokeny']);
+
+function isSecretArgKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  if (NON_SECRET_ARG_KEYS.has(lower)) return false;
+  return REDACTED_ARG_KEYS.some((k) => lower.includes(k));
+}
+
+/** Keep well-formed identifier keys; redact model-controlled key names that embed secrets. */
+function auditArgKeyLabel(key: string, isSecret: boolean): string {
+  if (!isSecret) return key;
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return key;
+  return '<redacted>';
+}
+
+/**
+ * Summarize a tool-call args object into a redaction-safe, DM-readable string (#1072).
+ * The summary is a compact `key=value` list where:
+ *   - primitive fields (number, boolean, null) render as-is
+ *   - string fields are truncated to 60 chars with a trailing "…"
+ *   - object/array fields render as `<object>` or `<array[N]>` (structure only, no content)
+ *   - any key matching {@link REDACTED_ARG_KEYS} renders as `<redacted>`
+ * The total output is bounded to ~400 characters so audit rows stay grep-friendly.
+ */
+export function summarizeToolArgs(args: Record<string, unknown> | undefined | null): string {
+  if (!args || typeof args !== 'object') return '';
+  const parts: string[] = [];
+  let totalLen = 0;
+  const MAX_TOTAL = 400;
+  const ELLIPSIS = '…';
+  for (const [key, value] of Object.entries(args)) {
+    const isSecret = isSecretArgKey(key);
+    let rendered: string;
+    if (isSecret) {
+      rendered = '<redacted>';
+    } else if (value === null || value === undefined) {
+      rendered = 'null';
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      rendered = String(value);
+    } else if (typeof value === 'string') {
+      rendered = value.length <= 60 ? JSON.stringify(value) : JSON.stringify(value.slice(0, 60) + '…');
+    } else if (Array.isArray(value)) {
+      rendered = `<array[${value.length}]>`;
+    } else {
+      rendered = '<object>';
+    }
+    const entry = `${auditArgKeyLabel(key, isSecret)}=${rendered}`;
+    // Only account for the ", " separator when appending after existing entries.
+    const separatorLen = parts.length === 0 ? 0 : 2;
+    // Check the *projected* length before pushing, so a large entry can't push
+    // the summary well past MAX_TOTAL (Copilot review, #1248).
+    if (totalLen + separatorLen + entry.length > MAX_TOTAL) {
+      // Reserve room for the ellipsis marker too.
+      const ellipsisSep = parts.length === 0 ? 0 : 2;
+      if (totalLen + ellipsisSep + ELLIPSIS.length <= MAX_TOTAL) {
+        parts.push(ELLIPSIS);
+      }
+      break;
+    }
+    totalLen += separatorLen + entry.length;
+    parts.push(entry);
+  }
+  return parts.join(', ');
+}
+
+/**
  * Map a finished turn onto a stuck reason, or null if the turn was healthy (#314). Order
  * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
  * narration / a verbatim loop) since it's the more actionable diagnosis.
  */
-function classifyStuck(ctx: {
+export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;
   prevNarration: string | null;
 }): AiDmStuckReason | null {
   // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
   if (ctx.stopReason === 'aborted') return null;
+  // #1057: a freeze (DM pause/takeover mid-turn) is not a stuck condition — the human
+  // deliberately froze the seat, so parking the ladder would conflict with their action.
+  if (ctx.stopReason === 'frozen') return null;
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';

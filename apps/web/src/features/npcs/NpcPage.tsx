@@ -410,6 +410,7 @@ export default function NpcPage() {
                   entityType="npc"
                   entityId={id}
                   currentSnapshot={{ body: npc.body }}
+                  expectedUpdatedAt={npc.updatedAt}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);
