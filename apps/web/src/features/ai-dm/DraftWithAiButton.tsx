@@ -102,8 +102,9 @@ export function DraftWithAiButton({
 }) {
   const available = useDraftWithAiAvailable(campaignId);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
-  const open = openProp ?? uncontrolledOpen;
-  const setOpen = onOpenChange ?? setUncontrolledOpen;
+  const isControlled = openProp !== undefined && onOpenChange !== undefined;
+  const open = isControlled ? openProp : uncontrolledOpen;
+  const setOpen = isControlled ? onOpenChange : setUncontrolledOpen;
   const generatedDialogId = useId();
   const dialogId = dialogIdProp ?? generatedDialogId;
 
