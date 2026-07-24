@@ -10,7 +10,7 @@
  * reload, and author-only revision history/restore. Server already notifies only on
  * audience/recipient expand or change — not typo fixes.
  */
-import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { CampaignMember, Note, NoteListPage } from '@campfire/schema';
@@ -107,8 +107,13 @@ export default function MyNotesPage() {
   const [forbidden, setForbidden] = useState(false);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
-  // Server-side search under pagination (issue #608) — defer so typing stays snappy.
-  const deferredSearch = useDeferredValue(search);
+  // Server-side search under pagination (issue #608) — debounce so each keystroke
+  // does not fire a separate request; 300 ms is enough to feel instant.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const [draft, setDraft] = useState('');
   const [attach, setAttach] = useState<EntityLink | null>(null);
@@ -131,12 +136,12 @@ export default function MyNotesPage() {
       const params = new URLSearchParams();
       params.set('limit', String(NOTES_LIST_DEFAULT_LIMIT));
       if (filter !== 'all') params.set('visibility', filter);
-      const q = deferredSearch.trim();
+      const q = debouncedSearch.trim();
       if (q) params.set('q', q);
       if (cursor) params.set('cursor', cursor);
       return `${API}/campaigns/${cid}/notes?${params.toString()}`;
     },
-    [cid, filter, deferredSearch],
+    [cid, filter, debouncedSearch],
   );
 
   const load = useCallback(async () => {
@@ -290,11 +295,9 @@ export default function MyNotesPage() {
   }
 
   async function undoDeleteNote(note: Note) {
-    const restored = await api.post<Note>(`${API}/notes/${note.id}/restore`);
+    await api.post<Note>(`${API}/notes/${note.id}/restore`);
     setUndoNote(null);
-    // Newest-first list (issue #608) — re-insert by id desc.
-    setNotes((cur) => [...cur, restored].sort((a, b) => b.id - a.id));
-    setTotal((n) => n + 1);
+    await load();
   }
 
   function onNoteSaved(updated: Note) {

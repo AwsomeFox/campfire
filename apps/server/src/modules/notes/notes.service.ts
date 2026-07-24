@@ -388,6 +388,11 @@ export class NotesService {
     // shared helper (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and
     // cannot see ß→ss / İ / accent case folds, so when `q` is set we fold-match in JS
     // then apply the keyset page — paging stays correct (#608) without relying on SQL lower().
+    //
+    // Search scans at most NOTES_SEARCH_SCAN_LIMIT of the most-recent rows so the in-memory
+    // filter stays O(constant). Total and pagination reflect only that window; a SQL full-text
+    // move is a future follow-up.
+    const NOTES_SEARCH_SCAN_LIMIT = 5_000;
     const search = filters.q?.trim() ? foldForSearch(filters.q.trim()) : '';
 
     let visible: Array<typeof notes.$inferSelect>;
@@ -398,7 +403,8 @@ export class NotesService {
         .select()
         .from(notes)
         .where(and(...conds))
-        .orderBy(desc(notes.id));
+        .orderBy(desc(notes.id))
+        .limit(NOTES_SEARCH_SCAN_LIMIT);
       const matched = all.filter((r) => foldedIncludes(r.body, search));
       total = matched.length;
       const afterCursor = cursor ? matched.filter((r) => r.id < cursor.i) : matched;
@@ -406,17 +412,12 @@ export class NotesService {
     } else {
       const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
       const pageConds = keyset ? [...conds, keyset] : conds;
-      const [countRow] = await this.db
-        .select({ value: count() })
-        .from(notes)
-        .where(and(...conds));
+      const [[countRow], fetched] = await Promise.all([
+        this.db.select({ value: count() }).from(notes).where(and(...conds)),
+        this.db.select().from(notes).where(and(...pageConds)).orderBy(desc(notes.id)).limit(limit + 1),
+      ]);
       total = countRow?.value ?? 0;
-      visible = await this.db
-        .select()
-        .from(notes)
-        .where(and(...pageConds))
-        .orderBy(desc(notes.id))
-        .limit(limit + 1);
+      visible = fetched;
     }
 
     const hasMore = visible.length > limit;
@@ -801,31 +802,21 @@ export class NotesService {
       notDeleted(notes.deletedAt),
     ];
 
-    const [countRow] = await this.db
-      .select({ value: count() })
-      .from(notes)
-      .where(and(...baseConds));
-    const total = countRow?.value ?? 0;
-
-    let rows: Array<typeof notes.$inferSelect>;
-    let nextCursor: string | undefined;
-
     if (resolved) {
       const cursor = decodeNotesCursor(opts.cursor, 'updated') as NotesUpdatedCursor | undefined;
       const keyset = cursor
         ? sql`(${notes.updatedAt} < ${cursor.u} OR (${notes.updatedAt} = ${cursor.u} AND ${notes.id} < ${cursor.i}))`
         : undefined;
       const conds = keyset ? [...baseConds, keyset] : baseConds;
-      const fetched = await this.db
-        .select()
-        .from(notes)
-        .where(and(...conds))
-        .orderBy(desc(notes.updatedAt), desc(notes.id))
-        .limit(limit + 1);
+      const [[countRow], fetched] = await Promise.all([
+        this.db.select({ value: count() }).from(notes).where(and(...baseConds)),
+        this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.updatedAt), desc(notes.id)).limit(limit + 1),
+      ]);
+      const total = countRow?.value ?? 0;
       const hasMore = fetched.length > limit;
-      rows = hasMore ? fetched.slice(0, limit) : fetched;
+      const rows = hasMore ? fetched.slice(0, limit) : fetched;
       const last = rows[rows.length - 1];
-      nextCursor =
+      const nextCursor =
         hasMore && last ? encodeNotesCursor({ v: 1, m: 'updated', u: last.updatedAt, i: last.id }) : undefined;
       return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
     }
@@ -833,16 +824,15 @@ export class NotesService {
     const cursor = decodeNotesCursor(opts.cursor, 'id') as NotesIdCursor | undefined;
     const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
     const conds = keyset ? [...baseConds, keyset] : baseConds;
-    const fetched = await this.db
-      .select()
-      .from(notes)
-      .where(and(...conds))
-      .orderBy(desc(notes.id))
-      .limit(limit + 1);
+    const [[countRow], fetched] = await Promise.all([
+      this.db.select({ value: count() }).from(notes).where(and(...baseConds)),
+      this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.id)).limit(limit + 1),
+    ]);
+    const total = countRow?.value ?? 0;
     const hasMore = fetched.length > limit;
-    rows = hasMore ? fetched.slice(0, limit) : fetched;
+    const rows = hasMore ? fetched.slice(0, limit) : fetched;
     const last = rows[rows.length - 1];
-    nextCursor = hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : undefined;
+    const nextCursor = hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : undefined;
     return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
   }
 
