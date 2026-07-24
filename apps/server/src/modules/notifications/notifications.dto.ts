@@ -14,7 +14,11 @@ export const BulkNotificationSchema = z
     campaignId: z.number().int().positive().optional(),
     all: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) => (value.ids?.length ?? 0) > 0 || value.campaignId !== undefined || value.all === true,
+    { message: 'At least one of ids, campaignId, or all must be provided' },
+  );
 
 export class BulkNotificationDto extends createZodDto(BulkNotificationSchema) {}
 

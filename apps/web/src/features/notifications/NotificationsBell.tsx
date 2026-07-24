@@ -284,11 +284,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
     const load = async () => {
       if (!isDocumentActive()) return;
-      const snapshotVersion = snapshotVersionRef.current;
       const res = await api.get<{ count: number }>(`${API}/notifications/unread-count`, {
         signal: controller.signal,
       });
-      if (countGenerationRef.current !== generation || snapshotVersionRef.current !== snapshotVersion) {
+      if (countGenerationRef.current !== generation) {
         return;
       }
       if (allReadAtRef.current !== null) {
@@ -601,12 +600,12 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const markAllRead = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await api.post<BulkMarkResult | Notification[]>(`${API}/notifications/read-all`);
+      const res = await api.post<BulkMarkResult>(`${API}/notifications/read-all`);
       const readAt = new Date().toISOString();
       cancelCountRequest();
       allReadAtRef.current = readAt;
       applyCount(0);
-      const updatedIds = Array.isArray(res) ? [] : (res.updatedIds ?? []);
+      const updatedIds = res.updatedIds ?? [];
       if (updatedIds.length > 0) {
         syncReadMessage({ type: 'read-bulk', ids: updatedIds, readAt });
         channelRef.current?.postMessage({ type: 'read-bulk', ids: updatedIds, readAt } satisfies NotificationSyncMessage);

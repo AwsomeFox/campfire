@@ -265,7 +265,7 @@ export default function NotificationsPage() {
         ids: res.updatedIds,
       });
       // Refresh current list state
-      void fetchNotifications();
+      await fetchNotifications();
     }
   };
 
@@ -347,7 +347,7 @@ export default function NotificationsPage() {
     setPendingUndo(null);
     await markUnreadBulk({ ids });
     announce('Restored unread status.');
-    void fetchNotifications();
+    await fetchNotifications();
   };
 
   const handleToggleRead = async (notification: Notification) => {
@@ -373,7 +373,7 @@ export default function NotificationsPage() {
     }
     const href = notificationHref(notification);
     if (!notification.readAt) {
-      void markReadBulk({ ids: [notification.id] });
+      await markReadBulk({ ids: [notification.id] });
     }
     navigate(href);
   };
