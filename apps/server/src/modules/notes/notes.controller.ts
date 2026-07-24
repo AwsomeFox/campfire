@@ -36,7 +36,7 @@ export class CampaignNotesController {
     enum: ['private', 'dm_shared', 'party_shared', 'whisper'],
     description: 'Filter to a single visibility (still visibility-gated to what the caller can see).',
   })
-  @ApiQuery({ name: 'q', required: false, type: String, description: 'Free-text search: only notes whose body contains this string (case-insensitive).' })
+  @ApiQuery({ name: 'q', required: false, type: String, description: 'Free-text search over each note body AND its anchored entity name, with Unicode-aware case folding. Applied across the full visible set before paging.' })
   @ApiQuery({
     name: 'limit',
     required: false,

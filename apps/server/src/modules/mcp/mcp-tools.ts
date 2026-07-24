@@ -1122,7 +1122,7 @@ export class McpToolsService {
         entityId: Id.optional().describe('Filter to notes linked to this entity id (use with entityType)'),
         mine: z.boolean().optional().describe('If true, only the caller\'s own notes'),
         visibility: NoteVisibility.optional().describe('Filter to a single visibility'),
-        q: z.string().max(200).optional().describe('Free-text search over note bodies'),
+        q: z.string().max(200).optional().describe('Free-text search over each note body and its anchored entity name (Unicode-aware case folding), applied across the full visible set before paging'),
         limit: LimitArg(200, 50),
         cursor: z.string().max(512).optional().describe('Opaque cursor from a previous page\'s nextCursor'),
       },

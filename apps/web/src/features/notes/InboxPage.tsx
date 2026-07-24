@@ -9,8 +9,9 @@
  * (resolved items, GET /campaigns/:cid/inbox?resolved=true) — history shows each
  * item's resolution note and a link to the entity it was resolved into.
  *
- * Pagination (issue #608): both lists return `{ items, total, hasMore, nextCursor? }`
- * newest-first; load-more appends; page-aware errors keep prior rows visible.
+ * Pagination (issue #608): both lists return `{ items, total, hasMore, nextCursor }`
+ * newest-first, where `nextCursor` is always present and `null` on the terminal page;
+ * load-more appends; page-aware errors keep prior rows visible.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';

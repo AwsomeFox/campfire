@@ -43,7 +43,9 @@ export function decodeNotesCursor(raw: string | undefined, expectedMode: NotesCu
   if (c.m === 'id') {
     return { v: 1, m: 'id', i: c.i };
   }
-  if (typeof c.u !== 'string' || c.u.length === 0) {
+  // `u` is the updatedAt keyset value — it must be a parseable ISO-8601 timestamp, else a
+  // crafted string would keyset-compare wrongly and silently corrupt paging instead of 400ing.
+  if (typeof c.u !== 'string' || c.u.length === 0 || Number.isNaN(Date.parse(c.u))) {
     throw new BadRequestException('`cursor` is invalid');
   }
   return { v: 1, m: 'updated', u: c.u, i: c.i };
