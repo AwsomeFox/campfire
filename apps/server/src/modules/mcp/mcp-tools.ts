@@ -2764,14 +2764,15 @@ export class McpToolsService {
       user,
       'saving_throw',
       'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
-        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((level - 1) / 4)) when the ' +
-        'ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares to the DC. Returns ' +
+        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((max(1, level) - 1) / 4); ' +
+        'level is clamped to at least 1) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
+        'to the DC. Returns ' +
         '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
         'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
       {
         characterId: Id.describe('Character id — from list_members or get_party'),
         ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
-        dc: z.number().int().min(1).max(50).describe('Difficulty class to beat'),
+        dc: z.number().int().min(1).max(100).describe('Difficulty class to beat (1–100; homebrew/high-level effects may exceed typical PHB DCs)'),
         advantage: z.enum(['normal', 'advantage', 'disadvantage']).optional().describe('Roll mode; defaults to normal'),
       },
       async ({ characterId, ability, dc, advantage }) => {

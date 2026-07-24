@@ -134,6 +134,7 @@ const ALL_TOOLS = [
   'install_rule_pack',
   'uninstall_rule_pack',
   'roll_dice',
+  'saving_throw',
   'create_encounter',
   'update_encounter',
   'reveal_map_region',
@@ -1207,6 +1208,93 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(rolled.rolls).toHaveLength(1);
     expect(rolled.total).toBeGreaterThanOrEqual(2);
     expect(rolled.total).toBeLessThanOrEqual(21);
+  });
+
+  it('#1040 saving_throw resolves from character stats, persists dice log, and audits', async () => {
+    const client = await mcpClient(dmToken);
+    // Level-5 DEX 16 + save proficiency → bonus +6 (+3 dex, +3 prof); DC 1 always succeeds.
+    const charResult = await client.callTool({
+      name: 'upsert_character',
+      arguments: {
+        campaignId,
+        name: 'Save Tester',
+        level: 5,
+        stats: { DEX: 16 },
+        saveProficiencies: ['DEX'],
+        hpMax: 20,
+      },
+    });
+    expect(charResult.isError).toBeFalsy();
+    const character = parseResult(charResult) as { id: number };
+
+    const saveResult = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'DEX', dc: 1 },
+    });
+    expect(saveResult.isError).toBeFalsy();
+    const save = parseResult(saveResult) as {
+      characterId: number;
+      ability: string;
+      dc: number;
+      mode: string;
+      score: number;
+      abilityMod: number;
+      profBonus: number;
+      proficient: boolean;
+      bonus: number;
+      total: number;
+      rolls: number[];
+      success: boolean;
+      diceLogId: number;
+    };
+    expect(save).toMatchObject({
+      characterId: character.id,
+      ability: 'DEX',
+      dc: 1,
+      mode: 'normal',
+      score: 16,
+      abilityMod: 3,
+      profBonus: 3,
+      proficient: true,
+      bonus: 6,
+      success: true,
+    });
+    expect(save.rolls.length).toBeGreaterThanOrEqual(1);
+    expect(save.total).toBeGreaterThanOrEqual(7); // 1d20 + 6
+    expect(save.total).toBeLessThanOrEqual(26);
+    expect(typeof save.diceLogId).toBe('number');
+
+    // Persisted to the shared campaign dice log via rollDiceForCampaign.
+    const diceLog = await dmAgent.get(`/api/v1/campaigns/${campaignId}/rolls`);
+    expect(diceLog.status).toBe(200);
+    expect(
+      (diceLog.body as Array<{ id: number; label: string | null; expr: string }>).some(
+        (row) => row.id === save.diceLogId && (row.label ?? '').includes('DEX save') && row.expr.includes('+6'),
+      ),
+    ).toBe(true);
+
+    // Audited like other dice rolls (entityId is null; detail carries label/expr/DC).
+    const auditRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/audit`);
+    expect(auditRes.status).toBe(200);
+    expect(
+      (auditRes.body as Array<{ action: string; detail: string }>).some(
+        (a) => a.action === 'dice.roll' && a.detail.includes('DEX save') && a.detail.includes('vs DC 1'),
+      ),
+    ).toBe(true);
+
+    // DC schema allows homebrew highs (max 100); an out-of-range DC is validation_failed.
+    const highDc = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'DEX', dc: 100 },
+    });
+    expect(highDc.isError).toBeFalsy();
+    expect((parseResult(highDc) as { dc: number }).dc).toBe(100);
+
+    const tooHigh = await client.callTool({
+      name: 'saving_throw',
+      arguments: { characterId: character.id, ability: 'DEX', dc: 101 },
+    });
+    expect(tooHigh.isError).toBe(true);
   });
 
   it('admin-owned campaign-scoped PAT 403s on a different campaign, incl. an MCP tool call (punch list item 12)', async () => {
