@@ -1,5 +1,9 @@
 import { describe, it, expect } from '@jest/globals';
-import { isDriverToolAllowed, guardDriverLivePlayArgs } from '../../src/modules/ai-driver/ai-driver.service';
+import {
+  isDriverToolAllowed,
+  guardDriverLivePlayArgs,
+  DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+} from '../../src/modules/ai-driver/ai-driver.service';
 
 /**
  * #1021: Verify that the AI Driver can award loot, treasury, and items during live play.
@@ -77,6 +81,45 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
     expect(guardDriverLivePlayArgs('update_inventory_item', { itemId: 1, name: 'Longsword +1', notes: 'magic' }, session)).toEqual({
       ok: true,
       args: { itemId: 1, name: 'Longsword +1', notes: 'magic' },
+    });
+  });
+
+  it('guardDriverLivePlayArgs enforces grant-only bounded deltas on adjust_treasury', () => {
+    const session = { driverGeneratedMapIds: [], generateMapCallsThisTurn: 0 };
+
+    expect(guardDriverLivePlayArgs('adjust_treasury', { campaignId: 1, delta: { gp: 50, sp: 10 } }, session)).toEqual({
+      ok: true,
+      args: { campaignId: 1, delta: { gp: 50, sp: 10 } },
+    });
+
+    expect(guardDriverLivePlayArgs('adjust_treasury', { campaignId: 1, delta: { gp: -1 } }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_treasury_spend',
+      message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+    });
+
+    expect(guardDriverLivePlayArgs('adjust_treasury', { campaignId: 1, delta: { gp: 0 } }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_treasury_spend',
+      message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+    });
+
+    expect(
+      guardDriverLivePlayArgs(
+        'adjust_treasury',
+        { campaignId: 1, delta: { gp: DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION + 1 } },
+        session,
+      ),
+    ).toEqual({
+      ok: false,
+      code: 'forbidden_treasury_grant_limit',
+      message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
+    });
+
+    expect(guardDriverLivePlayArgs('adjust_treasury', { campaignId: 1, set: { gp: 999 } }, session)).toEqual({
+      ok: false,
+      code: 'forbidden_treasury_field',
+      message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
     });
   });
 });

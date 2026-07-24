@@ -47,7 +47,7 @@ export interface AiDmLiveActivityState {
   /** The most recent `tool` event of any resource, for a generic "AI just acted" signal. */
   lastToolEvent: ToolStreamEvent | null;
   lastToolAt: number | null;
-  /** The most recent tool event that touched the encounter/combat resource (chip pre-resolved). */
+  /** The most recent encounter-facing tool event (encounter/combat + party-state grants). */
   encounterActivity: AiDmEncounterActivity | null;
   /**
    * Monotonic count of `tool` events with `proposed: true` — a DM nav badge / dashboard
@@ -133,8 +133,8 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       const at = Date.now();
       const next: AiDmLiveActivityState = { ...prev, lastToolEvent: event, lastToolAt: at };
       if (event.proposed) next.proposalFiledCount = prev.proposalFiledCount + 1;
-      const res = toolResource(event.name);
-      if (res === 'encounter' || res === 'party') {
+      const resource = toolResource(event.name);
+      if (resource === 'encounter' || resource === 'party') {
         next.encounterActivity = { chip: resolveToolActivity(event, { campaignId: event.campaignId }), at };
       }
       return next;

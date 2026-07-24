@@ -146,6 +146,27 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     expect(audit.body.some((e: { action: string }) => e.action === 'item.update')).toBe(true);
   });
 
+  it('#1021 driver: blocks treasury spends at execution time', async () => {
+    const campaignId = await h.createCampaign('Driver Treasury Guard');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script(
+      {
+        text: 'I will adjust party funds.',
+        toolCalls: [{ id: 'spend_gold', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: -5 } } }],
+      },
+      { text: 'I cannot reduce treasury directly without review.' },
+    );
+
+    const res = await h.sendMessage(campaignId, { input: 'Spend 5 gp from party funds.' });
+    expect(res.status).toBe(201);
+    expect(res.body.toolCalls).toEqual([{ name: 'adjust_treasury', isError: true, proposed: false }]);
+
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body).toMatchObject({ cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 });
+  });
+
   it('#312 driver: multi-step tool loop terminates on a stop turn and audits each step', async () => {
     const campaignId = await h.createCampaign('Driver Audit');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });

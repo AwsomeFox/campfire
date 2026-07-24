@@ -525,25 +525,30 @@ export default function RunSessionPage() {
   // only adds the "why did this just change" signal for whoever's watching.
   const liveActivity = useAiDmLiveActivity();
   const [aiToasts, setAiToasts] = useState<Array<{ key: number; chip: ReturnType<typeof resolveToolActivity>; at: number }>>([]);
-  const lastToastAtRef = useRef<number | null>(null);
+  const lastToastEventRef = useRef<string | null>(null);
   const toastSeq = useRef(0);
   useEffect(() => {
     const activity = liveActivity.encounterActivity;
-    if (!activity || activity.at === lastToastAtRef.current) return;
-    lastToastAtRef.current = activity.at;
+    if (!activity) return;
+    const event = liveActivity.lastToolEvent;
+    const eventKey = event ? `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}` : String(activity.at);
+    if (eventKey === lastToastEventRef.current) return;
+    lastToastEventRef.current = eventKey;
     // Re-resolve with THIS encounter's id so the chip can deep-link back here — tool
     // events are id-only (#338), so the generic app-level resolution above couldn't
-    // know it. `lastToolEvent` is set in the same reducer step as `encounterActivity`
-    // whenever it was an encounter-resource event, so it's the same underlying event.
+    // know it. `lastToolEvent` is set in the same reducer step as `encounterActivity`.
     const chip =
       liveActivity.lastToolEvent && Number.isFinite(eid)
         ? resolveToolActivity(liveActivity.lastToolEvent, { campaignId: cid, encounterId: eid })
         : activity.chip;
     const key = ++toastSeq.current;
     setAiToasts((prev) => [...prev, { key, chip, at: activity.at }].slice(-3));
+    announce(`The AI DM ${chip.label.toLowerCase()}.`, {
+      dedupeKey: `ai-dm-tool:${cid}:${eventKey}`,
+    });
     const timer = setTimeout(() => setAiToasts((prev) => prev.filter((t) => t.key !== key)), 8000);
     return () => clearTimeout(timer);
-  }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
+  }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid, announce]);
 
   // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
@@ -1260,9 +1265,8 @@ export default function RunSessionPage() {
         )}
       </div>
 
-      {/* Transient "the AI just acted on this encounter" row(s) (#344 point 2) — sourced
-          from `tool` stream events filtered to the encounter resource; the combatant/HP/
-          turn data itself already arrived via the encounter SSE refetch above. */}
+      {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
+          events touching encounter or party state (including loot/treasury grants). */}
       {aiToasts.length > 0 && (
         <div className="flex flex-col gap-1" style={{ paddingLeft: 2 }}>
           {aiToasts.map((toast) => (

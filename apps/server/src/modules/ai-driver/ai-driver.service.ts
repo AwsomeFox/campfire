@@ -312,7 +312,8 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_encounter',
   // private information delivery (#1023)
   'whisper_to_player',
-  // economy / loot (#1021) — parity with award_xp (explicit live-play allow-list exception)
+  // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
+  // (guardDriverLivePlayArgs): adjust_treasury allows positive bounded delta grants only.
   'adjust_treasury',
   'add_inventory_item',
   // update_inventory_item: grant-only — guardDriverLivePlayArgs enforces positive qtyDelta
@@ -327,6 +328,8 @@ const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
 /** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
 export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
+/** Per-call treasury grant cap (per denomination) for autonomous live play. */
+export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
 
 /**
  * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
@@ -371,6 +374,7 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
  *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
  *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
  *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
  */
@@ -410,6 +414,63 @@ export function guardDriverLivePlayArgs(
           code: 'forbidden_map_link',
           message:
             'The driver may only link mapAttachmentId to a map it generated this session, or pass null to detach.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'adjust_treasury') {
+    if ('set' in args && args.set !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
+      };
+    }
+    if (!('delta' in args) || typeof args.delta !== 'object' || args.delta === null || Array.isArray(args.delta)) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide a treasury delta object with positive grant values.',
+      };
+    }
+    const delta = args.delta as Record<string, unknown>;
+    const entries = Object.entries(delta).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide at least one treasury denomination delta.',
+      };
+    }
+    for (const [denom, value] of entries) {
+      if (!['cp', 'sp', 'ep', 'gp', 'pp'].includes(denom)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: `Unsupported treasury denomination "${denom}".`,
+        };
+      }
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: 'Treasury delta values must be integers.',
+        };
+      }
+      if (value <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_spend',
+          message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+        };
+      }
+      if (value > DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_grant_limit',
+          message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
         };
       }
     }
