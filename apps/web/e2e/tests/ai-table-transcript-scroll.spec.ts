@@ -89,17 +89,15 @@ test.describe('AI table transcript scroll (#590)', () => {
     await page.goto(`/c/${campaignId}/table`);
     const transcript = page.getByRole('log', { name: 'Table transcript' });
     await expect(transcript).toBeVisible();
-    await expect(page.getByTestId('transcript-jump-latest')).toHaveCount(0);
-    // Pin assertion: wait for an overflow box, then require near-tail scrollTop.
-    // Flex layout on CI can settle a frame late (#590).
-    await expect(async () => {
-      const metrics = await transcript.evaluate((node) => ({
+    // Wait for mount tail-pin: no jump affordance and scroll near the latest line.
+    await expect.poll(async () => {
+      const jumpCount = await page.getByTestId('transcript-jump-latest').count();
+      const { top, max } = await transcript.evaluate((node) => ({
         top: node.scrollTop,
         max: node.scrollHeight - node.clientHeight,
       }));
-      expect(metrics.max).toBeGreaterThan(0);
-      expect(metrics.max - metrics.top).toBeLessThanOrEqual(48);
-    }).toPass({ timeout: 15_000 });
+      return jumpCount === 0 && max > 0 && max - top <= 48;
+    }, { timeout: 15_000 }).toBe(true);
     await expect(transcript.getByText('Earlier table line 80')).toBeVisible();
   });
 

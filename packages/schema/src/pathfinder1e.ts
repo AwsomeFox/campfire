@@ -73,12 +73,71 @@ export const PF1E_CONDITIONS = [
 
 export type Pf1eCondition = (typeof PF1E_CONDITIONS)[number];
 
+/**
+ * Coerce a value to a finite number, or null. Accepts any finite number (including
+ * floats) and numeric strings `Number(...)` can parse (the SRD sometimes emits
+ * these); rejects NaN / Infinity / empty / non-numeric strings.
+ * Used for ability scores and the flat initiative bonus the importer stores on a
+ * monster's `dataJson`.
+ */
+function pf1eNum(v: unknown): number | null {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** First numeric value among `keys` on `source`, skipping invalid-but-present entries. */
+function pf1eFirstNum(source: Record<string, unknown>, keys: readonly string[]): number | null {
+  for (const key of keys) {
+    const n = pf1eNum(source[key]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
 /** Read the governing (DEX) score from either a canonical (`{ DEX }`) or raw monster
- *  (`{ dexterity }`) ability map, if numeric — mirrors the 5e adapter's DEX lookup. */
+ *  (`{ dexterity }`) ability map, if numeric — mirrors the 5e adapter's DEX lookup.
+ *  Uses pf1eNum so SRD numeric strings are accepted the same way as native Init. */
 function pf1eDexScore(abilities: Record<string, unknown> | null | undefined): number | null {
   if (!abilities) return null;
-  const raw = abilities.DEX ?? abilities.dexterity ?? abilities.dex;
-  return typeof raw === 'number' ? raw : null;
+  return pf1eFirstNum(abilities, ['DEX', 'dexterity', 'dex']);
+}
+
+/**
+ * Read an explicit native initiative bonus from a monster ability/statblock map.
+ * Prefers the camelCase key the PF1e importer writes (`initiative`), then the SRD's
+ * short `init` key. Returns null when absent or non-numeric — never invents a zero
+ * (issue #764: surface unavailable rather than silently +0).
+ */
+export function pf1eNativeInitiative(abilities: Record<string, unknown> | null | undefined): number | null {
+  if (!abilities) return null;
+  return pf1eFirstNum(abilities, ['initiative', 'init']);
+}
+
+/**
+ * Provenance-preserving initiative resolution for Pathfinder 1e (issue #764).
+ *
+ * PF1e monsters carry a flat Init bonus that already includes DEX + feats (e.g. Improved
+ * Initiative). Prefer that native bonus when present; fall back to a DEX-derived modifier
+ * only when the native value is absent; return `unavailable` when neither can be resolved
+ * so callers can surface the gap instead of treating a missing score as a silent +0.
+ */
+export type Pf1eInitiativeBreakdown =
+  | { source: 'native'; bonus: number }
+  | { source: 'dex'; bonus: number; dexScore: number }
+  | { source: 'unavailable'; bonus: null };
+
+export function pf1eInitiativeBreakdown(
+  abilities: Record<string, unknown> | null | undefined,
+): Pf1eInitiativeBreakdown {
+  const native = pf1eNativeInitiative(abilities);
+  if (native !== null) return { source: 'native', bonus: native };
+  const dex = pf1eDexScore(abilities);
+  if (dex !== null) return { source: 'dex', bonus: pf1eAbilityModifier(dex), dexScore: dex };
+  return { source: 'unavailable', bonus: null };
 }
 
 /** PF1e ability-score → modifier: floor((score - 10) / 2). Identical to 3.5e/5e. */
@@ -168,21 +227,35 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   label: 'Pathfinder 1e',
   presentation: PF1E_STATBLOCK_PRESENTATION,
   abilityModifier: pf1eAbilityModifier,
-  // PF1e initiative is a d20 roll + DEX modifier (feats like Improved Initiative are per-
-  // creature and live in the statblock's stored init, not this base derivation) — same die
-  // and same governing ability as 5e.
+  // PF1e initiative is a d20 roll + a flat Init bonus. Monsters store that bonus on the
+  // statblock (DEX + feats like Improved Initiative already baked in); characters without
+  // a stored Init fall back to the DEX modifier. Same die as 5e.
   initiativeDie: 20,
   // Pathfinder 1e caps at character level 20 (Core Rulebook), matching the 5e ceiling.
   maxLevel: 20,
+  // Prefer the explicit native Init folded into abilityScores by mapStatblock (issue #764);
+  // derive from DEX only when that bonus is absent. `representation` applies only to the
+  // DEX fallback (native Init is already a bonus).
+  //
+  // Callers that must surface "unavailable" (encounter addCombatant, generators) use
+  // `initiativeModifierOrNull` / `pf1eInitiativeBreakdown`. The numeric seam still returns
+  // 0 for rollInitiative callers that need a default when a combatant already exists.
+  initiativeModifierOrNull(
+    abilities: Record<string, unknown> | null | undefined,
+    representation: AbilityRepresentation = 'score',
+  ): number | null {
+    const breakdown = pf1eInitiativeBreakdown(abilities);
+    if (breakdown.source === 'unavailable') return null;
+    if (breakdown.source === 'native') return breakdown.bonus;
+    // Inline of resolveAbilityModifier — this file cannot runtime-import from ./index
+    // without creating a cycle (index registers Pathfinder1eAdapter).
+    return representation === 'score' ? breakdown.bonus : Math.trunc(breakdown.dexScore);
+  },
   initiativeModifier(
     abilities: Record<string, unknown> | null | undefined,
     representation: AbilityRepresentation = 'score',
   ): number {
-    const dex = pf1eDexScore(abilities);
-    if (dex === null) return 0;
-    // Inline of resolveAbilityModifier — this file cannot runtime-import from ./index
-    // without creating a cycle (index registers Pathfinder1eAdapter).
-    return representation === 'score' ? pf1eAbilityModifier(dex) : Math.trunc(dex);
+    return this.initiativeModifierOrNull!(abilities, representation) ?? 0;
   },
   // PF1e initiative is DEX-derived like 5e; on a tied total, higher DEX (initMod) first,
   // then sortOrder (issue #611).
@@ -192,8 +265,23 @@ export const Pathfinder1eAdapter: RuleSystemAdapter = {
   // scores). AC is ascending, so the stored `armorClass` is used as-is. We accept both the
   // camelCase shape the importer writes and PF1e-SRD snake_case keys (armor_class, hit_points,
   // challenge_rating, ability_scores) so a raw imported row maps without pre-normalisation.
+  // The importer also stores a flat `initiative` bonus — fold it into abilityScores (PF2e
+  // does the same with Perception) so the encounter path
+  // `initiativeModifier(mapStatblock(data).abilityScores)` preserves the native value
+  // across web / REST / MCP / generator / duplicate-add / reroll call sites (issue #764).
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
-    const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+    const scores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
+    const scoreMap = scores && typeof scores === 'object' && !Array.isArray(scores) ? scores : undefined;
+    const nativeInit = pf1eNativeInitiative(d) ?? (scoreMap ? pf1eNativeInitiative(scoreMap) : null);
+    // Only allocate a new object when folding native Init into the ability map.
+    const abilityScores =
+      scoreMap
+        ? nativeInit !== null
+          ? { ...scoreMap, initiative: nativeInit }
+          : scoreMap
+        : nativeInit !== null
+          ? { initiative: nativeInit }
+          : undefined;
     return {
       size: d.size,
       creatureType: d.type ?? d.creatureType,
