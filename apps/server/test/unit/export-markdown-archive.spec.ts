@@ -82,6 +82,7 @@ function buildService(entities: {
       listForCampaign: async () => (entities.encounters ?? []).map((e: any) => ({ id: e.id, name: e.name })),
       getWithCombatantsOrThrow: async (id: number) => (entities.encounters ?? []).find((e: any) => e.id === id),
       listEvents: async () => [],
+      listEventsForEncounters: async () => new Map(),
     } as any,
     {
       listRowsForCampaign: async () => entities.attachments ?? [],

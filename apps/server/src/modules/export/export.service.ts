@@ -428,16 +428,9 @@ export class ExportService {
     warnings.push(...stemCollisionWarnings('character', characterAlloc));
 
     // Encounter combat logs are markdown-only enrichment (not part of campaign.json).
-    const encounterEvents = new Map<number, EncounterEvent[]>();
-    const encounterEventChunk = 8;
-    for (let i = 0; i < data.encounters.length; i += encounterEventChunk) {
-      const chunk = data.encounters.slice(i, i + encounterEventChunk);
-      await Promise.all(
-        chunk.map(async (e) => {
-          encounterEvents.set(e.id, await this.encounters.listEvents(e.id));
-        }),
-      );
-    }
+    // Batch-fetch all encounters' events in a single query to avoid an N+1 on large
+    // campaigns (issue #863). Export is DM-scoped, so no viewer redaction is needed.
+    const encounterEvents = await this.encounters.listEventsForEncounters(data.encounters.map((e) => e.id));
 
     const encounterAlloc: Array<{ stem: string; filename: string }> = [];
     for (const e of [...data.encounters].sort((a, b) => a.id - b.id)) {
@@ -914,7 +907,10 @@ export class ExportService {
         lines.push(`| ${this.mdCell(a.name)} | ${this.mdCell(a.kind) || '_'} | ${this.mdCell(a.toHit) || '_'} | ${this.mdCell(a.damage) || '_'} | ${this.mdCell(a.notes) || '_'} |`);
       }
     }
-    const slotKeys = c.spellSlots ? Object.keys(c.spellSlots).sort() : [];
+    // Numeric sort so spell-slot levels order 1,2,…,10 rather than lexicographic 1,10,2.
+    const slotKeys = c.spellSlots
+      ? Object.keys(c.spellSlots).sort((a, b) => Number(a) - Number(b))
+      : [];
     if (slotKeys.length) {
       lines.push('', '## Spell slots', '');
       for (const level of slotKeys) {
