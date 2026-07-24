@@ -388,18 +388,11 @@ export class ScribeService implements OnApplicationBootstrap {
       }
 
       tokensUsed = Math.max(0, Math.floor(tokensUsed));
-      if (!text.trim()) {
-        return {
-          ok: false,
-          status: 'failed',
-          detail: 'provider returned empty recap',
-          tokensUsed,
-          providerName,
-        };
-      }
 
-      // Meter before releasing the mutex. The SQL clamp remains defense in depth;
-      // the lock prevents a second real-money call from passing the stale gate.
+      // Meter every completed provider call before releasing the mutex, even
+      // when it returned no prose. Empty output can still carry paid usage; if
+      // we skipped accounting here, the next spender could pass the same gate.
+      // The SQL clamp remains defense in depth against counter overshoot.
       try {
         await this.aiDm.meterTurn(campaignId, tokensUsed, {
           actor: auditActor(user),
@@ -411,6 +404,16 @@ export class ScribeService implements OnApplicationBootstrap {
           ok: false,
           status: 'failed',
           detail: `metering error: ${err instanceof Error ? err.message : String(err)}`,
+          tokensUsed,
+          providerName,
+        };
+      }
+
+      if (!text.trim()) {
+        return {
+          ok: false,
+          status: 'failed',
+          detail: 'provider returned empty recap',
           tokensUsed,
           providerName,
         };

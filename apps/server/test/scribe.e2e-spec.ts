@@ -245,6 +245,28 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     await harness.enableExperimental();
   });
 
+  it('meters reported usage when the provider returns an empty recap', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Empty Provider Response');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 100 });
+    await seedResolvedInbox(harness, campaignId, 'The party waited for the chronicler.');
+
+    harness.script({
+      text: '',
+      usage: { promptTokens: 7, completionTokens: 0, totalTokens: 7 },
+    });
+    const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
+    expect(run.status).toBe(201);
+    expect(run.body.job.status).toBe('failed');
+    expect(run.body.job.detail).toContain('empty recap');
+    expect(run.body.job.tokensUsed).toBe(7);
+    expect(run.body.proposalIds).toHaveLength(0);
+
+    const seat = await harness.getSeat(campaignId);
+    expect(seat.body.tokensUsed).toBe(7);
+    expect(seat.body.turnCount).toBe(1);
+  });
+
   it('reports no_material when there is nothing to recap', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Empty');
