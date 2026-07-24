@@ -331,6 +331,11 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // restrict update_encounter to VTT fields only, and limit map linkage to session-generated
   // maps (mapAttachmentId:null detaches/undoes).
   'generate_map',
+  // Genuine AI map generation (#410): the driver may GENERATE/REFINE candidates during prep
+  // (previews only — nothing persisted). It is intentionally NOT given attach_generated_map,
+  // so it can never reveal/replace a live map without the DM performing the attach.
+  'generate_ai_map',
+  'refine_ai_map',
   'update_encounter',
   // private information delivery (#1023)
   'whisper_to_player',
@@ -440,13 +445,15 @@ export function guardDriverLivePlayArgs(
   args: Record<string, unknown>,
   session: Pick<AiDmSessionState, 'driverGeneratedMapIds' | 'generateMapCallsThisTurn'>,
 ): DriverLivePlayArgGuardResult {
-  if (toolName === 'generate_map') {
+  // Both the procedural (#306) and genuine-AI (#410) map generators share one per-turn
+  // budget so an autonomous seat cannot burn provider/image cost by spamming generation.
+  if (toolName === 'generate_map' || toolName === 'generate_ai_map' || toolName === 'refine_ai_map') {
     const calls = session.generateMapCallsThisTurn ?? 0;
     if (calls >= DRIVER_GENERATE_MAP_BUDGET_PER_TURN) {
       return {
         ok: false,
         code: 'generate_map_budget_exhausted',
-        message: `The driver may call generate_map at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
+        message: `The driver may call map-generation tools at most ${DRIVER_GENERATE_MAP_BUDGET_PER_TURN} time(s) per turn.`,
       };
     }
     return { ok: true, args: { ...args } };
@@ -644,6 +651,8 @@ const DRIVER_PLAYER_SAFE_READ_TOOLS: ReadonlySet<string> = new Set([
   // attachments (metadata only; hidden dropped for non-DM; bytes never served over MCP)
   'list_attachments',
   'get_attachment',
+  // AI map generation job status (#410) — no campaign secrets; DM-role gated at the tool
+  'get_map_generation',
   // inventory / treasury / timeline / comments (secrecy-aware at the tool layer)
   'list_inventory',
   'get_inventory_item',
@@ -1489,7 +1498,9 @@ export class AiDriverService {
         const guardedArgs = { ...liveGuard.args };
         for (const key of Object.keys(args)) delete args[key];
         Object.assign(args, guardedArgs);
-        if (call.name === 'generate_map') noteDriverGenerateMapCall(session);
+        if (call.name === 'generate_map' || call.name === 'generate_ai_map' || call.name === 'refine_ai_map') {
+          noteDriverGenerateMapCall(session);
+        }
       }
 
       // (2) Secrecy policy (#557): pick the principal this read runs under. Writes always run

@@ -4333,6 +4333,27 @@ export type CoDmDraftResult = z.infer<typeof CoDmDraftResult>;
 export const AiProviderConfigType = z.enum(['openai', 'anthropic', 'gemini', 'mock']);
 export type AiProviderConfigType = z.infer<typeof AiProviderConfigType>;
 
+// ── Provider CAPABILITIES model (issue #410) ──────────────────────────────────
+// Genuine AI map generation (#410) can only route honestly if it knows what each
+// configured provider can actually DO. A text-only model (Anthropic today) must NOT
+// be asked to "generate an image" and then have its prose passed off as one; an
+// OpenAI-compatible endpoint with an images model CAN. These booleans are declared
+// per provider TYPE (the server factory owns the concrete per-type table — see
+// providerCapabilities()) and surfaced to clients so the web wizard can show cost /
+// readiness and pick concept-art vs battle-map modes before spending anything.
+//
+//  - text            — chat/completions style narration + structured output.
+//  - toolCalling      — the model can request tool/function calls (drives the driver).
+//  - imageGeneration  — the provider exposes a text-to-image endpoint we can call.
+//  - imageEditing     — optional: it can edit/inpaint an existing image (mask/refine).
+export const AiProviderCapabilities = z.object({
+  text: z.boolean(),
+  toolCalling: z.boolean(),
+  imageGeneration: z.boolean(),
+  imageEditing: z.boolean().optional(),
+});
+export type AiProviderCapabilities = z.infer<typeof AiProviderCapabilities>;
+
 // Non-secret description of where the effective credential comes from. `server`
 // means a campaign override is borrowing the server-default stored credential;
 // `environment` means the matching OPENAI_API_KEY / ANTHROPIC_API_KEY is in use.
@@ -5040,6 +5061,230 @@ export const ImportMapAttribution = z.object({
   sourceId: z.string().max(60).optional(), // the MapSource.id this came from, when known
 });
 export type ImportMapAttribution = z.infer<typeof ImportMapAttribution>;
+
+// ---------- genuine AI map generation (issue #410) ----------
+// Turns a DM's free-form brief ("a fog-drowned crypt with a collapsed altar and two
+// flanking corridors") into map candidates. Unlike the deterministic procedural
+// generator (#306), this ROUTES through the configured AI provider when it can actually
+// make an image — and stays HONEST when it can't: a text-only provider (Anthropic) can
+// only produce a structured BLUEPRINT, which Campfire renders through its OWN procedural
+// renderer and labels as such (never "Anthropic generated this image"). The whole flow is
+// orphan-safe: previews live in memory and NOTHING is written to disk or the attachment
+// store until the DM explicitly attaches a chosen candidate.
+
+/**
+ * Coerce a free-form theme string to a valid {@link MapTheme}, or `undefined` when it
+ * can't be mapped (issue #410). The AI (or a chip) may propose any theme word
+ * ("volcanic", "sunless", "sylvan"); the procedural renderer only knows a fixed palette
+ * enum, so an un-normalized theme used to hard-FAIL `GenerateMapParams.parse`. This maps
+ * common synonyms onto the nearest palette and drops anything unknown (so generation
+ * proceeds with the kind's default theme instead of 400ing). Pure + deterministic.
+ */
+export function normalizeMapTheme(input: unknown): MapTheme | undefined {
+  if (typeof input !== 'string') return undefined;
+  const v = input.trim().toLowerCase();
+  if (v === '') return undefined;
+  // Exact enum match first.
+  const direct = MapTheme.safeParse(v);
+  if (direct.success) return direct.data;
+  // Synonym / keyword mapping onto the fixed palette (stone/cavern/forest/crypt).
+  const table: Array<[readonly string[], MapTheme]> = [
+    [['cave', 'cavern', 'underground', 'grotto', 'volcanic', 'lava', 'subterranean', 'mine', 'sunless'], 'cavern'],
+    [['forest', 'wood', 'woods', 'woodland', 'jungle', 'sylvan', 'grove', 'swamp', 'marsh', 'wilderness', 'outdoor', 'nature', 'grass'], 'forest'],
+    [['crypt', 'tomb', 'grave', 'graveyard', 'catacomb', 'undead', 'necro', 'ossuary', 'mausoleum', 'burial'], 'crypt'],
+    [['stone', 'dungeon', 'keep', 'castle', 'fortress', 'ruins', 'temple', 'brick', 'masonry', 'rock', 'gray', 'grey'], 'stone'],
+  ];
+  for (const [keys, theme] of table) {
+    if (keys.some((k) => v.includes(k))) return theme;
+  }
+  return undefined;
+}
+
+/** Concept art (illustrative, no grid guarantee) vs a tactical battle map (grid-aligned). */
+export const AiMapMode = z.enum(['battle-map', 'concept-art']);
+export type AiMapMode = z.infer<typeof AiMapMode>;
+
+/**
+ * How a candidate was actually produced — the honesty backbone of #410. `image-provider`
+ * means a real text-to-image provider drew it; `procedural-blueprint` means a text-only
+ * provider produced a structured blueprint that Campfire's OWN procedural renderer drew
+ * (labeled as such — we never claim the text model made an image); `external-instructions`
+ * means no capable provider was available and Campfire returned steps for a client-side
+ * external generator instead of a fabricated image.
+ */
+export const AiMapGenerationMethod = z.enum(['image-provider', 'procedural-blueprint', 'external-instructions']);
+export type AiMapGenerationMethod = z.infer<typeof AiMapGenerationMethod>;
+
+/** Lifecycle of an AI map generation job. */
+export const AiMapJobStatus = z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled']);
+export type AiMapJobStatus = z.infer<typeof AiMapJobStatus>;
+
+/**
+ * Structured "chips" the web UI offers so a brief is composable rather than a blank box
+ * (issue #410): pick terrain / encounter type / mood / hazards / landmarks / grid size.
+ * All optional; they are folded into the prompt AND used to seed the blueprint fallback.
+ */
+export const AiMapChips = z.object({
+  terrain: z.string().max(60).optional(),
+  encounterType: z.string().max(60).optional(),
+  mood: z.string().max(60).optional(),
+  hazards: z.array(z.string().max(40)).max(12).default([]),
+  landmarks: z.array(z.string().max(40)).max(12).default([]),
+  /** Grid size in cells (square), used for battle-map layout + calibration hints. */
+  gridSizeCells: z.number().int().min(4).max(60).optional(),
+});
+export type AiMapChips = z.infer<typeof AiMapChips>;
+
+/** Pixel dimensions for an image-provider render (bounded; ignored for procedural SVG). */
+export const AiMapDimensions = z.object({
+  width: z.number().int().min(256).max(4096),
+  height: z.number().int().min(256).max(4096),
+});
+export type AiMapDimensions = z.infer<typeof AiMapDimensions>;
+
+/**
+ * The request to generate map candidates (issue #410). `theme` is a FREE-FORM string here
+ * (normalized server-side via {@link normalizeMapTheme}); `count` bounds the number of
+ * previews (2–4 typical). `includeCampaignSecrets` is false by default — campaign secrets
+ * are NEVER sent to a provider unless the DM explicitly opts in.
+ */
+export const AiMapGenerationRequest = z.object({
+  prompt: z.string().min(1).max(2000),
+  mode: AiMapMode.default('battle-map'),
+  chips: AiMapChips.optional(),
+  kind: MapKind.optional(),
+  size: MapSize.optional(),
+  theme: z.string().max(60).optional(),
+  dimensions: AiMapDimensions.optional(),
+  count: z.number().int().min(1).max(4).default(2),
+  seed: z.string().min(1).max(64).optional(),
+  complexity: z.number().min(0).max(1).optional(),
+  gridScale: z.number().positive().max(1000).optional(),
+  gridUnit: z.string().min(1).max(12).optional(),
+  /** Explicitly opt in to include DM-only campaign context in the prompt (default: never). */
+  includeCampaignSecrets: z.boolean().default(false),
+  /** Override the image model for this request (else the provider's configured default). */
+  imageModel: z.string().min(1).max(120).optional(),
+});
+export type AiMapGenerationRequest = z.infer<typeof AiMapGenerationRequest>;
+
+/** Result of the deterministic content-moderation gate run on the prompt before spending. */
+export const AiMapModeration = z.object({
+  flagged: z.boolean(),
+  categories: z.array(z.string().max(40)).default([]),
+  note: z.string().max(400).nullable().default(null),
+});
+export type AiMapModeration = z.infer<typeof AiMapModeration>;
+
+/** Honest provenance recorded for every candidate + persisted with the attachment audit. */
+export const AiMapProvenance = z.object({
+  method: AiMapGenerationMethod,
+  /** Provider type that served (or would have served) the request; null for external-instructions. */
+  providerType: z.string().nullable(),
+  model: z.string().nullable(),
+  /** Human-readable, HONEST label shown in the UI + stamped into the audit trail. */
+  label: z.string().max(300),
+  seed: z.string().nullable().default(null),
+});
+export type AiMapProvenance = z.infer<typeof AiMapProvenance>;
+
+/** Rough cost/usage surfaced BEFORE and after generation so the DM can decide to spend. */
+export const AiMapCost = z.object({
+  imageCount: z.number().int().nonnegative(),
+  tokensUsed: z.number().int().nonnegative().default(0),
+  /** Best-effort estimate in USD when the provider/model pricing is known; else null. */
+  estimatedUsd: z.number().nonnegative().nullable().default(null),
+});
+export type AiMapCost = z.infer<typeof AiMapCost>;
+
+/** A single generated candidate the DM can select / refine / crop / attach. */
+export const AiMapPreview = z.object({
+  id: z.string(),
+  method: AiMapGenerationMethod,
+  /** Inline SVG markup (procedural-blueprint renders) — mutually exclusive with imageBase64. */
+  svg: z.string().nullable().default(null),
+  /** Base64-encoded raster bytes (image-provider renders) — mutually exclusive with svg. */
+  imageBase64: z.string().nullable().default(null),
+  mime: z.string().max(60),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  seed: z.string(),
+  gridConfig: MapGridConfig.nullable().default(null),
+  provenance: AiMapProvenance,
+  /** Per-candidate warnings (e.g. "grid not guaranteed on a concept-art render"). */
+  warnings: z.array(z.string().max(200)).default([]),
+});
+export type AiMapPreview = z.infer<typeof AiMapPreview>;
+
+/**
+ * Readiness hints shown BEFORE generating (issue #410): whether doors/corridors/grid are
+ * likely to work for the chosen mode/provider, plus warnings. Concept-art + raster image
+ * providers cannot guarantee a usable grid or connected corridors, so the UI warns.
+ */
+export const AiMapReadiness = z.object({
+  mode: AiMapMode,
+  method: AiMapGenerationMethod,
+  gridLikely: z.boolean(),
+  doorsLikely: z.boolean(),
+  corridorsLikely: z.boolean(),
+  warnings: z.array(z.string().max(200)).default([]),
+  cost: AiMapCost,
+  moderation: AiMapModeration,
+  /** Declared capabilities of the resolved provider (null when none configured). */
+  capabilities: AiProviderCapabilities.nullable().default(null),
+});
+export type AiMapReadiness = z.infer<typeof AiMapReadiness>;
+
+/**
+ * The full job view returned by create/status/refine (issue #410). Previews are in-memory
+ * only until attached; `externalInstructions` is populated for the external-instructions
+ * fallback so a DM without a capable provider still has a concrete next step.
+ */
+export const AiMapGenerationJob = z.object({
+  id: z.string(),
+  campaignId: Id,
+  status: AiMapJobStatus,
+  progress: z.number().int().min(0).max(100),
+  mode: AiMapMode,
+  method: AiMapGenerationMethod,
+  prompt: z.string(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  dimensions: AiMapDimensions.nullable().default(null),
+  moderation: AiMapModeration,
+  cost: AiMapCost,
+  previews: z.array(AiMapPreview).default([]),
+  externalInstructions: z.array(z.string().max(400)).default([]),
+  warnings: z.array(z.string().max(200)).default([]),
+  error: z.string().max(400).nullable().default(null),
+  createdBy: z.string(),
+  ...timestamps,
+});
+export type AiMapGenerationJob = z.infer<typeof AiMapGenerationJob>;
+
+/** Refine an existing job: tweak the prompt/chips and regenerate (issue #410). */
+export const AiMapRefineRequest = z.object({
+  prompt: z.string().min(1).max(2000).optional(),
+  chips: AiMapChips.optional(),
+  count: z.number().int().min(1).max(4).optional(),
+  /** Reuse this preview's seed as the base for the refined render (keeps continuity). */
+  fromPreviewId: z.string().optional(),
+});
+export type AiMapRefineRequest = z.infer<typeof AiMapRefineRequest>;
+
+/**
+ * Attach a chosen candidate as a real (DM-hidden) 'map' attachment (issue #410). Optional
+ * crop/rotation and grid-calibration overrides are applied before persisting. When
+ * `encounterId` is set the map is also linked to that encounter's battle map + grid — this
+ * is the "reveal/replace a live map" path the driver seat is NOT permitted to take without
+ * DM policy/approval.
+ */
+export const AttachGeneratedMapRequest = z.object({
+  previewId: z.string().min(1),
+  encounterId: Id.optional(),
+  filename: z.string().max(160).optional(),
+});
+export type AttachGeneratedMapRequest = z.infer<typeof AttachGeneratedMapRequest>;
 
 // Encounter difficulty schemas + 5e math live in ./encounter-difficulty (issues #58 + #429).
 

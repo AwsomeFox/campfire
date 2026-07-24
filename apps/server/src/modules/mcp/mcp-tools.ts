@@ -72,6 +72,9 @@ import {
   RsvpSetBody,
   RsvpSet,
   GenerateMapParams,
+  AiMapGenerationRequest,
+  AiMapRefineRequest,
+  AttachGeneratedMapRequest,
   CoDmDraftTarget,
   CampaignDmRepair,
   ParticipantSupportPreferenceUpsert,
@@ -99,6 +102,7 @@ import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MapsService } from '../maps/maps.service';
+import { AiMapService } from '../ai-map/ai-map.service';
 import { AuditService } from '../audit/audit.service';
 import { ExportService } from '../export/export.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -320,6 +324,7 @@ export class McpToolsService {
     private readonly rules: RulesService,
     private readonly encounters: EncountersService,
     private readonly maps: MapsService,
+    private readonly aiMap: AiMapService,
     private readonly audit: AuditService,
     private readonly exportService: ExportService,
     private readonly aiDm: AiDmService,
@@ -3105,6 +3110,91 @@ export class McpToolsService {
           return this.maps.generateForEncounter(encounterId as number, campaignId as number, params, user, role);
         }
         return this.maps.generateForCampaign(campaignId as number, params, user, role);
+      },
+    );
+
+    // ── genuine AI map generation (issue #410) ──────────────────────────────────
+    this.writeTool(
+      server,
+      user,
+      'generate_ai_map',
+      'DM only: generate battle-map / concept-art CANDIDATES from a free-form brief using the configured AI provider ' +
+        '(issue #410). Routes HONESTLY: an image-capable provider (OpenAI-compatible) draws a real image; a text-only ' +
+        'provider (Anthropic) instead produces a blueprint that Campfire\'s own procedural renderer draws (labeled as ' +
+        'such — never claimed to be AI-drawn); with no capable provider it returns external-generator instructions. ' +
+        'Previews live in memory only — NOTHING is persisted until you call attach_generated_map, so cancelling leaves ' +
+        'no orphan files. `count` (1–4) previews. `mode`: "battle-map" (grid) or "concept-art". Campaign secrets are ' +
+        'NOT sent to the provider unless includeCampaignSecrets:true. Returns the job { id, status, method, previews[], ' +
+        'cost, moderation }; poll get_map_generation and then attach_generated_map to keep one.',
+      {
+        campaignId: CampaignIdArg,
+        idempotencyKey: z.string().max(120).optional().describe('Optional idempotency key — a retry with the same key returns the same job'),
+        ...AiMapGenerationRequest.shape,
+      },
+      async ({ campaignId, idempotencyKey, ...fields }) => {
+        const request = AiMapGenerationRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.aiMap.createJob(campaignId as number, request, user, role, {
+          idempotencyKey: idempotencyKey as string | undefined,
+          caller: 'co-dm',
+        });
+      },
+    );
+
+    this.tool(
+      server,
+      'get_map_generation',
+      'DM only: fetch the status/progress/previews of an AI map generation job (issue #410). Pass the campaignId and ' +
+        'the jobId returned by generate_ai_map / refine_ai_map.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('AI map job id from generate_ai_map'),
+      },
+      async ({ campaignId, jobId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.aiMap.getJob(jobId as string, campaignId as number);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'refine_ai_map',
+      'DM only: refine an existing AI map job (issue #410) — tweak the prompt/chips (or reuse a chosen preview\'s seed ' +
+        'for continuity) and regenerate a fresh set of candidates. Returns the new job. Like generate_ai_map, nothing ' +
+        'is persisted until attach_generated_map.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The job to refine (from generate_ai_map)'),
+        ...AiMapRefineRequest.shape,
+      },
+      async ({ campaignId, jobId, ...fields }) => {
+        const refine = AiMapRefineRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.aiMap.refine(campaignId as number, jobId as string, refine, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'attach_generated_map',
+      'DM only: persist a chosen AI-generated candidate as a HIDDEN (DM-only) map attachment (issue #410) and, when ' +
+        'encounterId is set, link it as that encounter\'s battle map with an aligned grid. This is the reveal/replace ' +
+        'path a DM controls — the autonomous driver seat is NOT permitted to reveal/replace a live map. Prompt, ' +
+        'provider/model, seed/params, dimensions, provenance, moderation, and cost are stamped into the attachment ' +
+        'audit record. Returns { attachment, result, provenance }. The map stays DM-hidden until you reveal it.',
+      {
+        campaignId: CampaignIdArg,
+        jobId: z.string().min(1).max(80).describe('The succeeded job to attach a preview from'),
+        ...AttachGeneratedMapRequest.shape,
+      },
+      async ({ campaignId, jobId, ...fields }) => {
+        const body = AttachGeneratedMapRequest.parse(fields);
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        // A DM invoking this tool directly is authorized to reveal/replace a live map. The
+        // driver seat never reaches here: attach_generated_map is absent from its allow-list.
+        return this.aiMap.attach(campaignId as number, jobId as string, body, user, role, { allowLiveReplace: true });
       },
     );
 
