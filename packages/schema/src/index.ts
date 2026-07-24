@@ -1338,7 +1338,7 @@ export const RulePack = z.object({
 });
 export type RulePack = z.infer<typeof RulePack>;
 
-export const RuleEntryType = z.enum(['spell', 'monster', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
+export const RuleEntryType = z.enum(['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other']);
 export type RuleEntryType = z.infer<typeof RuleEntryType>;
 
 export const RuleEntry = z.object({
@@ -1465,8 +1465,17 @@ export const RulePackInstallSection = z.enum([
   'equipment',
   'starships',
   'vehicles',
-  // Open Legend
+  // PF2e / SF2e Archives of Nethys native sections
   'creatures',
+  'ancestries',
+  'backgrounds',
+  'hazards',
+  'deities',
+  'rituals',
+  'planes',
+  'curses',
+  'diseases',
+  // Open Legend
   'banes',
   'boons',
 ]);
@@ -1537,7 +1546,7 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'api',
     installableWithoutUrl: true,
     license: 'OGL / ORC',
-    note: 'Live import from the Archives of Nethys 2e Elasticsearch backend.',
+    note: 'Live per-section import of open rules/reference content from Archives of Nethys; adventure, scenario, and story publications are excluded.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
   sf2e: {
@@ -1546,7 +1555,7 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     sourceKind: 'api',
     installableWithoutUrl: true,
     license: 'ORC / OGL',
-    note: 'Live import from the Archives of Nethys SF2e Elasticsearch backend (aonsf index).',
+    note: 'Live per-section import of open rules/reference content from the Archives of Nethys SF2e backend; adventure, scenario, and story publications are excluded.',
     candidateSourceUrl: 'https://elasticsearch.aonprd.com',
   },
   'open-legend': {
@@ -4338,6 +4347,9 @@ export const EncounterGenerateFilters = z.object({
   // Restrict to a single installed rule pack by slug (list_rule_packs). Omitting spans
   // every installed pack.
   packSlug: z.string().min(1).max(160).optional(),
+  // Hazards are opt-in encounter building blocks. When true, first-class hazard entries
+  // join monsters in the same rating/XP budget search; false/omitted preserves legacy output.
+  includeHazards: z.boolean().optional(),
 });
 export type EncounterGenerateFilters = z.infer<typeof EncounterGenerateFilters>;
 
@@ -4369,11 +4381,12 @@ export const EncounterGenerate = z.object({
 });
 export type EncounterGenerate = z.infer<typeof EncounterGenerate>;
 
-/** One suggested monster line (a stack of `count` identical statblocks). */
+/** One suggested monster or hazard line (a stack of `count` identical entries). */
 export const EncounterSuggestionCombatant = z.object({
   ruleEntryId: Id, // compendium statblock id — feed straight to add_combatant
   name: z.string(),
-  cr: z.number().nullable(), // numeric CR (null if the statblock's CR was unparseable)
+  entryType: z.enum(['monster', 'hazard']).default('monster'),
+  cr: z.number().nullable(), // numeric rating used by the active encounter budget
   xp: z.number().int().nonnegative(), // per-monster XP (5e CR→XP table)
   hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it
   count: z.number().int().min(1), // how many of this monster to add

@@ -122,7 +122,7 @@ export class RulesController {
       'from a previous `nextCursor` (issue #613).',
   })
   @ApiQuery({ name: 'q', required: false, description: 'Free-text search against entry name/summary. Empty returns all (subject to type/pack filters).' })
-  @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'item', 'class', 'race', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
+  @ApiQuery({ name: 'type', required: false, enum: ['spell', 'monster', 'hazard', 'item', 'class', 'race', 'feat', 'condition', 'section', 'other'], description: 'Filter to one entry type.' })
   @ApiQuery({ name: 'pack', required: false, description: 'Filter to one pack by slug.' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Page size (default 50, max 100).' })
   @ApiQuery({ name: 'cursor', required: false, description: 'Opaque cursor from a previous page\'s nextCursor.' })

@@ -11,7 +11,7 @@
  * turn/round/status. Players may only adjust HP/conditions on the combatant
  * that maps to their own character (via campaign characters' ownerUserId).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AoeShape,
@@ -3594,10 +3594,16 @@ function AddCombatantPanel({
     (async () => {
       setSearching(true);
       try {
-        const params = new URLSearchParams({ type: 'monster', q: debouncedQuery.trim() });
-        if (rulePack) params.set('pack', rulePack);
-        const page = await api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
-        if (!cancelled) setResults(page.items);
+        const baseParams = new URLSearchParams({ q: debouncedQuery.trim() });
+        if (rulePack) baseParams.set('pack', rulePack);
+        const pages = await Promise.all(
+          (['monster', 'hazard'] as const).map((type) => {
+            const params = new URLSearchParams(baseParams);
+            params.set('type', type);
+            return api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
+          }),
+        );
+        if (!cancelled) setResults(pages.flatMap((page) => page.items));
       } catch {
         if (!cancelled) setResults([]);
       } finally {
@@ -3663,6 +3669,26 @@ function AddCombatantPanel({
     }
   }
 
+  function addDroppedRuleEntry(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (saving) return;
+    try {
+      const payload = JSON.parse(event.dataTransfer.getData('application/x-campfire-rule-entry')) as {
+        id?: unknown;
+        name?: unknown;
+        type?: unknown;
+      };
+      if (
+        typeof payload.id !== 'number' ||
+        typeof payload.name !== 'string' ||
+        (payload.type !== 'monster' && payload.type !== 'hazard')
+      ) return;
+      void addFromCompendium({ id: payload.id, name: payload.name, type: payload.type } as RuleEntry);
+    } catch {
+      // Ignore unrelated/invalid drags; the drop zone accepts only Campfire rule entries.
+    }
+  }
+
   async function addFromParty(character: Character) {
     setSaving(true);
     setError(null);
@@ -3716,8 +3742,20 @@ function AddCombatantPanel({
   }
 
   return (
-    <Card className="space-y-3">
+    <Card
+      className="space-y-3"
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('application/x-campfire-rule-entry')) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+        }
+      }}
+      onDrop={addDroppedRuleEntry}
+    >
       <span className="card-kicker">Add combatant</span>
+      <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
+        Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
+      </p>
       <div className="seg self-start inline-flex">
         {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
@@ -3769,8 +3807,8 @@ function AddCombatantPanel({
       {tab === 'compendium' && (
         <div className="space-y-2">
           <TextInput
-            aria-label="Search monsters in the compendium"
-            placeholder="Search monsters…"
+            aria-label="Search monsters and hazards in the compendium"
+            placeholder="Search monsters and hazards…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
@@ -3815,7 +3853,7 @@ function AddCombatantPanel({
                 >
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{entry.name}</span>
                   <span className="tag tag-neutral">
-                    monster
+                    {entry.type}
                   </span>
                 </button>
               ))}

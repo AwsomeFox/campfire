@@ -634,6 +634,18 @@ describe('encounter generator (issue #304)', () => {
       expect(r.shape).toBe('horde');
     });
 
+    it('budgets hazards like monsters and carries entryType through to the pick (issue #404)', () => {
+      // A hazard is a first-class budget building block: it competes in the same CR/XP search
+      // and its entryType survives onto the returned pick so the caller can add it as a hazard.
+      const candidates = [cand({ ruleEntryId: 7, cr: 2, name: 'Spiked Pit', entryType: 'hazard' })];
+      const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates, maxCount: 12, seed: 7 });
+      expect(r.matchedBand).toBe(true);
+      expect(r.difficulty.band).toBe('medium');
+      expect(r.picks).toHaveLength(1);
+      expect(r.picks[0].ruleEntryId).toBe(7);
+      expect(r.picks[0].entryType).toBe('hazard');
+    });
+
     it('empty candidate list yields an empty group (no monsters to pick)', () => {
       const r = generateEncounterGroup({ partyLevels: party, targetBand: 'medium', candidates: [], maxCount: 12, seed: 1 });
       expect(r.picks).toHaveLength(0);

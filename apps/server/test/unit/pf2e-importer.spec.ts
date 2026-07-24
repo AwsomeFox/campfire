@@ -92,12 +92,36 @@ describe('pf2e-importer — section fetch + mapping', () => {
     expect(conditions.entries[0].type).toBe('condition');
   });
 
+  it('maps hazards as first-class budgetable entries and excludes adventure publications', async () => {
+    const { entries, skippedCount } = await fetchPf2eSection(fake.baseUrl, 'hazards', silentLogger);
+    expect(entries.map((e) => e.name)).toEqual(['Burning Floor']);
+    expect(entries[0].type).toBe('hazard');
+    expect(JSON.parse(entries[0].dataJson!)).toMatchObject({ level: 3, ac: 20, hp: 32, complexity: 'Simple' });
+    expect(skippedCount).toBe(1);
+  });
+
+  it('maps deities, rituals, planes, curses, and diseases into searchable compendium types', async () => {
+    const sections = await Promise.all(
+      (['deities', 'rituals', 'planes', 'curses', 'diseases'] as const).map((section) =>
+        fetchPf2eSection(fake.baseUrl, section, silentLogger),
+      ),
+    );
+    expect(sections.map((result) => result.entries[0].type)).toEqual([
+      'other',
+      'spell',
+      'section',
+      'condition',
+      'condition',
+    ]);
+  });
+
   it('exposes the section -> rule-entry-type mapping and a complete section list', () => {
     expect(entryTypeForSection('creatures')).toBe('monster');
     expect(entryTypeForSection('ancestries')).toBe('race');
     expect(entryTypeForSection('backgrounds')).toBe('feat');
     expect(entryTypeForSection('vehicles')).toBe('item');
-    expect(ALL_PF2E_SECTIONS).toHaveLength(9);
+    expect(entryTypeForSection('hazards')).toBe('hazard');
+    expect(ALL_PF2E_SECTIONS).toHaveLength(15);
   });
 });
 

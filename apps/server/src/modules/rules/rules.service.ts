@@ -342,9 +342,8 @@ export class RulesService {
    */
   private static readonly SECTIONS_BY_SOURCE: Record<RulePackInstallSource, readonly string[]> = {
     open5e: ALL_OPEN5E_SECTIONS,
-    // PF2e / SF2e accept both 5e-shaped section names and native PF2e/SF2e section keys
-    pf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
-    sf2e: Array.from(new Set([...ALL_OPEN5E_SECTIONS, ...ALL_PF2E_SECTIONS])),
+    pf2e: ALL_PF2E_SECTIONS,
+    sf2e: ALL_PF2E_SECTIONS,
     pf1e: ALL_PF1E_SECTIONS,
     starfinder: ALL_STARFINDER_SECTIONS,
     archmage: ALL_ARCHMAGE_SECTIONS,
@@ -482,10 +481,10 @@ export class RulesService {
    * the `pf2e-srd` pack slug, which the PF2e RuleSystemAdapter is registered against.
    */
   enqueuePf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    // The shared RulePackInstall.sections enum is Open5e-shaped (spells/monsters/…); PF2e
-    // has its own section vocabulary (creatures/equipment/ancestries/…), so a PF2e install
-    // always imports all PF2e sections rather than honouring the 5e-named filter.
-    const job = this.newJob('pf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('pf2e', sections);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromPf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -495,7 +494,10 @@ export class RulesService {
   }
 
   enqueueSf2eInstall(input: RulePackInstall, user: RequestUser): RulePackInstallJob {
-    const job = this.newJob('sf2e', ALL_PF2E_SECTIONS);
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
+    const job = this.newJob('sf2e', sections);
     queueMicrotask(() =>
       void this.runJob(job.id, () =>
         this.installFromSf2e(input, user, (section, imported) => this.markSectionDone(job.id, section, imported)),
@@ -806,7 +808,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? PF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
@@ -838,7 +842,9 @@ export class RulesService {
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
     const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
-    const sections: Pf2eSection[] = ALL_PF2E_SECTIONS;
+    const sections: Pf2eSection[] = input.sections?.length
+      ? (input.sections as Pf2eSection[])
+      : ALL_PF2E_SECTIONS;
 
     const sectionResults = await Promise.all(
       sections.map(async (s) => {

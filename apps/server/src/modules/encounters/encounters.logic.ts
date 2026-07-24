@@ -139,6 +139,7 @@ export function computeEncounterDifficulty(partyLevels: number[], monsterCrs: (n
 export interface GeneratorCandidate {
   ruleEntryId: number;
   name: string;
+  entryType?: 'monster' | 'hazard';
   cr: number | null;
   xp: number;
   hpMax: number | null;

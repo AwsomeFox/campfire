@@ -195,6 +195,42 @@ const VEHICLES = [
   },
 ];
 
+const HAZARDS = [
+  {
+    id: 'burning-floor',
+    name: 'Burning Floor',
+    type: 'Hazard',
+    level: 3,
+    ac: 20,
+    hp: 32,
+    stealth: 10,
+    complexity: 'Simple',
+    disable: 'Thievery DC 18',
+    trait: ['Fire', 'Mechanical'],
+    text: 'Pressure plates ignite the floor.',
+    source: 'Pathfinder GM Core',
+    license: 'ORC',
+  },
+  {
+    id: 'story-trap',
+    name: 'Story Trap',
+    type: 'Hazard',
+    level: 4,
+    hp: 20,
+    text: 'Adventure-specific story content that must not be imported.',
+    source: 'Example Adventure Path',
+    license: 'ORC',
+  },
+];
+
+const REFERENCES: Record<string, Array<Record<string, unknown>>> = {
+  deity: [{ id: 'sarenrae', name: 'Sarenrae', type: 'Deity', text: 'The Dawnflower.', source: 'Pathfinder Lost Omens Gods & Magic', license: 'OGL' }],
+  ritual: [{ id: 'resurrect', name: 'Resurrect', type: 'Ritual', level: 5, text: 'Return a soul to life.', source: 'Pathfinder Player Core', license: 'ORC' }],
+  plane: [{ id: 'astral-plane', name: 'Astral Plane', type: 'Plane', text: 'A transitive plane.', source: 'Pathfinder GM Core', license: 'ORC' }],
+  curse: [{ id: 'curse-of-nightmares', name: 'Curse of Nightmares', type: 'Curse', level: 2, text: 'Restless dreams.', source: 'Pathfinder GM Core', license: 'ORC' }],
+  disease: [{ id: 'filth-fever', name: 'Filth Fever', type: 'Disease', level: 1, text: 'A debilitating infection.', source: 'Pathfinder GM Core', license: 'ORC' }],
+};
+
 const BY_TYPE: Record<string, Array<Record<string, unknown>>> = {
   creature: CREATURES,
   spell: SPELLS,
@@ -207,6 +243,8 @@ const BY_TYPE: Record<string, Array<Record<string, unknown>>> = {
   background: BACKGROUNDS,
   condition: CONDITIONS,
   vehicle: VEHICLES,
+  hazard: HAZARDS,
+  ...REFERENCES,
 };
 
 function parseType(q: unknown): string {

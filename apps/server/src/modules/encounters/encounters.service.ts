@@ -1336,8 +1336,10 @@ export class EncountersService {
       packId = pack.id;
     }
 
-    const where = packId !== undefined ? and(eq(ruleEntries.type, 'monster'), eq(ruleEntries.packId, packId)) : eq(ruleEntries.type, 'monster');
-    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
+    const allowedTypes = filters?.includeHazards ? ['monster', 'hazard'] as const : ['monster'] as const;
+    const typeWhere = inArray(ruleEntries.type, [...allowedTypes]);
+    const where = packId !== undefined ? and(typeWhere, eq(ruleEntries.packId, packId)) : typeWhere;
+    const rows = await this.db.select({ id: ruleEntries.id, name: ruleEntries.name, type: ruleEntries.type, dataJson: ruleEntries.dataJson }).from(ruleEntries).where(where);
 
     const typeNeedle = filters?.creatureType?.trim().toLowerCase();
     const envNeedle = filters?.environment?.trim().toLowerCase();
@@ -1367,7 +1369,14 @@ export class EncountersService {
         if (!envs.some((e) => e.includes(envNeedle))) continue;
       }
 
-      candidates.push({ ruleEntryId: row.id, name: row.name, cr, xp: crToXp(cr), hpMax: adapter.monsterHitPoints(data) });
+      candidates.push({
+        ruleEntryId: row.id,
+        name: row.name,
+        entryType: row.type === 'hazard' ? 'hazard' : 'monster',
+        cr,
+        xp: crToXp(cr),
+        hpMax: adapter.monsterHitPoints(data),
+      });
     }
     return candidates;
   }
@@ -1403,7 +1412,7 @@ export class EncountersService {
     });
 
     return {
-      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
+      combatants: result.picks.map((p) => ({ ruleEntryId: p.ruleEntryId, name: p.name, entryType: p.entryType ?? 'monster', cr: p.cr, xp: p.xp, hpMax: p.hpMax, count: p.count })),
       targetBand: input.difficulty,
       difficulty: result.difficulty,
       totalXp: result.difficulty.adjustedXp,

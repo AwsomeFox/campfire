@@ -45,6 +45,14 @@ export const SECTION_LABELS: Record<RulePackInstallSection, string> = {
   starships: 'Starships',
   vehicles: 'Vehicles',
   creatures: 'Creatures',
+  ancestries: 'Ancestries',
+  backgrounds: 'Backgrounds',
+  hazards: 'Hazards',
+  deities: 'Deities',
+  rituals: 'Rituals',
+  planes: 'Planes',
+  curses: 'Curses',
+  diseases: 'Diseases',
   banes: 'Banes',
   boons: 'Boons',
 };
@@ -106,6 +114,23 @@ export interface RuleSystemMeta {
 }
 
 const FIVE_E_SECTIONS: RulePackInstallSection[] = ['spells', 'monsters', 'items', 'conditions', 'classes', 'races', 'feats'];
+const AON_SECTIONS: RulePackInstallSection[] = [
+  'creatures',
+  'spells',
+  'equipment',
+  'feats',
+  'ancestries',
+  'classes',
+  'backgrounds',
+  'conditions',
+  'vehicles',
+  'hazards',
+  'deities',
+  'rituals',
+  'planes',
+  'curses',
+  'diseases',
+];
 
 /**
  * Every installable rule system, in picker order. `sections` mirror the server's
@@ -128,10 +153,9 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     source: 'pf2e',
     label: 'Pathfinder 2e',
     license: 'Archives of Nethys · ORC / OGL',
-    blurb: 'Pathfinder 2e (remaster) content from the Archives of Nethys open dataset.',
+    blurb: 'Open rules and setting reference content from Archives of Nethys. Adventure, scenario, and story publications are excluded.',
     mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e conditions · four degrees of success.',
-    // PF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
-    sections: FIVE_E_SECTIONS,
+    sections: AON_SECTIONS,
     packSlug: PF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('pf2e'),
   },
@@ -139,10 +163,9 @@ export const RULE_SYSTEMS: RuleSystemMeta[] = [
     source: 'sf2e',
     label: 'Starfinder 2e',
     license: 'Archives of Nethys · ORC / OGL',
-    blurb: 'Starfinder 2e (remaster/playtest) content from the Archives of Nethys open dataset.',
+    blurb: 'Open rules and setting reference content from Archives of Nethys. Adventure, scenario, and story publications are excluded.',
     mechanics: 'Initiative d20 + Perception · proficiency adds your level · level-based DCs · PF2e-style mechanics & conditions · four degrees of success.',
-    // SF2e accepts the 5e-shaped section names (the importer imports its full set regardless).
-    sections: FIVE_E_SECTIONS,
+    sections: AON_SECTIONS,
     packSlug: SF2E_PACK_SLUG,
     requiresUrl: SOURCES_REQUIRING_URL.has('sf2e'),
   },

@@ -29,6 +29,7 @@ export const COMPENDIUM_LOAD_MORE_LABEL = 'Load more';
 export const COMPENDIUM_URL_TYPE_VALUES = [
   'spell',
   'monster',
+  'hazard',
   'item',
   'condition',
   'class',
