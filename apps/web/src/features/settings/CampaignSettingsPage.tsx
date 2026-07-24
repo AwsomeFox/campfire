@@ -10,7 +10,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import type { Campaign, CampaignCloneMode, CampaignInvite, DangerLevel, RulePack } from '@campfire/schema';
+import type { Campaign, CampaignCloneMode, CampaignClonePreview, CampaignInvite, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { adminRulesHref } from '../../lib/adminNavigation';
@@ -1121,8 +1121,34 @@ function ExportCard({ campaignId }: { campaignId: number }) {
 function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: Campaign) => void }) {
   const [name, setName] = useState(`${campaign.name} (copy)`);
   const [mode, setMode] = useState<CampaignCloneMode>('full');
+  const [preview, setPreview] = useState<CampaignClonePreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [cloning, setCloning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    void api
+      .get<CampaignClonePreview>(`${API}/campaigns/${campaign.id}/clone/preview?mode=${mode}`)
+      .then((data) => {
+        if (!cancelled) setPreview(data);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(err instanceof ApiError ? err.message : "Couldn't load clone preview.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPreviewLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaign.id, mode]);
 
   async function clone() {
     setCloning(true);
@@ -1139,14 +1165,24 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
     }
   }
 
+  const previewLines = preview
+    ? Object.entries(preview.inclusions)
+        .filter(([, v]) => v.included && v.count > 0)
+        .map(([key, v]) => {
+          const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, (c) => c.toUpperCase());
+          return `${label}: ${v.count}`;
+        })
+    : [];
+
   return (
     <div className="card elev-sm">
       <span className="card-kicker">Duplicate campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
-        Reuse your prep. A full copy duplicates everything — quests, NPCs, locations, characters, sessions, notes and
-        encounters (encounter combat state is reset: fights go back to preparing with full HP and no conditions). A template
-        copies the world only and resets progress: quests back to available, objectives unchecked, no sessions or play
-        state. Members aren't copied — you become the new campaign's DM.
+        Reuse your prep. A full copy duplicates world-building and play state — quests, NPCs, locations,
+        factions, characters, sessions, notes, encounters, storylines, timeline, session-zero charter,
+        inventory, treasury, prose revisions, and map/portrait attachments (encounter combat resets to
+        preparing with full HP). A template copies prep only and resets progress. Members are not copied —
+        you become the new campaign&apos;s DM.
       </p>
       <div className="field">
         <label htmlFor="settings-clone-name">New campaign name</label>
@@ -1170,9 +1206,35 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
           <option value="template">Template — prep only, progress reset</option>
         </select>
       </div>
+      {(previewLoading || preview || previewError) && (
+        <div
+          className="text-muted"
+          style={{ margin: '0.5rem 0', fontSize: 11.5, lineHeight: 1.45 }}
+          data-testid="clone-preview"
+        >
+          {previewLoading && <p style={{ margin: 0 }}>Loading preview…</p>}
+          {previewError && <p style={{ margin: 0, color: '#f87171' }}>{previewError}</p>}
+          {preview && !previewLoading && (
+            <>
+              {previewLines.length > 0 && (
+                <p style={{ margin: '0 0 0.35rem' }}>
+                  <strong style={{ fontWeight: 600 }}>Will copy:</strong> {previewLines.join(' · ')}
+                </p>
+              )}
+              {preview.warnings.length > 0 && (
+                <ul style={{ margin: 0, paddingLeft: '1.1rem' }}>
+                  {preview.warnings.map((w) => (
+                    <li key={w.code}>{w.message}</li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
       {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
       <div className="flex gap-2 items-center">
-        <button className="btn btn-secondary" style={{ fontSize: 12.5 }} disabled={cloning} onClick={clone}>
+        <button className="btn btn-secondary" style={{ fontSize: 12.5 }} disabled={cloning || previewLoading} onClick={clone}>
           {cloning ? 'Duplicating…' : mode === 'template' ? 'Create from template' : 'Duplicate campaign'}
         </button>
       </div>

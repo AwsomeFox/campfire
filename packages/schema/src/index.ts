@@ -173,6 +173,44 @@ export const CampaignClone = z.object({
   mode: CampaignCloneMode.default('full'),
 });
 
+/** Versioned manifest returned by GET /campaigns/:id/clone/preview (issue #435). */
+export const CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION = 1;
+
+export const ClonePreviewExclusion = z.object({
+  module: z.string(),
+  reason: z.string(),
+});
+export type ClonePreviewExclusion = z.infer<typeof ClonePreviewExclusion>;
+
+export const ClonePreviewWarning = z.object({
+  code: z.string(),
+  message: z.string(),
+});
+export type ClonePreviewWarning = z.infer<typeof ClonePreviewWarning>;
+
+export const ClonePreviewModuleInclusion = z.object({
+  included: z.boolean(),
+  count: z.number().int().nonnegative(),
+  note: z.string().optional(),
+});
+export type ClonePreviewModuleInclusion = z.infer<typeof ClonePreviewModuleInclusion>;
+
+export const CampaignClonePreview = z.object({
+  app: z.literal('campfire'),
+  kind: z.literal('campaign-clone-preview'),
+  formatVersion: z.number().int(),
+  appVersion: z.string(),
+  schemaVersion: z.number().int(),
+  campaignId: Id,
+  mode: CampaignCloneMode,
+  createdAt: IsoDate,
+  counts: z.record(z.string(), z.number().int().nonnegative()),
+  inclusions: z.record(z.string(), ClonePreviewModuleInclusion),
+  exclusions: z.array(ClonePreviewExclusion),
+  warnings: z.array(ClonePreviewWarning),
+});
+export type CampaignClonePreview = z.infer<typeof CampaignClonePreview>;
+
 // Import input — POST /campaigns/import (issue #120). The body is a Campfire JSON
 // export (the shape ExportService.buildExport produces): make the one-way export
 // round-trippable by re-creating the campaign from it. Validated permissively —
@@ -6757,6 +6795,7 @@ export type CheckRequestResolution = z.infer<typeof CheckRequestResolution>;
 // Type aliases for enum/value exports (TS declaration merging: value + type share the name)
 export type DangerLevel = z.infer<typeof DangerLevel>;
 export type CampaignCloneMode = z.infer<typeof CampaignCloneMode>;
+export type CampaignClone = z.infer<typeof CampaignClone>;
 export type QuestStatus = z.infer<typeof QuestStatus>;
 export type CanonicalNpcDisposition = z.infer<typeof CanonicalNpcDisposition>;
 export type LocationStatus = z.infer<typeof LocationStatus>;

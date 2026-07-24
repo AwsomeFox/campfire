@@ -545,3 +545,163 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * Issue #435 — extended clone coverage: storylines, timeline, session-zero,
+ * inventory/treasury, map attachments, encounter-anchored notes, clone preview.
+ */
+describe('campaign clone extended modules (e2e, issue #435)', () => {
+  let ctx: TestAppContext;
+  let dmAgent: ReturnType<typeof request.agent>;
+  let campaignId: number;
+  let questId: number;
+  let sessionId: number;
+  let encounterId: number;
+  let mapAttachmentId: number;
+  let battleMapAttachmentId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    dmAgent = request.agent(server);
+    await dmAgent.post('/api/v1/auth/setup').send({ username: 'clone435-dm', password: 'dm-password-435' });
+
+    const campRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Clone 435 Source', description: 'Extended modules.' });
+    campaignId = campRes.body.id;
+
+    const mapUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'overworld.png', contentType: 'image/png' });
+    mapAttachmentId = mapUpload.body.id;
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}`).send({ mapAttachmentId });
+
+    const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: 'Revision quest' });
+    questId = questRes.body.id;
+    await dmAgent.patch(`/api/v1/quests/${questId}`).send({ body: 'First draft' });
+    await dmAgent.patch(`/api/v1/quests/${questId}`).send({ body: 'Second draft' });
+
+    const sessionRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'Session one.' });
+    sessionId = sessionRes.body.id;
+
+    const battleUpload = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/attachments`)
+      .field('kind', 'map')
+      .attach('file', TINY_PNG, { filename: 'battle.png', contentType: 'image/png' });
+    battleMapAttachmentId = battleUpload.body.id;
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Mapped fight' });
+    encounterId = encRes.body.id;
+    await dmAgent.patch(`/api/v1/encounters/${encounterId}`).send({ mapAttachmentId: battleMapAttachmentId, gridSize: 5 });
+
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .send({ body: 'Encounter prep note', visibility: 'party_shared', entityType: 'encounter', entityId: encounterId });
+
+    const arcRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/arcs`).send({ title: 'Main arc', summary: 'Arc summary' });
+    const beat1 = await dmAgent.post(`/api/v1/arcs/${arcRes.body.id}/beats`).send({ title: 'Opening' });
+    const beat2 = await dmAgent.post(`/api/v1/arcs/${arcRes.body.id}/beats`).send({ title: 'Climax' });
+    await dmAgent.post(`/api/v1/beats/${beat1.body.id}/branches`).send({ label: 'go north', toBeatId: beat2.body.id });
+    await dmAgent.patch(`/api/v1/beats/${beat1.body.id}`).send({ sessionId, questId, encounterId });
+
+    await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/timeline`)
+      .send({ title: 'The founding', inWorldDate: 'Year 1', body: 'King crowned.' });
+    await dmAgent
+      .put(`/api/v1/campaigns/${campaignId}/timeline/calendar`)
+      .send({ currentDate: 'Year 5, Harvest', note: 'Present day.' });
+
+    await dmAgent.put(`/api/v1/campaigns/${campaignId}/session-zero`).send({
+      lines: ['No harm to children'],
+      veils: ['Torture'],
+      safetyTools: ['X-Card'],
+      houseRules: 'Flanking grants advantage.',
+      toneAndExpectations: 'Grim but hopeful.',
+    });
+
+    await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Healing potion', qty: 3 });
+    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ gp: 120, sp: 45 });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('GET clone preview returns a versioned manifest with counts and warnings', async () => {
+    const preview = await dmAgent.get(`/api/v1/campaigns/${campaignId}/clone/preview`);
+    expect(preview.status).toBe(200);
+    expect(preview.body.kind).toBe('campaign-clone-preview');
+    expect(preview.body.formatVersion).toBeGreaterThanOrEqual(1);
+    expect(preview.body.mode).toBe('full');
+    expect(preview.body.counts.storyArcs).toBeGreaterThanOrEqual(1);
+    expect(preview.body.counts.timelineEvents).toBeGreaterThanOrEqual(1);
+    expect(preview.body.counts.sessionZero).toBe(1);
+    expect(preview.body.counts.inventory).toBeGreaterThanOrEqual(1);
+    expect(preview.body.inclusions.storyArcs.included).toBe(true);
+    expect(preview.body.inclusions.encounters.included).toBe(true);
+
+    const templatePreview = await dmAgent.get(`/api/v1/campaigns/${campaignId}/clone/preview?mode=template`);
+    expect(templatePreview.status).toBe(200);
+    expect(templatePreview.body.inclusions.encounters.included).toBe(false);
+    expect(templatePreview.body.inclusions.storyArcs.included).toBe(true);
+    expect(templatePreview.body.warnings.some((w: { code: string }) => w.code === 'template_play_state_reset')).toBe(true);
+  });
+
+  it('full clone copies storylines, timeline, session-zero, inventory/treasury, maps, and encounter notes', async () => {
+    const cloneRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/clone`).send({ name: 'Clone 435 Copy' });
+    expect(cloneRes.status).toBe(201);
+    const cloneId = cloneRes.body.id;
+
+    expect(cloneRes.body.mapAttachmentId).not.toBeNull();
+    expect(cloneRes.body.mapAttachmentId).not.toBe(mapAttachmentId);
+    const mapFile = await getBuffer(dmAgent, `/api/v1/attachments/${cloneRes.body.mapAttachmentId}/file`);
+    expect(mapFile.status).toBe(200);
+    expect(Buffer.compare(mapFile.body as Buffer, TINY_PNG)).toBe(0);
+
+    const arcs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/arcs`);
+    expect(arcs.body).toHaveLength(1);
+    expect(arcs.body[0].beats).toHaveLength(2);
+    expect(arcs.body[0].beats[0].branches).toHaveLength(1);
+    expect(arcs.body[0].beats[0].branches[0].label).toBe('go north');
+    const clonedSessions = await dmAgent.get(`/api/v1/campaigns/${cloneId}/sessions`);
+    const clonedQuests = await dmAgent.get(`/api/v1/campaigns/${cloneId}/quests`);
+    const clonedEncs = await dmAgent.get(`/api/v1/campaigns/${cloneId}/encounters`);
+    expect(arcs.body[0].beats[0].sessionId).toBe(clonedSessions.body[0].id);
+    expect(arcs.body[0].beats[0].questId).toBe(clonedQuests.body[0].id);
+    expect(arcs.body[0].beats[0].encounterId).toBe(clonedEncs.body[0].id);
+
+    const timeline = await dmAgent.get(`/api/v1/campaigns/${cloneId}/timeline`);
+    expect(timeline.body.some((e: { title: string }) => e.title === 'The founding')).toBe(true);
+    const calendar = await dmAgent.get(`/api/v1/campaigns/${cloneId}/timeline/calendar`);
+    expect(calendar.body.currentDate).toBe('Year 5, Harvest');
+
+    const charter = await dmAgent.get(`/api/v1/campaigns/${cloneId}/session-zero`);
+    expect(charter.body.lines).toContain('No harm to children');
+    expect(charter.body.houseRules).toBe('Flanking grants advantage.');
+
+    const inventory = await dmAgent.get(`/api/v1/campaigns/${cloneId}/inventory`);
+    expect(inventory.body.some((i: { name: string }) => i.name === 'Healing potion')).toBe(true);
+    const treasury = await dmAgent.get(`/api/v1/campaigns/${cloneId}/treasury`);
+    expect(treasury.body.gp).toBe(120);
+    expect(treasury.body.sp).toBe(45);
+
+    const encDetail = await dmAgent.get(`/api/v1/encounters/${clonedEncs.body[0].id}`);
+    expect(encDetail.body.mapAttachmentId).not.toBeNull();
+    expect(encDetail.body.mapAttachmentId).not.toBe(battleMapAttachmentId);
+    expect(encDetail.body.gridSize).toBe(5);
+    const battleFile = await getBuffer(dmAgent, `/api/v1/attachments/${encDetail.body.mapAttachmentId}/file`);
+    expect(battleFile.status).toBe(200);
+
+    const notes = await dmAgent.get(`/api/v1/campaigns/${cloneId}/notes`);
+    const encNote = notes.body.items.find((n: { body: string }) => n.body === 'Encounter prep note');
+    expect(encNote).toBeDefined();
+    expect(encNote.entityType).toBe('encounter');
+    expect(encNote.entityId).toBe(clonedEncs.body[0].id);
+
+    const sourceRevisions = await dmAgent.get(`/api/v1/revisions/quest/${questId}`);
+    const clonedQuestId = clonedQuests.body[0].id;
+    const clonedRevisions = await dmAgent.get(`/api/v1/revisions/quest/${clonedQuestId}`);
+    expect(clonedRevisions.body.length).toBe(sourceRevisions.body.length);
+    expect(clonedRevisions.body[0].snapshot.body).toBe(sourceRevisions.body[0].snapshot.body);
+  });
+});
