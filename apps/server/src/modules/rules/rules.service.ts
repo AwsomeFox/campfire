@@ -101,6 +101,7 @@ import {
   CEPHEUS_LICENSE,
   CEPHEUS_PACK_NAME,
   CEPHEUS_PACK_SLUG,
+  consoleLogger,
   createFetchLimiter,
   fetchCepheusSection,
   type CepheusSection,
@@ -1191,7 +1192,7 @@ export class RulesService {
     const fetchLimiter = createFetchLimiter(CEPHEUS_FETCH_CONCURRENCY);
     const sectionResults = await Promise.all(
       sections.map(async (s) => {
-        const r = await fetchCepheusSection(baseUrl, s, undefined, fetchLimiter);
+        const r = await fetchCepheusSection(baseUrl, s, consoleLogger, fetchLimiter);
         onSectionDone?.(s, r.entries.length);
         return r;
       }),

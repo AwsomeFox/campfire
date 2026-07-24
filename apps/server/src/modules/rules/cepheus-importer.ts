@@ -167,7 +167,12 @@ export interface CepheusSectionResult {
   dedupedCount: number;
 }
 
-const consoleLogger: Open5eImportLogger = {
+/**
+ * The importer's default logger — plain `console`. Exported so callers (e.g. RulesService)
+ * can pass it EXPLICITLY when they only need to reach a later positional argument, rather than
+ * passing `undefined` to fall through to this same default (clearer intent, identical behaviour).
+ */
+export const consoleLogger: Open5eImportLogger = {
   warn: (message: string) => console.warn(message),
   info: (message: string) => console.info(message),
 };
@@ -219,8 +224,9 @@ export function normalizeMarkdown(md: string): string {
 /**
  * A one-line summary from the start of a chapter: the first prose paragraph, skipping the
  * leading heading(s) and blank lines. If a list, table, or blockquote appears before any prose
- * paragraph, that first markup line is used instead (stripped of syntax) rather than returning
- * an empty summary.
+ * paragraph, that first markup line is used instead (with inline emphasis/backticks/link syntax
+ * removed, though block markers like '-', '>', or table pipes are left intact) rather than
+ * returning an empty summary.
  */
 export function firstParagraph(md: string): string {
   const lines = md.split('\n');

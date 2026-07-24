@@ -2785,7 +2785,12 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'cepheus', 'datasworn', 'upload']),
+  // Derived from RulePackInstallSource so the two lists can't drift: a new install source
+  // automatically becomes a valid job source. 'other' is excluded — it's a back-compat install
+  // alias that routes through the Open5e path (newJob('open5e', …)), so a job's source is never
+  // literally 'other'. 'upload' is added — it's the one source that only ever exists as a job
+  // (RulePackUpload), never as a RulePackInstall.source.
+  source: z.enum([...RulePackInstallSource.exclude(['other']).options, 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
