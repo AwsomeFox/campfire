@@ -83,11 +83,13 @@ export interface StarfinderHitPoints {
   stamina: number;
   /** Hit Points — the underlying pool damage spills into once Stamina is gone. */
   hitPoints: number;
+  /** Resolve Points — spent for stamina recovery, stabilization, etc. */
+  resolve: number;
   /** Combat-tracker effective max HP = stamina + hitPoints. */
   total: number;
 }
 
-/** Starfinder statblock fields, widening the generic shape with EAC/KAC and Stamina. */
+/** Starfinder statblock fields, widening the generic shape with EAC/KAC, Stamina, and Resolve. */
 export interface StarfinderStatblockData extends MonsterStatblockData {
   /** Energy Armor Class. */
   eac: unknown;
@@ -95,6 +97,8 @@ export interface StarfinderStatblockData extends MonsterStatblockData {
   kac: unknown;
   /** Stamina Points sub-pool (undefined for plain monsters). */
   stamina: unknown;
+  /** Resolve Points (undefined for plain monsters). */
+  resolve: unknown;
 }
 
 /** Coerce a value to a finite number, or null. Accepts numeric strings ("17"), rejects NaN. */
@@ -115,22 +119,150 @@ function starfinderDexScore(abilities: Record<string, unknown> | null | undefine
 
 /** Read EAC/KAC off a statblock's `dataJson`, tolerating camelCase and snake_case keys. */
 export function starfinderArmorClasses(d: Record<string, unknown>): StarfinderArmorClasses {
+  const eac = num(d.eac ?? d.energyArmorClass ?? d.energy_armor_class);
+  const kac = num(d.kac ?? d.kineticArmorClass ?? d.kinetic_armor_class ?? d.armorClass ?? d.armor_class);
   return {
-    eac: num(d.eac ?? d.energyArmorClass ?? d.energy_armor_class),
-    // `armorClass`/`armor_class`/`kac` all resolve to KAC — the value the generic slot carries.
-    kac: num(d.kac ?? d.kineticArmorClass ?? d.kinetic_armor_class ?? d.armorClass ?? d.armor_class),
+    eac,
+    kac,
   };
 }
 
 /**
- * Split a Starfinder statblock's damage pool into Stamina + Hit Points. Stamina soaks first,
+ * Split a Starfinder statblock's damage pool into Stamina + Hit Points + Resolve. Stamina soaks first,
  * so the combat-tracker max HP is their sum. Plain monsters carry only HP (stamina 0); PCs
  * and class-leveled NPCs carry both. Missing/invalid values coerce to 0.
  */
 export function starfinderHitPoints(d: Record<string, unknown>): StarfinderHitPoints {
   const stamina = Math.max(0, Math.round(num(d.stamina ?? d.staminaPoints ?? d.stamina_points ?? d.sp) ?? 0));
   const hitPoints = Math.max(0, Math.round(num(d.hitPoints ?? d.hit_points ?? d.hp) ?? 0));
-  return { stamina, hitPoints, total: stamina + hitPoints };
+  const resolve = Math.max(0, Math.round(num(d.resolve ?? d.resolvePoints ?? d.resolve_points ?? d.rp) ?? 0));
+  return { stamina, hitPoints, resolve, total: stamina + hitPoints };
+}
+
+/**
+ * Starfinder 1e Damage Application Logic.
+ * Damage order: Temp HP -> Stamina Points (SP) -> Hit Points (HP).
+ */
+export interface StarfinderDamageState {
+  hpCurrent: number;
+  hpMax: number;
+  spCurrent: number;
+  spMax: number;
+  rpCurrent: number;
+  rpMax: number;
+  hpTemp: number;
+  deathState: 'none' | 'dying' | 'stable' | 'dead';
+}
+
+export interface StarfinderDamageResult {
+  hpCurrent: number;
+  spCurrent: number;
+  rpCurrent: number;
+  hpTemp: number;
+  deathState: 'none' | 'dying' | 'stable' | 'dead';
+  spDamageTaken: number;
+  hpDamageTaken: number;
+}
+
+export function applyStarfinderDamage(
+  state: StarfinderDamageState,
+  damageAmount: number,
+): StarfinderDamageResult {
+  let { hpCurrent, spCurrent, rpCurrent, hpTemp, deathState } = state;
+  const { hpMax } = state;
+  let remainingDmg = Math.max(0, damageAmount);
+
+  let spDamageTaken = 0;
+  let hpDamageTaken = 0;
+
+  // 1. Temp HP soaks first
+  const absorbedByTemp = Math.min(hpTemp, remainingDmg);
+  hpTemp -= absorbedByTemp;
+  remainingDmg -= absorbedByTemp;
+
+  // 2. SP soaks second
+  if (remainingDmg > 0 && spCurrent > 0) {
+    spDamageTaken = Math.min(spCurrent, remainingDmg);
+    spCurrent -= spDamageTaken;
+    remainingDmg -= spDamageTaken;
+  }
+
+  // 3. HP soaks remaining overflow
+  if (remainingDmg > 0) {
+    const wasAtZeroHp = hpCurrent === 0;
+    hpDamageTaken = Math.min(hpCurrent, remainingDmg);
+    const overflowPastZero = remainingDmg - hpCurrent;
+    hpCurrent = Math.max(0, hpCurrent - remainingDmg);
+
+    if (hpCurrent === 0) {
+      if (wasAtZeroHp || overflowPastZero >= hpMax) {
+        // Taking damage while down or massive damage: loses 1 RP.
+        rpCurrent = Math.max(0, rpCurrent - 1);
+        if (rpCurrent === 0 || overflowPastZero >= hpMax) {
+          deathState = 'dead';
+        } else {
+          deathState = 'dying';
+        }
+      } else {
+        deathState = 'dying';
+      }
+    }
+  }
+
+  return {
+    hpCurrent,
+    spCurrent,
+    rpCurrent,
+    hpTemp,
+    deathState,
+    spDamageTaken,
+    hpDamageTaken,
+  };
+}
+
+/**
+ * Starfinder 1e Rest & Recovery logic:
+ * - Stamina Rest (10 minutes): Spends 1 RP to restore full SP.
+ * - Night's Rest (8 hours): Restores full SP, full RP, and HP equal to character level (min 1).
+ */
+export function applyStarfinderRest(
+  state: StarfinderDamageState,
+  restType: 'stamina' | 'night' | 'short' | 'long',
+  level = 1,
+): { state: StarfinderDamageState; success: boolean; message: string } {
+  const isStaminaRest = restType === 'stamina' || restType === 'short';
+  if (isStaminaRest) {
+    if (state.rpCurrent < 1) {
+      return {
+        state,
+        success: false,
+        message: 'Cannot take a Stamina Rest: requires at least 1 Resolve Point.',
+      };
+    }
+    return {
+      state: {
+        ...state,
+        rpCurrent: state.rpCurrent - 1,
+        spCurrent: state.spMax,
+      },
+      success: true,
+      message: '10-minute Stamina Rest completed: spent 1 RP to restore full Stamina Points.',
+    };
+  }
+
+  // Night's / 8-hour Rest
+  const hpHealed = Math.min(state.hpMax - state.hpCurrent, Math.max(1, level));
+  return {
+    state: {
+      ...state,
+      spCurrent: state.spMax,
+      rpCurrent: state.rpMax,
+      hpCurrent: Math.min(state.hpMax, state.hpCurrent + hpHealed),
+      deathState: state.hpCurrent + hpHealed > 0 ? 'none' : state.deathState,
+    },
+    success: true,
+    message: `Night's Rest completed: restored full SP, full RP, and ${hpHealed} HP.`,
+  };
 }
 
 /**
@@ -192,15 +324,15 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   conditions: STARFINDER_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): StarfinderStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
-    const { kac } = starfinderArmorClasses(d);
-    const { total } = starfinderHitPoints(d);
+    const { eac, kac } = starfinderArmorClasses(d);
+    const { stamina, resolve, total } = starfinderHitPoints(d);
     return {
       size: d.size,
       creatureType: d.type ?? d.creatureType,
       // Starfinder rates creatures by Challenge Rating like d20; some sources label it "CR".
       challengeRating: d.challengeRating ?? d.challenge_rating ?? d.cr,
       // Generic slot carries KAC (physical AC); EAC/KAC both available via armorClasses().
-      armorClass: kac,
+      armorClass: kac ?? eac,
       // Generic slot carries the effective damage pool (Stamina + HP).
       hitPoints: total > 0 ? total : null,
       speed: d.speed,
@@ -208,9 +340,10 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
       abilityRepresentation: 'score',
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
-      eac: d.eac ?? d.energyArmorClass ?? d.energy_armor_class ?? null,
-      kac: kac,
-      stamina: d.stamina ?? d.staminaPoints ?? d.stamina_points ?? d.sp ?? null,
+      eac: eac ?? d.eac ?? d.energyArmorClass ?? d.energy_armor_class ?? null,
+      kac: kac ?? d.kac ?? d.kineticArmorClass ?? d.kinetic_armor_class ?? null,
+      stamina: stamina > 0 ? stamina : d.stamina ?? d.staminaPoints ?? d.stamina_points ?? d.sp ?? null,
+      resolve: resolve > 0 ? resolve : d.resolve ?? d.resolvePoints ?? d.resolve_points ?? d.rp ?? null,
     };
   },
   monsterHitPoints(d: Record<string, unknown>): number | null {

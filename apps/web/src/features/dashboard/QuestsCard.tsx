@@ -23,7 +23,7 @@ export function QuestsCard({
   quests: QuestWithObjectives[];
   onChange: () => void;
 }) {
-  const { isDm, canPlayerWrite } = useCampaignAccess();
+  const { canPlayerWrite, canDmWrite } = useCampaignAccess();
   const canTick = canPlayerWrite;
   const [pending, setPending] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +159,18 @@ export function QuestsCard({
       </div>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {roots.length === 0 ? (
-        <EmptyState icon="scroll-unfurled" title="No quests yet" hint={isDm ? 'Start one from the Quests page.' : 'Check back after the next session.'} />
+        <EmptyState
+          icon="scroll-unfurled"
+          title="No quests yet"
+          hint={canDmWrite ? 'Track main objectives, side jobs, and rewards for the party.' : 'Active quests and objectives will appear here as the campaign progresses.'}
+          action={
+            canDmWrite ? (
+              <Link to={`/c/${campaignId}/quests/new`} className="btn btn-primary" style={{ fontSize: 13, gap: 6 }}>
+                + Create first quest
+              </Link>
+            ) : undefined
+          }
+        />
       ) : (
         roots.map((q) => renderQuest(q))
       )}

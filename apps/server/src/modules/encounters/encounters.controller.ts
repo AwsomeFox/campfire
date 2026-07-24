@@ -6,8 +6,9 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
+import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
 import { parseFogState } from '../../common/fog';
 
@@ -163,6 +164,7 @@ export class EncountersController {
     private readonly encounters: EncountersService,
     private readonly access: CampaignAccessService,
     private readonly encounterMaps: EncounterMapService,
+    private readonly actions: ActionResolverService,
   ) {}
 
   @Get(':id')
@@ -505,5 +507,78 @@ export class EncountersController {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.encounters.reopen(id, user, role, body);
+  }
+
+  // ---------- structured action resolver (issue #414) ----------
+
+  @Get(':id/combatants/:cid/actions')
+  @ApiOperation({
+    summary: 'List a combatant’s usable structured actions (issue #414)',
+    description:
+      'Requires campaign membership. Returns the combatant’s sheet actions with their structured spec + a `resolvable` ' +
+      'flag (false ⇒ the UI shows the inline statblock rather than a guided Use flow). A player may list only their own ' +
+      'character’s actions; the DM may list any combatant’s.',
+  })
+  @ApiResponse({ status: 200, description: 'Usable actions with resolvability + preserved freeform statblock text.' })
+  @ApiResponse({ status: 403, description: 'A player listing another combatant’s actions.' })
+  async usableActions(@Param('id', ParseIntPipe) id: number, @Param('cid', ParseIntPipe) cid: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId);
+    return this.actions.listUsableActions(id, cid, user, role);
+  }
+
+  @Post(':id/actions/resolve')
+  @ApiOperation({
+    summary: 'Resolve a structured action, optionally committing atomically (issue #414)',
+    description:
+      'Requires campaign write membership. Rolls the attack or the targets’ saves with the correct modifiers, compares ' +
+      'against AC / DC, classifies the outcome (5e hit/miss/crit or PF2e degrees), and returns a per-target PREVIEW with ' +
+      'player-safe text separated from DM-only mechanics. A player may resolve only their OWN character’s action (a ' +
+      'monster/NPC action is DM-only) but may target anyone — so a player can finish an attack against a monster ' +
+      'end-to-end. Pass `commit: true` to apply atomically in the same call when the campaign policy permits (automatic); ' +
+      'otherwise the result is a declaration the DM applies (dm-confirmed / player-declares). An unsupported action shape ' +
+      'is a 400 (fall back to its statblock — never silent math).',
+  })
+  @ApiResponse({ status: 200, description: 'The resolution preview (and applied result + undo token when committed).' })
+  @ApiResponse({ status: 400, description: 'The action has no resolvable structured spec, or a target has no known AC/DC.' })
+  @ApiResponse({ status: 403, description: 'A player resolving a monster/NPC action or another player’s character.' })
+  @HttpCode(200)
+  async resolveAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolveRequestDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.actions.resolve(id, body, user, role);
+  }
+
+  @Post(':id/actions/apply')
+  @ApiOperation({
+    summary: 'Apply a previewed action resolution (issue #414 confirm path)',
+    description:
+      'Requires campaign write membership. Commits a resolution returned by /actions/resolve, applying its rolled ' +
+      'consequences verbatim so the committed result equals the preview. The DM may apply any resolution; a player only ' +
+      'their own character’s action under an automatic policy. Returns an undo token that reverses the whole apply.',
+  })
+  @ApiResponse({ status: 200, description: 'Applied; returns the undo token.' })
+  @ApiResponse({ status: 403, description: 'Not permitted to apply under the campaign policy.' })
+  @HttpCode(200)
+  async applyAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionResolutionDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.actions.apply(id, body, user, role);
+  }
+
+  @Post(':id/actions/undo')
+  @ApiOperation({
+    summary: 'Undo an applied action resolution (issue #414)',
+    description:
+      'Requires campaign write membership. Restores every target’s HP / temp HP / death state / conditions to the ' +
+      'pre-apply snapshot, removes the effects the apply added, and refunds the actor’s action-economy slot, spell slot, ' +
+      'and concentration. The DM may undo any action; a player only one whose actor is their own character.',
+  })
+  @ApiResponse({ status: 200, description: 'Reversed.' })
+  @HttpCode(200)
+  async undoAction(@Param('id', ParseIntPipe) id: number, @Body() body: ActionUndoTokenDto, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireMember(user, row.campaignId, { write: true });
+    return this.actions.undo(id, body, user, role);
   }
 }
