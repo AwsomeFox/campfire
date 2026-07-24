@@ -415,20 +415,22 @@ export class SchedulingService {
     // an RSVP is theirs to see. Fan out to every dm-role member except the actor (a DM
     // marking their own availability shouldn't ping themselves). Best-effort.
     const roles = await this.notifications.memberRoles(schedule.campaignId);
-    for (const [memberId, memberRole] of roles) {
-      if (memberRole !== 'dm' || String(memberId) === user.id) continue;
-      const title =
-        noteChanged && !statusChanged
-          ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
-          : noteChanged && statusChanged
-            ? `${user.name || 'A player'} RSVP'd ${nextStatus} and updated their note for ${this.scheduleLabel(schedule)}`
-            : `${user.name || 'A player'} RSVP'd ${nextStatus} for ${this.scheduleLabel(schedule)}`;
-      await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
-        type: 'session_rsvp',
-        title,
-        entityId: scheduleId,
-        actorName: user.name,
-      });
+    if (statusChanged || noteChanged) {
+      for (const [memberId, memberRole] of roles) {
+        if (memberRole !== 'dm' || String(memberId) === user.id) continue;
+        const title =
+          noteChanged && !statusChanged
+            ? `${user.name || 'A player'} updated their RSVP note for ${this.scheduleLabel(schedule)}`
+            : noteChanged && statusChanged
+              ? `${user.name || 'A player'} RSVP'd ${nextStatus} and updated their note for ${this.scheduleLabel(schedule)}`
+              : `${user.name || 'A player'} RSVP'd ${nextStatus} for ${this.scheduleLabel(schedule)}`;
+        await this.notifications.notifyUser(memberId, schedule.campaignId, user, {
+          type: 'session_rsvp',
+          title,
+          entityId: scheduleId,
+          actorName: user.name,
+        });
+      }
     }
     return this.getWithRsvps(scheduleId);
   }

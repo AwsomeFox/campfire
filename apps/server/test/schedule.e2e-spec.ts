@@ -132,6 +132,55 @@ describe('session scheduling (e2e)', () => {
     );
   });
 
+  it('members can clear an RSVP note with an explicit empty string', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'bringing snacks' });
+
+    const cleared = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: '' });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'yes', note: '' }),
+      ]),
+    );
+  });
+
+  it('status-only RSVP updates preserve a note edited concurrently', async () => {
+    const server = ctx.app.getHttpServer();
+    const next = await request(server).get(`/api/v1/campaigns/${campaignId}/schedule/next`).set(player);
+    const scheduleId = next.body.id;
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'yes', note: 'old note' });
+
+    await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ note: 'fresh note' });
+
+    const statusOnly = await request(server)
+      .put(`/api/v1/schedule/${scheduleId}/rsvp`)
+      .set(player)
+      .send({ status: 'maybe' });
+    expect(statusOnly.status).toBe(200);
+    expect(statusOnly.body.rsvps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'dev:player-1', status: 'maybe', note: 'fresh note' }),
+      ]),
+    );
+  });
+
   it('DM can update and cancel a scheduled session; players cannot', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)
