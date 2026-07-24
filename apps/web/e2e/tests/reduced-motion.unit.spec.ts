@@ -17,6 +17,7 @@ const AUTHED = resolve(ROOT, 'app/AuthedLayout.tsx');
 const UI = resolve(ROOT, 'components/ui.tsx');
 const NOTES = resolve(ROOT, 'features/notes/MyNotesPage.tsx');
 const SETTINGS = resolve(ROOT, 'features/settings/CampaignSettingsPage.tsx');
+const RUN_SESSION = resolve(ROOT, 'features/encounters/RunSessionPage.tsx');
 
 test.describe('prefersReducedMotion helper (issue #594)', () => {
   test('maps reduce → auto scroll and no-reduce → smooth', () => {
@@ -108,6 +109,7 @@ test.describe('component gates keep non-motion feedback (issue #594)', () => {
   test('smooth auto-scroll call sites use scrollBehavior()', () => {
     expect(readFileSync(NOTES, 'utf8')).toMatch(/scrollBehavior\(\)/);
     expect(readFileSync(SETTINGS, 'utf8')).toMatch(/scrollBehavior\(\)/);
+    expect(readFileSync(RUN_SESSION, 'utf8')).toMatch(/scrollBehavior\(\)/);
     expect(readFileSync(SETTINGS, 'utf8')).not.toMatch(/prefers-reduced-motion: reduce'\)\.matches/);
   });
 });
