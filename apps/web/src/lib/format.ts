@@ -8,12 +8,43 @@
  *
  * Locale resolution is centralized in `i18n/locale`: an explicit language uses that
  * locale, while System preserves the browser's full locale (not the rendered catalog).
+ *
+ * Issue #634: clock rendering follows the signed-in user's `timeFormat` preference
+ * (system / 12h / 24h). Date-only values keep their calendar-day semantics.
  */
 import { useSyncExternalStore } from 'react';
+import { DEFAULT_TIME_FORMAT, appliesTime, withTimeFormat, type TimeFormat } from '@campfire/schema';
 import { localeController } from '../i18n/locale';
 
 const subscribeToLocale = (onStoreChange: () => void) => localeController.subscribe(onStoreChange);
 const formattingLocaleSnapshot = () => localeController.resolved.formatLocale;
+
+const timeFormatListeners = new Set<() => void>();
+let activeTimeFormatPreference: TimeFormat = DEFAULT_TIME_FORMAT;
+
+function subscribeToTimeFormat(onStoreChange: () => void): () => void {
+  timeFormatListeners.add(onStoreChange);
+  return () => timeFormatListeners.delete(onStoreChange);
+}
+
+const timeFormatSnapshot = () => activeTimeFormatPreference;
+
+/** Called by AuthProvider when the signed-in user's preference is known or cleared. */
+export function setTimeFormatPreference(preference: TimeFormat): void {
+  if (activeTimeFormatPreference === preference) return;
+  activeTimeFormatPreference = preference;
+  for (const listener of timeFormatListeners) listener();
+}
+
+/** The persisted clock-rendering preference for the current session. */
+export function activeTimeFormat(): TimeFormat {
+  return activeTimeFormatPreference;
+}
+
+/** Subscribe a formatting surface so a preference change re-renders it. */
+export function useTimeFormat(): TimeFormat {
+  return useSyncExternalStore(subscribeToTimeFormat, timeFormatSnapshot, timeFormatSnapshot);
+}
 
 /** Subscribe a formatting surface so a runtime browser-language change re-renders it. */
 export function useFormattingLocale(): string | undefined {
@@ -63,18 +94,29 @@ function toDate(value: Date | string | number): Date {
 }
 
 /** Format a date (day granularity). Options default to the browser's locale-native short date. */
-export function createLocaleFormatters(getLocale: () => string | undefined) {
+export function createLocaleFormatters(
+  getLocale: () => string | undefined,
+  getTimeFormat: () => TimeFormat = activeTimeFormat,
+) {
   return {
     formatDate(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
       return toDate(value).toLocaleDateString(getLocale(), options);
     },
 
     formatDateTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-      return toDate(value).toLocaleString(getLocale(), options);
+      const base = options ?? {};
+      const resolved = options === undefined || appliesTime(base)
+        ? withTimeFormat(base, getTimeFormat())
+        : base;
+      return toDate(value).toLocaleString(getLocale(), resolved);
     },
 
     formatTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-      return toDate(value).toLocaleTimeString(getLocale(), options);
+      const base = options ?? {};
+      const resolved = options === undefined || appliesTime(base)
+        ? withTimeFormat(base, getTimeFormat())
+        : base;
+      return toDate(value).toLocaleTimeString(getLocale(), resolved);
     },
 
     formatNumber(value: number, options?: Intl.NumberFormatOptions): string {

@@ -517,6 +517,8 @@ export const users = sqliteTable('users', {
   // column predates comfortable mode, so existing rows remain compatible and no
   // shape migration is required; strict values are enforced by the API schema.
   textSize: text('text_size').notNull().default('default'),
+  // Clock rendering preference: 'system' | '12h' | '24h' (issue #634).
+  timeFormat: text('time_format').notNull().default('system'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

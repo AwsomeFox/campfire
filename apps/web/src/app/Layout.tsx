@@ -17,7 +17,7 @@ import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 
-import { useFormattingLocale } from '../lib/format';
+import { useFormattingLocale, useTimeFormat, formatDateTime } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card } from '../components/ui';
@@ -222,6 +222,7 @@ function relativeAgo(at: number, now: number = Date.now()): string {
 function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   const { t } = useTranslation();
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   // Tick once a minute so the relative label stays current. `staleIdentity` only
   // flips on a real /me outcome, so this effect is mounted at most while offline.
   const [, tick] = useState(0);
@@ -232,9 +233,12 @@ function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   const when = useMemo(() => {
     if (lastSyncedAt == null) return null;
     const ago = relativeAgo(lastSyncedAt);
-    const abs = new Date(lastSyncedAt).toLocaleString(formattingLocale);
+    const abs = formatDateTime(lastSyncedAt, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
     return { ago, abs };
-  }, [lastSyncedAt, formattingLocale]);
+  }, [lastSyncedAt, formattingLocale, timeFormat]);
 
   return (
     <div

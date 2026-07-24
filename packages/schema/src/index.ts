@@ -1049,6 +1049,9 @@ export * from './scheduleWindow';
 // Schedule notification metadata + locale-aware copy (issue #820).
 export * from './scheduleNotifications';
 
+// User time-of-day rendering preference (issue #634).
+export * from './timeFormat';
+
 // Per-campaign ICS calendar feed. `token` is an unguessable capability secret
 // (cf_ics_<48 hex>) baked into the feed URL; null = feed disabled. Any member
 // may read it (the feed only exposes schedule data members already see);
@@ -3853,6 +3856,9 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
+import { TimeFormat } from './timeFormat';
+
 export const User = z.object({
   id: Id,
   username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
@@ -3863,6 +3869,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
+  timeFormat: TimeFormat.default('system'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -3885,6 +3893,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  timeFormat: TimeFormat.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 

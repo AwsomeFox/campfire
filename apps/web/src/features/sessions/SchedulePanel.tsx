@@ -17,7 +17,7 @@ import {
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
-import { formatDateTime, useFormattingLocale } from '../../lib/format';
+import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -91,6 +91,7 @@ const SCHEDULE_CONFLICT_FIELDS: Array<ConflictField<ScheduleDraft>> = [
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const { canDmWrite } = useCampaignAccess();
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const { me } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
@@ -126,8 +127,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     [cancelledId],
   );
   const cancelledCopy = useMemo(
-    () => cancelledScheduleDetailCopy(cancelledDetail, formattingLocale),
-    [cancelledDetail, formattingLocale],
+    () => cancelledScheduleDetailCopy(cancelledDetail, formattingLocale, undefined, timeFormat),
+    [cancelledDetail, formattingLocale, timeFormat],
   );
 
   // RSVP rows store the server-side user id: String(users.id) for real users,
