@@ -2,15 +2,23 @@ import { ConflictException, Inject, Injectable, NotFoundException } from '@nestj
 import { and, asc, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityRevision, RevisionAuthorSource, Role, RevisionEntityType } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { entityRevisions, factions, locations, notes, npcs, quests, sessions } from '../../db/schema';
+import {
+  auditLog,
+  entityRevisions,
+  factions,
+  locations,
+  notes,
+  npcs,
+  quests,
+  sessions,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
-import { AuditService } from '../audit/audit.service';
 
 /**
- * Prose revision history + optimistic-concurrency guard (issue #157 / #813).
+ * Prose revision history + optimistic-concurrency guard (issue #157 / #813 / #513).
  *
  * Two cooperating tiers protect the prose entities most at risk of a blind
  * last-write-wins clobber (a co-DM polishing a recap while a connected AI over MCP
@@ -30,6 +38,11 @@ import { AuditService } from '../audit/audit.service';
  * entity service — the recording direction is one-way (entity service → RevisionsService),
  * so there is no cycle. A restore skips entity-specific side effects (e.g. recap_posted
  * notifications) on purpose: re-applying old text is not a fresh post.
+ *
+ * Restore itself is one synchronous better-sqlite3 transaction (issue #513): the
+ * pre-restore snapshot, entity prose update, new revision tip, and audit row either
+ * all commit or all roll back. Concurrent restore/edit uses the same `expectedUpdatedAt`
+ * version guard as prose PATCH.
  */
 
 /** The prose field snapshotted/restored for each supported entity type. */
@@ -43,6 +56,9 @@ const PROSE_FIELD: Record<RevisionEntityType, 'recap' | 'body'> = {
 };
 
 const AUTHOR_SOURCES = new Set<RevisionAuthorSource>(['human', 'ai', 'tool']);
+
+/** better-sqlite3 transaction handle or the root db — both expose sync `.all()`/`.run()`. */
+type SyncDb = DrizzleDb | Parameters<Parameters<DrizzleDb['transaction']>[0]>[0];
 
 function asAuthorSource(value: string | null | undefined): RevisionAuthorSource {
   return value && AUTHOR_SOURCES.has(value as RevisionAuthorSource)
@@ -92,10 +108,7 @@ export function revisionActorProvenance(user: RequestUser): {
 
 @Injectable()
 export class RevisionsService {
-  constructor(
-    @Inject(DB) private readonly db: DrizzleDb,
-    private readonly audit: AuditService,
-  ) {}
+  constructor(@Inject(DB) private readonly db: DrizzleDb) {}
 
   /**
    * Optimistic-concurrency guard (tier 1). When `expectedUpdatedAt` is supplied and it
@@ -144,11 +157,12 @@ export class RevisionsService {
   }
 
   /** Current unreplacd tip for an entity, if one exists. */
-  private async loadTip(
+  private loadTip(
+    db: SyncDb,
     entityType: RevisionEntityType,
     entityId: number,
-  ): Promise<typeof entityRevisions.$inferSelect | null> {
-    const [row] = await this.db
+  ): typeof entityRevisions.$inferSelect | null {
+    const [row] = db
       .select()
       .from(entityRevisions)
       .where(
@@ -159,8 +173,91 @@ export class RevisionsService {
         ),
       )
       .orderBy(desc(entityRevisions.id))
-      .limit(1);
+      .limit(1)
+      .all();
     return row ?? null;
+  }
+
+  /**
+   * Synchronous tip-close + tip-open (issue #813). Callers that need atomicity with
+   * other writes (restore, #513) pass a transaction handle; ordinary entity updates
+   * pass `this.db`.
+   */
+  private commitProseVersionOn(
+    db: SyncDb,
+    params: {
+      entityType: RevisionEntityType;
+      entityId: number;
+      campaignId: number;
+      priorProse: string;
+      nextProse: string;
+      user: RequestUser;
+      restoredFromRevisionId?: number | null;
+      ts?: string;
+    },
+  ): void {
+    if (params.priorProse === params.nextProse) return;
+
+    const field = PROSE_FIELD[params.entityType];
+    const ts = params.ts ?? nowIso();
+    const actor = revisionActorProvenance(params.user);
+    const tip = this.loadTip(db, params.entityType, params.entityId);
+
+    if (tip) {
+      db.update(entityRevisions)
+        .set({
+          replacedByUserId: actor.userId,
+          replacedByName: actor.name,
+          replacedBySource: actor.source,
+          replacedBySourceDetail: actor.sourceDetail,
+          replacedAt: ts,
+        })
+        .where(eq(entityRevisions.id, tip.id))
+        .run();
+    } else if (params.priorProse !== '') {
+      // No tip — prior content's author is unknowable. Record an honest legacy row.
+      db.insert(entityRevisions)
+        .values({
+          campaignId: params.campaignId,
+          entityType: params.entityType,
+          entityId: params.entityId,
+          snapshot: toJsonText({ [field]: params.priorProse }),
+          authorUserId: '',
+          authorName: '',
+          authorSource: 'human',
+          authorSourceDetail: '',
+          createdAt: '',
+          replacedByUserId: actor.userId,
+          replacedByName: actor.name,
+          replacedBySource: actor.source,
+          replacedBySourceDetail: actor.sourceDetail,
+          replacedAt: ts,
+          restoredFromRevisionId: null,
+          authorshipKnown: false,
+        })
+        .run();
+    }
+
+    db.insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText({ [field]: params.nextProse }),
+        authorUserId: actor.userId,
+        authorName: actor.name,
+        authorSource: actor.source,
+        authorSourceDetail: actor.sourceDetail,
+        createdAt: ts,
+        replacedByUserId: '',
+        replacedByName: '',
+        replacedBySource: 'human',
+        replacedBySourceDetail: '',
+        replacedAt: null,
+        restoredFromRevisionId: params.restoredFromRevisionId ?? null,
+        authorshipKnown: true,
+      })
+      .run();
   }
 
   /**
@@ -185,64 +282,7 @@ export class RevisionsService {
     user: RequestUser;
     restoredFromRevisionId?: number | null;
   }): Promise<void> {
-    if (params.priorProse === params.nextProse) return;
-
-    const field = PROSE_FIELD[params.entityType];
-    const ts = nowIso();
-    const actor = revisionActorProvenance(params.user);
-    const tip = await this.loadTip(params.entityType, params.entityId);
-
-    if (tip) {
-      await this.db
-        .update(entityRevisions)
-        .set({
-          replacedByUserId: actor.userId,
-          replacedByName: actor.name,
-          replacedBySource: actor.source,
-          replacedBySourceDetail: actor.sourceDetail,
-          replacedAt: ts,
-        })
-        .where(eq(entityRevisions.id, tip.id));
-    } else if (params.priorProse !== '') {
-      // No tip — prior content's author is unknowable. Record an honest legacy row.
-      await this.db.insert(entityRevisions).values({
-        campaignId: params.campaignId,
-        entityType: params.entityType,
-        entityId: params.entityId,
-        snapshot: toJsonText({ [field]: params.priorProse }),
-        authorUserId: '',
-        authorName: '',
-        authorSource: 'human',
-        authorSourceDetail: '',
-        createdAt: '',
-        replacedByUserId: actor.userId,
-        replacedByName: actor.name,
-        replacedBySource: actor.source,
-        replacedBySourceDetail: actor.sourceDetail,
-        replacedAt: ts,
-        restoredFromRevisionId: null,
-        authorshipKnown: false,
-      });
-    }
-
-    await this.db.insert(entityRevisions).values({
-      campaignId: params.campaignId,
-      entityType: params.entityType,
-      entityId: params.entityId,
-      snapshot: toJsonText({ [field]: params.nextProse }),
-      authorUserId: actor.userId,
-      authorName: actor.name,
-      authorSource: actor.source,
-      authorSourceDetail: actor.sourceDetail,
-      createdAt: ts,
-      replacedByUserId: '',
-      replacedByName: '',
-      replacedBySource: 'human',
-      replacedBySourceDetail: '',
-      replacedAt: null,
-      restoredFromRevisionId: params.restoredFromRevisionId ?? null,
-      authorshipKnown: true,
-    });
+    this.commitProseVersionOn(this.db, params);
   }
 
   /**
@@ -262,9 +302,9 @@ export class RevisionsService {
     const field = PROSE_FIELD[params.entityType];
     const ts = nowIso();
     const actor = revisionActorProvenance(params.user);
-    const tip = await this.loadTip(params.entityType, params.entityId);
+    const tip = this.loadTip(this.db, params.entityType, params.entityId);
     if (tip) {
-      await this.db
+      this.db
         .update(entityRevisions)
         .set({
           replacedByUserId: actor.userId,
@@ -273,27 +313,31 @@ export class RevisionsService {
           replacedBySourceDetail: actor.sourceDetail,
           replacedAt: ts,
         })
-        .where(eq(entityRevisions.id, tip.id));
+        .where(eq(entityRevisions.id, tip.id))
+        .run();
       return;
     }
-    await this.db.insert(entityRevisions).values({
-      campaignId: params.campaignId,
-      entityType: params.entityType,
-      entityId: params.entityId,
-      snapshot: toJsonText({ [field]: params.priorProse }),
-      authorUserId: '',
-      authorName: '',
-      authorSource: 'human',
-      authorSourceDetail: '',
-      createdAt: '',
-      replacedByUserId: actor.userId,
-      replacedByName: actor.name,
-      replacedBySource: actor.source,
-      replacedBySourceDetail: actor.sourceDetail,
-      replacedAt: ts,
-      restoredFromRevisionId: null,
-      authorshipKnown: false,
-    });
+    this.db
+      .insert(entityRevisions)
+      .values({
+        campaignId: params.campaignId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        snapshot: toJsonText({ [field]: params.priorProse }),
+        authorUserId: '',
+        authorName: '',
+        authorSource: 'human',
+        authorSourceDetail: '',
+        createdAt: '',
+        replacedByUserId: actor.userId,
+        replacedByName: actor.name,
+        replacedBySource: actor.source,
+        replacedBySourceDetail: actor.sourceDetail,
+        replacedAt: ts,
+        restoredFromRevisionId: null,
+        authorshipKnown: false,
+      })
+      .run();
   }
 
   /** Delete every revision for one entity — called by the owning service's remove() so a single entity delete leaves no orphan. */
@@ -327,33 +371,34 @@ export class RevisionsService {
   }
 
   /** Load the current prose + campaignId + updatedAt for a target entity, or null if it's gone. */
-  private async loadTarget(
+  private loadTarget(
+    db: SyncDb,
     entityType: RevisionEntityType,
     entityId: number,
-  ): Promise<{ campaignId: number; prose: string; updatedAt: string } | null> {
+  ): { campaignId: number; prose: string; updatedAt: string } | null {
     switch (entityType) {
       case 'session': {
-        const [row] = await this.db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1);
+        const [row] = db.select().from(sessions).where(eq(sessions.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.recap, updatedAt: row.updatedAt } : null;
       }
       case 'quest': {
-        const [row] = await this.db.select().from(quests).where(eq(quests.id, entityId)).limit(1);
+        const [row] = db.select().from(quests).where(eq(quests.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'npc': {
-        const [row] = await this.db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1);
+        const [row] = db.select().from(npcs).where(eq(npcs.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'location': {
-        const [row] = await this.db.select().from(locations).where(eq(locations.id, entityId)).limit(1);
+        const [row] = db.select().from(locations).where(eq(locations.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'faction': {
-        const [row] = await this.db.select().from(factions).where(eq(factions.id, entityId)).limit(1);
+        const [row] = db.select().from(factions).where(eq(factions.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
       case 'note': {
-        const [row] = await this.db.select().from(notes).where(eq(notes.id, entityId)).limit(1);
+        const [row] = db.select().from(notes).where(eq(notes.id, entityId)).limit(1).all();
         return row ? { campaignId: row.campaignId, prose: row.body, updatedAt: row.updatedAt } : null;
       }
     }
@@ -378,33 +423,87 @@ export class RevisionsService {
     };
   }
 
-  /** Write an entity's prose column back and bump updatedAt. */
-  private async writeProse(entityType: RevisionEntityType, entityId: number, prose: string, ts: string): Promise<void> {
+  /**
+   * Write an entity's prose column back and bump updatedAt, compare-and-swapping on
+   * `expectedUpdatedAt`. Returns false when the row was concurrently changed (0 rows).
+   */
+  private writeProseCas(
+    db: SyncDb,
+    entityType: RevisionEntityType,
+    entityId: number,
+    prose: string,
+    ts: string,
+    expectedUpdatedAt: string,
+  ): boolean {
+    const changesOf = (result: unknown): number =>
+      (result as { changes?: number }).changes ?? 0;
     switch (entityType) {
       case 'session':
-        await this.db.update(sessions).set({ recap: prose, updatedAt: ts }).where(eq(sessions.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(sessions)
+              .set({ recap: prose, updatedAt: ts })
+              .where(and(eq(sessions.id, entityId), eq(sessions.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'quest':
-        await this.db.update(quests).set({ body: prose, updatedAt: ts }).where(eq(quests.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(quests)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(quests.id, entityId), eq(quests.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'npc':
-        await this.db.update(npcs).set({ body: prose, updatedAt: ts }).where(eq(npcs.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(npcs)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(npcs.id, entityId), eq(npcs.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'location':
-        await this.db.update(locations).set({ body: prose, updatedAt: ts }).where(eq(locations.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(locations)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(locations.id, entityId), eq(locations.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'faction':
-        await this.db.update(factions).set({ body: prose, updatedAt: ts }).where(eq(factions.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(factions)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(factions.id, entityId), eq(factions.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
       case 'note':
-        await this.db.update(notes).set({ body: prose, updatedAt: ts }).where(eq(notes.id, entityId));
-        return;
+        return (
+          changesOf(
+            db
+              .update(notes)
+              .set({ body: prose, updatedAt: ts })
+              .where(and(eq(notes.id, entityId), eq(notes.updatedAt, expectedUpdatedAt)))
+              .run(),
+          ) > 0
+        );
     }
   }
 
   /** The current campaignId for an entity (for the controller's access check), or throws 404 if it's gone. */
   async campaignIdForEntityOrThrow(entityType: RevisionEntityType, entityId: number): Promise<number> {
-    const target = await this.loadTarget(entityType, entityId);
+    const target = this.loadTarget(this.db, entityType, entityId);
     if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
     return target.campaignId;
   }
@@ -415,6 +514,11 @@ export class RevisionsService {
    * restorer and linked via `restoredFromRevisionId`, and record the restore in
    * the audit log. The revision must belong to the named entity (a mismatched or
    * foreign id 404s). Returns the fresh revision list (superseded versions only).
+   *
+   * Snapshot, entity prose update, new revision tip, and audit commit in one
+   * synchronous better-sqlite3 transaction (issue #513). Optional `expectedUpdatedAt`
+   * uses the same STALE_WRITE guard as prose PATCH; the prose write also CAS-updates
+   * on the live row's updatedAt so a concurrent edit cannot interleave mid-restore.
    */
   async restore(
     entityType: RevisionEntityType,
@@ -422,43 +526,71 @@ export class RevisionsService {
     revisionId: number,
     user: RequestUser,
     role: Role,
+    opts?: { expectedUpdatedAt?: string },
   ): Promise<{ entityType: RevisionEntityType; entityId: number; updatedAt: string; revisions: EntityRevision[] }> {
-    const [revision] = await this.db.select().from(entityRevisions).where(eq(entityRevisions.id, revisionId)).limit(1);
+    const [revision] = this.db
+      .select()
+      .from(entityRevisions)
+      .where(eq(entityRevisions.id, revisionId))
+      .limit(1)
+      .all();
     if (!revision || revision.entityType !== entityType || revision.entityId !== entityId) {
       throw new NotFoundException(`Revision ${revisionId} not found for ${entityType} ${entityId}`);
     }
-    const target = await this.loadTarget(entityType, entityId);
-    if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
 
     const field = PROSE_FIELD[entityType];
     const snapshot = fromJsonText<Record<string, string>>(revision.snapshot, {});
     const restoredProse = snapshot[field] ?? '';
-
     const ts = nowIso();
-    // Capture the current content as a closed version FIRST so restore is reversible, then
-    // open a new tip for the restored prose. Only record when it actually differs — a
-    // restore-to-same is a no-op that shouldn't grow history.
-    if (target.prose !== restoredProse) {
-      await this.commitProseVersion({
-        entityType,
-        entityId,
-        campaignId: target.campaignId,
-        priorProse: target.prose,
-        nextProse: restoredProse,
-        user,
-        restoredFromRevisionId: revisionId,
-      });
-    }
-    await this.writeProse(entityType, entityId, restoredProse, ts);
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: `${entityType}.revision.restore`,
-      entityType,
-      entityId,
-      campaignId: target.campaignId,
-      detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+    // better-sqlite3 serializes this synchronous callback: tip close, tip open, prose
+    // CAS, and audit either all land or all roll back. A throw (including 409) aborts.
+    this.db.transaction((tx) => {
+      const target = this.loadTarget(tx, entityType, entityId);
+      if (!target) throw new NotFoundException(`${entityType} ${entityId} not found`);
+      this.assertNotStale(target, opts?.expectedUpdatedAt);
+
+      // Capture the current content as a closed version FIRST so restore is reversible, then
+      // open a new tip for the restored prose. Only record when it actually differs — a
+      // restore-to-same is a no-op that shouldn't grow history.
+      if (target.prose !== restoredProse) {
+        this.commitProseVersionOn(tx, {
+          entityType,
+          entityId,
+          campaignId: target.campaignId,
+          priorProse: target.prose,
+          nextProse: restoredProse,
+          user,
+          restoredFromRevisionId: revisionId,
+          ts,
+        });
+      }
+
+      if (!this.writeProseCas(tx, entityType, entityId, restoredProse, ts, target.updatedAt)) {
+        // Row moved between the in-tx read and the CAS write (should be rare under
+        // better-sqlite3's write lock); surface the same STALE_WRITE shape as PATCH.
+        throw new ConflictException({
+          code: 'STALE_WRITE',
+          message:
+            'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
+            'Reload to get the latest version, then restore again.',
+          expectedUpdatedAt: opts?.expectedUpdatedAt ?? target.updatedAt,
+          currentUpdatedAt: this.loadTarget(tx, entityType, entityId)?.updatedAt ?? target.updatedAt,
+        });
+      }
+
+      tx.insert(auditLog)
+        .values({
+          campaignId: target.campaignId,
+          actor: auditActor(user),
+          actorRole: role,
+          action: `${entityType}.revision.restore`,
+          entityType,
+          entityId,
+          detail: JSON.stringify({ restoredFromRevisionId: revisionId }),
+          createdAt: ts,
+        })
+        .run();
     });
 
     return { entityType, entityId, updatedAt: ts, revisions: await this.listForEntity(entityType, entityId) };
