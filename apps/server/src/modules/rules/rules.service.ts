@@ -252,7 +252,7 @@ export class RulesService implements OnModuleInit {
       .all();
     for (const job of interrupted) {
       const ts = nowIso();
-      const errors = JSON.parse(job.errors || '[]') as string[];
+      const errors = RulesService.parseErrors(job.errors);
       errors.push('Job interrupted by server restart');
       this.db.update(importJobs).set({ status: 'failed', updatedAt: ts, completedAt: ts, errors: JSON.stringify(errors) }).where(eq(importJobs.id, job.id)).run();
     }
@@ -263,6 +263,11 @@ export class RulesService implements OnModuleInit {
   private static parseProgress(json: string): ImportJobProgress {
     try { return JSON.parse(json) as ImportJobProgress; }
     catch { return { committed: 0, skipped: 0, failed: 0, sections: [] }; }
+  }
+
+  private static parseErrors(json: string): string[] {
+    try { return JSON.parse(json || '[]') as string[]; }
+    catch { return []; }
   }
 
   getJobOrThrow(id: string): RulePackInstallJob {
@@ -295,7 +300,7 @@ export class RulesService implements OnModuleInit {
       pack,
       added: row.status === 'completed' ? progress.committed : null,
       skippedExisting: row.status === 'completed' ? progress.skipped : null,
-      error: JSON.parse(row.errors || '[]')[0] ?? null,
+      error: RulesService.parseErrors(row.errors)[0] ?? null,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -347,7 +352,7 @@ export class RulesService implements OnModuleInit {
       this.runningJobs.delete(jobId);
       return;
     }
-    const errors = JSON.parse(row.errors || '[]') as string[]; errors.push(error);
+    const errors = RulesService.parseErrors(row.errors); errors.push(error);
     const progress = RulesService.parseProgress(row.progress);
     progress.sections.forEach((s) => { if (s.status !== 'done') s.status = 'failed'; });
     const ts = nowIso();
