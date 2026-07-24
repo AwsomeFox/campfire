@@ -115,3 +115,75 @@ describe('manifestToInspectView (issue #997)', () => {
     expect(result.sourceFormatVersion).toBe(1);
   });
 });
+
+
+// #496 AI credential key posture in the manifest
+describe('AI key posture manifest fields (#496)', () => {
+  const baseV1 = {
+    app: BACKUP_APP,
+    kind: BACKUP_KIND,
+    version: 1,
+    createdAt: '2026-07-20T12:00:00.000Z',
+    db: 'db/campfire.db',
+    dbBytes: 12345,
+    uploadCount: 0,
+  };
+
+  it('carries aiKeySource + aiKeyIncluded + aiCredentialCount when present', () => {
+    const parsed = parseBackupManifest({
+      ...baseV1,
+      aiKeySource: 'keyfile',
+      aiKeyIncluded: true,
+      aiCredentialCount: 3,
+    });
+    expect(parsed.aiKeySource).toBe('keyfile');
+    expect(parsed.aiKeyIncluded).toBe(true);
+    expect(parsed.aiCredentialCount).toBe(3);
+  });
+
+  it('accepts aiKeySource=env (operator-managed key)', () => {
+    const parsed = parseBackupManifest({ ...baseV1, aiKeySource: 'env' });
+    expect(parsed.aiKeySource).toBe('env');
+    // No envelope included is the expected posture for env-managed keys.
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+  });
+
+  it('ignores garbage values in the key-posture fields (backward compat)', () => {
+    const parsed = parseBackupManifest({
+      ...baseV1,
+      aiKeySource: 'garbage',
+      aiKeyIncluded: 'yes-please',
+      aiCredentialCount: -5,
+    });
+    expect(parsed.aiKeySource).toBeUndefined();
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+    expect(parsed.aiCredentialCount).toBeUndefined();
+  });
+
+  it('accepts a manifest without any of the new key-posture fields (older archives)', () => {
+    const parsed = parseBackupManifest(baseV1);
+    expect(parsed.aiKeySource).toBeUndefined();
+    expect(parsed.aiKeyIncluded).toBeUndefined();
+    expect(parsed.aiCredentialCount).toBeUndefined();
+  });
+
+  it('propagates key-posture fields into the inspect view', () => {
+    const manifest = {
+      ...baseV1,
+      aiKeySource: 'keyfile' as const,
+      aiKeyIncluded: true,
+      aiCredentialCount: 7,
+    };
+    const view = manifestToInspectView(manifest, [], 1);
+    expect(view.aiKeySource).toBe('keyfile');
+    expect(view.aiKeyIncluded).toBe(true);
+    expect(view.aiCredentialCount).toBe(7);
+  });
+
+  it('inspect view exposes safe defaults when the manifest omits key-posture', () => {
+    const view = manifestToInspectView(baseV1, [], 1);
+    expect(view.aiKeySource).toBeNull();
+    expect(view.aiKeyIncluded).toBe(false);
+    expect(view.aiCredentialCount).toBeNull();
+  });
+});

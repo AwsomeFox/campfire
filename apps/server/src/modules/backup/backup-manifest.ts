@@ -23,6 +23,22 @@ export function serverAppVersion(): string {
   return APP_VERSION;
 }
 
+/**
+ * How the running server sourced its AI credential encryption key at backup
+ * time (#496). Recorded in the manifest so an operator restoring to a fresh
+ * host knows what they need to do to keep stored provider credentials working:
+ *  - `env`      — operator manages the key via the AI_CONFIG_KEY env var; set
+ *                 the SAME value on the restore host and no envelope is needed.
+ *  - `keyfile`  — the server used an auto-generated `DATA_DIR/ai-config.key`.
+ *                 If `aiKeyIncluded=true`, the archive carries an encrypted
+ *                 envelope of that keyfile (unlock during restore with the
+ *                 passphrase supplied when the backup was cut). If false,
+ *                 stored provider credentials will not be decryptable on a
+ *                 fresh DATA_DIR — the operator must supply the original
+ *                 keyfile out-of-band or reconfigure providers.
+ */
+export type AiKeySource = 'env' | 'keyfile';
+
 export interface BackupManifest {
   app: string;
   kind: string;
@@ -41,6 +57,18 @@ export interface BackupManifest {
    * an older server can tell the operator which app version is required.
    */
   minCampfireVersion?: string;
+  /** AI credential encryption key posture at backup time (#496). Optional for
+   *  backward compat — older archives simply omit it and the restore side
+   *  assumes `keyfile` with no envelope. */
+  aiKeySource?: AiKeySource;
+  /** True when an encrypted keyfile envelope (ai-config.key.env.json) is
+   *  present in the archive (#496). */
+  aiKeyIncluded?: boolean;
+  /** Number of AI provider config rows with a stored encrypted API key at
+   *  backup time (#496). Lets the operator quickly see the size of the
+   *  credential fleet that hinges on the keyfile. Non-secret — no key
+   *  material or last-4 leaks through this count. */
+  aiCredentialCount?: number;
 }
 
 /** Non-destructive summary returned by backup inspect (issue #514). */
@@ -57,6 +85,10 @@ export interface BackupInspectResult {
   dbBytes: number | null;
   uploadCount: number | null;
   uploads: string[];
+  /** AI credential encryption key posture recorded at backup time (#496). */
+  aiKeySource: AiKeySource | null;
+  aiKeyIncluded: boolean;
+  aiCredentialCount: number | null;
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -98,6 +130,19 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
       ? schemaVersion
       : undefined;
 
+  // #496: AI credential key posture — all optional for backward compat.
+  const rawKeySource = raw.aiKeySource;
+  const aiKeySource: AiKeySource | undefined =
+    rawKeySource === 'env' || rawKeySource === 'keyfile' ? rawKeySource : undefined;
+  const aiKeyIncluded = raw.aiKeyIncluded === true ? true : undefined;
+  const rawCredentialCount = raw.aiCredentialCount;
+  const aiCredentialCount =
+    typeof rawCredentialCount === 'number' &&
+    Number.isInteger(rawCredentialCount) &&
+    rawCredentialCount >= 0
+      ? rawCredentialCount
+      : undefined;
+
   return {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
@@ -108,6 +153,9 @@ function normalizeManifestV1(raw: Record<string, unknown>): BackupManifest {
     uploadCount,
     ...(appVersion ? { appVersion } : {}),
     ...(parsedSchema !== undefined ? { schemaVersion: parsedSchema } : {}),
+    ...(aiKeySource ? { aiKeySource } : {}),
+    ...(aiKeyIncluded !== undefined ? { aiKeyIncluded } : {}),
+    ...(aiCredentialCount !== undefined ? { aiCredentialCount } : {}),
   };
 }
 
@@ -167,5 +215,8 @@ export function manifestToInspectView(manifest: BackupManifest, uploads: string[
     dbBytes: manifest.dbBytes ?? null,
     uploadCount: manifest.uploadCount ?? null,
     uploads,
+    aiKeySource: manifest.aiKeySource ?? null,
+    aiKeyIncluded: manifest.aiKeyIncluded === true,
+    aiCredentialCount: manifest.aiCredentialCount ?? null,
   };
 }

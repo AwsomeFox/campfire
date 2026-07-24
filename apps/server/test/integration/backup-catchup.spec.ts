@@ -93,7 +93,13 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     // it for inserts/reads, so handing them the proxy directly mirrors runtime.
     const db = holder.proxy as DrizzleDb;
     const audit = new AuditService(db);
-    return new BackupService(holder, audit, new SettingsService(db), new AttachmentsService(db, audit, new FsDeletionService(db, audit)));
+    return new BackupService(
+      holder,
+      db,
+      audit,
+      new SettingsService(db),
+      new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
+    );
   }
 
   it('runs an initial catch-up backup on the first boot after enabling (no prior cadence row)', async () => {
