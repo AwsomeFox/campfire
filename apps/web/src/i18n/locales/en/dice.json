@@ -64,6 +64,8 @@
     "retentionCapped": "Showing the latest rolls — the newest {{count}} per campaign are kept.",
     "retentionCapped_one": "Showing the latest rolls — the newest {{count}} per campaign is kept.",
     "retentionCapped_other": "Showing the latest rolls — the newest {{count}} per campaign are kept.",
-    "retentionUnbounded": "Showing the latest rolls — full history is kept for this campaign."
+    "retentionUnbounded": "Showing the latest rolls — full history is kept for this campaign.",
+    "applyDamage": "Apply",
+    "dismissRollToast": "Dismiss roll result"
   }
 }

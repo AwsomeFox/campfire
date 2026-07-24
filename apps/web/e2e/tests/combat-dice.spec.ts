@@ -67,6 +67,11 @@ test.describe('encounter dice — apply rolled damage', () => {
 
       // Roll the Greatsword damage from the owned (interactive) card.
       await page.getByRole('button', { name: '2d6+4 slashing' }).click();
+      const rollToast = page.getByTestId('roll-result-toast');
+      await expect(rollToast).toBeVisible();
+      await expect(rollToast.getByTestId('roll-result-apply')).toBeVisible();
+      await rollToast.getByTestId('roll-result-apply').click();
+
       const applyBar = page.getByRole('group', { name: /rolled/i });
       await expect(applyBar).toBeVisible();
 

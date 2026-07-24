@@ -16,6 +16,7 @@ import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError, getWithHeaders } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { useRollResultToast } from '../../components/RollResultToastContext';
 import { useCampaignAccessFor } from '../../app/CampaignAccessContext';
 import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
@@ -63,6 +64,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // N rolls" footnote; undefined until the first successful feed fetch.
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
+  const { showRoll } = useRollResultToast();
   const exprId = useId();
   const rollAnnouncementRef = useRef<{
     campaignId: number;
@@ -181,6 +183,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
           return next;
         });
         setJustRolledId(result.id); // triggers the tumble/crit/fumble animation (issue #67)
+        showRoll(result);
         return result;
       } catch (err) {
         const message = err instanceof ApiError ? err.message : t('dice.rollError');
@@ -191,7 +194,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         setRolling(false);
       }
     },
-    [campaignId, limit, announce, t],
+    [campaignId, limit, announce, showRoll, t],
   );
 
   async function rollFromInput(e: FormEvent) {

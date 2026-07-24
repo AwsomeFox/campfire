@@ -1344,6 +1344,65 @@ a:hover .cf-name-reveal {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* Roll result toast (issue #1315) — fixed corner feedback for local rolls. */
+.cf-roll-result-toast {
+  position: fixed;
+  right: 16px;
+  bottom: calc(
+    var(--cf-tabbar-content-height, 0px) + env(safe-area-inset-bottom, 0px) +
+      var(--cf-snackbar-gap, 12px)
+  );
+  z-index: var(--cf-layer-snackbar);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 10px 10px 14px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--color-neutral-800, #1c1c22);
+  color: var(--color-neutral-100, #f2f2f5);
+  border: 1px solid var(--color-neutral-700, #333);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+  font-size: 13px;
+}
+.cf-roll-result-toast__body {
+  flex: 1 1 12ch;
+  min-width: 0;
+}
+.cf-roll-result-toast__label {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-roll-result-toast__meta {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--color-neutral-400, #999);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cf-roll-result-toast__apply {
+  font-size: 12px;
+  min-height: 36px;
+  padding: 0 10px;
+  flex: none;
+}
+.cf-roll-result-toast__dismiss {
+  flex: none;
+}
+@media (min-width: 768px) {
+  .cf-roll-result-toast {
+    bottom: 16px;
+  }
+}
 .cf-tabbar a,
 .cf-tabbar button {
   display: flex;

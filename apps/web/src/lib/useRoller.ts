@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import type { DiceRoll, CheckRollResponse } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
+import { useRollResultToast } from '../components/RollResultToastContext';
 import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
@@ -44,6 +45,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   const [last, setLast] = useState<DiceRoll | null>(null);
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const { showRoll } = useRollResultToast();
 
   const roll = useCallback(
     async (expr: string, label: string): Promise<DiceRoll | null> => {
@@ -52,6 +54,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
+        showRoll(result);
         rememberLocalDiceAnnouncement(campaignId, result.id);
         announce(formatDiceRollAnnouncement(result, t), {
           dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
@@ -64,7 +67,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, t],
+    [campaignId, onError, announce, showRoll, t],
   );
 
   const rollCheck = useCallback(
@@ -78,6 +81,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
           ...(dc != null ? { dc } : {}),
         });
         setLast(res.roll);
+        showRoll(res.roll);
         rememberLocalDiceAnnouncement(campaignId, res.roll.id);
         announce(formatDiceRollAnnouncement(res.roll, t), {
           dedupeKey: `dice-roll:${campaignId}:1:${res.roll.id}:${res.roll.id}`,
@@ -90,7 +94,7 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, t],
+    [campaignId, onError, announce, showRoll, t],
   );
 
   return { roll, rollCheck, rolling, last, dismiss: () => setLast(null) };
