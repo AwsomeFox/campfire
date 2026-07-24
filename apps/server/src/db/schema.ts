@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex, customType } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import type { AiDmProactiveSettings } from '@campfire/schema';
 
 /**

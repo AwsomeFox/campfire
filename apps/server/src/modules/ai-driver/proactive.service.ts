@@ -66,7 +66,7 @@ export class ProactiveService implements OnModuleDestroy {
   ) {}
 
   onModuleDestroy(): void {
-    for (const [id, state] of this.campaigns) {
+    for (const [, state] of this.campaigns) {
       state.subscription.unsubscribe();
     }
     this.campaigns.clear();
