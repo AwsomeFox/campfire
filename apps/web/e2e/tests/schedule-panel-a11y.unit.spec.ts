@@ -74,3 +74,69 @@ test.describe('schedule form help (issue #645)', () => {
     expect(SCHEDULE_WHEN_HELP.toLowerCase()).toContain('timezone');
   });
 });
+
+
+// -------------------- RSVP note editor (issue #552) --------------------
+
+import {
+  RSVP_NOTE_HELP,
+  RSVP_NOTE_LABEL,
+  RSVP_NOTE_MAX_LEN,
+  RSVP_NOTE_SAVED_ANNOUNCEMENT,
+  RSVP_NOTE_CLEARED_ANNOUNCEMENT,
+  RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT,
+  rsvpNoteSaveRequest,
+  rsvpNoteTooLongMessage,
+} from '../../src/features/sessions/schedulePanelA11y';
+
+test.describe('RSVP note editor copy (issue #552)', () => {
+  test('label + help are non-empty and mention that others can see it', () => {
+    expect(RSVP_NOTE_LABEL).toMatch(/rsvp note/i);
+    expect(RSVP_NOTE_LABEL).toMatch(/optional/i);
+    expect(RSVP_NOTE_HELP).toMatch(/DM|table|member/i);
+  });
+
+  test('announcements cover saved, cleared, and failed outcomes', () => {
+    expect(RSVP_NOTE_SAVED_ANNOUNCEMENT).toMatch(/saved/i);
+    expect(RSVP_NOTE_CLEARED_ANNOUNCEMENT).toMatch(/cleared/i);
+    expect(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT).toMatch(/couldn't|failed|error/i);
+  });
+
+  test('too-long message states current and max length', () => {
+    const msg = rsvpNoteTooLongMessage(600, RSVP_NOTE_MAX_LEN);
+    expect(msg).toContain('600');
+    expect(msg).toContain(String(RSVP_NOTE_MAX_LEN));
+  });
+});
+
+test.describe('rsvpNoteSaveRequest (issue #552)', () => {
+  test('returns null when no RSVP has been picked yet', () => {
+    expect(rsvpNoteSaveRequest(null, '', 'some new note')).toBeNull();
+  });
+
+  test('returns null when the trimmed draft matches the persisted note (no-op)', () => {
+    // Exact match
+    expect(rsvpNoteSaveRequest('yes', 'running late', 'running late')).toBeNull();
+    // Whitespace-only difference — trimming turns them into the same string,
+    // so a save would be a no-op.
+    expect(rsvpNoteSaveRequest('yes', 'running late', '  running late  ')).toBeNull();
+  });
+
+  test('sends the trimmed note when it differs', () => {
+    const req = rsvpNoteSaveRequest('maybe', '', 'might be 30 late');
+    expect(req).toEqual({ status: 'maybe', note: 'might be 30 late' });
+  });
+
+  test('sends empty string to explicitly clear an existing note', () => {
+    const req = rsvpNoteSaveRequest('yes', 'brought snacks', '');
+    expect(req).toEqual({ status: 'yes', note: '' });
+    // A whitespace-only draft is treated the same as empty (both clear).
+    expect(rsvpNoteSaveRequest('yes', 'brought snacks', '   ')).toEqual({ status: 'yes', note: '' });
+  });
+
+  test('preserves the caller-picked status regardless of prior state', () => {
+    // A user changing status AND note in the same edit must send both.
+    const req = rsvpNoteSaveRequest('no', 'planning to attend', 'sorry, sick');
+    expect(req).toEqual({ status: 'no', note: 'sorry, sick' });
+  });
+});
