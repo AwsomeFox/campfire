@@ -241,7 +241,10 @@ export class CharactersService {
       .from(encounters)
       .where(eq(encounters.id, encounterId))
       .get();
-    if (current && Boolean(current.hidden)) return;
+    // Fail closed (#754): if the row can't be read (e.g. deleted concurrently) treat
+    // it as not-visible and skip — an "unknown" encounter must not re-introduce an
+    // existence leak, and the signal is useless once the row is gone.
+    if (!current || Boolean(current.hidden)) return;
     this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
   }
 
