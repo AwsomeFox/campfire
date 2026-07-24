@@ -201,7 +201,10 @@ describe('campaigns (e2e)', () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).post('/api/v1/campaigns').set(dm).send({});
     expect(res.status).toBe(400);
-    expect(res.body.statusCode).toBe(400);
+    // Issue #682 — the published error envelope exposes `status` (not the
+    // legacy nestjs `statusCode`). The matching `code` slug is `bad_request`.
+    expect(res.body.status).toBe(400);
+    expect(res.body.code).toBe('bad_request');
   });
 
   // P2 fix pinning tests — FK-shaped fields (currentLocationId, mapAttachmentId) must
