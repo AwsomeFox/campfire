@@ -112,11 +112,7 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
       undefined as unknown as Ctor[6],
       undefined as unknown as Ctor[7],
       undefined as unknown as Ctor[8],
-<<<<<<< HEAD
-      undefined as unknown as Ctor[9],
-=======
       undefined as unknown as Ctor[9], // encounters (#1048 ctor arity)
->>>>>>> origin/main
     );
     return { svc, call, mcpTools, supportPreferences };
   }
