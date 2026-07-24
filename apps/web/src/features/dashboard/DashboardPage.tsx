@@ -217,7 +217,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-7" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <RegionMap campaignId={id} campaign={summary.campaign} locations={summary.locations} role={role} onChange={load} />
-          <QuestsCard campaignId={id} quests={summary.quests} role={role} onChange={load} />
+          <QuestsCard campaignId={id} quests={summary.quests} onChange={load} />
           <SessionLog
             campaignId={id}
             sessions={summary.sessions}
@@ -231,9 +231,9 @@ export default function DashboardPage() {
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
           <PartyCard campaignId={id} characters={summary.characters} />
           <NpcGrid campaignId={id} npcs={summary.npcs} />
-          <HandoutsCard campaignId={id} role={role} />
+          <HandoutsCard campaignId={id} />
           <DiceWidget campaignId={id} />
-          <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} role={role} />
+          <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} />
         </div>
       </div>
 

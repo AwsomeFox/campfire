@@ -69,6 +69,7 @@ export default function LocationPage() {
   const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
   const { role, isDm, canDmWrite } = useCampaignAccess();
+  const announce = useAnnounce();
 
   const [location, setLocation] = useState<Location | null>(null);
   const [loading, setLoading] = useState(true);

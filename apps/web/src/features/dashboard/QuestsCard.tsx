@@ -5,6 +5,7 @@
  */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import type { CampaignSummary, QuestObjective } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { api, API, ApiError } from '../../lib/api';
 import { EmptyState } from '../../components/ui';
