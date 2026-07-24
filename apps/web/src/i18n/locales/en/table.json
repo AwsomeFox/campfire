@@ -24,6 +24,8 @@
     "emptyHint": "Type an action below to begin the scene.",
     "transcriptLabel": "Table transcript",
     "narrationLogLabel": "Narration announcements",
+    "jumpToLatest": "Jump to latest",
+    "jumpToLatestUnread": "Jump to latest ({{count}} new)",
 
     "composerPlaceholder": "Describe what you do…",
     "composerPlaceholderCombat": "Combat is live — describe your action…",

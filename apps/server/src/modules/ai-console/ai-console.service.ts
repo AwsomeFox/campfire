@@ -1,5 +1,5 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { asc, eq } from 'drizzle-orm';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
+import { asc, eq, inArray } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   AiCapsUpdate,
@@ -198,6 +198,19 @@ export class AiConsoleService {
 
     if (input.campaigns && input.campaigns.length > 0) {
       const ts = nowIso();
+      // Validate campaign existence before any writes (#537): a typo must not silently
+      // create an orphan seat row pointing at a nonexistent campaign.
+      const requestedIds = input.campaigns.map((c) => c.campaignId);
+      const existingCampaigns = await this.db
+        .select({ id: campaigns.id })
+        .from(campaigns)
+        .where(inArray(campaigns.id, requestedIds));
+      const existingIds = new Set(existingCampaigns.map((r) => r.id));
+      const unknown = requestedIds.filter((id) => !existingIds.has(id));
+      if (unknown.length > 0) {
+        throw new BadRequestException(`Unknown campaign id(s): ${unknown.join(', ')}`);
+      }
+
       for (const c of input.campaigns) {
         const [existing] = await this.db
           .select({ campaignId: aiDmSeats.campaignId })

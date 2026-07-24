@@ -1892,6 +1892,25 @@ function migrateNotificationsTableForCommentId(sqlite: Database.Database): void 
 }
 
 /**
+ * Migration for issue #820: schedule lifecycle notifications store structured
+ * metadata (schedule id, UTC instant, duration, change type) in
+ * `notifications.data` so clients can localize the start time. Plain nullable
+ * ADD COLUMN — existing rows stay null. Fresh DBs never hit this path —
+ * BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNotificationsTableForData(sqlite: Database.Database): void {
+  const hasNotificationsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'")
+    .get();
+  if (!hasNotificationsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'data')) return;
+
+  sqlite.exec('ALTER TABLE notifications ADD COLUMN data TEXT');
+}
+
+/**
  * Migration for issue #819: character assignment is an exclusive seat — at most
  * one campaign_members row may reference a given character_id. Pre-fix DBs could
  * accumulate duplicate links (the service overwrote ownerUserId without clearing
@@ -1947,6 +1966,37 @@ function migrateCampaignMembersExclusiveCharacter(sqlite: Database.Database): vo
   sqlite.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character
       ON campaign_members(character_id) WHERE character_id IS NOT NULL;
+  `);
+}
+
+/**
+ * Issue #782: per-action idempotency for inventory quantity writes. CREATE TABLE
+ * IF NOT EXISTS is fully idempotent; fresh DBs never hit this path because
+ * BOOTSTRAP_SQL already declares the table. Same shape as other new-table
+ * migrations (e.g. 0051 server_meta).
+ */
+function migrateInventoryQtyIdempotencyTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS inventory_qty_idempotency (
+      key TEXT PRIMARY KEY,
+      item_id INTEGER NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_item
+      ON inventory_qty_idempotency(item_id);
+  `);
+}
+
+/** Issue #782: created_at index so TTL prune-on-write is a range scan, not a table scan. */
+function migrateInventoryQtyIdempotencyCreatedAtIndex(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_inventory_qty_idempotency_created
+      ON inventory_qty_idempotency(created_at);
   `);
 }
 
@@ -2031,7 +2081,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0065_notifications_comment_id', run: migrateNotificationsTableForCommentId },
   { name: '0066_entity_revisions_version_authorship', run: migrateEntityRevisionsForVersionAuthorship },
   { name: '0067_campaign_members_exclusive_character', run: migrateCampaignMembersExclusiveCharacter },
-  { name: '0068_campaigns_latest_session_number', run: migrateCampaignsTableForLatestSessionNumber },
+  { name: '0068_inventory_qty_idempotency', run: migrateInventoryQtyIdempotencyTable },
+  { name: '0069_inventory_qty_idempotency_created_at', run: migrateInventoryQtyIdempotencyCreatedAtIndex },
+  { name: '0070_notifications_data', run: migrateNotificationsTableForData },
+  { name: '0071_campaigns_latest_session_number', run: migrateCampaignsTableForLatestSessionNumber },
 ];
 
 /**

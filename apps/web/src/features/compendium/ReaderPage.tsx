@@ -19,6 +19,7 @@ import { IconPicker } from '../../components/IconPicker';
 import { ruleEntryIconSlug } from '../../lib/ruleEntryIcon';
 import { useCampaign } from '../../app/CampaignContext';
 import { useAuth } from '../../app/auth';
+import { PageTitle } from '../../components/PageTitle';
 import {
   COMPENDIUM_SOURCE_COPIED_LABEL,
   COMPENDIUM_SOURCE_COPY_LABEL,
@@ -100,7 +101,7 @@ export default function ReaderPage() {
         <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => navigate(`/c/${id}/compendium`)}>
           ← Compendium
         </button>
-        <h3 style={{ margin: 0, fontSize: 17 }}>Reader</h3>
+        {!entry && <PageTitle style={{ margin: 0, fontSize: 17 }}>Reader</PageTitle>}
         {pack && (
           <span className="tag tag-accent-2" style={{ fontSize: 9.5 }}>
             {pack.name}{pack.license ? ` · ${pack.license}` : ''}
@@ -127,7 +128,7 @@ export default function ReaderPage() {
             >
               <GameIcon slug={ruleEntryIconSlug(entry)} size={30} />
             </span>
-            <h3 style={{ margin: 0, fontFamily: 'var(--font-heading)' }}>{entry.name}</h3>
+            <PageTitle style={{ margin: 0 }}>{entry.name}</PageTitle>
             <span className="tag tag-neutral" style={{ fontSize: 9.5 }}>{entry.type}</span>
             {isDm && (
               <span className="flex items-center gap-1.5" style={{ marginLeft: 'auto' }}>
@@ -152,7 +153,7 @@ export default function ReaderPage() {
           {entry.body.trim() ? (
             <Markdown>{entry.body.replace(/\\r\\n|\\n/g, '\n').replace(/\\t/g, '\t')}</Markdown>
           ) : hasMonsterStatblock(entry.dataJson, ruleSystem) ? (
-            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={4} />
+            <StatBlock data={entry.dataJson} ruleSystem={ruleSystem} headingLevel={2} />
           ) : (
             <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>No details available for this entry.</p>
           )}

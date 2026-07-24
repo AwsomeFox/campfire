@@ -80,7 +80,7 @@ export class ScheduleController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Cancel a scheduled session', description: 'dm role required. Deletes the schedule entry and its RSVPs.' })
+  @ApiOperation({ summary: 'Cancel a scheduled session', description: 'dm role required. Deletes the schedule entry and its RSVPs, and notifies the party (issue #820).' })
   @ApiResponse({ status: 200, description: 'Deleted.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser): Promise<void> {
     const row = await this.scheduling.getRowOrThrow(id);

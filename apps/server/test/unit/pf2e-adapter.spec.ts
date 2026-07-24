@@ -231,6 +231,28 @@ describe('Pf2eAdapter — initiative (Perception, not DEX)', () => {
   });
 });
 
+describe('Pf2eAdapter — initiativeTiebreak (issue #611)', () => {
+  it('preserves sortOrder / roll order and ignores initMod on a tie', () => {
+    // Higher initMod on b must NOT reorder ahead of a — PF2e keeps add/roll order.
+    expect(
+      Pf2eAdapter.initiativeTiebreak(
+        { initMod: 1, sortOrder: 0 },
+        { initMod: 9, sortOrder: 1 },
+      ),
+    ).toBeLessThan(0);
+    expect(
+      Pf2eAdapter.initiativeTiebreak(
+        { initMod: 9, sortOrder: 1 },
+        { initMod: 1, sortOrder: 0 },
+      ),
+    ).toBeGreaterThan(0);
+  });
+
+  it('is inherited by Sf2eAdapter (same preserved-order rule)', () => {
+    expect(Sf2eAdapter.initiativeTiebreak).toBe(Pf2eAdapter.initiativeTiebreak);
+  });
+});
+
 describe('Pf2eAdapter — statblock mapping', () => {
   const data = {
     level: 14,

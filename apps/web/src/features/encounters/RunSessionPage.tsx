@@ -3596,8 +3596,8 @@ function AddCombatantPanel({
       try {
         const params = new URLSearchParams({ type: 'monster', q: debouncedQuery.trim() });
         if (rulePack) params.set('pack', rulePack);
-        const list = await api.get<RuleEntry[]>(`${API}/rules/search?${params.toString()}`);
-        if (!cancelled) setResults(list);
+        const page = await api.get<{ items: RuleEntry[] }>(`${API}/rules/search?${params.toString()}`);
+        if (!cancelled) setResults(page.items);
       } catch {
         if (!cancelled) setResults([]);
       } finally {

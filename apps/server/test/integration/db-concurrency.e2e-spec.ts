@@ -398,6 +398,100 @@ describe('concurrency (real SQLite, atomic writes)', () => {
   });
 
   /**
+   * Issue #782: inventory +/- must not send absolute quantities from a stale
+   * snapshot. Concurrent qtyDelta (+1 / -1) compose via `qty = qty + ?`; a lost
+   * update would leave the final count short. Concurrent move + qtyDelta must
+   * both land. Identical idempotency-key retries must not double-apply.
+   */
+  it('applies every concurrent inventory qtyDelta — no lost updates (#782)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Loot Race' });
+    const campaignId = campaign.body.id;
+    const created = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .set(dm)
+      .send({ name: 'Arrows', qty: 20 });
+    const itemId = created.body.id;
+
+    const N = 20;
+    const results = await Promise.all([
+      ...Array.from({ length: N }, (_, i) =>
+        request(baseUrl)
+          .patch(`/api/v1/inventory/${itemId}`)
+          .set(dm)
+          .send({ qtyDelta: 1, idempotencyKey: `loot-inc-${i}` }),
+      ),
+      ...Array.from({ length: N }, (_, i) =>
+        request(baseUrl)
+          .patch(`/api/v1/inventory/${itemId}`)
+          .set(player)
+          .send({ qtyDelta: -1, idempotencyKey: `loot-dec-${i}` }),
+      ),
+    ]);
+    expect(results.every((r) => r.status === 200)).toBe(true);
+
+    const finalRow = await request(baseUrl).get(`/api/v1/inventory/${itemId}`).set(dm);
+    // 20 start + 20 increments − 20 decrements = 20. A stale absolute write would lose updates.
+    expect(finalRow.body.qty).toBe(20);
+  });
+
+  it('concurrent move and qtyDelta both land (#782)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Move Race' });
+    const campaignId = campaign.body.id;
+    // DM-owned destination so whichever request wins the race, both actors retain
+    // write access (party stash is player-writable; DM can always write the result).
+    const character = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Carrier' });
+    const created = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .set(dm)
+      .send({ name: 'Relic', qty: 1 });
+    const itemId = created.body.id;
+
+    const [moved, bumped] = await Promise.all([
+      request(baseUrl)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ ownerType: 'character', characterId: character.body.id }),
+      request(baseUrl)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: 'move-race-bump' }),
+    ]);
+    expect(moved.status).toBe(200);
+    expect(bumped.status).toBe(200);
+
+    const finalRow = await request(baseUrl).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(finalRow.body.ownerType).toBe('character');
+    expect(finalRow.body.characterId).toBe(character.body.id);
+    expect(finalRow.body.qty).toBe(2);
+  });
+
+  it('identical concurrent idempotency-key retries apply once (#782)', async () => {
+    const campaign = await request(baseUrl).post('/api/v1/campaigns').set(dm).send({ name: 'Idem Race' });
+    const campaignId = campaign.body.id;
+    const created = await request(baseUrl)
+      .post(`/api/v1/campaigns/${campaignId}/inventory`)
+      .set(dm)
+      .send({ name: 'Coin purse', qty: 1 });
+    const itemId = created.body.id;
+    const key = 'shared-retry-key';
+
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        request(baseUrl).patch(`/api/v1/inventory/${itemId}`).set(dm).send({ qtyDelta: 1, idempotencyKey: key }),
+      ),
+    );
+    expect(results.every((r) => r.status === 200)).toBe(true);
+    expect([...new Set(results.map((r) => r.body.qty))]).toEqual([2]);
+    expect([...new Set(results.map((r) => r.body.updatedAt))]).toHaveLength(1);
+
+    const finalRow = await request(baseUrl).get(`/api/v1/inventory/${itemId}`).set(dm);
+    expect(finalRow.body.qty).toBe(2);
+  });
+
+  /**
    * Issue #658: a brand-new campaign has no treasury row yet. Two concurrent
    * first-accesses each pass the `if (!row)` check and race the INSERT — without
    * `onConflictDoNothing` the loser violates the `campaignId` PRIMARY KEY and

@@ -239,7 +239,8 @@ export default async function globalSetup(config: FullConfig) {
     ],
   });
   await waitForInstall(admin, statblockUpload.id);
-  const [statblockEntry] = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
+  const statblockSearch = await okJson(dm, 'get', '/api/v1/rules/search?q=fixture%20sentinel&type=monster&pack=e2e-open5e-actions');
+  const statblockEntry = (statblockSearch.items ?? statblockSearch)[0];
   if (!statblockEntry) throw new Error('Uploaded statblock fixture was not searchable');
   const statblockEntryId: number = statblockEntry.id;
 
