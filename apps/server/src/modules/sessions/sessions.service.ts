@@ -208,7 +208,7 @@ export class SessionsService {
     const [stats] = await this.db
       .select({
         count: sql<number>`count(*)`,
-        latest: sql<number>`coalesce(max(${sessions.number}), 0)`,
+        latest: sql<number>`max(0, coalesce(max(${sessions.number}), 0))`,
       })
       .from(sessions)
       .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
@@ -388,6 +388,13 @@ export class SessionsService {
       .where(eq(sessions.id, id))
       .returning();
 
+    // Renumbering changes latestSessionNumber without changing sessionCount (#841).
+    // Refresh immediately after the row write so ancillary audit/notification failures
+    // cannot leave the campaign's denormalized position stale.
+    if (input.number !== undefined && input.number !== existing.number) {
+      await this.recomputeSessionStats(existing.campaignId);
+    }
+
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -423,10 +430,6 @@ export class SessionsService {
         entityId: id,
         actorName: user.name,
       });
-    }
-    // Renumbering changes latestSessionNumber without changing sessionCount (#841).
-    if (input.number !== undefined && input.number !== existing.number) {
-      await this.recomputeSessionStats(existing.campaignId);
     }
     return redactSecret(toDomain(row), role);
   }

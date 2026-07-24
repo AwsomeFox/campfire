@@ -82,6 +82,10 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     // Play state: session, character, encounter+combatant, a shared note linked to the quest.
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The crew assembled.' });
+    const sparseSession = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .send({ number: 12, recap: 'The crew reunited after a long gap.' });
+    expect(sparseSession.status).toBe(201);
     const charRes = await playerAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
       name: 'Rogue',
       className: 'Thief',
@@ -110,9 +114,13 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     // Policy is portable configuration; capability rows/tokens are not.
     await dmAgent.put(`/api/v1/campaigns/${campaignId}/session-shares/policy`).send({ enabled: false });
 
-    // The export document is the import contract.
+    // The export document is the import contract. Deliberately corrupt its
+    // denormalized stats: import must recompute COUNT and MAX from session rows.
     const exportRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/export?format=json`);
     exportDoc = exportRes.body;
+    const exportedCampaign = exportDoc.campaign as Record<string, unknown>;
+    exportedCampaign.sessionCount = 999;
+    exportedCampaign.latestSessionNumber = -5;
   });
 
   afterAll(async () => {
@@ -128,6 +136,8 @@ describe('campaign import (e2e, real cookie sessions)', () => {
     expect(imported.description).toBe('To be exported and re-imported.');
     expect(imported.status).toBe('active');
     expect(imported.publicRecapSharingEnabled).toBe(false);
+    expect(imported.sessionCount).toBe(2);
+    expect(imported.latestSessionNumber).toBe(12);
     // Attachments aren't recreated from a JSON export.
     expect(imported.mapAttachmentId).toBeNull();
 
@@ -172,8 +182,14 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     // Sessions + characters copied.
     const sessions = await dmAgent.get(`/api/v1/campaigns/${imported.id}/sessions`);
-    expect(sessions.body.length).toBe(1);
-    expect((await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/shares`)).body).toEqual([]);
+    expect(sessions.body.length).toBe(2);
+    expect(sessions.body.map((s: { number: number }) => s.number).sort((a: number, b: number) => a - b)).toEqual([1, 12]);
+    const importedSessionOne = sessions.body.find((s: { number: number }) => s.number === 1);
+    expect(importedSessionOne).toBeDefined();
+    if (importedSessionOne === undefined) {
+      throw new Error('expected Session 1 on imported campaign');
+    }
+    expect((await dmAgent.get(`/api/v1/sessions/${importedSessionOne.id}/shares`)).body).toEqual([]);
     const chars = await dmAgent.get(`/api/v1/campaigns/${imported.id}/characters`);
     expect(chars.body.length).toBe(1);
     expect(chars.body[0].name).toBe('Rogue');

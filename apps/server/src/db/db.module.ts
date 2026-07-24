@@ -440,14 +440,17 @@ function migrateCampaignsTableForLatestSessionNumber(sqlite: Database.Database):
   // Backfill from live sessions only (soft-deleted recaps must not set campaign position).
   sqlite.exec(`
     UPDATE campaigns
-    SET latest_session_number = COALESCE(
-      (
-        SELECT MAX(s.number)
-        FROM sessions s
-        WHERE s.campaign_id = campaigns.id
-          AND s.deleted_at IS NULL
-      ),
-      0
+    SET latest_session_number = MAX(
+      0,
+      COALESCE(
+        (
+          SELECT MAX(s.number)
+          FROM sessions s
+          WHERE s.campaign_id = campaigns.id
+            AND s.deleted_at IS NULL
+        ),
+        0
+      )
     )
   `);
 }

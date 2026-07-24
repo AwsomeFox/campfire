@@ -39,7 +39,14 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(userCols).toEqual(expect.arrayContaining(['oidc_sub', 'accent_color', 'text_size']));
 
       expect(columnNames(sqlite, 'campaigns')).toEqual(
-        expect.arrayContaining(['rule_system', 'map_attachment_id', 'ics_token', 'ics_token_expires_at', 'public_recap_sharing_enabled']),
+        expect.arrayContaining([
+          'rule_system',
+          'map_attachment_id',
+          'ics_token',
+          'ics_token_expires_at',
+          'public_recap_sharing_enabled',
+          'latest_session_number',
+        ]),
       );
       expect(columnNames(sqlite, 'characters')).toEqual(
         expect.arrayContaining([
@@ -334,6 +341,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0068_inventory_qty_idempotency');
       expect(MIGRATION_NAMES).toContain('0069_inventory_qty_idempotency_created_at');
       expect(MIGRATION_NAMES).toContain('0070_notifications_data');
+      expect(MIGRATION_NAMES).toContain('0071_campaigns_latest_session_number');
       expect(
         (sqlite.pragma('index_list(inventory_qty_idempotency)') as Array<{ name: string }>).map((index) => index.name),
       ).toEqual(expect.arrayContaining(['idx_inventory_qty_idempotency_item', 'idx_inventory_qty_idempotency_created']));
@@ -471,6 +479,67 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(JSON.parse(row.data)).toMatchObject({ kind: 'schedule', scheduleId: 11, changeType: 'created' });
     } finally {
       upgraded.sqlite.close();
+    }
+  });
+
+  it('0071 backfills the live nonnegative latest session number and is idempotent', () => {
+    dataDir = makeTempDataDir();
+    writeOldSchemaDb(dataDir);
+
+    // Give the old sessions table the soft-delete shape expected by the later
+    // migration, then seed sparse live/deleted rows before 0071 adds the campaign
+    // aggregate column. The deleted high number must not affect the backfill.
+    const legacy = new Database(dbFilePath(dataDir));
+    try {
+      legacy.exec('ALTER TABLE sessions ADD COLUMN deleted_at TEXT');
+      legacy
+        .prepare(
+          "INSERT INTO sessions (campaign_id, number, recap, created_at, updated_at, deleted_at) VALUES (1, 12, 'later live recap', '2024-01-02', '2024-01-02', NULL)",
+        )
+        .run();
+      legacy
+        .prepare(
+          "INSERT INTO sessions (campaign_id, number, recap, created_at, updated_at, deleted_at) VALUES (1, 99, 'trashed recap', '2024-01-03', '2024-01-03', '2024-01-04')",
+        )
+        .run();
+      legacy
+        .prepare(
+          "INSERT INTO campaigns (name, description, created_at, updated_at) VALUES ('Negative only', '', '2024-01-01', '2024-01-01')",
+        )
+        .run();
+      legacy
+        .prepare(
+          "INSERT INTO sessions (campaign_id, number, recap, created_at, updated_at, deleted_at) VALUES (2, -4, 'malformed legacy recap', '2024-01-02', '2024-01-02', NULL)",
+        )
+        .run();
+    } finally {
+      legacy.close();
+    }
+
+    const first = openDatabase(dataDir);
+    try {
+      expect(columnNames(first.sqlite, 'campaigns')).toContain('latest_session_number');
+      expect(
+        first.sqlite.prepare('SELECT latest_session_number FROM campaigns WHERE id = 1').get(),
+      ).toEqual({ latest_session_number: 12 });
+      expect(
+        first.sqlite.prepare('SELECT latest_session_number FROM campaigns WHERE id = 2').get(),
+      ).toEqual({ latest_session_number: 0 });
+      expect(MIGRATION_NAMES).toContain('0071_campaigns_latest_session_number');
+    } finally {
+      first.sqlite.close();
+    }
+
+    const second = openDatabase(dataDir);
+    try {
+      expect(
+        second.sqlite.prepare('SELECT latest_session_number FROM campaigns WHERE id = 1').get(),
+      ).toEqual({ latest_session_number: 12 });
+      expect(
+        second.sqlite.prepare("SELECT COUNT(*) AS n FROM __migrations WHERE name = '0071_campaigns_latest_session_number'").get(),
+      ).toEqual({ n: 1 });
+    } finally {
+      second.sqlite.close();
     }
   });
 

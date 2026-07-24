@@ -89,6 +89,10 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     // Play state: session, character, encounter+combatant, notes.
     const session = await dmAgent.post(`/api/v1/campaigns/${campaignId}/sessions`).send({ number: 1, recap: 'The party arrived.' });
     sessionId = session.body.id;
+    const sparseSession = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .send({ number: 12, recap: 'The party returned much later.' });
+    expect(sparseSession.status).toBe(201);
     await dmAgent
       .post(`/api/v1/sessions/${sessionId}/shares`)
       .send({ label: 'Original-only capability', expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString() });
@@ -199,7 +203,8 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       expect(clone.id).not.toBe(campaignId);
       expect(clone.name).toBe('Origin Campaign (copy)');
       expect(clone.description).toBe('The one true prep.');
-      expect(clone.sessionCount).toBe(1);
+      expect(clone.sessionCount).toBe(2);
+      expect(clone.latestSessionNumber).toBe(12);
       expect(clone.mapAttachmentId).toBeNull();
       expect(clone.publicRecapSharingEnabled).toBe(true);
 
@@ -242,13 +247,18 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
 
       // Sessions and characters copied.
       const sessions = await dmAgent.get(`/api/v1/campaigns/${clone.id}/sessions`);
-      expect(sessions.body.length).toBe(1);
+      expect(sessions.body.length).toBe(2);
+      const clonedSessionOne = sessions.body.find((s: { number: number }) => s.number === 1);
+      expect(clonedSessionOne).toBeDefined();
+      if (clonedSessionOne === undefined) {
+        throw new Error('expected Session 1 on cloned campaign');
+      }
       // The list is list-shape now (issue #71): a recapExcerpt, not the full recap
       // body — for this short recap the excerpt is the whole thing.
-      expect(sessions.body[0].recapExcerpt).toBe('The party arrived.');
-      expect(sessions.body[0].recap).toBeUndefined();
+      expect(clonedSessionOne.recapExcerpt).toBe('The party arrived.');
+      expect(clonedSessionOne.recap).toBeUndefined();
       // Capability secrets/audit state are never cloned, even for a full clone.
-      const clonedShares = await dmAgent.get(`/api/v1/sessions/${sessions.body[0].id}/shares`);
+      const clonedShares = await dmAgent.get(`/api/v1/sessions/${clonedSessionOne.id}/shares`);
       expect(clonedShares.body).toEqual([]);
       const chars = await dmAgent.get(`/api/v1/campaigns/${clone.id}/characters`);
       expect(chars.body.length).toBe(2);
@@ -317,7 +327,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       const encDetail = await dmAgent.get(`/api/v1/encounters/${encs.body[0].id}`);
       expect(encDetail.body.locationId).toBe(locs.body[0].id);
       expect(encDetail.body.questId).toBe(q.id);
-      expect(encDetail.body.sessionId).toBe(sessions.body[0].id);
+      expect(encDetail.body.sessionId).toBe(clonedSessionOne.id);
       expect(encDetail.body.locationId).not.toBe(locationId);
       expect(encDetail.body.questId).not.toBe(questId);
       expect(encDetail.body.sessionId).not.toBe(sessionId);
@@ -354,7 +364,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       // cloned portrait; safe remote HTTPS portraits are preserved.
       const clonedComments = await dmAgent
         .get(`/api/v1/campaigns/${clone.id}/comments`)
-        .query({ entityType: 'session', entityId: sessions.body[0].id });
+        .query({ entityType: 'session', entityId: clonedSessionOne.id });
       expect(clonedComments.status).toBe(200);
       expect(clonedComments.body).toHaveLength(3);
       const spoken = clonedComments.body.find((c: { body: string }) => c.body === 'Hero speaks in the source campaign.');
@@ -485,6 +495,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     const clone = res.body;
     expect(clone.name).toBe('Fresh Start');
     expect(clone.sessionCount).toBe(0);
+    expect(clone.latestSessionNumber).toBe(0);
     expect(clone.status).toBe('active');
     expect(clone.currentLocationId).toBeNull();
 
