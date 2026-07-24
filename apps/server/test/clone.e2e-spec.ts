@@ -620,7 +620,10 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     });
 
     await dmAgent.post(`/api/v1/campaigns/${campaignId}/inventory`).send({ name: 'Healing potion', qty: 3 });
-    await dmAgent.patch(`/api/v1/campaigns/${campaignId}/treasury`).send({ gp: 120, sp: 45 });
+    const treasuryBefore = await dmAgent.get(`/api/v1/campaigns/${campaignId}/treasury`);
+    await dmAgent
+      .patch(`/api/v1/campaigns/${campaignId}/treasury`)
+      .send({ set: { gp: 120, sp: 45 }, expectedUpdatedAt: treasuryBefore.body.updatedAt });
   });
 
   afterAll(async () => {
