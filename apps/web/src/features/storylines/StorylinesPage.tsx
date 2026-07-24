@@ -378,8 +378,8 @@ function ArcCard({
   const [beatCreateError, setBeatCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingContent, setEditingContent] = useState(false);
-  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary });
-  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary });
+  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary ?? '' });
+  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary ?? '' });
   const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(arc.updatedAt);
   const [contentConflict, setContentConflict] = useState<{ base: StorylineContentDraft; theirs: StorylineContentDraft } | null>(null);
   const [contentError, setContentError] = useState<string | null>(null);
@@ -410,12 +410,12 @@ function ArcCard({
 
   useUnsavedWork(
     `storyline-arc-${arc.id}`,
-    editingContent && !storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary }),
+    editingContent && !storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary ?? '' }),
   );
 
   useEffect(() => {
     if (!editingContent) {
-      setContentDraft({ title: arc.title, prose: arc.summary });
+      setContentDraft({ title: arc.title, prose: arc.summary ?? '' });
       setExpectedUpdatedAt(arc.updatedAt);
     }
   }, [arc.title, arc.summary, arc.updatedAt, editingContent]);
@@ -427,7 +427,7 @@ function ArcCard({
   }, [arc, editingContent]);
 
   const startContentEdit = () => {
-    const draft = { title: arc.title, prose: arc.summary };
+    const draft = { title: arc.title, prose: arc.summary ?? '' };
     setContentDraft(draft);
     setContentBase(draft);
     setExpectedUpdatedAt(arc.updatedAt);
@@ -448,7 +448,7 @@ function ArcCard({
   const saveContent = async () => {
     const title = contentDraft.title.trim();
     if (!title || contentSaving) return;
-    if (storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary })) {
+    if (storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary ?? '' })) {
       cancelContentEdit();
       return;
     }
@@ -469,7 +469,7 @@ function ArcCard({
       if (isStaleWrite(err)) {
         try {
           const latest = await api.get<StoryArcWithBeats>(`${API}/arcs/${arc.id}`);
-          const theirs = { title: latest.title, prose: latest.summary };
+          const theirs = { title: latest.title, prose: latest.summary ?? '' };
           setContentConflict({ base: contentBase, theirs });
           setContentBase(theirs);
           setExpectedUpdatedAt(latest.updatedAt);
@@ -632,7 +632,7 @@ function ArcCard({
       )}
 
       {arc.summary && !editingContent && (
-        <div className="text-muted !text-[13px]">
+        <div className="text-muted text-[13px]">
           <Markdown>{arc.summary}</Markdown>
         </div>
       )}
@@ -761,8 +761,8 @@ function BeatRow({
   const [branchCreateError, setBranchCreateError] = useState<string | null>(null);
   const [editingLinks, setEditingLinks] = useState(false);
   const [editingContent, setEditingContent] = useState(false);
-  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body });
-  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body });
+  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body ?? '' });
+  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body ?? '' });
   const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(beat.updatedAt);
   const [contentConflict, setContentConflict] = useState<{ base: StorylineContentDraft; theirs: StorylineContentDraft } | null>(null);
   const [contentError, setContentError] = useState<string | null>(null);
@@ -805,12 +805,12 @@ function BeatRow({
 
   useUnsavedWork(
     `storyline-beat-${beat.id}`,
-    editingContent && !storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body }),
+    editingContent && !storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body ?? '' }),
   );
 
   useEffect(() => {
     if (!editingContent) {
-      setContentDraft({ title: beat.title, prose: beat.body });
+      setContentDraft({ title: beat.title, prose: beat.body ?? '' });
       setExpectedUpdatedAt(beat.updatedAt);
     }
   }, [beat.title, beat.body, beat.updatedAt, editingContent]);
@@ -822,7 +822,7 @@ function BeatRow({
   }, [beat, editingContent]);
 
   const startContentEdit = () => {
-    const draft = { title: beat.title, prose: beat.body };
+    const draft = { title: beat.title, prose: beat.body ?? '' };
     setContentDraft(draft);
     setContentBase(draft);
     setExpectedUpdatedAt(beat.updatedAt);
@@ -843,7 +843,7 @@ function BeatRow({
   const saveContent = async () => {
     const title = contentDraft.title.trim();
     if (!title || contentSaving) return;
-    if (storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body })) {
+    if (storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body ?? '' })) {
       cancelContentEdit();
       return;
     }
@@ -864,7 +864,7 @@ function BeatRow({
       if (isStaleWrite(err)) {
         try {
           const latest = await api.get<StoryBeatWithBranches>(`${API}/beats/${beat.id}`);
-          const theirs = { title: latest.title, prose: latest.body };
+          const theirs = { title: latest.title, prose: latest.body ?? '' };
           setContentConflict({ base: contentBase, theirs });
           setContentBase(theirs);
           setExpectedUpdatedAt(latest.updatedAt);
@@ -1075,7 +1075,7 @@ function BeatRow({
 
       {beat.body && !editingContent && (
         <div style={{ marginLeft: 22 }}>
-          <Markdown className="text-muted !text-[12px]">{beat.body}</Markdown>
+          <Markdown className="text-muted text-[13px]">{beat.body}</Markdown>
         </div>
       )}
       {!beat.body && !editingContent && canDmWrite && (
