@@ -196,7 +196,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
 
     // Notes: shared note copied with its entity link remapped to the imported quest.
     const importedNotes = await dmAgent.get(`/api/v1/campaigns/${imported.id}/notes`);
-    const shared = importedNotes.body.find((n: { body: string }) => n.body === 'Quest intel for the party');
+    const shared = importedNotes.body.items.find((n: { body: string }) => n.body === 'Quest intel for the party');
     expect(shared).toBeDefined();
     expect(shared.entityType).toBe('quest');
     expect(shared.entityId).toBe(q.id);

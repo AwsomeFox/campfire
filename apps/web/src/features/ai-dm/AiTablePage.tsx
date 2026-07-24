@@ -299,6 +299,8 @@ export default function AiTablePage() {
   const [unreadBelow, setUnreadBelow] = useState(0);
   const prevEntryCountRef = useRef(transcript.entries.length);
   const transcriptMountScrollDoneRef = useRef(false);
+  /** Suppress unpin-on-scroll while a programmatic pin assigns scrollTop (#590). */
+  const ignoreScrollUnpinRef = useRef(false);
 
   useEffect(() => {
     // Campaign switches must not inherit follow/unread state from the previous table.
@@ -307,6 +309,7 @@ export default function AiTablePage() {
     setFollowLatest(true);
     setUnreadBelow(0);
     prevEntryCountRef.current = 0;
+    ignoreScrollUnpinRef.current = false;
   }, [campaignId]);
 
   useEffect(() => {
@@ -330,6 +333,10 @@ export default function AiTablePage() {
   }, [transcript.entries.length]);
 
   const handleTranscriptScroll = useCallback(() => {
+    // Programmatic pinTranscriptToTail fires scroll events; don't treat those as the
+    // reader leaving the tail (flex settle on short viewports can land ~50–60px off,
+    // just outside FEED_NEAR_BOTTOM_PX, and would otherwise show jump-to-latest).
+    if (ignoreScrollUnpinRef.current) return;
     const el = transcriptRef.current;
     if (!el) return;
     const near = isFeedNearBottom(el.scrollTop, el.scrollHeight, el.clientHeight);
@@ -342,7 +349,19 @@ export default function AiTablePage() {
   const pinTranscriptToTail = useCallback((el: HTMLDivElement) => {
     // Prefer scrollTop over scrollIntoView — the latter can move the window when
     // nested flex overflow is still settling (issue #590 mount flake).
+    ignoreScrollUnpinRef.current = true;
     el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        ignoreScrollUnpinRef.current = false;
+        // Layout may have moved us off the tail during the suppressed window; re-pin
+        // while follow is still intended so jump-to-latest does not stick (#590).
+        const node = transcriptRef.current;
+        if (node && followLatestRef.current) {
+          node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+        }
+      });
+    });
   }, []);
 
   const syncTranscriptTailScroll = useCallback(() => {

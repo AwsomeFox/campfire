@@ -9,7 +9,8 @@
  * one scope is selected and secret implications are announced.
  */
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
-import type { CampaignMember, Note } from '@campfire/schema';
+import type { CampaignMember, Note, NoteListPage } from '@campfire/schema';
+import { NOTES_LIST_MAX_LIMIT } from '@campfire/schema';
 import { api, API } from '../lib/api';
 import { Card, Chip, Btn, ErrorNote, type ChipVariant } from './ui';
 import { Field, sanitizeFieldPrefix } from './Field';
@@ -48,6 +49,9 @@ function VisLabel({ visibility }: { visibility: Note['visibility'] }) {
 
 export function NotesRail({ campaignId, entityType, entityId }: { campaignId: number; entityType: Note['entityType']; entityId: number }) {
   const [notes, setNotes] = useState<Note[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [members, setMembers] = useState<CampaignMember[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [body, setBody] = useState('');
@@ -61,14 +65,51 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
   const visHelpId = `${idPrefix}-vis-help`;
   const radioRefs = useRef<Partial<Record<Note['visibility'], HTMLButtonElement | null>>>({});
 
+  const notesUrl = useCallback(
+    (cursor?: string) => {
+      const params = new URLSearchParams();
+      params.set('entityType', String(entityType));
+      params.set('entityId', String(entityId));
+      params.set('limit', String(NOTES_LIST_MAX_LIMIT));
+      if (cursor) params.set('cursor', cursor);
+      return `${API}/campaigns/${campaignId}/notes?${params.toString()}`;
+    },
+    [campaignId, entityType, entityId],
+  );
+
   const load = useCallback(async () => {
     setError(null);
     try {
-      setNotes(await api.get<Note[]>(`${API}/campaigns/${campaignId}/notes?entityType=${entityType}&entityId=${entityId}`));
+      // Entity rails are typically small, but consume the paginated page shape (issue #608)
+      // and surface hasMore via a "Show more" control so nothing is silently truncated when
+      // an entity accumulates more notes than a single page.
+      const page = await api.get<NoteListPage>(notesUrl());
+      setNotes(page.items);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor ?? null);
     } catch {
       setError("Couldn't load notes.");
     }
-  }, [campaignId, entityType, entityId]);
+  }, [notesUrl]);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await api.get<NoteListPage>(notesUrl(nextCursor));
+      setNotes((prev) => {
+        const seen = new Set(prev.map((n) => n.id));
+        return [...prev, ...page.items.filter((n) => !seen.has(n.id))];
+      });
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor ?? null);
+    } catch {
+      setError("Couldn't load more notes.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, notesUrl]);
 
   useEffect(() => {
     void load();
@@ -156,6 +197,19 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
           <Markdown className="!text-xs">{n.body}</Markdown>
         </div>
       ))}
+      {hasMore && (
+        <div className="flex justify-center">
+          <Btn
+            type="button"
+            ghost
+            className="!min-h-0 !py-1 text-xs"
+            disabled={loadingMore}
+            onClick={() => void loadMore()}
+          >
+            {loadingMore ? 'Loading…' : 'Show more notes'}
+          </Btn>
+        </div>
+      )}
       <div className="space-y-2" data-testid="notes-compose">
         <Field
           idPrefix={idPrefix}

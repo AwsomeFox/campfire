@@ -13,7 +13,8 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
-import type { CampaignMember, Note } from '@campfire/schema';
+import type { CampaignMember, Note, NoteListPage } from '@campfire/schema';
+import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -97,11 +98,22 @@ export default function MyNotesPage() {
   const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
 
   const [notes, setNotes] = useState<Note[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [filter, setFilter] = useState<FilterValue>('all');
   const [search, setSearch] = useState('');
+  // Server-side search under pagination (issue #608) — debounce so each keystroke
+  // does not fire a separate request; 300 ms is enough to feel instant.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const [draft, setDraft] = useState('');
   const [attach, setAttach] = useState<EntityLink | null>(null);
@@ -116,26 +128,74 @@ export default function MyNotesPage() {
   const [undoNote, setUndoNote] = useState<Note | null>(null);
   // Pause list polling while an author edit is open so a 5s refresh cannot wipe the draft.
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
+  const fetchGeneration = useRef(0);
+  const loadedMoreRef = useRef(false);
+
+  const buildNotesQuery = useCallback(
+    (cursor?: string) => {
+      const params = new URLSearchParams();
+      params.set('limit', String(NOTES_LIST_DEFAULT_LIMIT));
+      if (filter !== 'all') params.set('visibility', filter);
+      const q = debouncedSearch.trim();
+      if (q) params.set('q', q);
+      if (cursor) params.set('cursor', cursor);
+      return `${API}/campaigns/${cid}/notes?${params.toString()}`;
+    },
+    [cid, filter, debouncedSearch],
+  );
 
   const load = useCallback(async () => {
+    const gen = ++fetchGeneration.current;
     setError(null);
     setForbidden(false);
     setLoading(true);
+    loadedMoreRef.current = false;
     try {
-      const list = await api.get<Note[]>(`${API}/campaigns/${cid}/notes`);
-      setNotes(list);
+      const page = await api.get<NoteListPage>(buildNotesQuery());
+      if (gen !== fetchGeneration.current) return;
+      setNotes(page.items);
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor);
     } catch (e) {
+      if (gen !== fetchGeneration.current) return;
       if (handleAccessError(e)) {
         // handled: lostAccess flag drives the UI
       } else if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
         setError(t('notes.couldntLoadNotes'));
+        // Keep prior results visible when a refetch fails (stale + recovery).
+        setNotes((prev) => prev);
       }
     } finally {
-      setLoading(false);
+      if (gen === fetchGeneration.current) setLoading(false);
     }
-  }, [cid, handleAccessError, t]);
+  }, [buildNotesQuery, handleAccessError, t]);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore || loading) return;
+    const gen = fetchGeneration.current;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await api.get<NoteListPage>(buildNotesQuery(nextCursor));
+      if (gen !== fetchGeneration.current) return;
+      loadedMoreRef.current = true;
+      setNotes((prev) => {
+        const seen = new Set(prev.map((n) => n.id));
+        return [...prev, ...page.items.filter((n) => !seen.has(n.id))];
+      });
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor);
+    } catch (e) {
+      if (gen !== fetchGeneration.current) return;
+      setError(e instanceof ApiError ? e.message : t('notes.couldntLoadMore'));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, loading, buildNotesQuery, t]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -160,8 +220,16 @@ export default function MyNotesPage() {
   }, [cid]);
 
   // Keep the notes list live at the table (issue #113): poll ~5s while visible.
+  // Skip silent poll after load-more so we don't wipe an accumulated page stack.
   // Compose draft is separate state; author-edit draft is also local — pause poll while editing.
-  usePollWhileVisible(() => void load(), 5000, Number.isFinite(cid) && editingNoteId == null);
+  usePollWhileVisible(
+    () => {
+      if (loadedMoreRef.current) return;
+      void load();
+    },
+    5000,
+    Number.isFinite(cid) && editingNoteId == null,
+  );
 
   async function quickCapture(e: FormEvent) {
     e.preventDefault();
@@ -227,10 +295,9 @@ export default function MyNotesPage() {
   }
 
   async function undoDeleteNote(note: Note) {
-    const restored = await api.post<Note>(`${API}/notes/${note.id}/restore`);
+    await api.post<Note>(`${API}/notes/${note.id}/restore`);
     setUndoNote(null);
-    // Re-insert in id order so it lands where it was.
-    setNotes((cur) => [...cur, restored].sort((a, b) => a.id - b.id));
+    await load();
   }
 
   function onNoteSaved(updated: Note) {
@@ -238,24 +305,18 @@ export default function MyNotesPage() {
     setEditingNoteId(null);
   }
 
-  const filtered = useMemo(() => {
-    const byVis = filter === 'all' ? notes : notes.filter((n) => n.visibility === filter);
-    const q = search.trim().toLowerCase();
-    if (!q) return byVis;
-    // Ten sessions in, find "the one about the relic": match body or the anchored
-    // entity's name (issue #65). Client-side over the already-loaded, visible set.
-    return byVis.filter(
-      (n) => n.body.toLowerCase().includes(q) || (n.entityName?.toLowerCase().includes(q) ?? false),
-    );
-  }, [notes, filter, search]);
-
+  // Search is applied SERVER-SIDE over both note bodies AND anchored entity names, with
+  // Unicode-aware folding, across the complete filtered set (issue #608/#624). Render the
+  // server results directly — a client-side re-filter here would drop fold-matched
+  // entity-name hits the server legitimately returned (its naive lowercase includes()
+  // can't see ß→ss / accent folds).
   const mine = useMemo(
-    () => filtered.filter((n) => !myUserId || n.authorUserId === myUserId),
-    [filtered, myUserId],
+    () => notes.filter((n) => !myUserId || n.authorUserId === myUserId),
+    [notes, myUserId],
   );
   const sharedWithMe = useMemo(
-    () => filtered.filter((n) => myUserId && n.authorUserId !== myUserId),
-    [filtered, myUserId],
+    () => notes.filter((n) => myUserId && n.authorUserId !== myUserId),
+    [notes, myUserId],
   );
 
   if (!Number.isFinite(cid)) {
@@ -427,7 +488,8 @@ export default function MyNotesPage() {
             </section>
           )}
 
-          {filtered.length === 0 &&
+          {notes.length === 0 &&
+            !loading &&
             (search.trim() ? (
               <EmptyState
                 icon="magnifying-glass"
@@ -437,6 +499,30 @@ export default function MyNotesPage() {
             ) : (
               <EmptyState icon="candle-flame" title="No notes yet" hint="Jot your first thought above." />
             ))}
+
+          {notes.length > 0 && (
+            <p className="text-[11px] text-slate-500 m-0" aria-live="polite">
+              {loading
+                ? t('notes.loading')
+                : hasMore || total > notes.length
+                  ? t('notes.showingOf', { shown: notes.length, total })
+                  : t('notes.showingAll', { count: notes.length })}
+            </p>
+          )}
+
+          {hasMore && (
+            <div className="flex justify-center pt-1">
+              <Btn
+                type="button"
+                ghost
+                className="!min-h-0 !py-1.5 text-xs"
+                disabled={loadingMore || loading}
+                onClick={() => void loadMore()}
+              >
+                {loadingMore ? t('notes.loadingMore') : t('notes.loadMore')}
+              </Btn>
+            </div>
+          )}
         </div>
       )}
 

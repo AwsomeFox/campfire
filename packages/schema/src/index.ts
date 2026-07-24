@@ -1116,6 +1116,32 @@ export const InboxResolve = z
     message: 'entityType and entityId must be provided together',
   });
 
+/** Default page size for notes + inbox list endpoints (issue #608). */
+export const NOTES_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on notes/inbox lists — clients page with `cursor`, not a huge page. */
+export const NOTES_LIST_MAX_LIMIT = 200;
+/** Dashboard NotesQuickRail asks for exactly this many newest notes (issue #608). */
+export const NOTES_RECENT_LIMIT = 5;
+
+/**
+ * Paginated notes / inbox list response (issue #608).
+ *
+ * Replaces the historical bare `Note[]` (unbounded when `limit` was omitted).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true. Order is newest-first.
+ *
+ * `nextCursor` is ALWAYS present and is `null` on the terminal page (not omitted), so
+ * REST/MCP consumers see a stable, observable shape rather than a disappearing field.
+ */
+export const NoteListPage = z.object({
+  items: z.array(Note),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type NoteListPage = z.infer<typeof NoteListPage>;
+
 // ---------- entity revisions (issue #157 / #813) ----------
 // Immutable prose versions for the entities most at risk of a blind last-write-wins
 // clobber (a co-DM polishing a recap while a connected AI saves its own edit). Each
