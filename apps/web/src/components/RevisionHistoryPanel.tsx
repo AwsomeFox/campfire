@@ -295,7 +295,7 @@ export function RevisionHistoryPanel({
   onRestored?: () => void;
   label?: string;
 }) {
-  const { open, setOpen, buttonProps, regionProps } = useDisclosure({
+  const { open, buttonProps, regionProps } = useDisclosure({
     regionLabel: `${label} versions`,
   });
   const [revisions, setRevisions] = useState<EntityRevision[]>([]);

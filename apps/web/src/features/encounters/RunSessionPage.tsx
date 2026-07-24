@@ -220,7 +220,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSaved: (updated: Partial<EncounterWithCombatants>) => void;
 }) {
-  const { open: editing, setOpen: setEditing, buttonProps, regionProps } = useDisclosure({
+  const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
   });
