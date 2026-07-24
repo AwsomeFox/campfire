@@ -492,6 +492,20 @@ export class EncountersService {
   }
 
   /**
+   * Append a note to the campaign's live (running) encounter combat log (#1021).
+   * Used by the AI Driver after successful loot/treasury grants so awards survive
+   * reload and appear under the persistent Combat log (not only a transient toast).
+   * No-op when no encounter is running. Emits `encounter.updated` for open clients.
+   */
+  async appendActiveEncounterNote(campaignId: number, detail: string, actor = 'AI DM'): Promise<number | null> {
+    const live = await this.findLiveEncounter(campaignId);
+    if (!live) return null;
+    await this.appendEvent(live.id, live.round, 'note', { actor, detail });
+    this.emitEncounterEvent('encounter.updated', campaignId, live.id);
+    return live.id;
+  }
+
+  /**
    * Lists an encounter's persisted combat log in chronological (insertion) order —
    * issue #61 / #869. Hidden encounters 404 for non-DMs (parity with roster/
    * difficulty). For non-DMs, actor/target names (and any name-bearing detail) are

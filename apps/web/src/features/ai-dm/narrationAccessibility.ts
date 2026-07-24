@@ -59,7 +59,9 @@ export type NarrationLogAddition =
       variant: SystemEntry['variant'];
       text?: string;
       data?: Record<string, string>;
-    };
+    }
+  /** Tool activity (loot/treasury/encounter chips) — spoken from `text`, not via system/info. */
+  | { id: string; kind: 'tool'; text: string };
 
 export interface NarrationLogAdvance {
   /** Null only for an empty mount snapshot before seed/hydration settles. */
@@ -72,7 +74,7 @@ export function isAnnounceableEntry(entry: TranscriptEntry): boolean {
   if (entry.kind === 'dm') return entry.status === 'done' && dmEntryText(entry).trim().length > 0;
   if (entry.kind === 'player') return entry.text.trim().length > 0;
   if (entry.kind === 'system') return true;
-  // Tool chips are visual activity; status/lock copy covers the turn itself.
+  if (entry.kind === 'tool') return true;
   return false;
 }
 
@@ -83,6 +85,19 @@ export function announceableEntryIds(entries: readonly TranscriptEntry[]): Set<s
     if (isAnnounceableEntry(entry)) ids.add(entry.id);
   }
   return ids;
+}
+
+function humanizeToolName(name: string): string {
+  const words = name.split('_').filter(Boolean);
+  if (words.length === 0) return name;
+  return words.map((word, index) => (index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word)).join(' ');
+}
+
+function narrationToolLabel(entry: Extract<TranscriptEntry, { kind: 'tool' }>): string {
+  if (entry.proposed) return 'Filed a proposal — review it';
+  const human = humanizeToolName(entry.name);
+  if (entry.isError) return `${human} failed`;
+  return human;
 }
 
 function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
@@ -109,6 +124,13 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
       variant: entry.variant,
       text: entry.text,
       data: entry.data,
+    };
+  }
+  if (entry.kind === 'tool') {
+    return {
+      id: entry.id,
+      kind: 'tool',
+      text: narrationToolLabel(entry),
     };
   }
   return null;
@@ -219,31 +241,35 @@ export function formatNarrationLogAddition(
       : addition.memberName;
     return `${who}: ${addition.text}`;
   }
-  if (formatters?.formatSystem) return formatters.formatSystem(addition);
-  // English fallback for tests — production UI must pass formatSystem (systemText + t).
-  switch (addition.variant) {
-    case 'divider':
-      return 'Joined mid-session';
-    case 'scene':
-      return addition.text ? `Scene: ${addition.text}` : 'Scene updated';
-    case 'stuck':
-      return addition.text ? `The AI DM got stuck. ${addition.text}` : 'The AI DM got stuck';
-    case 'recovered':
-      return 'The AI DM recovered';
-    case 'paused':
-      return 'The AI DM was paused';
-    case 'resumed':
-      return 'The AI DM resumed';
-    case 'takeover':
-      return 'A human took over the DM seat';
-    case 'vote':
-      return addition.data?.action ? `Table vote: ${addition.data.action}` : 'Table vote';
-    case 'rules':
-      return addition.text ? `Rules answer: ${addition.text}` : 'Rules answer';
-    case 'info':
-    default:
-      return addition.data?.state ? `State: ${addition.data.state}` : 'Table updated';
+  if (addition.kind === 'tool') return addition.text;
+  if (addition.kind === 'system') {
+    if (formatters?.formatSystem) return formatters.formatSystem(addition);
+    // English fallback for tests — production UI must pass formatSystem (systemText + t).
+    switch (addition.variant) {
+      case 'divider':
+        return 'Joined mid-session';
+      case 'scene':
+        return addition.text ? `Scene: ${addition.text}` : 'Scene updated';
+      case 'stuck':
+        return addition.text ? `The AI DM got stuck. ${addition.text}` : 'The AI DM got stuck';
+      case 'recovered':
+        return 'The AI DM recovered';
+      case 'paused':
+        return 'The AI DM was paused';
+      case 'resumed':
+        return 'The AI DM resumed';
+      case 'takeover':
+        return 'A human took over the DM seat';
+      case 'vote':
+        return addition.data?.action ? `Table vote: ${addition.data.action}` : 'Table vote';
+      case 'rules':
+        return addition.text ? `Rules answer: ${addition.text}` : 'Rules answer';
+      case 'info':
+      default:
+        return addition.data?.state ? `State: ${addition.data.state}` : 'Table updated';
+    }
   }
+  return 'Table updated';
 }
 
 /** Coarse composer / turn phase for the status live region. */
