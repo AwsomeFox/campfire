@@ -23,6 +23,7 @@ import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
 import { useAnnounce } from '../../components/Announcer';
 import {
   confirmOpen,
@@ -1180,17 +1181,15 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
 }
 
 function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted: () => void }) {
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [liveInviteCount, setLiveInviteCount] = useState(0);
   const [revokeInvitesOnTrash, setRevokeInvitesOnTrash] = useState(false);
 
-  const canDelete = confirmText.trim() === campaign.name;
-
   function openConfirm() {
     setOpen(true);
+    setError(null);
     setRevokeInvitesOnTrash(false);
     void api
       .get<CampaignInvite[]>(`${API}/campaigns/${campaign.id}/invites`)
@@ -1199,7 +1198,6 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   async function remove() {
-    if (!canDelete) return;
     setDeleting(true);
     setError(null);
     try {
@@ -1216,86 +1214,75 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }}>
+    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="danger-zone-card">
       <span className="card-kicker" style={{ color: '#f87171' }}>Danger zone</span>
-      {!open ? (
-        <div className="flex items-center gap-2">
-          <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-            Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
-            permanently removed until you purge it from the Trash on your campaigns page.
-            Outstanding invite links are suspended automatically.
-          </p>
-          <div className="flex-1" />
-          <button className="btn btn-ghost btn-danger" style={{ fontSize: 12.5 }} onClick={openConfirm}>
-            Delete campaign…
-          </button>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">
-          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--color-neutral-200)' }}>
-            Type <strong>{campaign.name}</strong> to move it to the Trash (you can restore it later).
-            Invite links are suspended so old join URLs stop working; restore does not revive them.
-          </p>
-          {liveInviteCount > 0 && (
-            <div
-              data-testid="trash-outstanding-invites"
-              className="flex flex-col gap-1.5"
-              style={{
-                border: '1px solid var(--color-divider)',
-                borderRadius: 'var(--radius-md)',
-                padding: '8px 10px',
-                fontSize: 11.5,
-              }}
-            >
-              <p style={{ margin: 0 }}>
-                {liveInviteCount === 1
-                  ? '1 outstanding invite link will be suspended.'
-                  : `${liveInviteCount} outstanding invite links will be suspended.`}
-              </p>
-              <label className="flex items-center gap-2" style={{ margin: 0, cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={revokeInvitesOnTrash}
-                  onChange={(e) => setRevokeInvitesOnTrash(e.target.checked)}
-                  data-testid="trash-revoke-invites"
-                />
-                <span>Also revoke all invite links permanently</span>
-              </label>
-            </div>
-          )}
-          <input
-            className="input"
-            value={confirmText}
-            onChange={(e) => setConfirmText(e.target.value)}
-            placeholder={campaign.name}
-          />
-          {error && <p className="text-sm" style={{ color: '#f87171' }}>{error}</p>}
-          <div className="flex gap-2 items-center">
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 12.5 }}
-              onClick={() => {
-                setOpen(false);
-                setConfirmText('');
-                setError(null);
-                setRevokeInvitesOnTrash(false);
-              }}
-              disabled={deleting}
-            >
-              Cancel
-            </button>
-            <div className="flex-1" />
-            <button
-              className="btn btn-danger"
-              style={{ fontSize: 12.5 }}
-              disabled={!canDelete || deleting}
-              aria-busy={deleting || undefined}
-              onClick={() => void remove()}
-            >
-              {deleting ? 'Moving…' : 'Move to Trash'}
-            </button>
-          </div>
-        </div>
+      <div className="flex items-center gap-2">
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
+          Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
+          permanently removed until you purge it from the Trash on your campaigns page.
+          Outstanding invite links are suspended automatically.
+        </p>
+        <div className="flex-1" />
+        <button
+          className="btn btn-ghost btn-danger"
+          style={{ fontSize: 12.5 }}
+          onClick={openConfirm}
+          data-testid="delete-campaign-trigger"
+        >
+          Delete campaign…
+        </button>
+      </div>
+      {open && (
+        <ConfirmDestructiveDialog
+          title="Delete campaign"
+          consequence={
+            <p style={{ margin: 0, fontSize: 12.5 }}>
+              Typing <strong>{campaign.name}</strong> will move this campaign to the Trash.
+              Invite links are suspended so old join URLs stop working; restore does not revive them.
+            </p>
+          }
+          extraBody={
+            liveInviteCount > 0 ? (
+              <div
+                data-testid="trash-outstanding-invites"
+                className="flex flex-col gap-1.5"
+                style={{
+                  marginTop: 8,
+                  border: '1px solid var(--color-divider)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '8px 10px',
+                  fontSize: 11.5,
+                }}
+              >
+                <p style={{ margin: 0 }}>
+                  {liveInviteCount === 1
+                    ? '1 outstanding invite link will be suspended.'
+                    : `${liveInviteCount} outstanding invite links will be suspended.`}
+                </p>
+                <label className="flex items-center gap-2" style={{ margin: 0, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={revokeInvitesOnTrash}
+                    onChange={(e) => setRevokeInvitesOnTrash(e.target.checked)}
+                    data-testid="trash-revoke-invites"
+                  />
+                  <span>Also revoke all invite links permanently</span>
+                </label>
+              </div>
+            ) : null
+          }
+          confirmValue={campaign.name}
+          confirmLabel="Move to Trash"
+          pendingLabel="Moving…"
+          busy={deleting}
+          error={error}
+          onConfirm={() => void remove()}
+          onCancel={() => {
+            setOpen(false);
+            setError(null);
+            setRevokeInvitesOnTrash(false);
+          }}
+        />
       )}
     </div>
   );
