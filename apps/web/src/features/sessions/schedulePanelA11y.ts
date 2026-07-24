@@ -267,9 +267,9 @@ export function rsvpNoteSaveRequest(
   const trimmed = draft.trim();
   const persistedTrimmed = persistedNote.trim();
   if (trimmed === persistedTrimmed) {
-    // Whitespace-only persisted notes trim to '' but still occupy server storage —
-    // an empty draft must clear them.
-    if (trimmed === '' && persistedNote !== '') return { status, note: '' };
+    if (trimmed === '' && persistedNote !== '' && draft === '') {
+      return { status, note: '' };
+    }
     return null;
   }
   return { status, note: trimmed };

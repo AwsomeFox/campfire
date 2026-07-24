@@ -325,15 +325,15 @@ function ScheduleItem({
   useEffect(() => {
     dispatchRsvp({ type: 'sync', persisted: mine?.status ?? null });
     const scheduleChanged = lastScheduleIdRef.current !== schedule.id;
-    if (scheduleChanged) lastScheduleIdRef.current = schedule.id;
-    setNoteDraft((prev) => {
-      const next = syncRsvpNoteDraft(
-        prev,
-        lastSyncedPersistedRef.current,
-        persistedNote,
-        scheduleChanged,
-      );
+    if (scheduleChanged) {
+      lastScheduleIdRef.current = schedule.id;
       lastSyncedPersistedRef.current = persistedNote;
+      setNoteDraft(persistedNote);
+      return;
+    }
+    setNoteDraft((prev) => {
+      const next = syncRsvpNoteDraft(prev, lastSyncedPersistedRef.current, persistedNote, false);
+      if (next !== prev) lastSyncedPersistedRef.current = persistedNote;
       return next;
     });
   }, [mine?.status, persistedNote, schedule.id]);
@@ -343,7 +343,7 @@ function ScheduleItem({
   const noteFieldId = `schedule-rsvp-note-${schedule.id}`;
   const noteHelpId = `${noteFieldId}-help`;
   const noteStatusId = `${noteFieldId}-status`;
-  const noteDraftLength = noteDraft.length;
+  const noteDraftLength = noteDraft.trim().length;
   const noteDirty = noteDraft.trim() !== persistedNote.trim();
   const noteTooLong = noteDraftLength > RSVP_NOTE_MAX_LEN;
 
@@ -372,9 +372,9 @@ function ScheduleItem({
     const status = displayRsvp;
     if (!status) return;
     const draft = explicitDraft ?? noteDraft;
-    if (draft.length > RSVP_NOTE_MAX_LEN) {
-      setNoteError(rsvpNoteTooLongMessage(draft.length));
-      announce(rsvpNoteTooLongMessage(draft.length), { assertive: true });
+    if (draft.trim().length > RSVP_NOTE_MAX_LEN) {
+      setNoteError(rsvpNoteTooLongMessage(draft.trim().length));
+      announce(rsvpNoteTooLongMessage(draft.trim().length), { assertive: true });
       return;
     }
     const request = rsvpNoteSaveRequest(status, persistedNote, draft);
@@ -382,14 +382,14 @@ function ScheduleItem({
     setNoteSaving(true);
     setNoteError(null);
     try {
-      await api.put<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/rsvp`, request);
+      const updated = await api.put<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}/rsvp`, request);
+      const savedNote =
+        updated.rsvps.find((r) => myIds.has(r.userId))?.note ?? request.note;
       announce(
         request.note.length === 0 ? RSVP_NOTE_CLEARED_ANNOUNCEMENT : RSVP_NOTE_SAVED_ANNOUNCEMENT,
       );
-      // Optimistically reflect the saved value; the onChange refresh below
-      // will bring the authoritative row.
-      setNoteDraft(request.note);
-      lastSyncedPersistedRef.current = request.note;
+      setNoteDraft(savedNote);
+      lastSyncedPersistedRef.current = savedNote;
       onChange();
     } catch {
       setNoteError(RSVP_NOTE_SAVE_FAILED_ANNOUNCEMENT);
