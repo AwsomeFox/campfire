@@ -85,6 +85,19 @@ export function announceableEntryIds(entries: readonly TranscriptEntry[]): Set<s
   return ids;
 }
 
+function humanizeToolName(name: string): string {
+  const words = name.split('_').filter(Boolean);
+  if (words.length === 0) return name;
+  return words.map((word, index) => (index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word)).join(' ');
+}
+
+function narrationToolLabel(entry: Extract<TranscriptEntry, { kind: 'tool' }>): string {
+  if (entry.proposed) return 'Filed a proposal — review it';
+  const human = humanizeToolName(entry.name);
+  if (entry.isError) return `${human} failed`;
+  return human;
+}
+
 function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
   if (entry.kind === 'dm') {
     const text = dmEntryText(entry).trim();
@@ -116,7 +129,7 @@ function toAddition(entry: TranscriptEntry): NarrationLogAddition | null {
       id: entry.id,
       kind: 'system',
       variant: 'info',
-      text: entry.label,
+      text: narrationToolLabel(entry),
     };
   }
   return null;
