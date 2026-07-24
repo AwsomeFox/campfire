@@ -122,7 +122,7 @@ describe('open map sources + attributed import (e2e, issue #303)', () => {
     const audit = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
     const row = audit.body.find(
       (a: { action: string; entityId: number }) =>
-        a.action === 'attachment.generate' && a.entityId === res.body.attachment.id,
+        a.action === 'map.import' && a.entityId === res.body.attachment.id,
     );
     expect(row).toBeDefined();
     expect(row.detail).toBe('map:import:source=watabou-one-page-dungeon');
