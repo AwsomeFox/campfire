@@ -72,7 +72,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}:latest
 
-      - name: Generate release notes and update release
+      - name: Build release changelog
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -83,7 +83,7 @@ jobs:
           PREV_TAG=$(gh release list --limit 10 --json tagName,isPrerelease,isDraft \
             -q "[.[] | select(.tagName != \"${RELEASE_TAG}\" and .isPrerelease == false and .isDraft == false)] | .[0].tagName // empty")
 
-          # Build the release body: auto-generated changelog + container info
+          # Build the raw changelog body
           NOTES="## What's Changed"$'\n\n'
 
           if [ -n "$PREV_TAG" ]; then
@@ -103,9 +103,84 @@ jobs:
             NOTES="${NOTES}This is the first release."$'\n'
           fi
 
-          # Append container image pull instructions
-          NOTES="${NOTES}"$'\n\n---\n\n'"## Container image"$'\n\n'
-          NOTES="${NOTES}"'```'$'\n'"docker pull ${IMAGE}"$'\n''```'
+          printf '%s' "$NOTES" > "$RUNNER_TEMP/release-changelog.md"
 
-          gh release edit "$RELEASE_TAG" --notes "$NOTES"
-          echo "✅ Updated release ${RELEASE_TAG} with changelog and image link"
+          {
+            echo '## Container image'
+            echo ''
+            echo '```'
+            echo "docker pull ${IMAGE}"
+            echo '```'
+          } > "$RUNNER_TEMP/release-container.md"
+
+      - name: Generate AI summary and update release
+        uses: actions/github-script@v7
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: anthropic/claude-3.5-haiku
+        with:
+          script: |
+            const fs = require('fs');
+            const changelogPath = `${process.env.RUNNER_TEMP}/release-changelog.md`;
+            const containerPath = `${process.env.RUNNER_TEMP}/release-container.md`;
+            const rawBody = fs.readFileSync(changelogPath, 'utf8');
+            const containerSection = fs.readFileSync(containerPath, 'utf8').trim();
+            const releaseTag = process.env.GITHUB_REF_NAME;
+
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: releaseTag,
+            });
+
+            let summaryPrefix = '';
+
+            if (process.env.OPENROUTER_API_KEY) {
+              const prompt = `You are a technical product manager. Summarize these raw GitHub release notes into 3 clear sections:
+            - 🚀 **Key Highlights**
+            - ✨ **New Features & Improvements**
+            - 🐛 **Bug Fixes & Maintenance**
+
+            Keep it concise and clear. Here are the raw notes:
+            ${rawBody}`;
+
+              try {
+                const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': `https://github.com/${context.repo.owner}/${context.repo.repo}`,
+                    'X-Title': 'Campfire Release Summarizer',
+                  },
+                  body: JSON.stringify({
+                    model: process.env.OPENROUTER_MODEL,
+                    messages: [{ role: 'user', content: prompt }],
+                  }),
+                });
+
+                const data = await response.json();
+
+                if (!data.choices?.[0]?.message?.content) {
+                  core.warning(`OpenRouter summary failed: ${JSON.stringify(data)}`);
+                } else {
+                  summaryPrefix = `${data.choices[0].message.content.trim()}\n\n---\n\n`;
+                  core.info('Generated AI release summary via OpenRouter');
+                }
+              } catch (error) {
+                core.warning(`OpenRouter summary failed: ${error.message}`);
+              }
+            } else {
+              core.info('OPENROUTER_API_KEY not set; publishing changelog without AI summary');
+            }
+
+            const updatedBody = `${summaryPrefix}### Full Changelog\n\n${rawBody}\n\n---\n\n${containerSection}`;
+
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.data.id,
+              body: updatedBody,
+            });
+
+            core.info(`Updated release ${releaseTag} with changelog${summaryPrefix ? ' and AI summary' : ''}`);
