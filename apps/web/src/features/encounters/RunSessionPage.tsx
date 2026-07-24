@@ -36,7 +36,7 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { ruleSystemAdapter } from '@campfire/schema';
+import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError } from '../../lib/api';
@@ -508,8 +508,35 @@ function DeathSaveTracker({
  * render; `onSettled` invalidates and reconciles against server truth. A redacted monster
  * (exact HP hidden — issue #43) has null HP and gets no optimistic guess.
  */
-function applyHpDelta(c: Combatant, delta: number): Combatant {
+function applyHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): Combatant {
   if (c.hpCurrent == null || c.hpMax == null) return c;
+  const isStarfinder =
+    ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID ||
+    ruleSystem?.startsWith('starfinder') ||
+    (c.spMax != null && c.spMax > 0);
+  if (isStarfinder && delta < 0) {
+    const sfResult = applyStarfinderDamage(
+      {
+        hpCurrent: c.hpCurrent,
+        hpMax: c.hpMax,
+        spCurrent: c.spCurrent ?? 0,
+        spMax: c.spMax ?? 0,
+        rpCurrent: c.rpCurrent ?? 0,
+        rpMax: c.rpMax ?? 0,
+        hpTemp: c.hpTemp ?? 0,
+        deathState: c.deathState ?? 'none',
+      },
+      -delta,
+    );
+    return {
+      ...c,
+      hpCurrent: sfResult.hpCurrent,
+      spCurrent: sfResult.spCurrent,
+      rpCurrent: sfResult.rpCurrent,
+      hpTemp: sfResult.hpTemp,
+      deathState: sfResult.deathState,
+    };
+  }
   if (delta >= 0) {
     return { ...c, hpCurrent: Math.min(c.hpMax, c.hpCurrent + delta) };
   }
@@ -544,6 +571,7 @@ export default function RunSessionPage() {
   // module scope with no argument — so a future non-5e adapter's condition vocabulary and
   // statblock mapping actually take effect. Default (5e) is unchanged.
   const ruleSystem = campaign?.ruleSystem ?? null;
+  const isStarfinder = ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder') || false;
   const conditionSuggestions = useMemo(() => [...ruleSystemAdapter(ruleSystem).conditions], [ruleSystem]);
 
   const queryClient = useQueryClient();
@@ -892,7 +920,7 @@ export default function RunSessionPage() {
       if (previous) {
         queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
           ...previous,
-          combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta) : c)),
+          combatants: previous.combatants.map((c) => (c.id === combatantId ? applyHpDelta(c, delta, ruleSystem) : c)),
         });
       }
       return { previous };
@@ -1459,6 +1487,7 @@ export default function RunSessionPage() {
           amount={pendingApply.amount}
           label={pendingApply.label}
           targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
             hpDelta.mutate({ combatantId, delta });
             setPendingApply(null);
@@ -1525,6 +1554,7 @@ export default function RunSessionPage() {
               onRename={(name) => patchCombatant(c.id, { name })}
               onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
               onSetTokenSize={(size) => setTokenSize(c.id, size)}
+              onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
@@ -3165,16 +3195,19 @@ function ApplyDamageBar({
   amount,
   label,
   targets,
+  isStarfinder = false,
   onApply,
   onDismiss,
 }: {
   amount: number;
   label: string;
   targets: Combatant[];
+  isStarfinder?: boolean;
   onApply: (combatantId: number, delta: number) => void;
   onDismiss: () => void;
 }) {
   const [mode, setMode] = useState<'damage' | 'heal'>('damage');
+  const [targetAc, setTargetAc] = useState<'KAC' | 'EAC'>('KAC');
   const delta = mode === 'heal' ? amount : -amount;
   return (
     <div
@@ -3210,6 +3243,30 @@ function ApplyDamageBar({
           </button>
         ))}
       </div>
+      {isStarfinder && (
+        <div className="seg inline-flex" role="group" aria-label="Target AC" style={{ gap: 4 }}>
+          {(['KAC', 'EAC'] as const).map((ac) => (
+            <button
+              key={ac}
+              type="button"
+              className="cf-target-44"
+              aria-pressed={targetAc === ac}
+              onClick={() => setTargetAc(ac)}
+              style={{
+                padding: '0 12px',
+                fontSize: 12,
+                border: 0,
+                background: 'transparent',
+                cursor: 'pointer',
+                color: targetAc === ac ? 'var(--color-accent)' : 'var(--color-neutral-500)',
+                boxShadow: targetAc === ac ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+              }}
+            >
+              Target {ac}
+            </button>
+          ))}
+        </div>
+      )}
       <span className="text-muted" style={{ fontSize: 11.5 }}>
         {mode === 'heal' ? 'Heal' : 'Apply to'}:
       </span>
@@ -3217,18 +3274,22 @@ function ApplyDamageBar({
         <span className="text-muted" style={{ fontSize: 11.5 }}>no editable targets</span>
       ) : (
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {targets.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              className="btn btn-secondary cf-target-44"
-              style={{ fontSize: 12, padding: '0 12px' }}
-              title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}`}
-              onClick={() => onApply(c.id, delta)}
-            >
-              {c.name}
-            </button>
-          ))}
+          {targets.map((c) => {
+            const acVal = targetAc === 'EAC' ? (c.eac ?? '—') : (c.kac ?? '—');
+            const acLabel = isStarfinder ? ` (${targetAc} ${acVal})` : '';
+            return (
+              <button
+                key={c.id}
+                type="button"
+                className="btn btn-secondary cf-target-44"
+                style={{ fontSize: 12, padding: '0 12px' }}
+                title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
+                onClick={() => onApply(c.id, delta)}
+              >
+                {c.name}{acLabel}
+              </button>
+            );
+          })}
         </div>
       )}
       <button
@@ -3273,6 +3334,7 @@ function CombatantRow({
   onRename,
   onSetHpMax,
   onSetTokenSize,
+  onPatchCombatant,
   onRemove,
 }: {
   combatant: Combatant;
@@ -3314,6 +3376,7 @@ function CombatantRow({
   onRename: (name: string) => void;
   onSetHpMax: (value: number) => void;
   onSetTokenSize: (size: TokenSize) => void;
+  onPatchCombatant?: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -3325,6 +3388,9 @@ function CombatantRow({
     setNameDraft(combatant.name);
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
   }, [combatant.name, combatant.hpMax]);
+
+  const isStarfinder = ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
+  const hasSfPools = isStarfinder || (combatant.spMax != null && combatant.spMax > 0) || (combatant.rpMax != null && combatant.rpMax > 0);
 
   function commitIdentity() {
     const trimmedName = nameDraft.trim();
@@ -3536,6 +3602,11 @@ function CombatantRow({
             <span className={kindTagClass}>
               {kindLabel}
             </span>
+            {(isStarfinder || combatant.eac != null || combatant.kac != null) && (
+              <span className="tag tag-neutral" style={{ fontSize: 10 }} title="Energy AC (EAC) / Kinetic AC (KAC)" data-testid="starfinder-ac-tag">
+                EAC {combatant.eac ?? '—'} · KAC {combatant.kac ?? '—'}
+              </span>
+            )}
             {combatant.deathState !== 'none' && combatant.deathState !== undefined ? (
               <span className="tag tag-outline">
                 {DEATH_STATE_LABEL[combatant.deathState] ?? 'Down'}
@@ -3607,7 +3678,7 @@ function CombatantRow({
           </div>
         )}
         {canEdit && (
-          <div style={{ marginTop: 4 }}>
+          <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
               <div className="flex gap-1 flex-wrap">
                 {conditionSuggestions.filter((s) => !combatant.conditions.includes(s)).map((s) => (
@@ -3640,6 +3711,61 @@ function CombatantRow({
                 + condition
               </button>
             )}
+
+            {/* Starfinder Stamina Rest Button */}
+            {hasSfPools && combatant.spMax != null && combatant.spMax > 0 && onPatchCombatant && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy || (combatant.rpCurrent ?? 0) < 1 || (combatant.spCurrent ?? 0) >= combatant.spMax}
+                title={(combatant.rpCurrent ?? 0) < 1 ? 'Requires at least 1 Resolve Point' : '10-minute Stamina Rest: spends 1 RP to restore full SP'}
+                onClick={() => onPatchCombatant({ spSet: combatant.spMax, rpDelta: -1 })}
+                style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                data-testid="stamina-rest-btn"
+              >
+                ⛺ Stamina Rest (1 RP → Full SP)
+              </button>
+            )}
+
+            {/* Dying / Stabilization Controls for Starfinder or Down Combatants */}
+            {(combatant.deathState === 'dying' || (combatant.hpCurrent != null && combatant.hpCurrent <= 0)) && onPatchCombatant && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={busy}
+                  title="Stabilize combatant at 0 HP"
+                  onClick={() => onPatchCombatant({ deathState: 'stable' })}
+                  style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                >
+                  Stabilize
+                </button>
+                {combatant.rpMax != null && combatant.rpMax > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy || (combatant.rpCurrent ?? 0) < 1}
+                      title="Spend 1 RP to stabilize"
+                      onClick={() => onPatchCombatant({ deathState: 'stable', rpDelta: -1 })}
+                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                    >
+                      Stabilize (1 RP)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy || (combatant.rpCurrent ?? 0) < 1}
+                      title="Spend 1 RP to revive at 1 HP"
+                      onClick={() => onPatchCombatant({ hpSet: 1, deathState: 'none', rpDelta: -1 })}
+                      style={{ fontSize: 'var(--type-label)', border: '1px dashed var(--color-divider)', borderRadius: 'var(--radius-md)', minHeight: 24, padding: '2px 8px' }}
+                    >
+                      Revive 1 HP (1 RP)
+                    </button>
+                  </>
+                )}
+              </>
+            )}
           </div>
         )}
         {/* Compendium statblock (issue #56): a monster combatant keeps its ruleEntryId —
@@ -3665,20 +3791,77 @@ function CombatantRow({
           />
         )}
       </div>
-      <div style={{ minWidth: 130, flex: 'none' }}>
+      <div style={{ minWidth: 140, flex: 'none' }}>
         {combatant.hpCurrent != null && combatant.hpMax != null ? (
           <>
-            <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
-              {combatant.hpTemp != null && combatant.hpTemp > 0 && (
+            {combatant.hpTemp != null && combatant.hpTemp > 0 && (
+              <div style={{ textAlign: 'right', marginBottom: 2 }}>
                 <span className="tag tag-accent" title="Temporary HP — absorbs damage first">
                   <GameIcon slug="shield" size={10} className="inline align-text-bottom mr-1" />{combatant.hpTemp}
                 </span>
-              )}
-              <span>
-                {combatant.hpCurrent} / {combatant.hpMax}
-              </span>
+              </div>
+            )}
+            {/* SP Bar & Status (if Starfinder / SP pool present) */}
+            {combatant.spMax != null && combatant.spMax > 0 && (
+              <div style={{ marginBottom: 4 }} data-testid="starfinder-sp-indicator">
+                <div style={{ fontSize: 11.5, textAlign: 'right', marginBottom: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em' }}>SP</span>
+                  <span>{combatant.spCurrent ?? 0} / {combatant.spMax}</span>
+                </div>
+                <div className="cf-hp" style={{ background: 'var(--color-neutral-800)', height: 6, borderRadius: 'var(--radius-full)', overflow: 'hidden' }}>
+                  <div
+                    style={{
+                      width: `${Math.max(0, Math.min(100, ((combatant.spCurrent ?? 0) / combatant.spMax) * 100))}%`,
+                      background: '#38bdf8',
+                      height: '100%',
+                      borderRadius: 'var(--radius-full)',
+                      transition: 'width 0.2s ease',
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+            {/* HP Bar & Status */}
+            <div>
+              <div style={{ fontSize: 12.5, textAlign: 'right', marginBottom: 3, display: 'flex', gap: 6, justifyContent: 'flex-end', alignItems: 'baseline' }}>
+                {combatant.spMax != null && combatant.spMax > 0 && (
+                  <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em', marginRight: 'auto' }}>HP</span>
+                )}
+                <span>
+                  {combatant.hpCurrent} / {combatant.hpMax}
+                </span>
+              </div>
+              <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
             </div>
-            <HpBar current={combatant.hpCurrent} max={combatant.hpMax} />
+            {/* RP (Resolve Points) indicator for Starfinder */}
+            {combatant.rpMax != null && combatant.rpMax > 0 && (
+              <div style={{ fontSize: 11, textAlign: 'right', marginTop: 4, display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'center' }} title="Resolve Points" data-testid="starfinder-rp-indicator">
+                <span className="text-muted font-semibold" style={{ fontSize: 10, letterSpacing: '0.04em' }}>RP</span>
+                <span style={{ fontSize: 11, fontWeight: 700 }}>{combatant.rpCurrent ?? 0} / {combatant.rpMax}</span>
+                {canEdit && onPatchCombatant && (
+                  <span style={{ display: 'inline-flex', gap: 2, marginLeft: 2 }}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      disabled={busy || (combatant.rpCurrent ?? 0) <= 0}
+                      title="Decrease Resolve Points"
+                      onClick={() => onPatchCombatant({ rpDelta: -1 })}
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost !min-h-0 !py-0 !px-1 text-[10px]"
+                      disabled={busy || (combatant.rpCurrent ?? 0) >= combatant.rpMax}
+                      title="Increase Resolve Points"
+                      onClick={() => onPatchCombatant({ rpDelta: 1 })}
+                    >
+                      +
+                    </button>
+                  </span>
+                )}
+              </div>
+            )}
           </>
         ) : (
           <>

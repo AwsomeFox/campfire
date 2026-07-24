@@ -6,6 +6,8 @@ import {
   starfinderHitPoints,
   ruleSystemAdapter,
   Dnd5eAdapter,
+  applyStarfinderDamage,
+  applyStarfinderRest,
 } from '@campfire/schema';
 
 /**
@@ -54,18 +56,18 @@ describe('StarfinderAdapter — initiative derivation (DEX on a d20)', () => {
 describe('StarfinderAdapter — Stamina + Hit Points split', () => {
   it('combines Stamina and HP into the effective damage pool (a class-leveled combatant)', () => {
     // Soldier with SP 21 + HP 20 → 41 effective HP for the combat tracker.
-    expect(starfinderHitPoints({ stamina: 21, hitPoints: 20 })).toEqual({ stamina: 21, hitPoints: 20, total: 41 });
+    expect(starfinderHitPoints({ stamina: 21, hitPoints: 20 })).toEqual({ stamina: 21, hitPoints: 20, resolve: 0, total: 41 });
     expect(StarfinderAdapter.monsterHitPoints({ stamina: 21, hitPoints: 20 })).toBe(41);
   });
 
   it('falls back to HP-only for a plain alien with no Stamina', () => {
     // Ksarik (CR 2): HP 25, no Stamina → 25.
-    expect(starfinderHitPoints({ hit_points: 25 })).toEqual({ stamina: 0, hitPoints: 25, total: 25 });
+    expect(starfinderHitPoints({ hit_points: 25 })).toEqual({ stamina: 0, hitPoints: 25, resolve: 0, total: 25 });
     expect(StarfinderAdapter.monsterHitPoints({ hit_points: 25 })).toBe(25);
   });
 
   it('accepts snake_case, camelCase, and short keys and numeric strings; rounds', () => {
-    expect(starfinderHitPoints({ stamina_points: '10', hp: 12.6 })).toEqual({ stamina: 10, hitPoints: 13, total: 23 });
+    expect(starfinderHitPoints({ stamina_points: '10', hp: 12.6 })).toEqual({ stamina: 10, hitPoints: 13, resolve: 0, total: 23 });
     expect(starfinderHitPoints({ sp: 5, hitPoints: 5 }).total).toBe(10);
   });
 
@@ -155,3 +157,163 @@ describe('StarfinderAdapter — registry resolution', () => {
     expect(ruleSystemAdapter(null)).toBe(Dnd5eAdapter);
   });
 });
+
+describe('applyStarfinderDamage', () => {
+  it('overflows damage from temp HP -> SP -> HP', () => {
+    const res = applyStarfinderDamage(
+      {
+        hpCurrent: 20,
+        hpMax: 20,
+        spCurrent: 10,
+        spMax: 10,
+        rpCurrent: 5,
+        rpMax: 5,
+        hpTemp: 5,
+        deathState: 'none',
+      },
+      12,
+    );
+    // 5 temp HP absorbed, 7 SP absorbed, 0 HP lost
+    expect(res.hpTemp).toBe(0);
+    expect(res.spCurrent).toBe(3);
+    expect(res.hpCurrent).toBe(20);
+    expect(res.deathState).toBe('none');
+  });
+
+  it('overflows to HP when SP is exhausted', () => {
+    const res = applyStarfinderDamage(
+      {
+        hpCurrent: 20,
+        hpMax: 20,
+        spCurrent: 10,
+        spMax: 10,
+        rpCurrent: 5,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'none',
+      },
+      15,
+    );
+    // 10 SP absorbed, 5 HP lost
+    expect(res.spCurrent).toBe(0);
+    expect(res.hpCurrent).toBe(15);
+    expect(res.deathState).toBe('none');
+  });
+
+  it('enters dying state when HP hits 0', () => {
+    const res = applyStarfinderDamage(
+      {
+        hpCurrent: 5,
+        hpMax: 20,
+        spCurrent: 0,
+        spMax: 10,
+        rpCurrent: 5,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'none',
+      },
+      5,
+    );
+    expect(res.hpCurrent).toBe(0);
+    expect(res.deathState).toBe('dying');
+  });
+
+  it('loses 1 RP when taking damage while dying', () => {
+    const res = applyStarfinderDamage(
+      {
+        hpCurrent: 0,
+        hpMax: 20,
+        spCurrent: 0,
+        spMax: 10,
+        rpCurrent: 3,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'dying',
+      },
+      4,
+    );
+    expect(res.rpCurrent).toBe(2);
+    expect(res.deathState).toBe('dying');
+  });
+
+  it('dies when RP hits 0 while taking damage', () => {
+    const res = applyStarfinderDamage(
+      {
+        hpCurrent: 0,
+        hpMax: 20,
+        spCurrent: 0,
+        spMax: 10,
+        rpCurrent: 1,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'dying',
+      },
+      4,
+    );
+    expect(res.rpCurrent).toBe(0);
+    expect(res.deathState).toBe('dead');
+  });
+});
+
+describe('applyStarfinderRest', () => {
+  it('spends 1 RP to restore full SP on Stamina Rest', () => {
+    const res = applyStarfinderRest(
+      {
+        hpCurrent: 15,
+        hpMax: 20,
+        spCurrent: 2,
+        spMax: 12,
+        rpCurrent: 4,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'none',
+      },
+      'stamina',
+      3,
+    );
+    expect(res.success).toBe(true);
+    expect(res.state.rpCurrent).toBe(3);
+    expect(res.state.spCurrent).toBe(12);
+    expect(res.state.hpCurrent).toBe(15);
+  });
+
+  it('fails Stamina Rest if RP is 0', () => {
+    const res = applyStarfinderRest(
+      {
+        hpCurrent: 15,
+        hpMax: 20,
+        spCurrent: 2,
+        spMax: 12,
+        rpCurrent: 0,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'none',
+      },
+      'stamina',
+      3,
+    );
+    expect(res.success).toBe(false);
+  });
+
+  it('restores full SP, full RP, and level HP on Night Rest', () => {
+    const res = applyStarfinderRest(
+      {
+        hpCurrent: 10,
+        hpMax: 20,
+        spCurrent: 0,
+        spMax: 12,
+        rpCurrent: 1,
+        rpMax: 5,
+        hpTemp: 0,
+        deathState: 'none',
+      },
+      'night',
+      3,
+    );
+    expect(res.success).toBe(true);
+    expect(res.state.spCurrent).toBe(12);
+    expect(res.state.rpCurrent).toBe(5);
+    expect(res.state.hpCurrent).toBe(13);
+  });
+});
+

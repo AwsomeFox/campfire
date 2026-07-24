@@ -4,6 +4,10 @@ describe('hp-sync helpers (issue #466)', () => {
   const combat = {
     hpCurrent: 5,
     hpTemp: 0,
+    spCurrent: 0,
+    spMax: 0,
+    rpCurrent: 0,
+    rpMax: 0,
     deathState: 'none' as const,
     deathSaveSuccesses: 0,
     deathSaveFailures: 0,
