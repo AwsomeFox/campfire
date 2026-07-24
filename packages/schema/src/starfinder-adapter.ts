@@ -325,7 +325,7 @@ export const StarfinderAdapter: StarfinderRuleSystemAdapter = {
   mapStatblock(d: Record<string, unknown>): StarfinderStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     const { eac, kac } = starfinderArmorClasses(d);
-    const { stamina, hitPoints, resolve, total } = starfinderHitPoints(d);
+    const { stamina, resolve, total } = starfinderHitPoints(d);
     return {
       size: d.size,
       creatureType: d.type ?? d.creatureType,
