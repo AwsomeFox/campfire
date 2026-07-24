@@ -81,15 +81,20 @@ export type AiDmSessionStatus = 'idle' | 'running' | 'paused';
 export type AiDmLadderState = 'running' | 'awaiting_players' | 'paused' | 'human_control';
 
 /**
+ * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
+ * it at compile time but concurrent pause/takeover can change it at runtime. Returns true for
+ * deliberate DM freeze states (`paused` / `human_control`).
+ */
+export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
+  return state === 'paused' || state === 'human_control';
+}
+
+/**
  * Whether a session is in a frozen state (DM pause or human takeover). Used in the step loop
- * (#1057) to abort early when a concurrent lever fires mid-turn. TS narrows `session.state`
- * inside the loop (where the initial guard proved it was `running`), so a plain comparison is
- * flagged as TS2367; this helper performs a runtime-safe check on the mutable property that
- * cannot be narrowed away, because the lever handlers mutate the object between await points.
+ * (#1057) to abort early with stopReason `'frozen'` when a concurrent lever fires mid-turn.
  */
 function isFrozen(session: AiDmSessionState): boolean {
-  const s: string = session.state;
-  return s === 'paused' || s === 'human_control';
+  return isMidTurnFrozenState(session.state);
 }
 
 /** Why the driver is considered stuck — any one of these trips the ladder (#314). */
@@ -757,20 +762,14 @@ export class AiDriverService {
       for (let step = 0; step < maxSteps; step++) {
         // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
         // before the next provider call so we cannot interleave with a replacement session.
-        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
-        // 'paused' or 'human_control'; abort early so the AI doesn't burn further budget,
-        // stream narration, or execute tool calls against a table that's now human-owned.
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
           break;
         }
-        // #1057: a DM pause or human takeover that landed mid-turn flips session.state to
-        // 'paused' or 'human_control'. The finally block must NOT stomp those states (it already
-        // doesn't), and we must NOT continue streaming/executing — abort early with a distinct
-        // stop reason so the stuck-ladder transition below parks correctly.
-        // Note: TypeScript narrows session.state at compile time, but it's a mutable shared
-        // object — concurrent requests (grantTakeover/pause) can change it between awaits.
-        if (isMidTurnFrozenState(session.state)) {
+        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
+        // 'paused' or 'human_control'. Distinct from `'aborted'` (mode-switch teardown): the
+        // stuck ladder must not park on top of the human's explicit freeze.
+        if (isFrozen(session)) {
           stopReason = 'frozen';
           break;
         }
@@ -790,13 +789,14 @@ export class AiDriverService {
           maxTokens,
           tools: toolSchemas,
         });
-        if (aborted || session.detached || isFrozen(session)) {
+        // streamStep sets `aborted` only on mode-switch detach mid-stream (#1071).
+        if (aborted || session.detached) {
           stopReason = 'aborted';
           if (text) finalNarration = text;
           break;
         }
         // #1057: re-check after streaming — a pause/takeover can land while we streamed.
-        if (isMidTurnFrozenState(session.state)) {
+        if (isFrozen(session)) {
           stopReason = 'frozen';
           if (text) finalNarration = text;
           break;
@@ -828,8 +828,13 @@ export class AiDriverService {
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
+          if (text) finalNarration = text;
+          break;
+        }
+        if (isFrozen(session)) {
+          stopReason = 'frozen';
           if (text) finalNarration = text;
           break;
         }
@@ -858,12 +863,12 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached || isFrozen(session)) {
+        if (session.detached) {
           stopReason = 'aborted';
           break;
         }
         // #1057: re-check after tool execution — a pause/takeover can land between steps.
-        if (isMidTurnFrozenState(session.state)) {
+        if (isFrozen(session)) {
           stopReason = 'frozen';
           break;
         }
@@ -1894,14 +1899,6 @@ function approvalKey(tool: string, entityId: number): string {
  * matters: a hard stop (tool error / budget / max-steps) outranks a soft signal (empty
  * narration / a verbatim loop) since it's the more actionable diagnosis.
  */
-/**
- * Mid-turn freeze guard (#1057). `session.state` is mutable across awaits; TypeScript narrows
- * it at compile time but concurrent pause/takeover can change it at runtime.
- */
-export function isMidTurnFrozenState(state: AiDmLadderState | string): boolean {
-  return state === 'paused' || state === 'human_control';
-}
-
 export function classifyStuck(ctx: {
   stopReason: AiDmStopReason;
   narration: string;

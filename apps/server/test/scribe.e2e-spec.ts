@@ -50,6 +50,8 @@ describe('AI scribe — on-demand run files a recap proposal (e2e)', () => {
     harness.script({ text: 'A quiet night at the inn.' });
     const run = await request(harness.server).post(`${API}/campaigns/${campaignId}/scribe/run`).set(dm).send({});
     expect(run.status).toBe(201);
+    expect(Array.isArray(run.body.proposalIds)).toBe(true);
+    expect(run.body.proposalIds.length).toBeGreaterThan(0);
     const proposalId = run.body.proposalIds[0] as number;
     expect((await request(harness.server).post(`${API}/proposals/${proposalId}/approve`).set(dm).send({})).status).toBe(201);
 
