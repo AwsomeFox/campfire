@@ -10,7 +10,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { NotFoundState } from '../../components/NotFoundState';
@@ -41,9 +41,7 @@ export default function NpcPage() {
   // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
   const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { role, isDm, canDmWrite } = useCampaignAccess();
 
   const [npc, setNpc] = useState<Npc | null>(null);
   const [loading, setLoading] = useState(true);
@@ -324,7 +322,7 @@ export default function NpcPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && (
+      {canDmWrite && (
         <VisibleToPlayersBar
           visible={!npc.hidden}
           onHide={async () => {
@@ -365,7 +363,7 @@ export default function NpcPage() {
             </div>
             <NpcDispositionBadge disposition={npc.disposition} />
             {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
-            {isDm && (
+            {canDmWrite && (
               <div className="flex gap-2 ml-auto">
                 <Btn
                   ghost

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { NpcDispositionBadge } from '../../components/EntitySemanticBadges';
@@ -20,9 +20,7 @@ export default function NpcListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
@@ -128,7 +126,7 @@ export default function NpcListPage() {
           title="NPCs"
           secondaryActions={secondaryActions}
           primaryAction={
-            isDm && !creating ? (
+            canDmWrite && !creating ? (
               <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
                 + New NPC
               </Btn>
@@ -137,7 +135,7 @@ export default function NpcListPage() {
         />
         {draftDialog}
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="NPC name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />

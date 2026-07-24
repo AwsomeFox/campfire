@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState, statusVariant } from '../../components/ui';
 import { LocationStatusLabel } from '../../components/LocationStatusLabel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
@@ -54,9 +54,7 @@ export default function LocationListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,7 +156,7 @@ export default function LocationListPage() {
           subtitle="· Locations"
           secondaryActions={secondaryActions}
           primaryAction={
-            isDm && !creating ? (
+            canDmWrite && !creating ? (
               <Btn ghost type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
                 + New location
               </Btn>
@@ -167,7 +165,7 @@ export default function LocationListPage() {
         />
         {draftDialog}
 
-        {isDm && creating && (
+        {canDmWrite && creating && (
           <div className="cf-inset p-3.5 space-y-2">
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Location name" placeholder="Name" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />

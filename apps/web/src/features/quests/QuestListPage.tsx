@@ -13,7 +13,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { Quest, QuestChanges, QuestListItem } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { PageTitle } from '../../components/PageTitle';
@@ -67,9 +67,7 @@ export default function QuestListPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [quests, setQuests] = useState<QuestListItem[]>([]);
   const [changes, setChanges] = useState<Map<number, ChangeKind>>(new Map());
@@ -154,7 +152,7 @@ export default function QuestListPage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <PageTitle>{t('quests.title')}</PageTitle>
         <div style={{ flex: 1 }} />
-        {isDm && (
+        {canDmWrite && (
           <Link to={`/c/${cid}/quests/new`} className="btn btn-primary" style={{ fontSize: 13 }}>
             {t('quests.newQuest')}
           </Link>

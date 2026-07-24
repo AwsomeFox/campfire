@@ -22,6 +22,7 @@ import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui'
 import { Markdown } from '../../components/Markdown';
 import { useDialog } from '../../components/useDialog';
 import { useDisclosure } from '../../components/useDisclosure';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { GameIcon } from '../../components/GameIcon';
 
 const TRIGGER_LABEL: Record<ScribeTrigger, string> = {
@@ -78,6 +79,7 @@ type Outcome = { kind: 'info' | 'error' | 'success'; text: string; href?: string
 const GATE_FAILURE_STATUSES: ScribeJobStatus[] = ['disabled', 'over_budget', 'no_provider'];
 
 export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  const { canDmWrite } = useCampaignAccess();
   const seatQuery = useAiDmSeat(campaignId);
 
   const panelDisclosure = useDisclosure({ regionLabel: 'AI Scribe status and controls' });
@@ -200,7 +202,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
           {loadError && <ErrorNote message={loadError} onRetry={load} />}
 
-          {isDm && (
+          {canDmWrite && (
             <div className="flex items-center gap-2 flex-wrap">
               <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => void run(false)} disabled={busy !== null}>
                 {busy === 'run' ? 'Drafting…' : 'Draft recap with AI'}
@@ -216,7 +218,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
           {outcome && <OutcomeNote outcome={outcome} onDismiss={() => setOutcome(null)} />}
 
-          {isDm && configOpen && config && (
+          {canDmWrite && configOpen && config && (
             <ConfigForm
               campaignId={campaignId}
               config={config}

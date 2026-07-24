@@ -19,7 +19,7 @@ import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
@@ -69,9 +69,7 @@ export default function SessionsPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
 
   const selectedId = searchParams.get('session');
@@ -81,7 +79,7 @@ export default function SessionsPage() {
     campaignId: cid,
     target: 'recap',
     label: 'Draft a recap with AI',
-    enabled: isDm && tab === 'log',
+    enabled: canDmWrite && tab === 'log',
   });
 
   // Roving-tabindex tablist — the selected tab holds tabindex 0, the rest -1, so
@@ -175,9 +173,9 @@ export default function SessionsPage() {
   useEffect(() => {
     // Reconcile browser Back/Forward for a deep-linked form. Local button opens
     // do not change recapAction, so they remain controlled by showAddForm.
-    if (isDm && recapAction === 'new-recap') setShowAddForm(true);
+    if (canDmWrite && recapAction === 'new-recap') setShowAddForm(true);
     else if (recapAction !== 'new-recap') setShowAddForm(false);
-  }, [isDm, recapAction]);
+  }, [canDmWrite, recapAction]);
 
   function clearRecapAction() {
     setSearchParams(
@@ -339,7 +337,7 @@ export default function SessionsPage() {
   // The add form lives in the detail pane. Treat it like selected detail on
   // mobile; otherwise tapping "+ Add recap" mounts the form inside a pane that
   // remains `display: none` below the desktop breakpoint.
-  const showDetailOnMobile = Boolean(selected) || (isDm && (showAddForm || sessions.length === 0));
+  const showDetailOnMobile = Boolean(selected) || (canDmWrite && (showAddForm || sessions.length === 0));
 
   const secondaryActions: PageHeaderSecondaryAction[] = [];
   if (isDm) {
@@ -357,7 +355,7 @@ export default function SessionsPage() {
         title="Sessions"
         secondaryActions={secondaryActions}
         primaryAction={
-          isDm && tab === 'log' ? (
+          canDmWrite && tab === 'log' ? (
             <Btn
               type="button"
               className="cf-page-header__action"
@@ -516,7 +514,6 @@ export default function SessionsPage() {
               key={selected.id}
               session={selected}
               campaignId={cid}
-              isDm={isDm}
               startEditing={recapAction === 'edit-recap'}
               onEditActionHandled={clearRecapAction}
               onBack={backToList}
@@ -534,7 +531,7 @@ export default function SessionsPage() {
             </Card>
           )}
 
-          {isDm && (showAddForm || sessions.length === 0) && (
+          {canDmWrite && (showAddForm || sessions.length === 0) && (
             <AddRecapForm
               campaignId={cid}
               nextNumber={nextNumber()}
@@ -581,7 +578,6 @@ export default function SessionsPage() {
 function SessionDetail({
   session,
   campaignId,
-  isDm,
   startEditing,
   onEditActionHandled,
   onBack,
@@ -591,7 +587,6 @@ function SessionDetail({
 }: {
   session: SessionListItem;
   campaignId: number;
-  isDm: boolean;
   /** Open the existing recap editor when arriving from a post-encounter deep link. */
   startEditing: boolean;
   /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
@@ -604,7 +599,8 @@ function SessionDetail({
    *  recap is opened from the list so SR users land on the new content. */
   detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
-  const [editing, setEditing] = useState(isDm && startEditing);
+  const { canDmWrite } = useCampaignAccess();
+  const [editing, setEditing] = useState(canDmWrite && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
   const [dateDraft, setDateDraft] = useState(toDateInputValue(session.playedAt));
   // The list omits the full recap body (issue #71) — fetch it for the opened session.
@@ -628,7 +624,7 @@ function SessionDetail({
   const fieldIds = editRecapFieldIds(session.id);
 
   useEffect(() => {
-    setEditing(isDm && startEditing);
+    setEditing(canDmWrite && startEditing);
     setTitleDraft(session.title);
     setDateDraft(toDateInputValue(session.playedAt));
     // Issue #853: clear prior recap/draft immediately so a slow A fetch cannot leave
@@ -668,7 +664,7 @@ function SessionDetail({
       });
     const sequencer = loadSequencerRef.current;
     return () => sequencer.invalidate();
-  }, [session, isDm, startEditing]);
+  }, [session, canDmWrite, startEditing]);
 
   const detailReady = mutationsEnabledForRoute(
     loadedSessionId != null ? { id: loadedSessionId } : null,
@@ -937,9 +933,9 @@ function SessionDetail({
         </Card>
       )}
 
-      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} isDm={isDm} />}
+      {!editing && <AttendancePanel sessionId={session.id} campaignId={session.campaignId} />}
 
-      {isDm && !editing && (
+      {canDmWrite && !editing && (
         <div className="flex gap-2">
           <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit recap
@@ -950,11 +946,11 @@ function SessionDetail({
         </div>
       )}
 
-      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} isDm={isDm} />}
+      {!editing && <SharePanel sessionId={session.id} campaignId={campaignId} />}
 
       {/* Recap revision history + restore (issue #157) — DM-only, so a clobbered or
           regretted edit can be recovered. Refetches whenever a save/restore happens. */}
-      {isDm && !editing && (
+      {canDmWrite && !editing && (
         <RevisionHistoryPanel
           entityType="session"
           entityId={session.id}
@@ -1005,7 +1001,8 @@ function SessionDetail({
  * characters played (replace-set PUT). West Marches / rotating-cast tables need
  * this because the party is otherwise all-or-nothing.
  */
-function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { canDmWrite } = useCampaignAccess();
   const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -1105,7 +1102,7 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
       <div className="flex items-center gap-2">
         <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Who played</span>
         <div className="flex-1" />
-        {isDm && !editing && (
+        {canDmWrite && !editing && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEditing}>
             {attendees.length ? 'Edit' : 'Set attendance'}
           </Btn>
@@ -1165,7 +1162,8 @@ function AttendancePanel({ sessionId, campaignId, isDm }: { sessionId: number; c
 type ShareLifetime = '1' | '7' | '30' | 'never';
 
 /** Member-visible status plus DM-only capability controls for one recap. */
-function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campaignId: number; isDm: boolean }) {
+function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1233,7 +1231,7 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
       )}
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && policyEnabled && (
+      {canDmWrite && policyEnabled && (
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px_auto] items-end">
           <div className="field !mb-0">
             <label htmlFor={`share-label-${sessionId}`}>Label</label>
@@ -1316,7 +1314,6 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
               key={s.id}
               share={s}
               sessionId={sessionId}
-              isDm={isDm}
               onChanged={load}
               onRevoked={(shareId) => setNewLink((current) => current?.shareId === shareId ? null : current)}
             />
@@ -1330,16 +1327,15 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
 function ShareRow({
   share,
   sessionId,
-  isDm,
   onChanged,
   onRevoked,
 }: {
   share: SessionShare;
   sessionId: number;
-  isDm: boolean;
   onChanged: () => Promise<void>;
   onRevoked: (shareId: number) => void;
 }) {
+  const { canDmWrite } = useCampaignAccess();
   const [draftLabel, setDraftLabel] = useState(share.label);
   const [busy, setBusy] = useState<'label' | 'extend' | 'revoke' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1381,7 +1377,7 @@ function ShareRow({
         </div>
         <code className="text-slate-300 shrink-0" aria-label="Share token display prefix">{share.tokenPrefix}…</code>
       </div>
-      {isDm && (
+      {canDmWrite && (
         <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
           <label className="sr-only" htmlFor={`share-row-label-${share.id}`}>Edit share label</label>
           <TextInput

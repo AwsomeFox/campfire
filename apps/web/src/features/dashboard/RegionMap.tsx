@@ -7,8 +7,9 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { Link } from 'react-router-dom';
-import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location, Role } from '@campfire/schema';
+import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
@@ -59,16 +60,14 @@ export function RegionMap({
   campaignId,
   campaign,
   locations,
-  role,
   onChange,
 }: {
   campaignId: number;
   campaign: Campaign;
   locations: Location[];
-  role: Role | null;
   onChange: () => void;
 }) {
-  const isDm = role === 'dm';
+  const { canDmWrite } = useCampaignAccess();
   const pinned = locations.filter((l) => l.mapX != null && l.mapY != null);
   const unpinned = locations.filter((l) => l.mapX == null || l.mapY == null);
 
@@ -434,7 +433,7 @@ export function RegionMap({
 
   function onPinPointerDown(e: ReactPointerEvent<HTMLDivElement>, locationId: number) {
     // Only the primary pointer may own a drag; ignore secondary touches and nested starts (#808).
-    if (!e.isPrimary || activeDragRef.current || !isDm || !mapImageUrl) return;
+    if (!e.isPrimary || activeDragRef.current || !canDmWrite || !mapImageUrl) return;
     // Keyboard move panel owns this pin — ignore pointer drag so Save cannot
     // overwrite a just-dragged position with stale kbPos (or vice versa).
     if (kbMovingId != null) return;
@@ -499,7 +498,7 @@ export function RegionMap({
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">World map</span>
         <div style={{ flex: 1 }} />
-        {isDm && mapImageUrl && (
+        {canDmWrite && mapImageUrl && (
           <MapUploadButton
             campaignId={campaignId}
             hasMap
@@ -523,7 +522,7 @@ export function RegionMap({
         </div>
       )}
 
-      {isDm && !mapImageUrl && (
+      {canDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px 0' }}>
           <DmMapUploader
             campaignId={campaignId}
@@ -583,7 +582,7 @@ export function RegionMap({
                     width: 44,
                     height: 44,
                     justifyContent: 'center',
-                    cursor: isDm ? 'grab' : 'pointer',
+                    cursor: canDmWrite ? 'grab' : 'pointer',
                     touchAction: 'none',
                     opacity: isDragging ? 0.85 : 1,
                     zIndex: isDragging || isKbMoving ? 10 : 1,
@@ -682,7 +681,7 @@ export function RegionMap({
       )}
 
       {/* Keyboard-accessible pin positioning panel (#807) */}
-      {isDm && kbMovingId != null && kbPos != null && kbMovingLoc && (
+      {canDmWrite && kbMovingId != null && kbPos != null && kbMovingLoc && (
         <div
           className="flex flex-wrap items-center gap-3"
           style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)' }}
@@ -752,7 +751,7 @@ export function RegionMap({
       )}
 
       {/* DM pin move buttons — keyboard/touch/pointer accessible (#807) */}
-      {isDm && pinned.length > 0 && kbMovingId == null && (
+      {canDmWrite && pinned.length > 0 && kbMovingId == null && (
         <div className="flex flex-wrap gap-2" style={{ padding: '4px 14px 8px' }}>
           {pinned.map((loc) => (
             <button

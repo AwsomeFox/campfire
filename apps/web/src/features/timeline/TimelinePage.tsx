@@ -22,7 +22,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import { useParams } from 'react-router-dom';
 import type { TimelineEvent, TimelineCalendar } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
@@ -115,8 +115,7 @@ function focusField(id: string) {
 export default function TimelinePage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
-  const { roleIn } = useAuth();
-  const isDm = roleIn(cid) === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [calendar, setCalendar] = useState<TimelineCalendar | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
@@ -374,7 +373,7 @@ export default function TimelinePage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <PageTitle>Timeline</PageTitle>
         <div style={{ flex: 1 }} />
-        {isDm && !creating && (
+        {canDmWrite && !creating && (
           <Btn
             ref={newEventTriggerRef}
             onClick={() => {
@@ -393,7 +392,7 @@ export default function TimelinePage() {
       {actionError && <ErrorNote message={actionError} />}
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && visibilityEventId != null && (
+      {canDmWrite && visibilityEventId != null && (
         <VisibleToPlayersBar
           visible={!!events.find((e) => e.id === visibilityEventId && !e.hidden)}
           onHide={async () => {
@@ -478,7 +477,7 @@ export default function TimelinePage() {
                   </div>
                 )}
               </div>
-              {isDm && (
+              {canDmWrite && (
                 <Btn
                   ref={calendarEditTriggerRef}
                   ghost
@@ -514,7 +513,7 @@ export default function TimelinePage() {
       )}
 
       {/* New event form */}
-      {isDm && creating && (
+      {canDmWrite && creating && (
         <div className="card elev-sm" data-testid="timeline-event-create-form">
           <EventForm
             idPrefix={TIMELINE_NEW_FORM_PREFIX}
@@ -632,7 +631,7 @@ export default function TimelinePage() {
                       </div>
                     )}
                   </div>
-                  {isDm && (
+                  {canDmWrite && (
                     <Btn
                       ref={(node) => {
                         if (node) editTriggerRefs.current.set(e.id, node);

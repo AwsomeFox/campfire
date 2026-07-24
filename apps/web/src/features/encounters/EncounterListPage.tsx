@@ -9,7 +9,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
@@ -47,9 +47,7 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 export default function EncounterListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -92,7 +90,7 @@ export default function EncounterListPage() {
         title="Encounters"
         secondaryActions={secondaryActions}
         primaryAction={
-          isDm && !creating ? (
+          canDmWrite && !creating ? (
             <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
               + New encounter
             </Btn>
@@ -103,7 +101,7 @@ export default function EncounterListPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && creating && (
+      {canDmWrite && creating && (
         <NewEncounterForm campaignId={id} onCancel={() => setCreating(false)} />
       )}
 

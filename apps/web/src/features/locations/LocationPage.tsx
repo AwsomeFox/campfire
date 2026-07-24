@@ -12,7 +12,7 @@ import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
@@ -68,10 +68,8 @@ export default function LocationPage() {
   // `Number.isFinite` guard the core `load()` already applies (issue #697 review).
   const idReady = Number.isFinite(cid) && Number.isFinite(id);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
+  const { role, isDm, canDmWrite } = useCampaignAccess();
   const announce = useAnnounce();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
 
   const [location, setLocation] = useState<Location | null>(null);
   const [loading, setLoading] = useState(true);
@@ -520,7 +518,7 @@ export default function LocationPage() {
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
-            {isDm && nextStatus && (
+            {canDmWrite && nextStatus && (
               <Btn
                 className="!min-h-0 !py-1.5 text-xs"
                 disabled={statusSaving}
@@ -542,7 +540,7 @@ export default function LocationPage() {
                 </Btn>
               </div>
             )}
-            {isDm && (
+            {canDmWrite && (
               <div className="flex gap-2 shrink-0 ml-auto">
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
@@ -593,12 +591,12 @@ export default function LocationPage() {
                   >
                     {location.name}
                   </span>
-                  {isDm && !movingPin && (
+                  {canDmWrite && !movingPin && (
                     <Btn ghost className="absolute bottom-2 right-2 !min-h-0 !py-1 text-[10px]" onClick={startMovePin}>
                       Move pin (DM)
                     </Btn>
                   )}
-                  {isDm && movingPin && (
+                  {canDmWrite && movingPin && (
                     <div className="absolute bottom-2 right-2 cf-card p-2 flex flex-col gap-1.5" role="group" aria-labelledby="pin-position-heading">
                       <span id="pin-position-heading" className="text-[9px] text-slate-400 font-bold uppercase">
                         Move {location.name} pin

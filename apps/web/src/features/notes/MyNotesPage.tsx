@@ -18,6 +18,7 @@ import { NOTES_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
 import { Card, Chip, Btn, TextInput, EmptyState, Skeleton, ErrorNote, type ChipVariant } from '../../components/ui';
 import { Field, sanitizeFieldPrefix } from '../../components/Field';
@@ -94,6 +95,7 @@ export default function MyNotesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { me } = useAuth();
+  const { canMemberWrite } = useCampaignAccess();
   const myUserId = me ? String(me.user.id) : null;
   const { lostAccess, handle: handleAccessError } = useCampaignAccessError();
 
@@ -356,12 +358,14 @@ export default function MyNotesPage() {
       <div className="flex items-center gap-2.5">
         <h1 className="text-xl font-extrabold text-white m-0">My notes</h1>
         <div className="flex-1" />
+        {canMemberWrite && (
         <Btn
           className="!min-h-0 !py-1.5 text-xs"
           onClick={() => document.getElementById('note-quick-capture')?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })}
         >
           + New note
         </Btn>
+        )}
       </div>
       <p className="text-muted text-xs m-0">
         Private by default. Share a note with the DM or the whole party — tap the badge to change who sees it, or edit for full control.
@@ -405,6 +409,7 @@ export default function MyNotesPage() {
       </div>
 
       {/* Quick capture */}
+      {canMemberWrite && (
       <div id="note-quick-capture">
         <Card className="!p-4 space-y-2">
           <form className="flex gap-2" onSubmit={quickCapture}>
@@ -445,6 +450,7 @@ export default function MyNotesPage() {
           </div>
         </Card>
       </div>
+      )}
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -463,7 +469,7 @@ export default function MyNotesPage() {
                 key={note.id}
                 campaignId={cid}
                 note={note}
-                editable
+                editable={canMemberWrite}
                 myUserId={myUserId}
                 members={members}
                 editing={editingNoteId === note.id}

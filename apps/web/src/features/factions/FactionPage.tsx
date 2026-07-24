@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Faction, FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
@@ -40,9 +40,7 @@ export default function FactionPage() {
   const cid = Number(campaignId);
   const id = Number(factionId);
   const navigate = useNavigate();
-  const { roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { isDm, canDmWrite } = useCampaignAccess();
   const standingOptions = factionStandingOptions(t);
 
   const [faction, setFaction] = useState<FactionWithMembers | null>(null);
@@ -257,7 +255,7 @@ export default function FactionPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {isDm && (
+      {canDmWrite && (
         <VisibleToPlayersBar
           visible={!faction.hidden}
           onHide={async () => {
@@ -285,7 +283,7 @@ export default function FactionPage() {
               {formatStandingChip(faction.standing, faction.reputation, t)}
             </Chip>
             {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
-            {isDm && (
+            {canDmWrite && (
               <div className="flex gap-2 ml-auto">
                 <Btn
                   ghost
@@ -370,7 +368,7 @@ export default function FactionPage() {
                   <span className="text-muted">Reputation</span>
                   <span>{faction.reputation > 0 ? `+${faction.reputation}` : faction.reputation}</span>
                 </div>
-                {isDm && (
+                {canDmWrite && (
                   <div className="space-y-2 pt-1">
                     <div className="flex items-center gap-2">
                       <Btn ghost className="!min-h-0 !py-1 text-xs flex-1" disabled={bumping} onClick={() => adjustReputation({ delta: -10 })}>

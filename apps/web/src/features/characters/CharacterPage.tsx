@@ -33,6 +33,7 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -109,9 +110,8 @@ export default function CharacterPage() {
   const cid = Number(campaignId);
   const id = Number(characterId);
   const navigate = useNavigate();
-  const { me, roleIn } = useAuth();
-  const role = roleIn(cid);
-  const isDm = role === 'dm';
+  const { me } = useAuth();
+  const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   // Rule-system adapter resolved from the active campaign (issue #234): drives ability
   // modifiers and the condition vocabulary instead of a call-site 5e default.
   const adapter = ruleSystemAdapter(useCampaign(Number.isFinite(cid) ? cid : undefined)?.ruleSystem);
@@ -214,7 +214,7 @@ export default function CharacterPage() {
 
   const myUserId = me?.user.id;
   const isOwner = character.ownerUserId != null && myUserId != null && character.ownerUserId === String(myUserId);
-  const canEdit = isDm || isOwner;
+  const canEdit = canDmWrite || (canPlayerWrite && isOwner);
 
   async function savePortrait(attachment: Attachment) {
     setActionError(null);

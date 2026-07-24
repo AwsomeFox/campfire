@@ -19,6 +19,7 @@ import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
 import { sanitizeFieldPrefix } from '../../components/Field';
 import { LabeledField } from '../../components/LabeledField';
@@ -88,6 +89,7 @@ const SCHEDULE_CONFLICT_FIELDS: Array<ConflictField<ScheduleDraft>> = [
 ];
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  const { canDmWrite } = useCampaignAccess();
   const formattingLocale = useFormattingLocale();
   const { me } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -213,14 +215,14 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
           {inProgress.length > 0 ? 'Happening now' : 'Next session'}
         </h2>
         <div className="flex-1" />
-        {isDm && !showAddForm && (
+        {canDmWrite && !showAddForm && (
           <Btn className="!min-h-0 !py-1.5 text-xs" onClick={() => setShowAddForm(true)}>
             + Schedule session
           </Btn>
         )}
       </div>
 
-      {isDm && showAddForm && (
+      {canDmWrite && showAddForm && (
         <ScheduleForm
           onSubmit={async (body) => {
             await api.post<ScheduledSessionWithRsvps>(`${API}/campaigns/${campaignId}/schedule`, body);
@@ -314,6 +316,7 @@ function ScheduleItem({
   myIds: Set<string>;
   onChange: () => void;
 }) {
+  const { canDmWrite, canMemberWrite } = useCampaignAccess();
   const announce = useAnnounce();
   const rsvpLegendId = `schedule-rsvp-legend-${schedule.id}`;
   const rsvpStatusId = `schedule-rsvp-status-${schedule.id}`;
@@ -489,6 +492,8 @@ function ScheduleItem({
         {schedule.location && <p className="flex items-center gap-1 text-muted text-xs m-0"><GameIcon slug="position-marker" size={11} /> {schedule.location}</p>}
         {schedule.notes && <Markdown className="!text-sm !text-[color:var(--color-text)]">{schedule.notes}</Markdown>}
 
+        {canMemberWrite && (
+        <>
         <div className="flex items-center gap-2 flex-wrap">
           <span
             id={rsvpLegendId}
@@ -595,6 +600,8 @@ function ScheduleItem({
             </span>
           </div>
         )}
+        </>
+        )}
 
         {schedule.rsvps.length > 0 && <RsvpList rsvps={schedule.rsvps} />}
 
@@ -614,7 +621,7 @@ function ScheduleItem({
           </div>
         )}
 
-        {isDm && (
+        {canDmWrite && (
           <div className="flex gap-2 flex-wrap">
             {happeningNow && (
               <>
@@ -902,6 +909,7 @@ function FeedCard({
   /** Schedule-level reload — invoked after rotate/disable so the list stays fresh. */
   onChange: () => void;
 }) {
+  const { canDmWrite } = useCampaignAccess();
   const [busy, setBusy] = useState(false);
   const [mutateError, setMutateError] = useState<string | null>(null);
   const feedUrlId = `calendar-feed-url-${campaignId}`;
@@ -963,7 +971,7 @@ function FeedCard({
       <div className="flex items-center gap-2">
         <span className="flex items-center gap-2 text-sm font-bold text-white"><GameIcon slug="calendar" size={16} /> Calendar feed</span>
         <div className="flex-1" />
-        {isDm && absoluteUrl && (
+        {canDmWrite && absoluteUrl && (
           <>
             <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={rotate} disabled={busy} title="Generate a new URL; the old one stops working">
               Rotate
@@ -973,7 +981,7 @@ function FeedCard({
             </Btn>
           </>
         )}
-        {isDm && !absoluteUrl && (
+        {canDmWrite && !absoluteUrl && (
           <Btn className="!min-h-0 !py-1 text-xs" onClick={rotate} disabled={busy}>
             Enable feed
           </Btn>

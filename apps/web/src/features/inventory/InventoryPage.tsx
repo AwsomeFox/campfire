@@ -10,6 +10,7 @@ import { useParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -54,10 +55,9 @@ const ITEM_QTY_HELP =
 export default function InventoryPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
-  const { me, roleIn } = useAuth();
-  const role = roleIn(id);
-  const isDm = role === 'dm';
-  const canEdit = isDm || role === 'player';
+  const { me } = useAuth();
+  const { isDm, canPlayerWrite } = useCampaignAccess();
+  const canEdit = canPlayerWrite;
   const myUserId = me?.user.id != null ? String(me.user.id) : null;
 
   const [items, setItems] = useState<InventoryItem[]>([]);

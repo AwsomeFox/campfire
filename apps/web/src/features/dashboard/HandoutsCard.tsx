@@ -10,21 +10,16 @@
  *    live on character cards).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Attachment, Role } from '@campfire/schema';
+import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import type { Attachment } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { shareInFlightRef } from '../../lib/shareInFlight';
 import { Btn, Chip, ErrorNote, Skeleton } from '../../components/ui';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { GameIcon } from '../../components/GameIcon';
 
-export function HandoutsCard({
-  campaignId,
-  role,
-}: {
-  campaignId: number;
-  role: Role | null;
-}) {
-  const isDm = role === 'dm';
+export function HandoutsCard({ campaignId }: { campaignId: number }) {
+  const { isDm, canDmWrite } = useCampaignAccess();
   const [items, setItems] = useState<Attachment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -124,7 +119,7 @@ export function HandoutsCard({
                     <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
                   </div>
                 </div>
-                {isDm && (
+                {canDmWrite && (
                   <Btn
                     ghost
                     className="!min-h-0 !py-1 text-[11px]"
@@ -138,7 +133,7 @@ export function HandoutsCard({
             ))
           )}
 
-          {isDm && (
+          {canDmWrite && (
             <div style={{ marginTop: 4 }}>
               <ImageUpload
                 campaignId={campaignId}

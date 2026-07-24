@@ -16,6 +16,7 @@ import type { DiceRoll } from '@campfire/schema';
 import { api, API, ApiError, getWithHeaders } from '../../lib/api';
 import { Card, TextInput, Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { useCampaignAccessFor } from '../../app/CampaignAccessContext';
 import { DiceTray } from './DiceTray';
 import { RolledDice } from './RolledDice';
 import { RolledTerms } from './RolledTerms';
@@ -47,6 +48,7 @@ function timeAgo(iso: string): string {
 
 export function SharedDiceLog({ campaignId, compact = false }: { campaignId: number; compact?: boolean }) {
   const { t } = useTranslation();
+  const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
   const [rolling, setRolling] = useState(false);
@@ -200,27 +202,35 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   return (
     <Card className="space-y-2.5">
       <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
-      <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
-      <details className="dice-advanced">
-        <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
-          {t('dice.advancedSummary')}
-        </summary>
-        <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
-          <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
-            <label htmlFor={exprId}>{t('dice.expression')}</label>
-            <TextInput
-              id={exprId}
-              aria-label={t('dice.diceExpressionLabel')}
-              placeholder={t('dice.exprPlaceholder')}
-              value={expr}
-              onChange={(e) => setExpr(e.target.value)}
-            />
-          </div>
-          <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
-            {rolling ? t('dice.rolling') : t('dice.roll')}
-          </Btn>
-        </form>
-      </details>
+      {canMemberWrite ? (
+        <>
+          <DiceTray onSubmitExpr={submitExpr} rolling={rolling} campaignId={campaignId} compact={compact} />
+          <details className="dice-advanced">
+            <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+              {t('dice.advancedSummary')}
+            </summary>
+            <form onSubmit={rollFromInput} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
+              <div className="field" style={{ flex: 1, minWidth: compact ? 100 : 120 }}>
+                <label htmlFor={exprId}>{t('dice.expression')}</label>
+                <TextInput
+                  id={exprId}
+                  aria-label={t('dice.diceExpressionLabel')}
+                  placeholder={t('dice.exprPlaceholder')}
+                  value={expr}
+                  onChange={(e) => setExpr(e.target.value)}
+                />
+              </div>
+              <Btn type="submit" className={compact ? '!min-h-0 !py-2 text-xs' : undefined} disabled={rolling || !expr.trim()}>
+                {rolling ? t('dice.rolling') : t('dice.roll')}
+              </Btn>
+            </form>
+          </details>
+        </>
+      ) : (
+        <p className="text-muted m-0" style={{ fontSize: 11.5 }}>
+          Dice rolling is disabled while this campaign is archived (read-only).
+        </p>
+      )}
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       <div
         {...DICE_LOG_LIVE_REGION}

@@ -10,6 +10,7 @@ import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'reac
 import { useTranslation } from 'react-i18next';
 import { useAuth } from './auth';
 import { useCampaign, useCampaigns } from './CampaignContext';
+import { CampaignAccessProvider } from './CampaignAccessContext';
 import { MentionsProvider } from './MentionsContext';
 import { api, ApiError, API } from '../lib/api';
 import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
@@ -855,7 +856,7 @@ function LayoutContent() {
             or bouncing to /login. */}
         {staleIdentity && <OfflineBanner lastSyncedAt={lastSyncedAt} />}
 
-        {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page. */}
+        {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page (#704). */}
         {campaign && campaign.status !== 'active' && (
           <div
             className="px-4 py-2 text-center"
@@ -865,9 +866,22 @@ function LayoutContent() {
               background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
               borderBottom: '1px solid var(--color-divider)',
             }}
+            role="status"
           >
-            This campaign is {campaign.status} — archived and read-only.
-            {isDm ? ' Set its status back to active in Settings to make changes.' : ''}
+            {t('nav.archivedBanner', { status: campaign.status })}
+            {isDm && (
+              <>
+                {' '}
+                <Link
+                  to={`/c/${campaignId}/settings`}
+                  className="font-semibold underline underline-offset-2"
+                  style={{ color: 'var(--color-accent)' }}
+                >
+                  Reactivate in Settings
+                </Link>
+                {t('nav.archivedDmHint')}
+              </>
+            )}
           </div>
         )}
 
@@ -880,7 +894,13 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
-            <Outlet />
+            {campaignId !== undefined ? (
+              <CampaignAccessProvider campaignId={campaignId}>
+                <Outlet />
+              </CampaignAccessProvider>
+            ) : (
+              <Outlet />
+            )}
           </MentionsProvider>
         </main>
       </div>
