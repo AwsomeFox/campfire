@@ -25,6 +25,7 @@ import { InventoryModule } from '../inventory/inventory.module';
 import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
 import { UsersModule } from '../users/users.module';
+import { RevisionsModule } from '../revisions/revisions.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -57,6 +58,7 @@ import { McpController } from './mcp.controller';
     TimelineModule,
     CommentsModule,
     UsersModule,
+    RevisionsModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],
