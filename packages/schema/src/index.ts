@@ -30,6 +30,10 @@ import {
   sortOrderAscTiebreak,
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
+import { ActionSpec } from './action-resolver';
+// Structured action resolver (issue #414): data model + pure, system-aware resolution math.
+// Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
+export * from './action-resolver';
 
 export {
   DifficultyBand,
@@ -293,13 +297,23 @@ export type DeathState = z.infer<typeof DeathState>;
 export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
 export type CharacterStatus = z.infer<typeof CharacterStatus>;
 
-/** One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5", "1d8+3 slashing") so non-attack actions stay valid. */
+/**
+ * One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5",
+ * "1d8+3 slashing") so non-attack actions stay valid, and `notes` is always preserved (and,
+ * as of issue #414, rendered). The OPTIONAL `spec` (issue #414) carries the structured action
+ * model — mode, action-economy cost, DC source, range/shape, target rules, outcome branches,
+ * effects/durations, uses/recharge/concentration, damage types, healing/temp HP, and rule
+ * provenance — that powers the guided Use flow (roll → classify → preview → apply atomically).
+ * It is optional and fully defaulted, so every pre-#414 action parses unchanged and simply has
+ * no structured resolver (the card falls back to the freeform toHit/damage/notes statblock).
+ */
 export const CharacterAction = z.object({
   name: z.string().min(1).max(120),
   kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
   toHit: z.string().max(20).default(''),
   damage: z.string().max(80).default(''),
   notes: z.string().max(500).default(''),
+  spec: ActionSpec.optional(),
 });
 export type CharacterAction = z.infer<typeof CharacterAction>;
 

@@ -14,6 +14,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
+  ActionSpec,
+  ActionUndoToken,
   AoeShape,
   AoeTemplate,
   Attachment,
@@ -55,6 +57,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
+import { ActionUsePanel } from './ActionUseFlow';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -62,6 +65,7 @@ import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from 
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
@@ -589,6 +593,15 @@ export default function RunSessionPage() {
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
+  const [pendingActionUse, setPendingActionUse] = useState<{
+    combatantId: number;
+    actorName: string;
+    actionIndex: number;
+    actionName: string;
+    spec: ActionSpec;
+  } | null>(null);
+  const [actionUndo, setActionUndo] = useState<{ token: ActionUndoToken; label: string } | null>(null);
   // Live battle-map pings (issue #238) — transient markers pushed over SSE, each auto-expires
   // after a short lifetime. A monotonic key disambiguates simultaneous pings at the same spot.
   const [pings, setPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
@@ -824,6 +837,14 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
+  const onUseActionRequested = useCallback(
+    (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
+      setPendingApply(null);
+      setPendingActionUse({ combatantId, actorName, actionIndex, actionName, spec });
+    },
+    [],
+  );
+
   const reportError = useCallback((err: unknown) => {
     setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
   }, []);
@@ -831,6 +852,15 @@ export default function RunSessionPage() {
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);
+
+  const undoAction = useMutation({
+    mutationFn: (token: ActionUndoToken) => api.post(`${API}/encounters/${eid}/actions/undo`, token),
+    onSuccess: () => {
+      void invalidateEncounter(queryClient, eid);
+      setActionUndo(null);
+    },
+    onError: reportError,
+  });
 
   // Encounter-level run controls (roll-initiative / start / next-turn / end / reopen).
   // These are mutually exclusive DM header actions, so one shared pending flag gating
@@ -1467,6 +1497,37 @@ export default function RunSessionPage() {
         />
       )}
 
+      {pendingActionUse && (
+        <ActionUsePanel
+          encounterId={eid}
+          actorCombatantId={pendingActionUse.combatantId}
+          actorName={pendingActionUse.actorName}
+          actionIndex={pendingActionUse.actionIndex}
+          actionName={pendingActionUse.actionName}
+          spec={pendingActionUse.spec}
+          combatants={orderedCombatants}
+          isDm={isDm}
+          onDismiss={() => setPendingActionUse(null)}
+          onError={surfaceActionError}
+          onApplied={(token, _policy) => {
+            void invalidateEncounter(queryClient, eid);
+            setPendingActionUse(null);
+            setActionUndo({ token, label: pendingActionUse.actionName });
+          }}
+        />
+      )}
+
+      {actionUndo && (
+        <UndoSnackbar
+          message={`${actionUndo.label} applied.`}
+          successMessage="Action undone."
+          onUndo={async () => {
+            await undoAction.mutateAsync(actionUndo.token);
+          }}
+          onExpire={() => setActionUndo(null)}
+        />
+      )}
+
       <div className="card elev-sm" style={{ padding: '6px 0', gap: 0 }}>
         {sheetsStatusLabel && (
           <p
@@ -1511,6 +1572,16 @@ export default function RunSessionPage() {
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
               onApplyDamage={onApplyDamageRolled}
+              onUseAction={
+                canEditCombatant(c) && c.characterId != null
+                  ? (actionIndex) => {
+                      const ch = charactersById.get(c.characterId!);
+                      const act = ch?.actions[actionIndex];
+                      if (!act?.spec) return;
+                      onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
+                    }
+                  : undefined
+              }
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
@@ -3259,6 +3330,7 @@ function CombatantRow({
   campaignId,
   onRollError,
   onApplyDamage,
+  onUseAction,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -3296,6 +3368,8 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
+  /** Issue #414: open the structured action Use flow for a resolvable action index. */
+  onUseAction?: (actionIndex: number) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -3662,6 +3736,7 @@ function CombatantRow({
             campaignId={canEdit ? campaignId : undefined}
             onError={onRollError}
             onApplyDamage={onApplyDamage}
+            onUseAction={onUseAction}
           />
         )}
       </div>

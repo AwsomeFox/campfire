@@ -1,5 +1,5 @@
 import { createZodDto } from 'nestjs-zod';
-import { EncounterCreate, EncounterGenerate, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, MapPing, ExpectedUpdatedAt } from '@campfire/schema';
+import { EncounterCreate, EncounterGenerate, EncounterUpdate, EncounterReopen, CombatantCreate, CombatantUpdate, CombatantTurnStatePatch, EncounterEndTurn, RollRequest, MapPing, ExpectedUpdatedAt, ActionResolveRequest, ActionResolution, ActionUndoToken } from '@campfire/schema';
 
 export class EncounterCreateDto extends createZodDto(EncounterCreate.strict()) {}
 // Encounter generator request (issue #304). .strict() so an unknown/misspelled key 400s
@@ -33,3 +33,9 @@ export class EncounterReopenDto extends createZodDto(EncounterReopen.strict()) {
 // the per-combatant turn-state declaration patch (action economy, movement, effects, delay/ready).
 export class EncounterEndTurnDto extends createZodDto(EncounterEndTurn.strict()) {}
 export class CombatantTurnStatePatchDto extends createZodDto(CombatantTurnStatePatch.strict()) {}
+// Issue #414: structured action resolver. Resolve (with optional atomic commit), apply a
+// previewed resolution (DM confirm path), and undo an applied resolution. Not .strict() on
+// the nested resolution/token — they echo server-produced objects with many defaulted fields.
+export class ActionResolveRequestDto extends createZodDto(ActionResolveRequest.strict()) {}
+export class ActionResolutionDto extends createZodDto(ActionResolution) {}
+export class ActionUndoTokenDto extends createZodDto(ActionUndoToken) {}

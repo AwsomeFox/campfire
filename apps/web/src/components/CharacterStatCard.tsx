@@ -22,6 +22,7 @@ import {
   sortCheckCatalog,
   filterCheckCatalog,
   formatCheckBreakdown,
+  isResolvableSpec,
 } from '@campfire/schema';
 import {
   ABILITY_KEYS,
@@ -91,6 +92,7 @@ export function CharacterStatCard({
   campaignId,
   onError,
   onApplyDamage,
+  onUseAction,
 }: {
   character: Character;
   ruleSystem: string | null;
@@ -100,6 +102,8 @@ export function CharacterStatCard({
   onError?: (msg: string | null) => void;
   /** Called with a rolled damage total so the encounter can apply it to a target combatant. */
   onApplyDamage?: (amount: number, label: string) => void;
+  /** Issue #414: open the structured action Use flow for a resolvable action index. */
+  onUseAction?: (actionIndex: number) => void;
 }) {
   const { open, buttonProps, regionProps } = useDisclosure({
     initialOpen: defaultOpen,
@@ -285,8 +289,10 @@ export function CharacterStatCard({
                   const canRollHit = interactive && !!a.toHit && toHitExpr(a.toHit, 'flat') != null;
                   const dmgExpr = a.damage ? damageExpr(a.damage) : null;
                   const canRollDmg = interactive && dmgExpr != null;
+                  const canUse = interactive && onUseAction != null && a.spec != null && isResolvableSpec(a.spec);
                   return (
-                    <div key={i} style={{ fontSize: 12.5, lineHeight: 1.4, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <div style={{ fontSize: 12.5, lineHeight: 1.4, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                       <span style={{ fontWeight: 600, color: 'var(--color-text)' }}>{a.name}</span>
                       {a.kind && (
                         <span className="text-muted" style={{ fontSize: 11 }}>
@@ -328,6 +334,26 @@ export function CharacterStatCard({
                         ) : (
                           <span className="text-muted">{a.damage}</span>
                         ))}
+                      {canUse && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ minHeight: 32, fontSize: 11.5, padding: '0 10px' }}
+                          data-testid="action-use-control"
+                          onClick={() => onUseAction(i)}
+                        >
+                          Use
+                        </button>
+                      )}
+                      </div>
+                      {/* Freeform notes (issue #414): always preserved on the action AND rendered
+                          here — the statblock text a player relies on when an action has no
+                          structured resolver, or the flavour/rider text alongside one. */}
+                      {a.notes && (
+                        <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.35, whiteSpace: 'pre-wrap' }} data-testid="action-notes">
+                          {a.notes}
+                        </span>
+                      )}
                     </div>
                   );
                 })}

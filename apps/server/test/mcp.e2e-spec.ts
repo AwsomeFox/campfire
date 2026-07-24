@@ -162,6 +162,10 @@ const ALL_TOOLS = [
   'undo_turn',
   'set_turn_state',
   'get_turn',
+  'list_usable_actions',
+  'resolve_action',
+  'apply_action',
+  'undo_action',
   'end_encounter',
   'delete_encounter',
   'ai_dm_narrate',
@@ -277,7 +281,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(168);
+    expect(tools).toHaveLength(172);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool

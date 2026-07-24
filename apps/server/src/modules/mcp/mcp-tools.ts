@@ -13,6 +13,9 @@ const zodToJsonSchema = zodToJsonSchemaRaw as unknown as (
   options?: unknown,
 ) => Record<string, unknown>;
 import {
+  ActionResolution,
+  ActionResolveRequest,
+  ActionUndoToken,
   CampaignCreate,
   CampaignUpdate,
   CharacterCreate,
@@ -102,6 +105,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MapsService } from '../maps/maps.service';
 import { AiMapService } from '../ai-map/ai-map.service';
 import { AuditService } from '../audit/audit.service';
@@ -353,6 +357,7 @@ export class McpToolsService {
     private readonly scribe: ScribeService,
     private readonly users: UsersService,
     private readonly revisions: RevisionsService,
+    private readonly actionResolver: ActionResolverService,
   ) {}
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
@@ -1045,6 +1050,22 @@ export class McpToolsService {
         const row = await this.encounters.getRowOrThrow(encounterId as number);
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.getTurnWorkspace(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_usable_actions',
+      'List a combatant\'s usable structured actions (issue #414): each sheet action with its mode (attack/save/check), ' +
+        'the structured spec, and a `resolvable` flag — false means the action lacks enough structure to auto-resolve, ' +
+        'so fall back to its freeform statblock (toHit/damage/notes) rather than inventing numbers. The freeform text is ' +
+        'always returned. A player may list only their own character\'s actions; the DM may list any combatant\'s. Feed ' +
+        'the chosen action name/index into resolve_action.',
+      { encounterId: Id.describe('Encounter id — from list_encounters'), combatantId: Id.describe('Combatant id — from get_encounter') },
+      async ({ encounterId, combatantId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.actionResolver.listUsableActions(encounterId as number, combatantId as number, user, role);
       },
     );
 
@@ -3418,6 +3439,64 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'player');
         const validated = CombatantTurnStatePatch.parse(fields);
         return this.encounters.updateCombatantTurnState(encounterId as number, combatantId as number, validated, user, role);
+      },
+    );
+
+    // ---------- structured action resolver (issue #414) ----------
+
+    this.writeTool(
+      server,
+      user,
+      'resolve_action',
+      'Resolve a structured action (issue #414): roll the attack or the targets\' saves with the correct modifiers, ' +
+        'compare vs AC / DC, classify the outcome (5e hit/miss/crit or PF2e degrees), and return a per-target PREVIEW ' +
+        'with player-safe text separated from DM-only mechanics. Identify the action by actionName/actionIndex on the ' +
+        'actor\'s sheet (see list_usable_actions) OR pass an inline `spec` for a monster / ad-hoc action. A player may ' +
+        'resolve only their OWN character\'s action (a monster/NPC action is DM-only) but may target anyone — so a ' +
+        'player can finish an attack against a monster end-to-end. Pass commit:true to apply atomically in the same ' +
+        'call when the campaign policy permits (automatic); otherwise the result is a declaration the DM applies via ' +
+        'apply_action (dm-confirmed / player-declares). An unsupported action shape is refused (fall back to its ' +
+        'statblock). Returns { resolution, applied, canApply, policy, undoToken }.',
+      { encounterId: Id.describe('Encounter id'), ...ActionResolveRequest.shape },
+      async ({ encounterId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const validated = ActionResolveRequest.parse(fields);
+        return this.actionResolver.resolve(encounterId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'apply_action',
+      'Apply a previewed action resolution (issue #414 confirm path): commit the `resolution` returned by ' +
+        'resolve_action, writing its rolled consequences verbatim so the committed result equals the preview. The DM ' +
+        'may apply any resolution; a player only their own character\'s action under an automatic policy. Returns an ' +
+        'undo token that reverses the whole apply.',
+      { encounterId: Id.describe('Encounter id'), ...ActionResolution.shape },
+      async ({ encounterId, ...fields }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        const validated = ActionResolution.parse(fields);
+        return this.actionResolver.apply(encounterId as number, validated, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'undo_action',
+      'Undo an applied action resolution (issue #414): pass back the undoToken from resolve_action/apply_action to ' +
+        'restore every target\'s HP / temp HP / death state / conditions to the pre-apply snapshot, remove the effects ' +
+        'the apply added, and refund the actor\'s action-economy slot, spell slot, and concentration. The DM may undo ' +
+        'any action; a player only one whose actor is their own character.',
+      { ...ActionUndoToken.shape },
+      async ({ ...fields }) => {
+        const validated = ActionUndoToken.parse(fields);
+        const row = await this.encounters.getRowOrThrow(validated.encounterId);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.actionResolver.undo(validated.encounterId, validated, user, role);
       },
     );
 
