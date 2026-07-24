@@ -20,6 +20,11 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  formatCalendarForPrompt,
+  formatListForPrompt,
+  formatLocationEnvironmentFromSummary,
+} from './world-state-prompt';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -1762,18 +1767,26 @@ export class AiDriverService {
     //
     // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
     // the turn. The system prompt is read fresh every turn, so world-state changes propagate
-    // to the next player interaction without a cache-invalidation step.
-    const calendar = await safeRead(contextToolset, 'get_calendar', { campaignId });
+    // to the next player interaction without a cache-invalidation step. Calendar / encounters /
+    // party are fetched in parallel; location/environment is derived from the summary payload
+    // (currentLocation + dangerLevel) to avoid a redundant tool round-trip.
+    const [calendarRaw, activeEncountersRaw, partyRaw] = await Promise.all([
+      safeRead(contextToolset, 'get_calendar', { campaignId }),
+      safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
+      safeRead(contextToolset, 'get_party', { campaignId }),
+    ]);
+
+    const calendar = formatCalendarForPrompt(calendarRaw);
     if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
 
-    const activeEncounters = await safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' });
-    if (activeEncounters && activeEncounters.trim() !== '' && activeEncounters.trim() !== '[]') {
-      parts.push(`## Running encounters\n${activeEncounters}`);
-    }
+    const activeEncounters = formatListForPrompt(activeEncountersRaw);
+    if (activeEncounters) parts.push(`## Running encounters\n${activeEncounters}`);
 
-    // Party HP/conditions/status — filtered to what a player can see (dmSecret stripped).
-    const party = await safeRead(contextToolset, 'get_party', { campaignId });
+    const party = formatListForPrompt(partyRaw);
     if (party) parts.push(`## Party status\n${party}`);
+
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);
 
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for
