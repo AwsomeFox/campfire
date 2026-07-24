@@ -638,7 +638,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
 
     const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
     expect(dmRsvps).toHaveLength(2);
-    expect(dmRsvps[0].title).toMatch(/updated their note/i);
+    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
     expect(dmRsvps[0].title).not.toMatch(/RSVP'd yes/i);
   });
 
@@ -661,7 +661,7 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     const dmRsvps = ofType(await listFor(dm), 'session_rsvp').filter((n) => n.entityId === scheduleId);
     expect(dmRsvps).toHaveLength(2);
     expect(dmRsvps[0].title).toMatch(/RSVP'd no/i);
-    expect(dmRsvps[0].title).toMatch(/updated their RSVP note/i);
+    expect(dmRsvps[0].title).toMatch(/updated their note/i);
   });
 
   it('completing a visible quest notifies the party; the acting DM is not notified', async () => {
