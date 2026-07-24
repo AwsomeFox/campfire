@@ -23,18 +23,19 @@ describe('parseBackupManifest (issue #514)', () => {
 
   it('accepts a current-format manifest', () => {
     expect(parseBackupManifest(baseV1)).toMatchObject({
-      version: BACKUP_FORMAT_VERSION,
+      version: 1,
       dbBytes: 12345,
       uploadCount: 2,
       appVersion: '0.14.1',
       schemaVersion: 55,
     });
+    expect(parseBackupManifest({ ...baseV1, version: 2 })).toMatchObject({ version: 2 });
   });
 
   it('migrates a pre-version manifest (format 0) to the current shape', () => {
     const { version: _v, ...withoutVersion } = baseV1;
     expect(parseBackupManifest(withoutVersion)).toMatchObject({
-      version: BACKUP_FORMAT_VERSION,
+      version: 1,
       dbBytes: 12345,
     });
   });
@@ -94,7 +95,7 @@ describe('manifestToInspectView (issue #997)', () => {
   const manifest = {
     app: BACKUP_APP,
     kind: BACKUP_KIND,
-    version: BACKUP_FORMAT_VERSION,
+    version: 1,
     createdAt: '2026-07-20T12:00:00.000Z',
     db: 'db/campfire.db',
     dbBytes: 12345,
@@ -105,7 +106,7 @@ describe('manifestToInspectView (issue #997)', () => {
 
   it('reports sourceFormatVersion distinct from normalized formatVersion', () => {
     const result = manifestToInspectView(manifest, ['a.png'], 0);
-    expect(result.formatVersion).toBe(BACKUP_FORMAT_VERSION);
+    expect(result.formatVersion).toBe(1);
     expect(result.sourceFormatVersion).toBe(0);
   });
 
