@@ -110,6 +110,15 @@ describe('backup key envelope (#496)', () => {
     expect(() => parseKeyEnvelopeJson('{}')).toThrow(/missing required fields/);
   });
 
+  it('rejects unexpected fields in the envelope JSON (strict shape)', () => {
+    const keyBytes = Buffer.from('a'.repeat(64), 'utf8');
+    const envelope = encryptKeyfile(keyBytes, goodPassphrase);
+    const withPlaintext = { ...envelope, plaintextKey: keyBytes.toString('utf8') };
+    expect(() => parseKeyEnvelopeJson(JSON.stringify(withPlaintext))).toThrow(
+      /unexpected field "plaintextKey"/,
+    );
+  });
+
   it('parseKeyEnvelopeJson round-trips a real envelope', () => {
     const keyBytes = Buffer.from('a'.repeat(64), 'utf8');
     const envelope = encryptKeyfile(keyBytes, goodPassphrase);

@@ -198,7 +198,18 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
   if (formatVersion === 0) {
     return normalizeManifestV1({ ...record, version: 1 });
   }
-  if (formatVersion === 1 || formatVersion === 2) {
+  if (formatVersion === 1) {
+    return normalizeManifestV1(record, formatVersion);
+  }
+  if (formatVersion === 2) {
+    // Format 2 exists solely for envelope-bearing archives. Reject incomplete
+    // or repackaged v2 manifests that omit the posture markers so restore cannot
+    // silently apply the DB without its credential key (#496).
+    if (record.aiKeyIncluded !== true || record.aiKeySource !== 'keyfile') {
+      throw new BadRequestException(
+        'Invalid backup archive — format version 2 requires aiKeyIncluded=true and aiKeySource="keyfile"',
+      );
+    }
     return normalizeManifestV1(record, formatVersion);
   }
 

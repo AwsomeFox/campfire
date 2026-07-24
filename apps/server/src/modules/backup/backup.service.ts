@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
-import { DB, DB_HOLDER, DbHolder, dbFilePath, resolveDataDir, type DrizzleDb } from '../../db/db.module';
+import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { nowIso } from '../../common/time';
@@ -211,7 +211,6 @@ export class BackupService implements OnApplicationBootstrap {
 
   constructor(
     @Inject(DB_HOLDER) private readonly holder: DbHolder,
-    @Inject(DB) private readonly db: DrizzleDb,
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly attachments: AttachmentsService,

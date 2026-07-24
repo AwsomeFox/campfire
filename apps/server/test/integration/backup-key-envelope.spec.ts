@@ -72,7 +72,6 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
     const aiProviderConfig = { invalidateCachedKey: jest.fn() } as unknown as AiProviderConfigService;
     return new BackupService(
       holder,
-      db,
       audit,
       new SettingsService(db),
       new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
@@ -198,8 +197,9 @@ describe('BackupService AI keyfile envelope (#496, real SQLite)', () => {
 
     // ...then simulate restoring on a DIFFERENT host that uses env-managed key.
     fs.rmSync(path.join(dataDir, 'ai-config.key'), { force: true });
-    // Use the SAME key material as the archive keyfile so the env-key validation
-    // passes (archive has no ai_provider_configs rows, so the check is a no-op).
+    // Any AI_CONFIG_KEY works here: this fixture has no encrypted provider rows,
+    // so the env-key cross-check is a no-op. The next test covers mismatch rejection
+    // when credentials exist. Archive keyfile material is 'deadbeef'.repeat(8).
     process.env.AI_CONFIG_KEY = 'b'.repeat(64);
 
     await service.restore(buffer, RESTORE_CONFIRM_TOKEN, testUser, { keyPassphrase: PASSPHRASE });

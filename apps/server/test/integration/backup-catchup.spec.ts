@@ -97,7 +97,6 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
     const aiProviderConfig = { invalidateCachedKey: jest.fn() } as unknown as AiProviderConfigService;
     return new BackupService(
       holder,
-      db,
       audit,
       new SettingsService(db),
       new AttachmentsService(db, audit, new FsDeletionService(db, audit)),

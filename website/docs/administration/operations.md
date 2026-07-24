@@ -59,11 +59,15 @@ Each archive includes a `manifest.json` with:
 **Restore policy:**
 
 - The server accepts any format version it knows how to **migrate** forward to the
-  current layout (today: format `1`, and legacy archives with no `version` field are
-  treated as format `0` and migrated).
+  current layout (today: format `1` for plain archives, format `2` for archives that
+  include a passphrase-encrypted AI keyfile envelope via
+  `POST /api/v1/backup/download` or `BACKUP_KEY_PASSPHRASE`, and legacy archives with
+  no `version` field treated as format `0` and migrated).
 - If `version` is **newer** than this server understands, restore fails with `400`
   **before** the live database or uploads are touched. When the archive includes
   `minCampfireVersion`, the error tells you the minimum Campfire release required.
+  Older Campfire releases that only understand format `1` will reject format-`2`
+  envelope archives rather than silently restoring the DB without its credential key.
 - Format version is independent of DB schema migrations: upgrading Campfire still runs
   in-place migrations on boot after a restore, but you cannot restore a backup whose
   manifest format is from a newer Campfire build until you upgrade the app.

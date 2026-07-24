@@ -171,6 +171,12 @@ export function parseKeyEnvelopeJson(json: string): SerializedKeyEnvelope {
     throw new Error('Backup key envelope is not a JSON object');
   }
   const rec = parsed as Record<string, unknown>;
+  const allowedKeys = new Set(['v', 'kdf', 'salt', 'iv', 'tag', 'ct']);
+  for (const key of Object.keys(rec)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`Backup key envelope contains unexpected field "${key}"`);
+    }
+  }
   if (
     typeof rec.v !== 'number' ||
     typeof rec.kdf !== 'string' ||

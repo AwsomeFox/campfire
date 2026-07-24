@@ -28,7 +28,24 @@ describe('parseBackupManifest (issue #514)', () => {
       appVersion: '0.14.1',
       schemaVersion: 55,
     });
-    expect(parseBackupManifest({ ...baseV1, version: 2 })).toMatchObject({ version: 2 });
+    expect(
+      parseBackupManifest({
+        ...baseV1,
+        version: 2,
+        aiKeySource: 'keyfile',
+        aiKeyIncluded: true,
+      }),
+    ).toMatchObject({ version: 2, aiKeySource: 'keyfile', aiKeyIncluded: true });
+  });
+
+  it('rejects format version 2 without envelope posture markers', () => {
+    expect(() => parseBackupManifest({ ...baseV1, version: 2 })).toThrow(BadRequestException);
+    expect(() =>
+      parseBackupManifest({ ...baseV1, version: 2, aiKeyIncluded: true }),
+    ).toThrow(/aiKeySource="keyfile"/);
+    expect(() =>
+      parseBackupManifest({ ...baseV1, version: 2, aiKeySource: 'keyfile' }),
+    ).toThrow(/aiKeyIncluded=true/);
   });
 
   it('migrates a pre-version manifest (format 0) to the current shape', () => {
