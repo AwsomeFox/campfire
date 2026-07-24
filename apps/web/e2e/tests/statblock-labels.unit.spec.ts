@@ -86,15 +86,22 @@ test.describe('statblock labels (issue #763)', () => {
     expect(labels.ratingLine).toBe('Rating 2');
   });
 
-  test('compendium / encounter parity: both surfaces share parseMonsterStatblock labels', () => {
-    // ReaderPage and RunSessionPage both call StatBlock with the campaign ruleSystem.
-    // Parity = the same ruleSystem + dataJson yields identical visible labels regardless
-    // of which surface asked (headingLevel is the only StatBlock prop that differs).
+  test('compendium / encounter parity: parseMonsterStatblock yields consistent presentation per ruleSystem', () => {
+    // Both ReaderPage (compendium) and RunSessionPage (encounter) render via StatBlock
+    // with the campaign ruleSystem. This test verifies that for any given ruleSystem + data,
+    // the parsed presentation matches the adapter's declared metadata — ensuring both
+    // surfaces render the same native labels. Full rendering-path parity would require
+    // component-level integration tests.
     for (const ruleSystem of listRuleSystemAdapters().map((a) => a.id)) {
-      const compendium = parseMonsterStatblock(SAMPLE, ruleSystem);
-      const encounter = parseMonsterStatblock(SAMPLE, ruleSystem);
-      expect(statblockVisibleLabels(compendium!)).toEqual(statblockVisibleLabels(encounter!));
-      expect(compendium!.presentation).toEqual(statblockPresentation(ruleSystem));
+      const parsed = parseMonsterStatblock(SAMPLE, ruleSystem);
+      expect(parsed).not.toBeNull();
+      expect(parsed!.presentation).toEqual(statblockPresentation(ruleSystem));
+      // Verify the visible labels helper produces non-empty entries
+      const labels = statblockVisibleLabels(parsed!);
+      expect(labels.rating.length).toBeGreaterThan(0);
+      expect(labels.defense.length).toBeGreaterThan(0);
+      expect(labels.hitPoints.length).toBeGreaterThan(0);
+      expect(labels.creatureType.length).toBeGreaterThan(0);
     }
   });
 

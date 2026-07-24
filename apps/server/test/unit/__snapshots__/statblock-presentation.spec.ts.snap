@@ -173,8 +173,8 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
       "short": "KAC",
     },
     "hitPoints": {
-      "full": "Hit Points",
-      "short": "HP",
+      "full": "Stamina + Hit Points",
+      "short": "SP + HP",
     },
     "rating": {
       "full": "Challenge Rating",

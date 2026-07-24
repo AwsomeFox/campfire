@@ -168,7 +168,7 @@ export const Archmage13aAdapter: Archmage13aRuleSystemAdapter = {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
       size: d.size,
-      creatureType: d.creatureType ?? d.type ?? d.role,
+      creatureType: d.role ?? d.creatureType ?? d.type,
       challengeRating: d.level ?? d.challengeRating ?? d.challenge_rating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
       hitPoints: d.hp ?? d.hitPoints ?? d.hit_points,

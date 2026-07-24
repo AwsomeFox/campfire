@@ -342,15 +342,17 @@ export function StatBlock({ data, ruleSystem, headingLevel = 2 }: { data: unknow
   if (!block) return null;
 
   const { presentation } = block;
-  const metaBits = [block.size, block.creatureType].filter(Boolean).join(' ');
+  const creatureTypeText = block.creatureType
+    ? `${presentation.creatureType.full}: ${[block.size, block.creatureType].filter(Boolean).join(' ')}`
+    : block.size || '';
   const ratingText = statblockVisibleLabels(block).ratingLine ?? '';
 
   return (
     <section aria-label="Creature statblock" style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
-      {(metaBits || ratingText) && (
+      {(creatureTypeText || ratingText) && (
         <p className="text-muted" style={{ margin: 0, fontSize: 12.5, fontStyle: 'italic' }}>
-          {metaBits}
-          {metaBits && ratingText ? ' · ' : ''}
+          {creatureTypeText}
+          {creatureTypeText && ratingText ? ' · ' : ''}
           {ratingText}
         </p>
       )}

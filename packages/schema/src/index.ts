@@ -2394,7 +2394,7 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return {
       size: d.size,
       // Traits stand in for a 5e "creature type" (PF2e creatures are typed by traits).
-      creatureType: d.creatureType ?? d.type ?? (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits),
+      creatureType: (Array.isArray(d.traits) ? (d.traits as unknown[]).join(', ') : d.traits) ?? d.creatureType ?? d.type,
       // PF2e has no CR — a creature's LEVEL is its difficulty rating; surface it in the CR slot.
       challengeRating: d.level ?? d.challengeRating ?? d.cr,
       armorClass: d.ac ?? d.armorClass ?? d.armor_class,
