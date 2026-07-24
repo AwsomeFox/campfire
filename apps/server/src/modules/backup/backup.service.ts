@@ -527,7 +527,14 @@ export class BackupService implements OnApplicationBootstrap {
       uploads.push(rel);
     }
     uploads.sort();
-    return manifestToInspectView(manifest, uploads, sourceFormatVersion);
+    const envelopeEntry = zip.file(KEY_ENVELOPE_ENTRY);
+    const view = manifestToInspectView(manifest, uploads, sourceFormatVersion);
+    // Cross-check manifest vs archive entry so inspect() does not claim portability
+    // when the envelope file is missing from a truncated/tampered zip.
+    return {
+      ...view,
+      aiKeyIncluded: view.aiKeyIncluded && !!envelopeEntry,
+    };
   }
 
   async restore(
@@ -685,8 +692,9 @@ export class BackupService implements OnApplicationBootstrap {
           if (!envSetOnHost) {
             const keyfilePath = path.join(dataDir, AI_KEYFILE_NAME);
             fs.mkdirSync(path.dirname(keyfilePath), { recursive: true });
-            fs.rmSync(keyfilePath, { force: true });
-            fs.writeFileSync(keyfilePath, restoredKeyBytes.toString('utf8'), { mode: 0o600 });
+            const stagedKey = `${keyfilePath}.${process.pid}.tmp`;
+            fs.writeFileSync(stagedKey, restoredKeyBytes.toString('utf8'), { mode: 0o600 });
+            fs.renameSync(stagedKey, keyfilePath);
           } else {
             this.logger.warn(
               'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
