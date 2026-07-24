@@ -552,26 +552,23 @@ function ArcCard({
       aria-labelledby={arcTitleId}
       {...entityTargetProps('arc', arc.id)}
     >
-      <h2 id={arcTitleId} className={editingContent ? 'sr-only' : undefined}>
+      <h2
+        id={arcTitleId}
+        className={editingContent ? 'sr-only' : undefined}
+        style={editingContent ? undefined : {
+          fontFamily: 'var(--font-heading)',
+          fontWeight: 500,
+          fontSize: 17,
+          opacity: arc.status === 'resolved' || arc.status === 'abandoned' ? 0.7 : 1,
+          flex: '1 1 180px',
+          minWidth: 0,
+          margin: 0,
+          overflowWrap: 'anywhere',
+        }}
+      >
         {editingContent ? `Edit arc ${arc.title}` : arc.title}
       </h2>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        {!editingContent && (
-          <div
-            style={{
-              fontFamily: 'var(--font-heading)',
-              fontWeight: 500,
-              fontSize: 17,
-              opacity: arc.status === 'resolved' || arc.status === 'abandoned' ? 0.7 : 1,
-              flex: '1 1 180px',
-              minWidth: 0,
-              overflowWrap: 'anywhere',
-            }}
-            aria-hidden="true"
-          >
-            {arc.title}
-          </div>
-        )}
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
@@ -998,19 +995,22 @@ function BeatRow({
       aria-labelledby={beatTitleId}
       {...entityTargetProps('beat', beat.id)}
     >
-      <h3 id={beatTitleId} className={editingContent ? 'sr-only' : undefined}>
+      <h3
+        id={beatTitleId}
+        className={editingContent ? 'sr-only' : undefined}
+        style={editingContent ? undefined : {
+          fontWeight: 500,
+          fontSize: 14,
+          flex: '1 1 150px',
+          minWidth: 0,
+          margin: 0,
+          overflowWrap: 'anywhere',
+        }}
+      >
         {editingContent ? `Edit beat ${beat.title}` : beat.title}
       </h3>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span aria-hidden="true" style={{ width: 14, flex: 'none', textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
-        {!editingContent && (
-          <div
-            style={{ fontWeight: 500, fontSize: 14, flex: '1 1 150px', minWidth: 0, overflowWrap: 'anywhere' }}
-            aria-hidden="true"
-          >
-            {beat.title}
-          </div>
-        )}
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>

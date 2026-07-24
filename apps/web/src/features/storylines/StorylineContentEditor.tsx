@@ -97,7 +97,7 @@ export function StorylineContentEditor({
       {showPreview ? (
         <div className="rounded-md border border-[var(--color-divider,rgba(255,255,255,0.08))] p-3 min-h-[80px]">
           {draft.prose.trim() ? (
-            <Markdown className="text-muted !text-[13px]">{draft.prose}</Markdown>
+            <Markdown className="text-muted text-[13px]">{draft.prose}</Markdown>
           ) : (
             <p className="text-muted m-0 text-[13px] italic">Nothing to preview yet.</p>
           )}
