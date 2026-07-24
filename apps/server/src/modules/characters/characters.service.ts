@@ -204,8 +204,12 @@ export class CharactersService {
     const result = rollDice(expr);
     const breakdownText = formatCheckBreakdown(def);
     // The dice-log label carries the label + transparent breakdown, so the shared feed and
-    // the combat log show how the number was reached without any hidden-data leak.
-    result.label = `${character.name} · ${def.label} (${breakdownText})`;
+    // the combat log show how the number was reached without any hidden-data leak. When a DM
+    // attached consequence text (issue #415), it rides on the persisted label too — not just
+    // the audit detail — so the shared dice log shows the stakes, matching the documented
+    // "recorded with the roll" contract. Public copy only (no hidden-data leak).
+    result.label =
+      `${character.name} · ${def.label} (${breakdownText})` + (input.consequence ? ` — ${input.consequence}` : '');
     if (typeof input.dc === 'number') {
       result.dc = input.dc;
       result.success = result.total >= input.dc;
@@ -344,20 +348,19 @@ export class CharactersService {
     role: Role,
     opts: { status?: CheckRequest['status'] } = {},
   ): Promise<CheckRequest[]> {
+    // Visibility is pushed into the WHERE clause rather than filtered in memory (issue #415):
+    // the DM sees every request in the campaign; a non-DM sees only requests targeting a
+    // character they OWN. This scales with the caller's slice, not the whole campaign.
+    const conditions = [eq(checkRequests.campaignId, campaignId)];
+    if (opts.status) conditions.push(eq(checkRequests.status, opts.status));
+    if (role !== 'dm') conditions.push(eq(characters.ownerUserId, user.id));
     const rows = await this.db
-      .select({ req: checkRequests, characterName: characters.name, ownerUserId: characters.ownerUserId })
+      .select({ req: checkRequests, characterName: characters.name })
       .from(checkRequests)
       .innerJoin(characters, eq(checkRequests.characterId, characters.id))
-      .where(
-        opts.status
-          ? and(eq(checkRequests.campaignId, campaignId), eq(checkRequests.status, opts.status))
-          : eq(checkRequests.campaignId, campaignId),
-      )
+      .where(and(...conditions))
       .orderBy(desc(checkRequests.id));
-    const visible = rows.filter(
-      (r) => role === 'dm' || (r.ownerUserId != null && r.ownerUserId === user.id),
-    );
-    return visible.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
+    return rows.map((r) => this.toCheckRequestDomain(r.req, r.characterName));
   }
 
   private async getCheckRequestRowOrThrow(id: number) {
@@ -385,9 +388,19 @@ export class CharactersService {
     const charRow = await this.getRowOrThrow(req.characterId);
     // dm-or-owner may answer — same gate as writing the sheet.
     this.assertCanWrite(charRow, user, role);
-    if (req.status === 'resolved') {
+    // Atomically CLAIM the request (pending -> resolved) BEFORE rolling so the "roll once"
+    // invariant survives a race (DM + player double-click, retries): the conditional UPDATE
+    // flips the row only if it is still pending, and exactly one racing caller gets a returned
+    // row. A caller that loses the race (or a repeat on an already-answered row) gets a 400.
+    const [claimed] = await this.db
+      .update(checkRequests)
+      .set({ status: 'resolved', resolvedAt: nowIso() })
+      .where(and(eq(checkRequests.id, id), eq(checkRequests.status, 'pending')))
+      .returning();
+    if (!claimed) {
       throw new BadRequestException('This check request has already been answered');
     }
+    // The claim guarantees this rolls at most once; link the resulting roll id back onto the row.
     const result = await this.rollCheck(
       req.characterId,
       {
@@ -401,7 +414,7 @@ export class CharactersService {
     );
     const [updated] = await this.db
       .update(checkRequests)
-      .set({ status: 'resolved', rollId: result.roll.id, resolvedAt: nowIso() })
+      .set({ rollId: result.roll.id })
       .where(eq(checkRequests.id, id))
       .returning();
     this.events.emit({ type: 'check.resolved', campaignId: req.campaignId, requestId: id, characterId: req.characterId, userId: user.id });
