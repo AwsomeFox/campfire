@@ -79,7 +79,10 @@ test.describe('timeline authoring form accessibility (issue #453)', () => {
     await page.keyboard.press('Tab');
     await expect(dmSecret).toBeFocused();
     await page.keyboard.press('Tab');
-    await expect(form.getByRole('checkbox', { name: /Hidden from players/ })).toBeFocused();
+    // Create form uses Audience radios (DM-only default) instead of a hidden checkbox (#754).
+    await expect(form.getByRole('radio', { name: /DM only/ })).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(form.getByRole('radio', { name: /Visible to players/ })).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(form.getByRole('button', { name: 'Create event' })).toBeFocused();
     await page.keyboard.press('Tab');

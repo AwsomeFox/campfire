@@ -23,7 +23,7 @@ export function AudienceField({
 }) {
   return (
     <fieldset className="space-y-2" style={{ border: 0, padding: 0, margin: 0 }}>
-      <legend className="text-xs font-bold text-slate-500 uppercase tracking-wide">Audience</legend>
+      <legend className="text-xs font-bold text-slate-400 uppercase tracking-wide">Audience</legend>
       <div className="flex flex-col gap-2">
         <label className="flex items-start gap-2 text-sm text-slate-300 cursor-pointer select-none">
           <input
@@ -36,7 +36,7 @@ export function AudienceField({
           />
           <span>
             <strong className="text-slate-200">DM only</strong>
-            <span className="block text-xs text-slate-500">Hidden from players until you reveal it. Default for prep.</span>
+            <span className="block text-xs text-slate-400">Hidden from players until you reveal it. Default for prep.</span>
           </span>
         </label>
         <label className="flex items-start gap-2 text-sm text-slate-300 cursor-pointer select-none">
@@ -50,7 +50,7 @@ export function AudienceField({
           />
           <span>
             <strong className="text-slate-200">Visible to players</strong>
-            <span className="block text-xs text-slate-500">Appears in their lists, search, and links immediately.</span>
+            <span className="block text-xs text-slate-400">Appears in their lists, search, and links immediately.</span>
           </span>
         </label>
       </div>
