@@ -139,6 +139,24 @@ export interface BackupManifest {
   reconciliation?: BackupReconciliation;
 }
 
+/** Per-attachment checksum row surfaced by inspect (issue #444). */
+export interface BackupInspectAttachmentChecksum {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+/** Reconciliation summary surfaced by inspect (issue #444). */
+export interface BackupInspectReconciliation {
+  generation: string;
+  totalAttachments: number;
+  missing: number;
+  changed: number;
+  orphanCount: number;
+  clean: boolean;
+  orphans: string[];
+}
+
 /** Non-destructive summary returned by backup inspect (issue #514). */
 export interface BackupInspectResult {
   app: string;
@@ -157,7 +175,14 @@ export interface BackupInspectResult {
   aiKeySource: AiKeySource | null;
   aiKeyIncluded: boolean;
   aiCredentialCount: number | null;
+  /** Attachment checksums from the manifest when present (#444). */
+  attachmentChecksums: BackupInspectAttachmentChecksum[];
+  /** Reconciliation summary from the manifest when present (#444). */
+  reconciliation: BackupInspectReconciliation | null;
 }
+
+/** Cap checksum rows returned by inspect so huge archives stay UI-safe. */
+export const BACKUP_INSPECT_CHECKSUM_CAP = 100;
 
 function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== 'string') return null;
@@ -338,6 +363,22 @@ export function parseBackupManifest(raw: unknown): BackupManifest {
 }
 
 export function manifestToInspectView(manifest: BackupManifest, uploads: string[], sourceFormatVersion: number): BackupInspectResult {
+  const reconciliation = manifest.reconciliation
+    ? {
+        generation: manifest.reconciliation.generation,
+        totalAttachments: manifest.reconciliation.totalAttachments,
+        missing: manifest.reconciliation.missing,
+        changed: manifest.reconciliation.changed,
+        orphanCount: manifest.reconciliation.orphanCount,
+        clean: manifest.reconciliation.clean,
+        orphans: manifest.reconciliation.orphans,
+      }
+    : null;
+
+  const attachmentChecksums = (manifest.attachments ?? [])
+    .slice(0, BACKUP_INSPECT_CHECKSUM_CAP)
+    .map((entry) => ({ path: entry.path, size: entry.size, sha256: entry.sha256 }));
+
   return {
     app: manifest.app,
     kind: manifest.kind,
@@ -353,5 +394,7 @@ export function manifestToInspectView(manifest: BackupManifest, uploads: string[
     aiKeySource: manifest.aiKeySource ?? null,
     aiKeyIncluded: manifest.aiKeyIncluded === true,
     aiCredentialCount: manifest.aiCredentialCount ?? null,
+    attachmentChecksums,
+    reconciliation,
   };
 }

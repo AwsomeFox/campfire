@@ -86,6 +86,22 @@ export interface RestoreResult {
   uploadCount: number;
 }
 
+/** One on-disk scheduled backup archive listed by {@link BackupService.getStatus}. */
+export interface BackupOnDiskEntry {
+  name: string;
+  bytes: number;
+  mtime: string;
+}
+
+/** Operator-facing scheduled-backup status (issue #444). */
+export interface BackupStatus {
+  scheduleEnabled: boolean;
+  intervalHours: number;
+  backupDir: string;
+  cadence: BackupCadenceState | null;
+  onDisk: BackupOnDiskEntry[];
+}
+
 function uploadsRoot(dataDir: string): string {
   return path.join(dataDir, 'uploads');
 }
@@ -445,6 +461,45 @@ export class BackupService implements OnApplicationBootstrap {
   backupFilename(): string {
     const date = nowIso().slice(0, 10);
     return `campfire-backup-${date}.zip`;
+  }
+
+  /**
+   * Operator-facing scheduled-backup status (issue #444). Read-only — cadence
+   * is driven by env (`BACKUP_SCHEDULE_ENABLED`, `BACKUP_INTERVAL_HOURS`,
+   * `BACKUP_DIR`) and the persisted `backup.cadence` settings row.
+   */
+  async getStatus(): Promise<BackupStatus> {
+    const scheduleEnabled = process.env.BACKUP_SCHEDULE_ENABLED === '1';
+    const intervalHours = parseBackupIntervalHours();
+    const dir = this.backupDir();
+    const cadence = await this.readCadence();
+    const onDisk: BackupOnDiskEntry[] = [];
+    if (fs.existsSync(dir)) {
+      try {
+        for (const name of fs.readdirSync(dir)) {
+          if (!name.startsWith('campfire-backup-') || !name.endsWith('.zip')) continue;
+          const abs = path.join(dir, name);
+          let stat: fs.Stats;
+          try {
+            stat = fs.statSync(abs);
+          } catch {
+            continue;
+          }
+          if (!stat.isFile()) continue;
+          onDisk.push({ name, bytes: stat.size, mtime: stat.mtime.toISOString() });
+        }
+        onDisk.sort((a, b) => b.mtime.localeCompare(a.mtime));
+      } catch {
+        // BACKUP_DIR exists but is unreadable or not a directory — degrade to empty listing.
+      }
+    }
+    return {
+      scheduleEnabled,
+      intervalHours,
+      backupDir: dir,
+      cadence,
+      onDisk: onDisk.slice(0, 20),
+    };
   }
 
   /**
