@@ -76,6 +76,8 @@ import {
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
+import { fromJsonText } from '../../common/json';
+import { resolveSavingThrow } from './saving-throw-math';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -2776,6 +2778,76 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    // #1040: saving_throw — resolve a save server-side using the character's real stats
+    // + proficiency, comparing against a DC in one verifiable call. Uses the 5e formula
+    // (d20 + abilityMod + (proficient ? profBonus(level) : 0)); if the campaign uses a
+    // different rule system with different modifier math, a subsequent PR can route the
+    // computation through the rule-system adapter. Members may call this; the roll is
+    // audited and persisted to the shared dice log so every member sees it.
+    this.writeTool(
+      server,
+      user,
+      'saving_throw',
+      'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
+        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((max(1, level) - 1) / 4); ' +
+        'level is clamped to at least 1) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
+        'to the DC. Returns ' +
+        '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
+        'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
+      {
+        characterId: Id.describe('Character id — from list_members or get_party'),
+        ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
+        dc: z.number().int().min(1).max(100).describe('Difficulty class to beat (1–100; homebrew/high-level effects may exceed typical PHB DCs)'),
+        advantage: z.enum(['normal', 'advantage', 'disadvantage']).optional().describe('Roll mode; defaults to normal'),
+      },
+      async ({ characterId, ability, dc, advantage }) => {
+        const character = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireMember(user, character.campaignId, { write: true });
+        const abilityKey = ability as 'STR' | 'DEX' | 'CON' | 'INT' | 'WIS' | 'CHA';
+        const dcNum = dc as number;
+        const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
+
+        const resolved = resolveSavingThrow({
+          stats: fromJsonText<Record<string, number>>(character.stats, {}),
+          saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
+          ability: abilityKey,
+          level: character.level,
+        });
+        const { score, abilityMod, proficient, profBonus, bonus } = resolved;
+
+        const diceExpr =
+          rollMode === 'advantage'
+            ? `2d20kh1${bonus >= 0 ? `+${bonus}` : bonus}`
+            : rollMode === 'disadvantage'
+              ? `2d20kl1${bonus >= 0 ? `+${bonus}` : bonus}`
+              : `1d20${bonus >= 0 ? `+${bonus}` : bonus}`;
+
+        const label = `${abilityKey} save (${proficient ? 'proficient' : 'unproficient'})`;
+        const persisted = await this.encounters.rollDiceForCampaign(
+          character.campaignId,
+          { expr: diceExpr, label, dc: dcNum },
+          user,
+          role,
+        );
+
+        return {
+          characterId: character.id,
+          ability: abilityKey,
+          dc: dcNum,
+          mode: rollMode,
+          score,
+          abilityMod,
+          profBonus,
+          proficient,
+          bonus,
+          total: persisted.total,
+          rolls: persisted.rolls,
+          success: persisted.total >= dcNum,
+          diceLogId: persisted.id,
+        };
       },
     );
 
