@@ -215,9 +215,29 @@ export class CharactersService {
     // without waiting for the poll (pairs with character.updated for the inline card).
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
-        this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+        this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
       }
     }
+  }
+
+  /**
+   * Emit `encounter.updated` only while the encounter is still player-visible, so a
+   * sheet HP/condition sync into a HIDDEN live encounter cannot leak that encounter's
+   * existence onto the shared campaign SSE stream (#754). Mirrors
+   * EncountersService.emitEncounterEvent's re-read-at-emit visibility gate, applied at
+   * this producer too so every encounter-event path shares the same posture.
+   */
+  private emitEncounterUpdatedIfVisible(campaignId: number, encounterId: number): void {
+    const current = this.db
+      .select({ hidden: encounters.hidden })
+      .from(encounters)
+      .where(eq(encounters.id, encounterId))
+      .get();
+    // Fail closed (#754): if the row can't be read (e.g. deleted concurrently) treat
+    // it as not-visible and skip — an "unknown" encounter must not re-introduce an
+    // existence leak, and the signal is useless once the row is gone.
+    if (!current || Boolean(current.hidden)) return;
+    this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
   }
 
   /**
@@ -260,7 +280,7 @@ export class CharactersService {
     }
     if (campaignId != null) {
       for (const encounterId of touchedEncounterIds) {
-        this.events.emit({ type: 'encounter.updated', campaignId, encounterId });
+        this.emitEncounterUpdatedIfVisible(campaignId, encounterId);
       }
     }
   }

@@ -13,6 +13,7 @@ import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -321,7 +322,8 @@ export class AiDriverController {
     summary: 'Subscribe to AI DM narration (SSE)',
     description:
       'Requires campaign membership. Server-sent stream of AiDmStreamEvent JSON in `data`: turn.start, narration.delta ' +
-      '(token-by-token), narration.message, tool (id-only signals — refetch through REST), and turn.end. Periodic ' +
+      '(token-by-token), narration.message, tool (thin signals with optional encounterId for encounter mutations — ' +
+      'refetch through REST; hidden encounter ids are stripped for non-DMs, #825), and turn.end. Periodic ' +
       '`{"type":"ping"}` keepalives should be ignored. The stream closes automatically when the subscriber is removed ' +
       'from the campaign (issue #527); a reconnect then receives 403.',
   })
@@ -332,7 +334,7 @@ export class AiDriverController {
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
   ): Promise<Observable<MessageEvent>> {
-    await this.access.requireMember(user, id);
+    const role = await this.access.requireMember(user, id);
     // Issue #527: terminate the narration stream when this user's membership is revoked.
     // The AI narration channel is a separate Subject from CampaignEventsService, so the
     // shared membership.revoked notifier (from the campaign event stream) is tapped here
@@ -347,7 +349,12 @@ export class AiDriverController {
       ),
     );
     return merge(
-      this.stream.streamFor(id).pipe(map((event): MessageEvent => ({ data: event }))),
+      this.stream.streamFor(id).pipe(
+        map((event): MessageEvent => ({
+          // Role-project tool frames so hidden encounter ids never reach non-DMs (#825 / #262).
+          data: event.type === 'tool' ? projectAiDmToolEventForRole(event, role) : event,
+        })),
+      ),
       interval(HEARTBEAT_MS).pipe(map((): MessageEvent => ({ data: { type: 'ping' } }))),
     ).pipe(takeUntil(revoked));
   }

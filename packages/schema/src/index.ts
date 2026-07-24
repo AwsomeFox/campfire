@@ -484,14 +484,21 @@ export const Quest = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42): a hidden quest is excluded WHOLESALE from
   // every non-DM read (list/get/summary/export) — not merely dmSecret-redacted.
-  // Default false = visible; the DM sets it true to prep future content, then
-  // "reveals" by patching it back to false.
+  // Stored default false = visible when present; CREATE paths default omitted
+  // `hidden` to DM-only (issue #754) — pass false only for an intentional public create.
   hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
   ...timestamps,
 });
 export type Quest = z.infer<typeof Quest>;
-export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ title: true });
+// Create: `hidden` stays optional with NO Zod default so omit≠false. Service
+// `resolveCreateHidden` then applies issue #754 (omit → DM-only). A `.default(false)`
+// here would materialize false before the service and bypass private-by-default
+// on MCP/proposal/DTO parse paths.
+export const QuestCreate = Quest.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export const QuestUpdate = QuestCreate.partial();
 export const QuestStatusPatch = z.object({ status: QuestStatus });
 export const ObjectiveCreate = z.object({ text: z.string().min(1).max(500), sortOrder: z.number().int().optional() });
@@ -641,11 +648,16 @@ export const Npc = z.object({
   iconSlug: z.string().max(80).default(''),
   // Entity-level secrecy (issue #42) — see Quest.hidden. A hidden NPC is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type Npc = z.infer<typeof Npc>;
-export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const NpcCreate = Npc.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const NpcUpdate = NpcCreate.partial();
 
 // ---------- faction / organization (issue #221) ----------
@@ -669,6 +681,7 @@ export const Faction = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42) — see Npc.hidden. A hidden faction is dropped
   // wholesale from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   // Party standing/reputation. `reputation` is a numeric score (-100 hostile →
   // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
@@ -677,7 +690,11 @@ export const Faction = z.object({
   ...timestamps,
 });
 export type Faction = z.infer<typeof Faction>;
-export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
+export const FactionCreate = Faction.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
+  .partial()
+  .required({ name: true })
+  .extend({ hidden: z.boolean().optional() });
 export const FactionUpdate = FactionCreate.partial();
 
 // A faction with its member NPCs embedded (the detail read — issue #221 "surface
@@ -939,13 +956,16 @@ export const TimelineEvent = z.object({
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM
   // Entity-level secrecy (issue #42 convention): a hidden event is excluded WHOLESALE
   // from every non-DM read until the DM reveals it (hidden=false).
+  // CREATE omits default to DM-only (issue #754).
   hidden: z.boolean().default(false),
   ...timestamps,
 });
 export type TimelineEvent = z.infer<typeof TimelineEvent>;
+// Create: optional `hidden` without Zod default — see QuestCreate (#754).
 export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true })
   .partial()
-  .required({ title: true });
+  .required({ title: true })
+  .extend({ hidden: z.boolean().optional() });
 export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
 export const TimelineEventUpdate = TimelineEventCreate.partial();
 export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
@@ -1115,6 +1135,32 @@ export const InboxResolve = z
   .refine((v) => (v.entityType == null) === (v.entityId == null), {
     message: 'entityType and entityId must be provided together',
   });
+
+/** Default page size for notes + inbox list endpoints (issue #608). */
+export const NOTES_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on notes/inbox lists — clients page with `cursor`, not a huge page. */
+export const NOTES_LIST_MAX_LIMIT = 200;
+/** Dashboard NotesQuickRail asks for exactly this many newest notes (issue #608). */
+export const NOTES_RECENT_LIMIT = 5;
+
+/**
+ * Paginated notes / inbox list response (issue #608).
+ *
+ * Replaces the historical bare `Note[]` (unbounded when `limit` was omitted).
+ * Always includes `total` + `hasMore` so clients never silently truncate; continue
+ * with `nextCursor` when `hasMore` is true. Order is newest-first.
+ *
+ * `nextCursor` is ALWAYS present and is `null` on the terminal page (not omitted), so
+ * REST/MCP consumers see a stable, observable shape rather than a disappearing field.
+ */
+export const NoteListPage = z.object({
+  items: z.array(Note),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type NoteListPage = z.infer<typeof NoteListPage>;
 
 // ---------- entity revisions (issue #157 / #813) ----------
 // Immutable prose versions for the entities most at risk of a blind last-write-wins
@@ -1412,6 +1458,9 @@ export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
  *   - 'open-legend' — Open Legend community codex (issue #299)
  *   - 'osr'         — the OSR retroclone family (issue #300; see `system` below)
  *   - 'cepheus'     — Cepheus Engine SRD (2D6 sci-fi; mdBook Markdown, issue #406)
+ *   - 'datasworn'   — Ironsworn: Starforged, via the canonical rsek/datasworn CC-BY-4.0
+ *                     JSON dataset (issue #405; a PbtA reference-text pack — one real
+ *                     statblock section, NPCs, the rest reference text)
  *   - 'other'       — generic/placeholder (routes to the Open5e path for back-compat)
  * The existing Open5e/PF2e request shape is unchanged: callers still pass `source: 'open5e'`
  * (or 'pf2e'). Generic JSON uploads take the separate RulePackUpload path, `source: 'upload'`.
@@ -1426,6 +1475,7 @@ export const RulePackInstallSource = z.enum([
   'open-legend',
   'osr',
   'cepheus',
+  'datasworn',
   'other',
 ]);
 export type RulePackInstallSource = z.infer<typeof RulePackInstallSource>;
@@ -1471,6 +1521,13 @@ export const RulePackInstallSection = z.enum([
   'creatures',
   'banes',
   'boons',
+  // Datasworn / Ironsworn: Starforged (issue #405). A PbtA/narrative game whose native model
+  // is oracles/moves/assets — only `npcs` maps cleanly to a statblock; the rest is reference text.
+  'npcs',
+  'assets',
+  'moves',
+  'oracles',
+  'truths',
 ]);
 export type RulePackInstallSection = z.infer<typeof RulePackInstallSection>;
 
@@ -1604,6 +1661,15 @@ export const RULE_PACK_SOURCE_META: Record<RulePackInstallSource, RulePackSource
     license: 'Open Game License v1.0a',
     note: 'Live import of the section-level SRD text (2D6 sci-fi) from the first-party mdBook Markdown at orffen/cepheus-srd (raw GitHub). Open Game Content only; the "Cepheus Engine"/"Samardan Press" trademarks are not claimed.',
     candidateSourceUrl: 'https://github.com/orffen/cepheus-srd',
+  },
+  datasworn: {
+    source: 'datasworn',
+    label: 'Ironsworn: Starforged (datasworn)',
+    sourceKind: 'api',
+    installableWithoutUrl: true,
+    license: 'CC-BY-4.0',
+    note: 'Live import of the canonical rsek/datasworn Starforged JSON (a single CC-BY-4.0 data file). A PbtA reference-text pack: NPCs import as monster statblocks; assets, moves, oracles, and truths import as reference sections.',
+    candidateSourceUrl: 'https://raw.githubusercontent.com/rsek/datasworn/main/datasworn/starforged/starforged.json',
   },
   other: {
     source: 'other',
@@ -2475,6 +2541,8 @@ import { Archmage13aAdapter, ARCHMAGE_ADAPTER_ID } from './adapters/archmage';
 export * from './adapters/archmage';
 import { OsrAdapter, OSR_RULE_SYSTEM_SLUGS } from './osr-adapter';
 export * from './osr-adapter';
+import { StarforgedAdapter, STARFORGED_ADAPTER_ID, STARFORGED_PACK_SLUG } from './adapters/starforged';
+export * from './adapters/starforged';
 
 /**
  * Registry of rule-system adapters, keyed by family id (and, for a system with its own
@@ -2502,6 +2570,13 @@ const ADAPTERS: Record<string, RuleSystemAdapter> = {
   [STARFINDER_ADAPTER_ID]: StarfinderAdapter, // Starfinder 1e (issue #297)
   [ARCHMAGE_ADAPTER_ID]: Archmage13aAdapter, // 13th Age (issue #298)
   'archmage-srd': Archmage13aAdapter, // …and its installed rule-pack slug
+  // Ironsworn: Starforged (issue #405). Registered under BOTH its family id and the datasworn
+  // pack slug a campaign's `ruleSystem` holds (matching the sibling adapters), so this
+  // PbtA/narrative pack resolves to the neutral Starforged adapter instead of silently
+  // inheriting 5e combat via the unknown-slug fallback. STARFORGED_PACK_SLUG mirrors the
+  // importer's DATASWORN_PACK_SLUG ('ironsworn-starforged').
+  [STARFORGED_ADAPTER_ID]: StarforgedAdapter,
+  [STARFORGED_PACK_SLUG]: StarforgedAdapter,
 };
 // OSR pack (issue #300): one shared adapter resolves several retroclone slugs.
 for (const slug of OSR_RULE_SYSTEM_SLUGS) ADAPTERS[slug] = OsrAdapter;
@@ -2710,7 +2785,7 @@ export type RulePackSectionProgress = z.infer<typeof RulePackSectionProgress>;
  */
 export const RulePackInstallJob = z.object({
   id: z.string(), // opaque job id (uuid)
-  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'cepheus', 'upload']),
+  source: z.enum(['open5e', 'pf2e', 'sf2e', 'pf1e', 'starfinder', 'archmage', 'open-legend', 'osr', 'cepheus', 'datasworn', 'upload']),
   status: RulePackInstallJobStatus,
   progress: z.array(RulePackSectionProgress).default([]),
   totalSections: z.number().int().nonnegative().default(0),
@@ -4155,7 +4230,7 @@ export const EncounterCreate = z.object({
   locationId: Id.nullable().optional(),
   questId: Id.nullable().optional(),
   sessionId: Id.nullable().optional(),
-  // Entity-level secrecy (issue #262) — start an encounter hidden (DM prep). Default false.
+  // Entity-level secrecy (issue #262/#754) — omit defaults to DM-only prep; pass false to create visible.
   hidden: z.boolean().optional(),
 });
 // Edit an encounter's name, its location/quest/session links (issue #126), and/or its
@@ -4252,6 +4327,26 @@ export const GeneratedMapResult = z.object({
   gridConfig: MapGridConfig,
 });
 export type GeneratedMapResult = z.infer<typeof GeneratedMapResult>;
+
+/**
+ * Result of a *preview* generate call (issue #409): the rendered SVG markup plus the
+ * same reproducibility/grid metadata a real generate returns — but with NO attachment.
+ * The map-generation wizard renders this to show the DM a candidate map (and lets them
+ * reroll the seed) WITHOUT persisting anything, so previewing/rerolling never leaves an
+ * orphan attachment or burns the campaign's storage quota. Because generation is
+ * deterministic by seed, "Use this map" reproduces the previewed map exactly by replaying
+ * the same seed through the normal (persisting) generate/attach endpoints.
+ */
+export const GeneratedMapPreview = z.object({
+  svg: z.string(),
+  seed: z.string(),
+  kind: MapKind,
+  widthCells: z.number().int().positive(),
+  heightCells: z.number().int().positive(),
+  roomCount: z.number().int().nonnegative(),
+  gridConfig: MapGridConfig,
+});
+export type GeneratedMapPreview = z.infer<typeof GeneratedMapPreview>;
 
 // ---------- open map SOURCES (issue #303) ----------
 // Complements the first-party procedural generator (#306) with EXTERNAL, license-clean

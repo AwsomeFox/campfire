@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Note, Role } from '@campfire/schema';
+import type { Note, NoteListPage, Role } from '@campfire/schema';
+import { NOTES_RECENT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
-import { Chip, TextInput, Btn, ErrorNote, EmptyState, type ChipVariant } from '../../components/ui';
+import { Chip, TextInput, Btn, ErrorNote, EmptyState, Skeleton, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
@@ -36,6 +37,7 @@ export function NotesQuickRail({
 }) {
   const isDm = role === 'dm';
   const [notes, setNotes] = useState<Note[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [quickNote, setQuickNote] = useState('');
   const [saving, setSaving] = useState(false);
@@ -50,12 +52,21 @@ export function NotesQuickRail({
   const [attachResetKey, setAttachResetKey] = useState(0);
 
   const load = useCallback(async () => {
+    // Exact recent-five query (issue #608) — newest-first page, not fetch-all-then-slice.
     // Server allows private notes for every role, including viewers.
     setError(null);
+    setLoading(true);
     try {
-      setNotes(await api.get<Note[]>(`${API}/campaigns/${campaignId}/notes`));
+      const page = await api.get<NoteListPage>(
+        `${API}/campaigns/${campaignId}/notes?limit=${NOTES_RECENT_LIMIT}`,
+      );
+      setNotes(page.items);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't load notes.");
+      // Keep prior results visible when a refetch fails (stale + recovery).
+      setNotes((prev) => prev);
+    } finally {
+      setLoading(false);
     }
   }, [campaignId]);
 
@@ -115,10 +126,12 @@ export function NotesQuickRail({
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
-      {notes.length === 0 ? (
+      {loading && notes.length === 0 ? (
+        <Skeleton lines={3} />
+      ) : notes.length === 0 ? (
         <EmptyState icon="quill-ink" title="No notes yet" hint="Jot your first thought below." />
       ) : (
-        notes.slice(0, 5).map((n) => (
+        notes.map((n) => (
           <div
             key={n.id}
             style={{

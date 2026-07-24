@@ -56,7 +56,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       for (const e of live as { id: number }[]) {
         await dm.post(`/api/v1/encounters/${e.id}/end`);
       }
-      const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill' } })).json();
+      const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
       encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
       await dm.post(`/api/v1/encounters/${enc.id}/start`);

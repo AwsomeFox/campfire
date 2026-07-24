@@ -489,6 +489,13 @@ export class AttachmentsService implements OnApplicationBootstrap {
     file: { filename: string; mime: string; bytes: Buffer },
     user: RequestUser,
     role: Role,
+    /**
+     * Optional richer audit `detail` (issue #409). Defaults to the attachment `kind`
+     * (unchanged for every existing caller). The procedural map generator passes
+     * `map:generator-builtin:seed=<seed>` so the audit trail names the source and the
+     * exact seed, keeping a generated map attributable + reproducible.
+     */
+    auditDetail?: string,
   ): Promise<Attachment> {
     return this.createAndPublish(
       campaignId,
@@ -497,6 +504,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
       user,
       role,
       'attachment.generate',
+      auditDetail,
     );
   }
 
@@ -523,11 +531,12 @@ export class AttachmentsService implements OnApplicationBootstrap {
     user: RequestUser,
     role: Role,
     auditAction: 'attachment.upload' | 'attachment.generate',
+    auditDetail?: string,
   ): Promise<Attachment> {
     const row = await this.reserveQuota(campaignId, kind, file, user);
     try {
       this.stageAndPublish(row, file.bytes);
-      const committed = this.commitPublication(row, user, role, auditAction);
+      const committed = this.commitPublication(row, user, role, auditAction, auditDetail);
       return toDomain(committed);
     } catch (err) {
       try {
@@ -727,6 +736,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
     user: RequestUser,
     role: Role,
     action: 'attachment.upload' | 'attachment.generate',
+    auditDetail?: string,
   ): typeof attachments.$inferSelect {
     return this.db.transaction((tx) => {
       tx.insert(auditLog)
@@ -737,7 +747,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
           entityType: 'attachment',
           entityId: row.id,
           campaignId: row.campaignId,
-          detail: row.kind,
+          detail: auditDetail ?? row.kind,
           createdAt: nowIso(),
         })
         .run();

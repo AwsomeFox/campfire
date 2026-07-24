@@ -123,9 +123,11 @@ export function responseHasNoStore(response: Response): boolean {
  */
 export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): boolean {
   if (request.method !== 'GET') return false;
-  if (!url.pathname.startsWith('/api/')) return false;
-
-  const path = url.pathname;
+  let path = url.pathname;
+  const apiIdx = path.indexOf('/api/');
+  if (apiIdx >= 0) path = path.slice(apiIdx);
+  else if (path !== '/api' && !path.endsWith('/api')) return false;
+  if (!path.startsWith('/api/')) return false;
   const accept = request.headers.get('accept') || '';
 
   // Identity channel — proven-live only (issue #579); never SW-cached.
@@ -180,7 +182,11 @@ export function matchNetworkOnlyApi({ url, request }: WorkboxMatchOptions): bool
  */
 export function matchApiImageCache({ url, request }: WorkboxMatchOptions): boolean {
   if (request.method !== 'GET') return false;
-  if (!url.pathname.startsWith('/api/v1/attachments/')) return false;
+  let path = url.pathname;
+  const apiIdx = path.indexOf('/api/');
+  if (apiIdx >= 0) path = path.slice(apiIdx);
+  else if (path !== '/api' && !path.endsWith('/api')) return false;
+  if (!path.startsWith('/api/v1/attachments/')) return false;
   return url.searchParams.get('size') === 'thumb';
 }
 
@@ -193,9 +199,11 @@ export function matchApiImageCache({ url, request }: WorkboxMatchOptions): boole
  */
 export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolean {
   if (request.method !== 'GET') return false;
-  if (!url.pathname.startsWith('/api/')) return false;
-
-  const path = url.pathname;
+  let path = url.pathname;
+  const apiIdx = path.indexOf('/api/');
+  if (apiIdx >= 0) path = path.slice(apiIdx);
+  else if (path !== '/api' && !path.endsWith('/api')) return false;
+  if (!path.startsWith('/api/')) return false;
   const accept = request.headers.get('accept') || '';
 
   // Issue #730: allowlist bounded non-sensitive JSON — not every remaining GET.
@@ -230,6 +238,16 @@ export function matchApiJsonCache({ url, request }: WorkboxMatchOptions): boolea
   if (/^\/api\/v1\/encounters\/\d+\/map$/.test(path)) return false;
 
   return true;
+}
+
+/**
+ * Game-icons.net catalog body shards (issue #349 / #798). Shard URLs may carry
+ * a reverse-proxy prefix; normalize by locating `/icons/shards/` in the path.
+ *
+ * SELF-CONTAINED for workbox `.toString()` embedding.
+ */
+export function matchIconShardCache({ url }: { url: URL }): boolean {
+  return url.pathname.indexOf('/icons/shards/') >= 0;
 }
 
 function contentLengthBytes(response: Response): number | null {

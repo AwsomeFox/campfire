@@ -71,7 +71,7 @@ describe('encounters (e2e)', () => {
 
   it('create auto-adds the party with DEX-derived initMod', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Goblin Ambush' });
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Goblin Ambush', hidden: false });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('preparing');
     expect(res.body.round).toBe(0);
@@ -125,7 +125,7 @@ describe('encounters (e2e)', () => {
 
   it('player without dm role cannot create an encounter', async () => {
     const server = ctx.app.getHttpServer();
-    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope' });
+    const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(player).send({ name: 'Nope', hidden: false });
     expect(res.status).toBe(403);
   });
 
@@ -165,7 +165,7 @@ describe('encounters (e2e)', () => {
 
     it('only active characters are auto-added; dead/retired are skipped', async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight', hidden: false });
       expect(res.status).toBe(201);
       const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
       expect(charIds).toContain(activeId);
@@ -181,7 +181,7 @@ describe('encounters (e2e)', () => {
       expect(patch.status).toBe(200);
       expect(patch.body.status).toBe('active');
 
-      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'Second Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'Second Fight', hidden: false });
       expect(res.status).toBe(201);
       const charIds = (res.body.combatants as Array<{ characterId: number | null }>).map((c) => c.characterId);
       expect(charIds).toContain(activeId);
@@ -199,7 +199,7 @@ describe('encounters (e2e)', () => {
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
-      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'The Big Fight' });
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'The Big Fight', hidden: false });
       encounterId = res.body.id;
       ariaCombatantId = res.body.combatants[0].id;
     });
@@ -488,7 +488,7 @@ describe('encounters (e2e)', () => {
       const server = ctx.app.getHttpServer();
 
       // A second, unrelated encounter in the same campaign.
-      const otherEncRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrelated Fight' });
+      const otherEncRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Unrelated Fight', hidden: false });
       const otherEncounterId = otherEncRes.body.id;
 
       // ariaCombatantId belongs to `encounterId`, not `otherEncounterId`.
@@ -536,7 +536,7 @@ describe('encounters (e2e)', () => {
       // `encounterId` is currently 'running' at this point in the suite (started earlier) —
       // exercise the guard against a fresh 'preparing' encounter instead.
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Not Started Yet' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Not Started Yet', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/next-turn`).set(dm);
@@ -545,7 +545,7 @@ describe('encounters (e2e)', () => {
 
     it('/end on a non-running (preparing) encounter is rejected 400', async () => {
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Never Started' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Never Started', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/end`).set(dm);
@@ -579,7 +579,7 @@ describe('encounters (e2e)', () => {
 
     it('/reopen on a non-ended (preparing) encounter is rejected 400', async () => {
       const server = ctx.app.getHttpServer();
-      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Still Preparing' });
+      const freshRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Still Preparing', hidden: false });
       const freshId = freshRes.body.id;
 
       const res = await request(server).post(`/api/v1/encounters/${freshId}/reopen`).set(dm);
@@ -629,7 +629,7 @@ describe('encounters (e2e)', () => {
 
       // Fresh, self-contained encounter: create (auto-adds the party), start it (which
       // seeds a combat-log 'turn' event), so both child tables have rows to orphan.
-      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Cleanup Test' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Cleanup Test', hidden: false });
       expect(encRes.status).toBe(201);
       const encId = encRes.body.id;
       await request(server).post(`/api/v1/encounters/${encId}/roll-initiative`).set(dm);
@@ -670,7 +670,7 @@ describe('encounters (e2e)', () => {
         .send({ name: 'Lyra', stats: { dex: 18, wis: 15 }, hpCurrent: 24, hpMax: 24 });
       expect(charRes.status).toBe(201);
 
-      const encRes = await request(server).post(`/api/v1/campaigns/${lcCampaignId}/encounters`).set(dm).send({ name: 'Initiative Check' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${lcCampaignId}/encounters`).set(dm).send({ name: 'Initiative Check', hidden: false });
       expect(encRes.status).toBe(201);
       expect(encRes.body.combatants).toHaveLength(1);
       const lyra = encRes.body.combatants[0];
@@ -701,7 +701,7 @@ describe('encounters (e2e)', () => {
       heroCharacterId = charRes.body.id;
 
       // Create → roll initiative → start → end, leaving one character combatant behind.
-      const encRes = await request(server).post(`/api/v1/campaigns/${endedCampaignId}/encounters`).set(dm).send({ name: 'Last Stand' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${endedCampaignId}/encounters`).set(dm).send({ name: 'Last Stand', hidden: false });
       endedEncounterId = encRes.body.id;
       heroCombatantId = encRes.body.combatants[0].id;
 
@@ -789,7 +789,7 @@ describe('encounters (e2e)', () => {
       const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer);
       expect(listRes.status).toBe(200);
 
-      const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer).send({ name: 'Nope' });
+      const createRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(viewer).send({ name: 'Nope', hidden: false });
       expect(createRes.status).toBe(403);
     });
   });
@@ -860,7 +860,7 @@ describe('encounters (e2e)', () => {
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Combat Log Campaign' });
       logCampaignId = campRes.body.id;
 
-      const encRes = await request(server).post(`/api/v1/campaigns/${logCampaignId}/encounters`).set(dm).send({ name: 'Logged Fight' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${logCampaignId}/encounters`).set(dm).send({ name: 'Logged Fight', hidden: false });
       logEncounterId = encRes.body.id;
 
       const add = await request(server)
@@ -1006,7 +1006,7 @@ describe('encounters (e2e)', () => {
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Actor Campaign' });
       actorCampId = campRes.body.id;
 
-      const encRes = await request(server).post(`/api/v1/campaigns/${actorCampId}/encounters`).set(dm).send({ name: 'Attributed Fight' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${actorCampId}/encounters`).set(dm).send({ name: 'Attributed Fight', hidden: false });
       actorEncounterId = encRes.body.id;
 
       const addEmber = await request(server)
@@ -1200,7 +1200,7 @@ describe('encounters (e2e)', () => {
 
       const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Statblock Campaign' });
       const sbCampaignId = campRes.body.id;
-      const encRes = await request(server).post(`/api/v1/campaigns/${sbCampaignId}/encounters`).set(dm).send({ name: 'SB Fight' });
+      const encRes = await request(server).post(`/api/v1/campaigns/${sbCampaignId}/encounters`).set(dm).send({ name: 'SB Fight', hidden: false });
       const sbEncounterId = encRes.body.id;
 
       // Adding by ruleEntryId stores the link on the combatant (as the tracker relies on).
@@ -1241,7 +1241,7 @@ describe('encounters — optimistic concurrency (issue #532, e2e)', () => {
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'CAS Encounter Campaign' })).body.id;
     encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush at the Crossroads', hidden: false })
     ).body.id;
   });
 
@@ -1353,7 +1353,7 @@ describe('encounters (e2e, real cookie sessions — non-member access)', () => {
     const createRes = await dmAgent.post('/api/v1/campaigns').send({ name: 'Private Encounter Campaign' });
     campaignId = createRes.body.id;
 
-    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Fight' });
+    const encRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Secret Fight', hidden: false });
     encounterId = encRes.body.id;
   });
 
@@ -1377,7 +1377,7 @@ describe('encounters (e2e, real cookie sessions — non-member access)', () => {
   });
 
   it('non-member gets 403 creating an encounter', async () => {
-    const res = await outsiderAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Nope' });
+    const res = await outsiderAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Nope', hidden: false });
     expect(res.status).toBe(403);
   });
 });
@@ -1404,7 +1404,7 @@ describe('encounters — issue #51: character uniqueness guard (e2e)', () => {
       await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 })
     ).body.id;
     // create auto-adds the whole party (Aria) as a combatant.
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -1459,7 +1459,7 @@ describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Turn Pointer' })).body.id;
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
 
@@ -1545,7 +1545,7 @@ describe('encounters — issue #528: removeCombatant increments round on turn wr
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Round Wrap' })).body.id;
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Wrap Fight', hidden: false });
     encounterId = encRes.body.id;
 
     c1Id = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'C1', hpMax: 10 })).body.id;
@@ -1601,7 +1601,7 @@ describe('encounters — issue #54: set/roll initiative for a late joiner (e2e)'
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Reinforcements' })).body.id;
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${ariaCombatantId}`).set(dm).send({ initiative: 12 });
@@ -1681,7 +1681,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('a fully-rolled roster is a no-op: rolledCount=0, no audit entry, no SSE broadcast', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'All Rolled' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'All Rolled', hidden: false })
     ).body.id;
     // One party combatant; fill it once with a real roll.
     const first = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1718,7 +1718,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('a partial roster rolls only the missing ones and returns the count', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Partial' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Partial', hidden: false })
     ).body.id;
     const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const partyId = (getRes.body.combatants as CombatantShape[])[0].id;
@@ -1747,7 +1747,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
   it('reinforcements added mid-fight roll to a non-zero count, then a fully-rolled re-roll is a no-op', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reinforce' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Reinforce', hidden: false })
     ).body.id;
     // Roll the initial roster, then start so the fight is running.
     const initial = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1784,7 +1784,7 @@ describe('encounters — issue #702: no-op roll-initiative + rolledCount (e2e)',
     // A fresh campaign with no party members, so the encounter starts truly empty.
     const emptyCampaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Encounter Campaign' })).body.id;
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${emptyCampaignId}/encounters`).set(dm).send({ name: 'Empty' })
+      await request(server).post(`/api/v1/campaigns/${emptyCampaignId}/encounters`).set(dm).send({ name: 'Empty', hidden: false })
     ).body.id;
     const auditsBefore = await countInitiativeAudits(encounterId);
     const res = await request(server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
@@ -1811,7 +1811,7 @@ describe('encounters — issue #469: reject Start when there are zero combatants
     const server = ctx.app.getHttpServer();
     const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Empty Roster Campaign' })).body.id;
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'No Combatants' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'No Combatants', hidden: false })
     ).body.id;
 
     const res = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
@@ -1833,7 +1833,7 @@ describe('encounters — issue #469: reject Start when there are zero combatants
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Retired Boro', status: 'retired' });
 
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Nobody Left' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Nobody Left', hidden: false })
     ).body.id;
     const getBeforeStart = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     expect((getBeforeStart.body.combatants as CombatantShape[]).length).toBe(0);
@@ -1849,7 +1849,7 @@ describe('encounters — issue #469: reject Start when there are zero combatants
     await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 20, hpMax: 20 });
 
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Emptied Out' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Emptied Out', hidden: false })
     ).body.id;
     const getRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
     const combatants = getRes.body.combatants as CombatantShape[];
@@ -1872,7 +1872,7 @@ describe('encounters — issue #469: reject Start when there are zero combatants
     const server = ctx.app.getHttpServer();
     const campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Concurrent Empty Start Campaign' })).body.id;
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Race' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Race', hidden: false })
     ).body.id;
 
     const [a, b] = await Promise.all([
@@ -1901,7 +1901,7 @@ describe('encounters — issue #50: character/combatant HP stay in sync (e2e)', 
     charId = (
       await request(server).post(`/api/v1/campaigns/${campaignId}/characters`).set(dm).send({ name: 'Aria', hpCurrent: 30, hpMax: 30 })
     ).body.id;
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     combatantId = encRes.body.combatants[0].id;
     await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${combatantId}`).set(dm).send({ initiative: 10 });
@@ -1981,7 +1981,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
       .send({ name: 'Aria', hpCurrent: 20, hpMax: 30, ownerUserId: 'dev:p-1' });
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Boss Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
 
@@ -1993,7 +1993,7 @@ describe('encounters — issue #43: monster HP is redacted for non-DM viewers (e
 
     // An NPC combatant at 20/100 -> 20% -> 'critical'. NPCs are DM-controlled, so their
     // exact HP must be redacted to a band for non-DM viewers exactly like a monster's.
-    const npcEntityId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Captain Vex' })).body.id;
+    const npcEntityId = (await request(server).post(`/api/v1/campaigns/${campaignId}/npcs`).set(dm).send({ name: 'Captain Vex', hidden: false })).body.id;
     npcCombatantId = (
       await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'npc', npcId: npcEntityId, hpMax: 100 })
     ).body.id;
@@ -2149,7 +2149,7 @@ describe('encounters — issue #86: concurrent HP updates are not lost (e2e)', (
         .set(dm)
         .send({ name: 'Aria', hpCurrent: 100, hpMax: 100, ownerUserId: 'dev:p-1' })
     ).body.id;
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Fight', hidden: false });
     encounterId = encRes.body.id;
     ariaCombatantId = encRes.body.combatants[0].id;
   });
@@ -2241,7 +2241,7 @@ describe('encounters — issue #57: temp HP / death saves / overkill (e2e)', () 
       .post(`/api/v1/campaigns/${campaignId}/characters`)
       .set(dm)
       .send({ name: 'Thorn', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grave Peril', hidden: false });
     encounterId = encRes.body.id;
     heroCombatantId = encRes.body.combatants[0].id;
   });
@@ -2372,7 +2372,7 @@ describe('encounters — issue #114: count add + rename (e2e)', () => {
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Goblin Horde' })).body.id;
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ambush', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -2476,7 +2476,7 @@ describe('encounters — issue #39: per-encounter battle map + combatant tokens 
     ).body.id;
 
     // create auto-adds the party (Aria) as a combatant.
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Map Fight', hidden: false });
     encounterId = encRes.body.id;
     charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
 
@@ -2706,7 +2706,7 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
         .send({ name: 'Aria', hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' })
     ).body.id;
 
-    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grid Fight' });
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Grid Fight', hidden: false });
     encounterId = encRes.body.id;
     charCombatantId = encRes.body.combatants.find((c: CombatantShape) => c.characterId === ownedCharacterId).id;
     monsterCombatantId = (
@@ -2978,7 +2978,7 @@ describe('encounters — issue #865: semantic PATCH no-ops (real DB)', () => {
   it('returns the encounter without touching updatedAt, audit, or SSE for a semantic no-op', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Stable Grid' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Stable Grid', hidden: false })
     ).body.id;
     const patch = {
       name: 'Stable Grid',
@@ -3033,7 +3033,7 @@ describe('encounters — issue #865: semantic PATCH no-ops (real DB)', () => {
   it('allows exactly one meaningful default PATCH when two clients race', async () => {
     const server = ctx.app.getHttpServer();
     const encounterId = (
-      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Two-client Grid' })
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Two-client Grid', hidden: false })
     ).body.id;
     expect((await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridSize: 8 })).status).toBe(200);
 
@@ -3076,7 +3076,7 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     ctx = await createTestApp();
     const server = ctx.app.getHttpServer();
     campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'VTT238 Campaign' })).body.id;
-    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hexy Fight' })).body.id;
+    encounterId = (await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hexy Fight', hidden: false })).body.id;
   });
 
   afterAll(async () => {
@@ -3227,7 +3227,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it('update edits the name and re-attaches / clears links', async () => {
     const server = ctx.app.getHttpServer();
-    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loose fight' });
+    const created = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loose fight', hidden: false });
     const id = created.body.id;
     expect(created.body.locationId).toBeNull();
 
@@ -3251,7 +3251,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     const server = ctx.app.getHttpServer();
     const otherCamp = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other' });
     const otherLoc = await request(server).post(`/api/v1/campaigns/${otherCamp.body.id}/locations`).set(dm).send({ name: 'Elsewhere' });
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'X', hidden: false });
     const res = await request(server).patch(`/api/v1/encounters/${enc.body.id}`).set(dm).send({ locationId: otherLoc.body.id });
     expect(res.status).toBe(404);
   });
@@ -3347,7 +3347,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it("a note can pin to entityType 'encounter'", async () => {
     const server = ctx.app.getHttpServer();
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Noted fight' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Noted fight', hidden: false });
     const note = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/notes`)
       .set(dm)
@@ -3360,7 +3360,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
 
   it('difficulty band computes correctly for a known party + monster set', async () => {
     const server = ctx.app.getHttpServer();
-    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ogre fight' });
+    const enc = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Ogre fight', hidden: false });
     // Add the CR-10 ogre (5900 XP). Party = 4 level-5 PCs -> deadly threshold 4*1100=4400.
     // One monster -> ×1 multiplier -> adjusted 5900 >= 4400 -> deadly.
     const add = await request(server)
@@ -3619,7 +3619,10 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       const encRes = await request(server)
         .post(`/api/v1/campaigns/${secrecyCampId}/encounters`)
         .set(dm)
-        .send({ name: 'Traitor Fight' });
+        // #754: encounters are private-by-default now; this suite asserts players
+        // can VIEW the encounter's events (with hidden NPC names masked), so it
+        // must be created explicitly player-visible.
+        .send({ name: 'Traitor Fight', hidden: false });
       secrecyEncounterId = encRes.body.id;
 
       const traitorAdd = await request(server)
@@ -3873,7 +3876,7 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       // End the running encounter so we can reopen to preparing-like state, then make a
       // fresh preparing encounter to prove roll-initiative still fills cleared nulls.
       await request(server).post(`/api/v1/encounters/${encounterId}/end`).set(dm);
-      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Clear Initiative 2' });
+      const res = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Clear Initiative 2', hidden: false });
       const enc2 = res.body.id;
       const m = await request(server)
         .post(`/api/v1/encounters/${enc2}/combatants`)

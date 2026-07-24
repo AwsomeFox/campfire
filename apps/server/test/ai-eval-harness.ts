@@ -59,6 +59,12 @@ export interface AiEvalHarness {
    * When the queue is exhausted the mock falls back to a deterministic echo of the prompt.
    */
   script(...responses: MockResponse[]): void;
+  /**
+   * Clear unconsumed scripted turns + the mock's request log. Use in `beforeEach` when a
+   * suite shares one harness — early stopReasons (tool_error, budget_exhausted) otherwise
+   * leave queued responses that pollute the next test.
+   */
+  resetMock(): void;
   /** Turn the server-wide experimental AI DM flag on (admin/dm). Required before any write. */
   enableExperimental(): Promise<void>;
   /** Create a campaign and return its id. */
@@ -132,6 +138,10 @@ export async function createAiEvalHarness(options: AiEvalHarnessOptions = {}): P
     mock,
     script(...responses: MockResponse[]): void {
       script.push(...responses);
+    },
+    resetMock(): void {
+      mock.clearResponses();
+      mock.clearReceived();
     },
     async enableExperimental(): Promise<void> {
       const res = await request(server).patch('/api/v1/settings').set(dm).send({ experimentalAiDm: true });

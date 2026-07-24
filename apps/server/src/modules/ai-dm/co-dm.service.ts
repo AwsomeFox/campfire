@@ -11,8 +11,8 @@ import {
   NpcCreate,
   LocationCreate,
   QuestCreate,
-  FactionCreate,
   SessionCreate,
+  FactionCreate,
   EncounterGenerate,
   GenerateMapParams,
 } from '@campfire/schema';
@@ -39,11 +39,11 @@ const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   npc: 'npc',
   location: 'location',
   beat: 'quest', // a story beat / next objective is filed as a quest (#27)
+  quest: 'quest', // a direct quest draft (#1056)
+  faction: 'faction', // a faction draft (#1056)
   recap: 'session', // a session recap is filed as a session
   encounter: 'encounter',
   map: 'map',
-  quest: 'quest',
-  faction: 'faction',
 };
 
 /** Targets that support drafting N items at once; the rest ignore `count`. */
@@ -306,6 +306,23 @@ export class CoDmService {
             body: raw.body ?? raw.summary ?? raw.description ?? '',
             ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
+        case 'quest':
+          return QuestCreate.parse({
+            title: raw.title ?? raw.name ?? 'Untitled quest',
+            body: raw.body ?? raw.description ?? '',
+            ...(typeof raw.reward === 'string' ? { reward: raw.reward } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+            ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
+          }) as Record<string, unknown>;
+        case 'faction':
+          return FactionCreate.parse({
+            name: raw.name ?? 'Untitled faction',
+            ...(typeof raw.body === 'string' ? { body: raw.body } : {}),
+            ...(typeof raw.kind === 'string' ? { kind: raw.kind } : {}),
+            ...(typeof raw.goals === 'string' ? { goals: raw.goals } : {}),
+            ...(typeof raw.standing === 'string' ? { standing: raw.standing } : {}),
+            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+          }) as Record<string, unknown>;
         case 'recap':
           return SessionCreate.parse(raw) as Record<string, unknown>;
         case 'encounter':
@@ -320,21 +337,6 @@ export class CoDmService {
           return GenerateMapParams.parse({
             ...raw,
             seed: typeof raw.seed === 'string' && raw.seed ? raw.seed : mintStringSeed(),
-          }) as Record<string, unknown>;
-        case 'quest':
-          return QuestCreate.parse({
-            title: raw.title ?? raw.name ?? 'Untitled quest',
-            body: raw.body ?? raw.description ?? '',
-            reward: typeof raw.reward === 'string' ? raw.reward : '',
-            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
-          }) as Record<string, unknown>;
-        case 'faction':
-          return FactionCreate.parse({
-            name: raw.name ?? 'Unnamed faction',
-            kind: typeof raw.kind === 'string' ? raw.kind : '',
-            body: typeof raw.body === 'string' ? raw.body : '',
-            goals: typeof raw.goals === 'string' ? raw.goals : '',
-            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
           }) as Record<string, unknown>;
       }
     } catch (err) {
@@ -351,12 +353,14 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
   beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
+  quest:
+    '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
+  faction:
+    '{"name": string (required), "body"?: string (markdown), "kind"?: string, "goals"?: string, "standing"?: "hostile"|"unfriendly"|"neutral"|"friendly"|"allied", "dmSecret"?: string}',
   recap: '{"title"?: string, "recap": string (markdown summary of the session)}',
   encounter:
     '{"difficulty": "trivial"|"easy"|"medium"|"hard"|"deadly", "count"?: number, "shape"?: string}',
   map: '{"kind"?: "dungeon"|"cave"|"wilderness", "size"?: "small"|"medium"|"large", "theme"?: string}',
-  quest: '{"title": string (required), "body"?: string (markdown quest description), "reward"?: string, "dmSecret"?: string}',
-  faction: '{"name": string (required), "kind"?: string (guild/cult/government/...), "body"?: string, "goals"?: string, "dmSecret"?: string}',
 };
 
 /** A fresh uint32 seed for the encounter generator. */

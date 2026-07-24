@@ -15,7 +15,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { quests, questObjectives, npcs, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -354,7 +354,8 @@ export class QuestsService {
         giverNpcId: input.giverNpcId ?? null,
         reward: input.reward ?? '',
         dmSecret: input.dmSecret ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         sortOrder: input.sortOrder ?? 0,
         createdAt: ts,
         updatedAt: ts,

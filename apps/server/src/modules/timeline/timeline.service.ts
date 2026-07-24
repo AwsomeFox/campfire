@@ -6,7 +6,7 @@ import type { TimelineEvent, TimelineCalendar, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { timelineEvents, timelineCalendars } from '../../db/schema';
 import { nowIso } from '../../common/time';
-import { redactSecret, redactSecrets, filterHidden, isVisibleTo } from '../../common/redact';
+import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
@@ -88,7 +88,8 @@ export class TimelineService {
         era: input.era ?? '',
         sortIndex: input.sortIndex ?? 0,
         dmSecret: input.dmSecret ?? '',
-        hidden: input.hidden ?? false,
+        // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
+        hidden: resolveCreateHidden(input.hidden),
         createdAt: ts,
         updatedAt: ts,
       })

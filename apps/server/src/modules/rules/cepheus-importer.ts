@@ -405,7 +405,13 @@ export function buildChapterEntries(
 
   const entries: ImportedEntry[] = [];
   const usedSlugs = new Set<string>();
-  // Reserve a slug, disambiguating collisions with a bounded suffix loop (never unbounded).
+  // Reserve a slug, disambiguating collisions. First try a bounded `-N` suffix loop (the common
+  // case: a handful of same-base chapters). If that bound is exhausted WITHOUT finding a free
+  // slug, fall back to a monotonically increasing counter and keep incrementing until the
+  // candidate is genuinely unused. This ALWAYS returns a slug not already in `usedSlugs`, so a
+  // pathological run of same-base collisions can never make us hand back a duplicate that the
+  // later same-slug de-dupe would silently drop (data loss). The loop always terminates: each
+  // increment produces a distinct string and only a finite number are already reserved.
   const reserveSlug = (base: string): string => {
     if (!usedSlugs.has(base)) {
       usedSlugs.add(base);
@@ -414,6 +420,11 @@ export function buildChapterEntries(
     let n = 2;
     let candidate = `${base}-${n}`;
     while (usedSlugs.has(candidate) && n <= MAX_SLUG_DEDUPE_ATTEMPTS) {
+      candidate = `${base}-${++n}`;
+    }
+    // Guarantee uniqueness: if the bounded loop ended on a still-colliding candidate, keep
+    // incrementing past the cap until we find a free slug. Never return a colliding slug.
+    while (usedSlugs.has(candidate)) {
       candidate = `${base}-${++n}`;
     }
     usedSlugs.add(candidate);

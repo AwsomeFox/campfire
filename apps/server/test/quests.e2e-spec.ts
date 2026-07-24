@@ -28,7 +28,7 @@ describe('quests (e2e)', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'Slay the Kobolds', dmSecret: 'The kobolds are secretly allied with the dragon.' });
+      .send({ title: 'Slay the Kobolds', dmSecret: 'The kobolds are secretly allied with the dragon.', hidden: false });
     expect(createRes.status).toBe(201);
     const questId = createRes.body.id;
     expect(createRes.body.status).toBe('available');
@@ -98,7 +98,7 @@ describe('quests (e2e)', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'Secret Quest', dmSecret: 'top secret plot twist' });
+      .send({ title: 'Secret Quest', dmSecret: 'top secret plot twist', hidden: false });
     const questId = createRes.body.id;
     expect(createRes.body.dmSecret).toBe('top secret plot twist');
 
@@ -190,7 +190,7 @@ describe('quests (e2e)', () => {
     const createRes = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/quests`)
       .set(dm)
-      .send({ title: 'Quest with progress', status: 'active', dmSecret: 'list projection secret' });
+      .send({ title: 'Quest with progress', status: 'active', dmSecret: 'list projection secret', hidden: false });
     const questId = createRes.body.id;
 
     const later = await request(server)
@@ -642,7 +642,7 @@ describe('quests: changed-since-last-session (#66, e2e)', () => {
 
   it('respects redaction + hidden: player never sees a hidden quest or dmSecret in the diff', async () => {
     const hidden = await createQuest('Hidden prep', { hidden: true, dmSecret: 'twist' });
-    const visible = await createQuest('Visible with secret', { dmSecret: 'also secret' });
+    const visible = await createQuest('Visible with secret', { dmSecret: 'also secret', hidden: false });
 
     // Diff against the far past so both quests qualify by date.
     const dmRes = await getChanges(dm, '2000-01-01');

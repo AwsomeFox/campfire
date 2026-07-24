@@ -7,10 +7,10 @@ import {
   noteVisibilityOptionLabel,
 } from '../../src/components/noteVisibilityA11y';
 import {
+  QUEST_AUDIENCE_DM_HELP,
+  QUEST_AUDIENCE_GROUP_LABEL,
   QUEST_BODY_LABEL,
   QUEST_GIVER_LABEL,
-  QUEST_HIDDEN_HELP,
-  QUEST_HIDDEN_LABEL,
   QUEST_NEW_FORM_PREFIX,
   QUEST_PARENT_LABEL,
   QUEST_REWARD_LABEL,
@@ -36,9 +36,9 @@ test.describe('quest form a11y vocabulary (issue #452)', () => {
     expect(QUEST_TITLE_REQUIRED_ERROR).toMatch(/title/i);
   });
 
-  test('hidden checkbox explains secret prep implications', () => {
-    expect(QUEST_HIDDEN_LABEL).toMatch(/Hidden from players/i);
-    expect(QUEST_HIDDEN_HELP).toMatch(/secret|reveal|cannot see/i);
+  test('audience group explains DM-only default for prep', () => {
+    expect(QUEST_AUDIENCE_GROUP_LABEL).toBe('Audience');
+    expect(QUEST_AUDIENCE_DM_HELP).toMatch(/Hidden from players|Default for prep/i);
   });
 });
 

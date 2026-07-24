@@ -7,6 +7,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
+import { EncountersService } from '../encounters/encounters.service';
 import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
@@ -19,7 +20,13 @@ import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
+import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  formatCalendarForPrompt,
+  formatListForPrompt,
+  formatLocationEnvironmentFromSummary,
+} from './world-state-prompt';
 
 /** Default per-provider-call output cap for a driver step; clamped to remaining budget. */
 const DEFAULT_STEP_MAX_TOKENS = 1024;
@@ -57,6 +64,13 @@ export interface AiDmExecutedTool {
   isError: boolean;
   /** True when the call was routed to the proposal queue (a canon write the seat can't make directly). */
   proposed: boolean;
+  /** Encounter mutated by this call, when known from validated args/results (#825). */
+  encounterId?: number;
+}
+
+/** Narrow resource identity to the fields persisted on a turn's executed-tool summary. */
+function pickExecutedIdentity(identity: ToolResourceIdentity): Pick<AiDmExecutedTool, 'encounterId'> {
+  return identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {};
 }
 
 export interface AiDmTurnRunResult {
@@ -290,6 +304,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
   'create_encounter',
@@ -318,9 +333,13 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'update_encounter',
   // private information delivery (#1023)
   'whisper_to_player',
-  // economy / loot (#1021) — parity with award_xp
+  // economy / loot (#1021) — explicit live-play exception with execution-time grant-only guards
+  // (guardDriverLivePlayArgs): adjust_treasury allows positive bounded delta grants only.
   'adjust_treasury',
   'add_inventory_item',
+  // update_inventory_item: grant-only — guardDriverLivePlayArgs enforces positive qtyDelta
+  // only; absolute qty, zero/negative qtyDelta, and owner moves are refused at execution.
+  'update_inventory_item',
   // table notes the DM jots during play
   'add_note',
 ]);
@@ -330,6 +349,37 @@ const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 
 /** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
 export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
+/** Per-call treasury grant cap (per denomination) for autonomous live play. */
+export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+
+/** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
+const DRIVER_LOOT_COMBAT_LOG_TOOLS = new Set(['adjust_treasury', 'add_inventory_item', 'update_inventory_item']);
+
+const TREASURY_DENOMS = ['pp', 'gp', 'ep', 'sp', 'cp'] as const;
+
+/** Human-readable combat-log detail for a successful driver loot/treasury grant. */
+export function formatDriverLootCombatLogDetail(toolName: string, args: Record<string, unknown>): string | null {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return 'Granted treasury';
+    const rec = delta as Record<string, unknown>;
+    const parts = TREASURY_DENOMS.filter((d) => typeof rec[d] === 'number' && (rec[d] as number) > 0).map(
+      (d) => `+${rec[d] as number} ${d}`,
+    );
+    return parts.length > 0 ? `Granted treasury (${parts.join(', ')})` : 'Granted treasury';
+  }
+  if (toolName === 'add_inventory_item') {
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'item';
+    const qty = typeof args.qty === 'number' && Number.isFinite(args.qty) ? args.qty : 1;
+    return `Granted item: ${name} ×${qty}`;
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : null;
+    if (qtyDelta != null && qtyDelta > 0) return `Increased party item quantity by +${qtyDelta}`;
+    return 'Updated party inventory';
+  }
+  return null;
+}
 
 /**
  * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
@@ -374,6 +424,9 @@ export function recordDriverGeneratedMap(session: AiDmSessionState, attachmentId
  *  - generate_map: bounded to {@link DRIVER_GENERATE_MAP_BUDGET_PER_TURN} per turn.
  *  - update_encounter: VTT fields only; mapAttachmentId must be null (detach/undo) or a
  *    session-generated map id.
+ *  - adjust_treasury: grant-only positive `delta` values, bounded per denomination.
+ *  - update_inventory_item: grant-only — positive qtyDelta only; absolute qty, zero/negative
+ *    qtyDelta, and owner-move fields (ownerType/characterId) are refused.
  */
 export function guardDriverLivePlayArgs(
   toolName: string,
@@ -411,6 +464,95 @@ export function guardDriverLivePlayArgs(
           code: 'forbidden_map_link',
           message:
             'The driver may only link mapAttachmentId to a map it generated this session, or pass null to detach.',
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'adjust_treasury') {
+    if ('set' in args && args.set !== undefined) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
+      };
+    }
+    if (!('delta' in args) || typeof args.delta !== 'object' || args.delta === null || Array.isArray(args.delta)) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide a treasury delta object with positive grant values.',
+      };
+    }
+    const delta = args.delta as Record<string, unknown>;
+    const entries = Object.entries(delta).filter(([, value]) => value !== undefined);
+    if (entries.length === 0) {
+      return {
+        ok: false,
+        code: 'forbidden_treasury_field',
+        message: 'The driver must provide at least one treasury denomination delta.',
+      };
+    }
+    for (const [denom, value] of entries) {
+      if (!['cp', 'sp', 'ep', 'gp', 'pp'].includes(denom)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: `Unsupported treasury denomination "${denom}".`,
+        };
+      }
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_field',
+          message: 'Treasury delta values must be integers.',
+        };
+      }
+      if (value <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_spend',
+          message: 'The driver may only grant treasury (positive deltas); spending/reducing treasury requires review.',
+        };
+      }
+      if (value > DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION) {
+        return {
+          ok: false,
+          code: 'forbidden_treasury_grant_limit',
+          message: `The driver may grant at most ${DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION} per treasury denomination in one call.`,
+        };
+      }
+    }
+    return { ok: true, args: { ...args } };
+  }
+
+  if (toolName === 'update_inventory_item') {
+    // Only grant-only quantity operations are allowed: positive qtyDelta (atomic increment).
+    // Any absolute qty write (even a positive value can reduce below current), zero/negative
+    // qtyDelta, and owner moves (ownerType/characterId) are all refused to preserve the
+    // no-destruction boundary.
+    if ('qty' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not set an absolute qty on update_inventory_item; use a positive qtyDelta to grant.',
+      };
+    }
+    if ('ownerType' in args || 'characterId' in args) {
+      return {
+        ok: false,
+        code: 'forbidden_inventory_field',
+        message: 'The driver may not move inventory items between owners (ownerType/characterId are not allowed).',
+      };
+    }
+    if ('qtyDelta' in args) {
+      const delta = args.qtyDelta;
+      if (typeof delta !== 'number' || !Number.isInteger(delta) || delta <= 0) {
+        return {
+          ok: false,
+          code: 'forbidden_inventory_reduction',
+          message: 'The driver may only increase item quantities via update_inventory_item (qtyDelta must be a positive integer).',
         };
       }
     }
@@ -649,6 +791,7 @@ export class AiDriverService {
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
+    private readonly encounters: EncountersService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -1262,8 +1405,15 @@ export class AiDriverService {
           error: { status: 403, code: 'forbidden_tool', message: `The AI DM seat is not permitted to call ${call.name}.` },
         });
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const blockedIdentity = await this.resolveToolResourceIdentity(
+          campaignId,
+          call.name,
+          call.arguments ?? {},
+          undefined,
+          true,
+        );
+        this.emitToolEvent(campaignId, call.name, true, false, blockedIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(blockedIdentity) });
         this.logger.warn(`Blocked out-of-scope tool ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
         await this.audit.log({
           actor,
@@ -1289,8 +1439,9 @@ export class AiDriverService {
           error: { status: 403, code: 'forbidden', message: `This AI DM seat is scoped to campaign ${campaignId}.` },
         });
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-        this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-        executed.push({ name: call.name, isError: true, proposed: false });
+        const crossIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+        this.emitToolEvent(campaignId, call.name, true, false, crossIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(crossIdentity) });
         toolErrored = true;
         continue;
       }
@@ -1304,8 +1455,9 @@ export class AiDriverService {
             error: { status: 403, code: liveGuard.code, message: liveGuard.message },
           });
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-          executed.push({ name: call.name, isError: true, proposed: false });
+          const liveIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
           this.logger.warn(`Blocked live-play guard on ${call.name} for ${actor} (triggered by ${triggeredBy.id}): ${liveGuard.code}`);
           await this.audit.log({
             actor,
@@ -1345,8 +1497,9 @@ export class AiDriverService {
             },
           });
           messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
-          this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: true, proposed: false });
-          executed.push({ name: call.name, isError: true, proposed: false });
+          const secretIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, true);
+          this.emitToolEvent(campaignId, call.name, true, false, secretIdentity);
+          executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(secretIdentity) });
           this.logger.warn(`Blocked secret-bearing read ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
           await this.audit.log({
             actor,
@@ -1425,8 +1578,15 @@ export class AiDriverService {
       const content =
         approvedSecret && !res.isError ? `${cleanedText}\n\n${DM_APPROVED_SECRET_REMINDER}` : cleanedText;
       messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content });
-      this.stream.emit({ type: 'tool', campaignId, name: call.name, isError: res.isError, proposed });
-      executed.push({ name: call.name, isError: res.isError, proposed });
+      const identity = await this.resolveToolResourceIdentity(
+        campaignId,
+        call.name,
+        args,
+        cleanedText,
+        res.isError,
+      );
+      this.emitToolEvent(campaignId, call.name, res.isError, proposed, identity);
+      executed.push({ name: call.name, isError: res.isError, proposed, ...pickExecutedIdentity(identity) });
 
       // (6) Audit every tool call the AI made (actor = the seat, records the triggering user).
       // #1072: include a redaction-safe args summary so the DM can inspect WHY the AI acted,
@@ -1441,13 +1601,74 @@ export class AiDriverService {
         campaignId,
         detail:
           `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''}` +
+          `${identity.encounterId !== undefined ? ` encounter=${identity.encounterId}` : ''}` +
           `${argsSummary ? ` args={${argsSummary}}` : ''}` +
           ` by ${triggeredBy.id}`,
       });
 
+      // (7) #1021 — persist successful loot/treasury grants on the active encounter's
+      // combat log so awards survive reload (toast alone is not enough). Best-effort:
+      // a log failure must not fail the grant that already committed.
+      if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        const detail = formatDriverLootCombatLogDetail(call.name, args);
+        if (detail) {
+          try {
+            await this.encounters.appendActiveEncounterNote(campaignId, detail);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to append loot combat-log note after ${call.name} for campaign ${campaignId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      }
+
       if (res.isError) toolErrored = true;
     }
     return { toolErrored };
+  }
+
+  /**
+   * Derive + authoritatively resolve encounter resource identity for a tool SSE/turn
+   * summary entry (#825). Args/result text yield a candidate id; the encounter row
+   * confirms campaign scope and `hidden` so role projection can strip prep ids.
+   */
+  private async resolveToolResourceIdentity(
+    campaignId: number,
+    toolName: string,
+    args: Record<string, unknown>,
+    resultText: string | undefined,
+    isError: boolean,
+  ): Promise<ToolResourceIdentity> {
+    const extracted = extractToolResourceIdentity(toolName, args, resultText, isError);
+    if (extracted.encounterId === undefined) return {};
+    try {
+      const row = await this.encounters.getRowOrThrow(extracted.encounterId);
+      if (row.campaignId !== campaignId) return {};
+      return { encounterId: row.id, encounterHidden: row.hidden };
+    } catch {
+      // Missing/inaccessible row — do not advertise an unverified id on the shared stream.
+      return {};
+    }
+  }
+
+  private emitToolEvent(
+    campaignId: number,
+    name: string,
+    isError: boolean,
+    proposed: boolean,
+    identity: ToolResourceIdentity,
+  ): void {
+    this.stream.emit({
+      type: 'tool',
+      campaignId,
+      name,
+      isError,
+      proposed,
+      ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
+      ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
+    });
   }
 
   // ===================================================================================
@@ -2034,6 +2255,34 @@ export class AiDriverService {
 
     const sessionZero = await safeRead(contextToolset, 'get_session_zero', { campaignId });
     if (sessionZero) parts.push(`## Session-zero charter (safety boundaries — MUST respect)\n${sessionZero}`);
+
+    // #1048: dynamic world-state context — inject the LIVE game state into the prompt so the
+    // AI can narrate coherently without needing to chain read tools every turn. All reads go
+    // through the player-scoped contextToolset so hidden entities / dmSecret / unexplored
+    // locations stay excluded (same secrecy guarantee as the campaign summary above).
+    //
+    // Each read is best-effort: a failing/empty read is simply omitted rather than aborting
+    // the turn. The system prompt is read fresh every turn, so world-state changes propagate
+    // to the next player interaction without a cache-invalidation step. Calendar / encounters /
+    // party are fetched in parallel; location/environment is derived from the summary payload
+    // (currentLocation + dangerLevel) to avoid a redundant tool round-trip.
+    const [calendarRaw, activeEncountersRaw, partyRaw] = await Promise.all([
+      safeRead(contextToolset, 'get_calendar', { campaignId }),
+      safeRead(contextToolset, 'list_encounters', { campaignId, status: 'running' }),
+      safeRead(contextToolset, 'get_party', { campaignId }),
+    ]);
+
+    const calendar = formatCalendarForPrompt(calendarRaw);
+    if (calendar) parts.push(`## In-world calendar / time\n${calendar}`);
+
+    const activeEncounters = formatListForPrompt(activeEncountersRaw);
+    if (activeEncounters) parts.push(`## Running encounters\n${activeEncounters}`);
+
+    const party = formatListForPrompt(partyRaw);
+    if (party) parts.push(`## Party status\n${party}`);
+
+    const locationEnv = formatLocationEnvironmentFromSummary(summary);
+    if (locationEnv) parts.push(`## Current location / environment\n${locationEnv}`);
 
     // This tool is model-specific by design: it ignores facilitator authority and
     // returns only rows with explicit participant AI consent. It is read fresh for

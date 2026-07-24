@@ -660,6 +660,7 @@ export default function LocationPage() {
                   entityType="location"
                   entityId={id}
                   currentSnapshot={{ body: location.body }}
+                  expectedUpdatedAt={location.updatedAt}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);

@@ -11,6 +11,7 @@ import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { GameIcon } from '../../components/GameIcon';
 import { initials } from '../../lib/avatarText';
 import { formatStandingChip, standingVariant } from './standing';
@@ -31,6 +32,8 @@ export default function FactionListPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newKind, setNewKind] = useState('');
+  // #754: quick-create defaults to DM-only.
+  const [audience, setAudience] = useState<AudienceValue>('dm');
   const [saving, setSaving] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -56,9 +59,15 @@ export default function FactionListPage() {
     setSaving(true);
     setCreateError(null);
     try {
-      const faction = await api.post<Faction>(`${API}/campaigns/${id}/factions`, { name: newName.trim(), kind: newKind.trim() });
+      const hidden = audienceToHidden(audience);
+      const faction = await api.post<Faction>(`${API}/campaigns/${id}/factions`, {
+        name: newName.trim(),
+        kind: newKind.trim(),
+        hidden,
+      });
       setNewName('');
       setNewKind('');
+      setAudience('dm');
       setCreating(false);
       await load();
       navigate(`/c/${id}/factions/${faction.id}`);
@@ -112,6 +121,7 @@ export default function FactionListPage() {
             {createError && <ErrorNote message={createError} />}
             <TextInput aria-label="Faction name" placeholder="Name (e.g. Thieves' Guild)" value={newName} onChange={(e) => setNewName(e.target.value)} maxLength={120} autoFocus />
             <TextInput aria-label="Faction kind" placeholder="Kind (e.g. guild, cult, government)" value={newKind} onChange={(e) => setNewKind(e.target.value)} maxLength={60} />
+            <AudienceField value={audience} onChange={setAudience} entityLabel="faction" name="faction-audience" />
             <div className="flex items-center justify-end gap-2">
               <Btn
                 ghost
@@ -120,6 +130,7 @@ export default function FactionListPage() {
                   setCreating(false);
                   setNewName('');
                   setNewKind('');
+                  setAudience('dm');
                   setCreateError(null);
                 }}
               >

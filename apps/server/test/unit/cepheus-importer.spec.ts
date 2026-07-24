@@ -96,6 +96,41 @@ describe('cepheus-importer — chapter → section entries', () => {
     expect(JSON.parse(weapons.dataJson!).heading).toBe('Weapons');
   });
 
+  it('keeps every slug unique even when MANY headings share the same slug base (no data loss)', () => {
+    // Regression for the reserveSlug dedupe bug: after MAX_SLUG_DEDUPE_ATTEMPTS (1000) bounded
+    // suffix tries, the old code appended the final candidate unconditionally, which could hand
+    // back a slug already in use — a duplicate the later same-slug de-dupe would silently drop.
+    // Here EVERY `##` heading is identical ("Dup"), so all blocks share the base
+    // `book1-dup--dup`. With well over 1000 such blocks we force the fallback path; every
+    // resulting slug must still be unique and every unique token must survive.
+    const chapter = { path: 'book1/dup.md', title: 'Dup', section: 'book1' as const };
+    const blockCount = 1100; // > MAX_SLUG_DEDUPE_ATTEMPTS, so the bounded loop is exhausted
+    // Each block is small enough to stay a single entry (well under the cap), but there are
+    // enough of them that the chapter as a whole is oversized and fans out one entry per `##`.
+    const filler = 'filler words to pad the block body while staying under the entry cap. ';
+    const blocks = Array.from({ length: blockCount }, (_, i) => `## Dup\n\n[UNIQTOK_${i}] ${filler}`);
+    const md = `# Dup\n\nChapter intro.\n\n${blocks.join('\n\n')}`;
+    expect(md.length).toBeGreaterThan(BODY_CAP); // precondition: oversized, so it fans out per heading
+
+    const entries = buildChapterEntries(chapter, md, { warn() {}, info() {} });
+
+    // One entry per identical-heading block (plus the chapter-intro lead).
+    expect(entries.length).toBeGreaterThanOrEqual(blockCount);
+    // The core guarantee: NO two entries share a slug, despite the shared base.
+    const slugs = entries.map((e) => e.slug);
+    expect(new Set(slugs).size).toBe(slugs.length);
+    // NO content lost: every unique token appears in exactly one entry body.
+    const perToken = new Array(blockCount).fill(0);
+    for (const e of entries) {
+      for (let i = 0; i < blockCount; i++) {
+        if (e.body.includes(`[UNIQTOK_${i}]`)) perToken[i] += 1;
+      }
+    }
+    for (let i = 0; i < blockCount; i++) {
+      expect(perToken[i]).toBe(1);
+    }
+  });
+
   it('returns no entries for an empty chapter body', () => {
     const chapter = { path: 'book1/skills.md', title: 'Skills', section: 'book1' as const };
     expect(buildChapterEntries(chapter, '   \n\n')).toEqual([]);

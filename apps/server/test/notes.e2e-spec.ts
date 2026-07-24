@@ -80,7 +80,7 @@ describe('notes privacy (e2e)', () => {
     const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/notes`).set(otherPlayer);
     expect(listRes.status).toBe(200);
     // otherPlayer should only see the party_shared note from this suite
-    for (const n of listRes.body) {
+    for (const n of listRes.body.items) {
       expect(n.visibility).toBe('party_shared');
     }
   });
@@ -122,7 +122,7 @@ describe('notes privacy (e2e)', () => {
 
     const listInbox = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
     expect(listInbox.status).toBe(200);
-    expect(listInbox.body.some((n: { id: number }) => n.id === inboxId)).toBe(true);
+    expect(listInbox.body.items.some((n: { id: number }) => n.id === inboxId)).toBe(true);
 
     // non-dm cannot list inbox
     const listForbidden = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(authorPlayer);
@@ -136,7 +136,7 @@ describe('notes privacy (e2e)', () => {
     expect(resolveRes.body.resolved).toBe(true);
 
     const listInboxAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
-    expect(listInboxAfter.body.some((n: { id: number }) => n.id === inboxId)).toBe(false);
+    expect(listInboxAfter.body.items.some((n: { id: number }) => n.id === inboxId)).toBe(false);
   });
 });
 
@@ -184,7 +184,7 @@ describe('notes search (e2e)', () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=relic`).set(authorPlayer);
     expect(res.status).toBe(200);
-    const bodies = res.body.map((n: { body: string }) => n.body).sort();
+    const bodies = res.body.items.map((n: { body: string }) => n.body).sort();
     // authorPlayer's own "relic" note + the party_shared one; NOT other player's private note
     expect(bodies).toEqual(['The RELIC glows near water', 'The one about the relic in the vault']);
   });
@@ -195,8 +195,8 @@ describe('notes search (e2e)', () => {
       .get(`/api/v1/campaigns/${campaignId}/notes?q=relic&mine=true`)
       .set(authorPlayer);
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0].body).toBe('The one about the relic in the vault');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.items[0].body).toBe('The one about the relic in the vault');
   });
 
   it('q never surfaces notes the caller cannot see', async () => {
@@ -204,7 +204,7 @@ describe('notes search (e2e)', () => {
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=secret`).set(authorPlayer);
     expect(res.status).toBe(200);
     // "Secret relic theory" is otherPlayer's private note — invisible to authorPlayer.
-    expect(res.body).toHaveLength(0);
+    expect(res.body.items).toHaveLength(0);
   });
 
   it('blank/whitespace q returns all visible notes (no-op filter)', async () => {
@@ -212,7 +212,8 @@ describe('notes search (e2e)', () => {
     const all = await request(server).get(`/api/v1/campaigns/${campaignId}/notes`).set(authorPlayer);
     const blank = await request(server).get(`/api/v1/campaigns/${campaignId}/notes?q=%20%20`).set(authorPlayer);
     expect(blank.status).toBe(200);
-    expect(blank.body).toHaveLength(all.body.length);
+    expect(blank.body.items).toHaveLength(all.body.items.length);
+    expect(blank.body.total).toBe(all.body.total);
   });
 });
 
@@ -261,7 +262,7 @@ describe('notes entityName resolution (e2e)', () => {
     expect(createRes.body.entityName).toBe('The Sunken Crypt');
 
     const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/notes`).set(authorPlayer);
-    const listed = listRes.body.find((n: { id: number }) => n.id === createRes.body.id);
+    const listed = listRes.body.items.find((n: { id: number }) => n.id === createRes.body.id);
     expect(listed.entityName).toBe('The Sunken Crypt');
 
     const getRes = await request(server).get(`/api/v1/notes/${createRes.body.id}`).set(authorPlayer);
@@ -414,17 +415,17 @@ describe('notes whisper — per-player targeted visibility (e2e)', () => {
     // List endpoint: target sees the whisper; the non-target player never receives it,
     // and any whisper it does surface must be one they're the recipient of.
     const targetList = await targetAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
-    expect(targetList.body.some((n: { id: number }) => n.id === noteId)).toBe(true);
+    expect(targetList.body.items.some((n: { id: number }) => n.id === noteId)).toBe(true);
 
     const otherList = await otherAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
-    expect(otherList.body.some((n: { id: number }) => n.id === noteId)).toBe(false);
-    for (const n of otherList.body as Array<{ visibility: string; recipientUserId: string | null }>) {
+    expect(otherList.body.items.some((n: { id: number }) => n.id === noteId)).toBe(false);
+    for (const n of otherList.body.items as Array<{ visibility: string; recipientUserId: string | null }>) {
       if (n.visibility === 'whisper') expect(n.recipientUserId).toBe(String(otherUserId));
     }
 
     // DM oversight: the whisper is in the DM's list too (it enters the campaign record).
     const dmList = await dmAgent.get(`/api/v1/campaigns/${campaignId}/notes`);
-    expect(dmList.body.some((n: { id: number }) => n.id === noteId)).toBe(true);
+    expect(dmList.body.items.some((n: { id: number }) => n.id === noteId)).toBe(true);
   });
 
   it('free-text search never leaks a whisper to a non-target', async () => {
@@ -434,10 +435,10 @@ describe('notes whisper — per-player targeted visibility (e2e)', () => {
 
     // The target can find their own whisper by body text…
     const targetHit = await targetAgent.get(`/api/v1/campaigns/${campaignId}/notes?q=sparrow`);
-    expect(targetHit.body.length).toBeGreaterThan(0);
+    expect(targetHit.body.items.length).toBeGreaterThan(0);
     // …but the non-target searching the same word gets nothing.
     const otherHit = await otherAgent.get(`/api/v1/campaigns/${campaignId}/notes?q=sparrow`);
-    expect(otherHit.body).toHaveLength(0);
+    expect(otherHit.body.items).toHaveLength(0);
   });
 
   it('a player may whisper another player; the DM still sees it, a third player does not', async () => {
@@ -583,12 +584,12 @@ describe('inbox resolved history (e2e)', () => {
     // gone from the open list
     const openList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
     expect(openList.status).toBe(200);
-    expect(openList.body.some((n: { id: number }) => n.id === inboxId)).toBe(false);
+    expect(openList.body.items.some((n: { id: number }) => n.id === inboxId)).toBe(false);
 
     // present in the resolved history, with note + entity link intact
     const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
     expect(resolvedList.status).toBe(200);
-    const item = resolvedList.body.find((n: { id: number }) => n.id === inboxId);
+    const item = resolvedList.body.items.find((n: { id: number }) => n.id === inboxId);
     expect(item).toBeDefined();
     expect(item.resolved).toBe(true);
     expect(item.resolvedNote).toBe('Became a quest');
@@ -609,7 +610,7 @@ describe('inbox resolved history (e2e)', () => {
     expect(resolveRes.body.entityId).toBeNull();
 
     const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
-    const item = resolvedList.body.find((n: { id: number }) => n.id === inboxId);
+    const item = resolvedList.body.items.find((n: { id: number }) => n.id === inboxId);
     expect(item).toBeDefined();
     expect(item.resolvedNote).toBe('Answered at the table');
     expect(item.entityType).toBeNull();
@@ -626,7 +627,7 @@ describe('inbox resolved history (e2e)', () => {
     await request(server).post(`/api/v1/notes/${secondId}/resolve`).set(dm).send({ resolvedNote: 'two' });
 
     const resolvedList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(dm);
-    const ids: number[] = resolvedList.body.map((n: { id: number }) => n.id);
+    const ids: number[] = resolvedList.body.items.map((n: { id: number }) => n.id);
     expect(ids.indexOf(secondId)).toBeLessThan(ids.indexOf(firstId));
   });
 
@@ -648,12 +649,201 @@ describe('inbox resolved history (e2e)', () => {
 
     // item is still open after the failed attempts
     const openList = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox`).set(dm);
-    expect(openList.body.some((n: { id: number }) => n.id === inboxId)).toBe(true);
+    expect(openList.body.items.some((n: { id: number }) => n.id === inboxId)).toBe(true);
   });
 
   it('non-dm cannot list the resolved history', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).get(`/api/v1/campaigns/${campaignId}/inbox?resolved=true`).set(authorPlayer);
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * Issue #608: bounded newest-first cursor pagination for notes + inbox.
+ * Default page is a NoteListPage (never an unbounded array); cursors are stable
+ * under mid-list inserts; search/visibility filters compose with paging.
+ */
+describe('notes pagination (e2e, issue #608)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  const server = () => ctx.app.getHttpServer();
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const res = await request(server()).post('/api/v1/campaigns').set(dm).send({ name: 'Pagination Campaign' });
+    campaignId = res.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('defaults to a bounded newest-first page with total/hasMore/nextCursor', async () => {
+    // Seed enough notes to cross the default page size.
+    for (let i = 0; i < 55; i++) {
+      const res = await request(server())
+        .post(`/api/v1/campaigns/${campaignId}/notes`)
+        .set(authorPlayer)
+        .send({ body: `Paged note ${i.toString().padStart(3, '0')}`, visibility: 'private' });
+      expect(res.status).toBe(201);
+    }
+
+    const page1 = await request(server()).get(`/api/v1/campaigns/${campaignId}/notes`).set(authorPlayer);
+    expect(page1.status).toBe(200);
+    expect(page1.body).toMatchObject({
+      limit: 50,
+      hasMore: true,
+    });
+    expect(page1.body.total).toBeGreaterThanOrEqual(55);
+    expect(page1.body.items).toHaveLength(50);
+    expect(typeof page1.body.nextCursor).toBe('string');
+    // Newest first: ids strictly descending.
+    const ids = page1.body.items.map((n: { id: number }) => n.id);
+    expect(ids).toEqual([...ids].sort((a: number, b: number) => b - a));
+
+    const page2 = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/notes`)
+      .query({ cursor: page1.body.nextCursor })
+      .set(authorPlayer);
+    expect(page2.status).toBe(200);
+    expect(page2.body.items.length).toBeGreaterThan(0);
+    // No overlap between pages.
+    const page2Ids = new Set(page2.body.items.map((n: { id: number }) => n.id));
+    for (const id of ids) expect(page2Ids.has(id)).toBe(false);
+    // Continuation stays strictly older than the last id of page 1.
+    expect(Math.max(...page2.body.items.map((n: { id: number }) => n.id))).toBeLessThan(ids[ids.length - 1]);
+  });
+
+  it('exact recent-five query returns the five newest notes', async () => {
+    const res = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/notes`)
+      .query({ limit: 5 })
+      .set(authorPlayer);
+    expect(res.status).toBe(200);
+    expect(res.body.limit).toBe(5);
+    expect(res.body.items).toHaveLength(5);
+    const ids = res.body.items.map((n: { id: number }) => n.id);
+    expect(ids).toEqual([...ids].sort((a: number, b: number) => b - a));
+  });
+
+  it('visibility + q filters remain correct under pagination', async () => {
+    await request(server())
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Unique relic filter token alpha', visibility: 'private' });
+    await request(server())
+      .post(`/api/v1/campaigns/${campaignId}/notes`)
+      .set(authorPlayer)
+      .send({ body: 'Unique relic filter token beta', visibility: 'party_shared' });
+
+    const filtered = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/notes`)
+      .query({ q: 'Unique relic filter token', visibility: 'private', limit: 10 })
+      .set(authorPlayer);
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.items.length).toBeGreaterThanOrEqual(1);
+    for (const n of filtered.body.items) {
+      expect(n.visibility).toBe('private');
+      expect(n.body.toLowerCase()).toContain('unique relic filter token');
+    }
+  });
+
+  it('rejects an invalid cursor with 400', async () => {
+    const res = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/notes`)
+      .query({ cursor: '%%%not-a-cursor%%%' })
+      .set(authorPlayer);
+    expect(res.status).toBe(400);
+  });
+
+  it('pages thousands of rows with stable cursors under interleaved inserts', async () => {
+    // Sequential seed — the Nest test HTTP server resets under large Promise.all bursts.
+    for (let i = 0; i < 1100; i++) {
+      const res = await request(server())
+        .post(`/api/v1/campaigns/${campaignId}/notes`)
+        .set(authorPlayer)
+        .send({ body: `Bulk note ${i}`, visibility: 'private' });
+      expect(res.status).toBe(201);
+    }
+
+    const seen = new Set<number>();
+    let cursor: string | undefined;
+    let pages = 0;
+    let interleavedInserts = 0;
+
+    for (;;) {
+      const res = await request(server())
+        .get(`/api/v1/campaigns/${campaignId}/notes`)
+        .query({ limit: 100, ...(cursor ? { cursor } : {}) })
+        .set(authorPlayer);
+      expect(res.status).toBe(200);
+      expect(res.body.items.length).toBeGreaterThan(0);
+      expect(res.body.items.length).toBeLessThanOrEqual(100);
+      for (const n of res.body.items as Array<{ id: number }>) {
+        expect(seen.has(n.id)).toBe(false);
+        seen.add(n.id);
+      }
+      pages += 1;
+
+      // Interleave inserts while paging. Newest-first keyset means inserts land
+      // ahead of the cursor (not on later pages) — they must not duplicate rows
+      // already returned or break the walk.
+      if (interleavedInserts < 10) {
+        const inserted = await request(server())
+          .post(`/api/v1/campaigns/${campaignId}/notes`)
+          .set(authorPlayer)
+          .send({ body: `Interleaved insert ${interleavedInserts}`, visibility: 'private' });
+        expect(inserted.status).toBe(201);
+        interleavedInserts += 1;
+      }
+
+      if (!res.body.hasMore) break;
+      expect(typeof res.body.nextCursor).toBe('string');
+      cursor = res.body.nextCursor as string;
+      // Safety valve — should finish well under this with limit 100.
+      expect(pages).toBeLessThan(40);
+    }
+
+    expect(interleavedInserts).toBe(10);
+    // Full walk of the pre-seeded thousands with no duplicate ids across pages.
+    expect(seen.size).toBeGreaterThanOrEqual(1100);
+    expect(pages).toBeGreaterThan(10);
+  }, 180_000);
+
+  it('inbox open + history pages are bounded newest-first', async () => {
+    for (let i = 0; i < 12; i++) {
+      const created = await request(server())
+        .post(`/api/v1/campaigns/${campaignId}/inbox`)
+        .set(authorPlayer)
+        .send({ body: `Inbox page item ${i}` });
+      expect(created.status).toBe(201);
+      if (i < 6) {
+        await request(server())
+          .post(`/api/v1/notes/${created.body.id}/resolve`)
+          .set(dm)
+          .send({ resolvedNote: `done ${i}` });
+      }
+    }
+
+    const open = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/inbox`)
+      .query({ limit: 5 })
+      .set(dm);
+    expect(open.status).toBe(200);
+    expect(open.body.limit).toBe(5);
+    expect(open.body.items).toHaveLength(5);
+    expect(open.body.hasMore).toBe(true);
+    const openIds = open.body.items.map((n: { id: number }) => n.id);
+    expect(openIds).toEqual([...openIds].sort((a: number, b: number) => b - a));
+
+    const history = await request(server())
+      .get(`/api/v1/campaigns/${campaignId}/inbox`)
+      .query({ resolved: true, limit: 5 })
+      .set(dm);
+    expect(history.status).toBe(200);
+    expect(history.body.items).toHaveLength(5);
+    expect(history.body.hasMore).toBe(true);
+    expect(typeof history.body.nextCursor).toBe('string');
   });
 });

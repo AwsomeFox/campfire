@@ -181,5 +181,26 @@ exports[`statblock presentation metadata (issue #763) snapshots native labels fo
       "short": "CR",
     },
   },
+  "starforged": {
+    "abilities": {
+      "full": "Abilities",
+    },
+    "actions": {
+      "full": "Actions",
+    },
+    "creatureType": {
+      "full": "Type",
+    },
+    "defense": {
+      "full": "Defense",
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP",
+    },
+    "rating": {
+      "full": "Rating",
+    },
+  },
 }
 `;

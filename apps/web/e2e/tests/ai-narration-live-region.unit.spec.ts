@@ -385,6 +385,26 @@ test.describe('AI narration announce-on-boundary behaviour (#1077)', () => {
     ).toBe('— Beigetreten mitten in der Session —');
   });
 
+  test('tool transcript entries announce as kind=tool with the humanized label (#1021)', () => {
+    const entries = fold({
+      type: 'tool',
+      campaignId: 1,
+      name: 'adjust_treasury',
+      isError: false,
+      proposed: false,
+      at,
+    });
+    const advanced = advanceNarrationLog(entries, silenceNarrationLogBaseline([]));
+    expect(advanced.additions).toEqual([{ id: expect.any(String), kind: 'tool', text: 'Adjust treasury' }]);
+    expect(formatNarrationLogAddition(advanced.additions[0]!)).toBe('Adjust treasury');
+    // formatSystem must not swallow tool text the way system/info does.
+    expect(
+      formatNarrationLogAddition(advanced.additions[0]!, {
+        formatSystem: () => 'Table updated',
+      }),
+    ).toBe('Adjust treasury');
+  });
+
   test('pendingStreamingNarrationChunk returns only the unannounced suffix', () => {
     const entries = stream({ type: 'turn.start', campaignId: 1, at });
     const withText = transcriptReducer(

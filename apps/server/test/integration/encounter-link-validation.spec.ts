@@ -45,7 +45,7 @@ describe('encounter link validation on create (real SQLite, issue #864)', () => 
     const audit = new AuditService(orm);
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
-    const revisions = new RevisionsService(orm, audit);
+    const revisions = new RevisionsService(orm);
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
     // Capture SSE emits without needing a live subscriber — reject paths must not emit.

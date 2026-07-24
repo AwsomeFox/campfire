@@ -50,7 +50,7 @@ test.describe('inline character cards — live sheet refresh', () => {
         await dm.post(`/api/v1/encounters/${e.id}/end`);
       }
       const enc = await (
-        await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Sheet sync drill' } })
+        await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Sheet sync drill', hidden: false } })
       ).json();
       encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/start`);

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { EntityRevision, RevisionEntityType } from '@campfire/schema';
-import { api, API } from '../lib/api';
+import { api, API, ApiError } from '../lib/api';
 import { Btn, Card, ErrorNote, Skeleton } from './ui';
 import { Markdown } from './Markdown';
 import { useDialog } from './useDialog';
@@ -218,6 +218,7 @@ function RevisionDialog({
                 })}
               </div>
             )}
+            {restoreError && <ErrorNote message={restoreError} />}
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Btn ghost ref={closeRef} onClick={onClose} className="w-full sm:w-auto">
                 Close preview
@@ -272,6 +273,7 @@ export function RevisionHistoryPanel({
   entityType,
   entityId,
   currentSnapshot,
+  expectedUpdatedAt,
   reloadNonce,
   onRestored,
   label = 'Edit history',
@@ -280,6 +282,12 @@ export function RevisionHistoryPanel({
   entityId: number;
   /** Current restorable fields, keyed the same way as the server snapshot. */
   currentSnapshot: Snapshot;
+  /**
+   * Entity `updatedAt` last loaded by the parent (issue #513). Sent as the restore
+   * optimistic-concurrency guard so an edit that landed after the dialog opened 409s
+   * instead of overwriting. Omit only when the parent has no version yet.
+   */
+  expectedUpdatedAt?: string | null;
   /** Bump to force a refetch after an out-of-band save (e.g. the owning editor saved). */
   reloadNonce?: number;
   /** Called after a successful restore so the parent can reload the live prose. */
@@ -337,9 +345,11 @@ export function RevisionHistoryPanel({
     setRestoring(true);
     setRestoreError(null);
     try {
-      const res = await api.post<{ revisions: EntityRevision[] }>(
-        `${API}/revisions/${entityType}/${entityId}/${selected.id}/restore`,
-      );
+      const path =
+        expectedUpdatedAt != null && expectedUpdatedAt !== ''
+          ? `${API}/revisions/${entityType}/${entityId}/${selected.id}/restore?expectedUpdatedAt=${encodeURIComponent(expectedUpdatedAt)}`
+          : `${API}/revisions/${entityType}/${entityId}/${selected.id}/restore`;
+      const res = await api.post<{ revisions: EntityRevision[] }>(path);
       if (res?.revisions) setRevisions(res.revisions);
       const restoredLabel = selected.authorshipKnown && selected.createdAt
         ? formatDate(selected.createdAt)
@@ -351,8 +361,19 @@ export function RevisionHistoryPanel({
       setRestoreError(null);
       setAnnouncement(`Restored the version from ${restoredLabel}. The previous content remains in revision history.`);
       onRestored?.();
-    } catch {
-      setRestoreError("Couldn't restore this version. Your current content was not changed. Try again.");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.code === 'STALE_WRITE') {
+        // Reload live prose + history, then return to inspect so the dialog matches the
+        // refreshed tip instead of staying on a stale confirm step.
+        onRestored?.();
+        setDialogStep('inspect');
+        setRestoreError(
+          'This was changed by someone else since you loaded it — restoring now would erase their edit. ' +
+            'The latest content was reloaded; review the history and try again if you still want to restore.',
+        );
+      } else {
+        setRestoreError("Couldn't restore this version. Your current content was not changed. Try again.");
+      }
     } finally {
       setRestoring(false);
     }

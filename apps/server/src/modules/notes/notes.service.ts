@@ -7,10 +7,17 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, lt, or, sql, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
-import { NoteCreate, NoteUpdate, InboxCreate, InboxResolve, EntityType } from '@campfire/schema';
-import type { Note, Role, PageParams } from '@campfire/schema';
+import {
+  NoteCreate,
+  NoteUpdate,
+  InboxCreate,
+  InboxResolve,
+  EntityType,
+  NOTES_LIST_MAX_LIMIT,
+} from '@campfire/schema';
+import type { Note, NoteListPage, NoteVisibility, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   auditLog,
@@ -29,13 +36,19 @@ import {
 } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
-import { applyPage } from '../../common/pagination';
 import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import {
+  clampNotesListLimit,
+  decodeNotesCursor,
+  encodeNotesCursor,
+  type NotesIdCursor,
+  type NotesUpdatedCursor,
+} from './notes-pagination';
 
 type NoteCreateInput = z.infer<typeof NoteCreate>;
 type NoteUpdateInput = z.infer<typeof NoteUpdate>;
@@ -331,14 +344,39 @@ export class NotesService {
     return names.get(row.recipientUserId) ?? null;
   }
 
+  /**
+   * List notes visible to `user` in a campaign (issue #608).
+   *
+   * Returns a bounded newest-first page (`items` / `total` / `hasMore` / `nextCursor`)
+   * — never an unbounded array. Default page size is 50; pass `cursor` from a previous
+   * `nextCursor` to continue. Filters (`entityType`/`entityId`/`mine`/`visibility`/`q`)
+   * apply before paging so search and chips stay correct under load-more.
+   */
   async listForCampaign(
     campaignId: number,
     user: RequestUser,
     role: Role,
-    filters: { entityType?: string; entityId?: number; mine?: boolean; q?: string; limit?: number; offset?: number },
-  ): Promise<Note[]> {
-    // Visibility is pushed into SQL (was a JS post-filter, issue #71) so limit/offset
-    // page over the ACTUALLY-visible rows: party_shared to everyone, own notes always,
+    filters: {
+      entityType?: string;
+      entityId?: number;
+      mine?: boolean;
+      visibility?: NoteVisibility;
+      q?: string;
+      limit?: number;
+      cursor?: string;
+      /**
+       * Internal-only: set false to skip the per-page COUNT(*) when a caller walks every
+       * page for the full item set (search/export) and never reads `total`. Not wired to
+       * any HTTP/MCP query param — `total` stays accurate for real paginated consumers.
+       */
+      countTotal?: boolean;
+    } = {},
+  ): Promise<NoteListPage> {
+    const limit = clampNotesListLimit(filters.limit);
+    const cursor = decodeNotesCursor(filters.cursor, 'id') as NotesIdCursor | undefined;
+
+    // Visibility is pushed into SQL (was a JS post-filter, issue #71) so the page
+    // covers the ACTUALLY-visible rows: party_shared to everyone, own notes always,
     // dm_shared additionally to a dm, and a whisper to its recipient (+ any dm). Mirrors
     // canSee() exactly — a non-target, non-dm member never even loads a whisper row.
     const visibility: SQL[] = [eq(notes.visibility, 'party_shared'), eq(notes.authorUserId, user.id)];
@@ -350,35 +388,106 @@ export class NotesService {
     if (filters.entityType) conds.push(eq(notes.entityType, filters.entityType));
     if (filters.entityId !== undefined) conds.push(eq(notes.entityId, filters.entityId));
     if (filters.mine) conds.push(eq(notes.authorUserId, user.id));
-    // Free-text search over note bodies (issue #65 / #624). Needle is folded with the
-    // shared helper (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and
-    // cannot see ß→ss / İ / accent case folds, so when `q` is set we fold-match in JS
-    // then apply limit/offset — paging stays correct (#71) without relying on SQL lower().
-    // Campaign-wide search (#64) loads notes without `q` and matches in memory the same way.
+    if (filters.visibility) conds.push(eq(notes.visibility, filters.visibility));
+
+    // Free-text search (issue #65 / #624). The needle is folded with the shared helper
+    // (NFKC + fixed-locale case fold). SQLite `lower()` is ASCII-only and cannot see
+    // ß→ss / İ / accent case folds, so `q` is fold-matched in JS.
+    //
+    // To keep the documented "filters apply before paging" guarantee correct at any size
+    // (#608), the scan walks the COMPLETE filtered set in keyset batches — not a truncated
+    // newest-N window that would make `total` wrong and strand older matches. Each row is
+    // matched against its body OR its anchored entity name (resolved per batch, bounded
+    // queries) so an entity-name search still surfaces its notes; only matched rows are kept.
+    const SEARCH_SCAN_BATCH = 1_000;
     const search = filters.q?.trim() ? foldForSearch(filters.q.trim()) : '';
 
-    const page: PageParams = { limit: filters.limit, offset: filters.offset };
-    let query = this.db
-      .select()
-      .from(notes)
-      .where(and(...conds))
-      .orderBy(asc(notes.id)) // deterministic order for stable paging (insertion order)
-      .$dynamic();
-
     let visible: Array<typeof notes.$inferSelect>;
+    let total: number;
+
     if (search) {
-      const all = await query;
-      const matched = all.filter((r) => foldedIncludes(r.body, search));
-      const offset = page.offset ?? 0;
-      visible = page.limit !== undefined ? matched.slice(offset, offset + page.limit) : matched.slice(offset);
+      const matched: Array<typeof notes.$inferSelect> = [];
+      let scanId: number | undefined;
+      for (;;) {
+        const batchConds = scanId !== undefined ? [...conds, lt(notes.id, scanId)] : conds;
+        const batch = await this.db
+          .select()
+          .from(notes)
+          .where(and(...batchConds))
+          .orderBy(desc(notes.id))
+          .limit(SEARCH_SCAN_BATCH);
+        if (batch.length === 0) break;
+        const batchNames = await this.resolveEntityNames(campaignId, batch);
+        for (const r of batch) {
+          const name = entityNameFor(r, batchNames);
+          if (foldedIncludes(r.body, search) || (name ? foldedIncludes(name, search) : false)) {
+            matched.push(r);
+          }
+        }
+        scanId = batch[batch.length - 1]!.id;
+        if (batch.length < SEARCH_SCAN_BATCH) break;
+      }
+      total = matched.length;
+      const afterCursor = cursor ? matched.filter((r) => r.id < cursor.i) : matched;
+      visible = afterCursor.slice(0, limit + 1);
     } else {
-      query = applyPage(query, page);
-      visible = await query;
+      const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
+      const pageConds = keyset ? [...conds, keyset] : conds;
+      const countQuery: Promise<{ value: number }[]> =
+        filters.countTotal === false
+          ? Promise.resolve([{ value: 0 }])
+          : this.db.select({ value: count() }).from(notes).where(and(...conds));
+      const [countRows, fetched] = await Promise.all([
+        countQuery,
+        this.db.select().from(notes).where(and(...pageConds)).orderBy(desc(notes.id)).limit(limit + 1),
+      ]);
+      total = countRows[0]?.value ?? 0;
+      visible = fetched;
     }
 
-    const names = await this.resolveEntityNames(campaignId, visible);
-    const recipientNames = await this.resolveRecipientNames(visible);
-    return visible.map((r) => toDomain(r, entityNameFor(r, names), this.recipientNameFor(r, recipientNames)));
+    const hasMore = visible.length > limit;
+    const pageRows = hasMore ? visible.slice(0, limit) : visible;
+    const names = await this.resolveEntityNames(campaignId, pageRows);
+    const recipientNames = await this.resolveRecipientNames(pageRows);
+    const items = pageRows.map((r) => toDomain(r, entityNameFor(r, names), this.recipientNameFor(r, recipientNames)));
+    const last = pageRows[pageRows.length - 1];
+    // Always present, `null` when exhausted — a stable REST/MCP contract (issue #608),
+    // rather than omitting the key (which JSON does for `undefined`).
+    const nextCursor =
+      hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : null;
+    return { items, total, hasMore, nextCursor, limit };
+  }
+
+  /**
+   * Walk every page of {@link listForCampaign} for internal full-set readers
+   * (campaign search #64, export). Not exposed over HTTP/MCP.
+   */
+  async listAllForCampaign(
+    campaignId: number,
+    user: RequestUser,
+    role: Role,
+    filters: {
+      entityType?: string;
+      entityId?: number;
+      mine?: boolean;
+      visibility?: NoteVisibility;
+      q?: string;
+    } = {},
+  ): Promise<Note[]> {
+    const out: Note[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.listForCampaign(campaignId, user, role, {
+        ...filters,
+        limit: NOTES_LIST_MAX_LIMIT,
+        cursor,
+        countTotal: false,
+      });
+      out.push(...page.items);
+      if (!page.hasMore || !page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    return out;
   }
 
   /**
@@ -701,22 +810,84 @@ export class NotesService {
   }
 
   /**
-   * dm; inbox items. Defaults to open (unresolved) items; pass `resolved: true`
-   * for the resolved history (newest resolution first).
+   * DM inbox items (issue #608). Defaults to open (unresolved) items; pass
+   * `resolved: true` for the resolved history.
+   *
+   * Returns a bounded newest-first page — never an unbounded array. Open items
+   * order by id desc; resolved history by updatedAt desc, id desc (stable under
+   * same-timestamp ties). Continue with `cursor` from a previous `nextCursor`.
    */
-  async listInbox(campaignId: number, resolved = false, page?: PageParams): Promise<Note[]> {
-    // Ordering pushed into SQL (was a JS sort) so limit/offset page correctly:
-    // resolved history is newest-resolution-first (updatedAt desc); the open list
-    // keeps insertion order (id asc). issue #71.
-    let q = this.db
-      .select()
-      .from(notes)
-      .where(and(eq(notes.campaignId, campaignId), eq(notes.kind, 'inbox'), eq(notes.resolved, resolved), notDeleted(notes.deletedAt)))
-      .orderBy(resolved ? desc(notes.updatedAt) : asc(notes.id))
-      .$dynamic();
-    q = applyPage(q, page);
-    const rows = await q;
-    return rows.map((r) => toDomain(r));
+  async listInbox(
+    campaignId: number,
+    resolved = false,
+    opts: { limit?: number; cursor?: string; countTotal?: boolean } = {},
+  ): Promise<NoteListPage> {
+    const limit = clampNotesListLimit(opts.limit);
+    // Internal full-walkers (scribe/recap) pass countTotal:false — they never read `total`,
+    // so skip the per-page COUNT(*) scan. Real paginated consumers keep an accurate total.
+    const countFor = (conds: SQL[]): Promise<{ value: number }[]> =>
+      opts.countTotal === false
+        ? Promise.resolve([{ value: 0 }])
+        : this.db.select({ value: count() }).from(notes).where(and(...conds));
+    const baseConds = [
+      eq(notes.campaignId, campaignId),
+      eq(notes.kind, 'inbox'),
+      eq(notes.resolved, resolved),
+      notDeleted(notes.deletedAt),
+    ];
+
+    if (resolved) {
+      const cursor = decodeNotesCursor(opts.cursor, 'updated') as NotesUpdatedCursor | undefined;
+      const keyset = cursor
+        ? sql`(${notes.updatedAt} < ${cursor.u} OR (${notes.updatedAt} = ${cursor.u} AND ${notes.id} < ${cursor.i}))`
+        : undefined;
+      const conds = keyset ? [...baseConds, keyset] : baseConds;
+      const [countRows, fetched] = await Promise.all([
+        countFor(baseConds),
+        this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.updatedAt), desc(notes.id)).limit(limit + 1),
+      ]);
+      const total = countRows[0]?.value ?? 0;
+      const hasMore = fetched.length > limit;
+      const rows = hasMore ? fetched.slice(0, limit) : fetched;
+      const last = rows[rows.length - 1];
+      const nextCursor =
+        hasMore && last ? encodeNotesCursor({ v: 1, m: 'updated', u: last.updatedAt, i: last.id }) : null;
+      return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
+    }
+
+    const cursor = decodeNotesCursor(opts.cursor, 'id') as NotesIdCursor | undefined;
+    const keyset = cursor ? lt(notes.id, cursor.i) : undefined;
+    const conds = keyset ? [...baseConds, keyset] : baseConds;
+    const [countRows, fetched] = await Promise.all([
+      countFor(baseConds),
+      this.db.select().from(notes).where(and(...conds)).orderBy(desc(notes.id)).limit(limit + 1),
+    ]);
+    const total = countRows[0]?.value ?? 0;
+    const hasMore = fetched.length > limit;
+    const rows = hasMore ? fetched.slice(0, limit) : fetched;
+    const last = rows[rows.length - 1];
+    const nextCursor = hasMore && last ? encodeNotesCursor({ v: 1, m: 'id', i: last.id }) : null;
+    return { items: rows.map((r) => toDomain(r)), total, hasMore, nextCursor, limit };
+  }
+
+  /**
+   * Walk every page of {@link listInbox} for internal full-set readers
+   * (scribe / draft_session_recap). Not exposed over HTTP/MCP.
+   */
+  async listAllInbox(campaignId: number, resolved = false): Promise<Note[]> {
+    const out: Note[] = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.listInbox(campaignId, resolved, {
+        limit: NOTES_LIST_MAX_LIMIT,
+        cursor,
+        countTotal: false,
+      });
+      out.push(...page.items);
+      if (!page.hasMore || !page.nextCursor) break;
+      cursor = page.nextCursor;
+    }
+    return out;
   }
 
   /**

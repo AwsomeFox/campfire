@@ -985,7 +985,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(upload.body.hidden).toBe(true);
       mapId = upload.body.id;
 
-      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Fight' });
+      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Fight', hidden: false });
       expect(enc.status).toBe(201);
       encounterId = enc.body.id;
 
@@ -1114,7 +1114,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(before.headers.etag).toBeTruthy();
       expect(before.headers['cache-control']).toContain('must-revalidate');
 
-      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Re-hidden Map' });
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Re-hidden Map', hidden: false });
       const publicEncounterId = created.body.id as number;
       const protect = await dmAgent.patch(`/api/v1/encounters/${publicEncounterId}`).send({
         mapAttachmentId: publicMapId,
@@ -1141,7 +1141,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
         .field('kind', 'map')
         .attach('file', battleMap, { filename: 'corrupt-fog.png', contentType: 'image/png' });
       const invalidMapId = upload.body.id as number;
-      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Malformed Fog' });
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Malformed Fog', hidden: false });
       const invalidEncounterId = created.body.id as number;
       expect(
         (
@@ -1200,7 +1200,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
         .field('kind', 'map')
         .attach('file', battleMap, { filename: 'token-redact-fog.png', contentType: 'image/png' });
       const tokenMapId = upload.body.id as number;
-      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Corrupt Fog Tokens' });
+      const created = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Corrupt Fog Tokens', hidden: false });
       const tokenEncounterId = created.body.id as number;
       expect(
         (
@@ -1254,7 +1254,7 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
       expect(asCampaign.body.mapAttachmentId).toBe(sharedId);
       expect((await playerAgent.get(`/api/v1/attachments/${sharedId}/file`)).status).toBe(200);
 
-      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fog on Region Map' });
+      const enc = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fog on Region Map', hidden: false });
       const encId = enc.body.id as number;
       const fogged = await dmAgent.patch(`/api/v1/encounters/${encId}`).send({
         mapAttachmentId: sharedId,
@@ -1282,8 +1282,8 @@ describe('attachments (e2e, real cookie sessions — non-member access)', () => 
         .attach('file', battleMap, { filename: 'shared-map.png', contentType: 'image/png' });
       const sharedMapId = upload.body.id as number;
 
-      const fogged = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Shared' });
-      const clear = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Clear Shared' });
+      const fogged = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Fogged Shared', hidden: false });
+      const clear = await dmAgent.post(`/api/v1/campaigns/${campaignId}/encounters`).send({ name: 'Clear Shared', hidden: false });
       const foggedId = fogged.body.id as number;
       const clearId = clear.body.id as number;
 

@@ -199,7 +199,7 @@ export class ScribeService implements OnApplicationBootstrap {
    * prose from it. `null` when there's nothing to recap.
    */
   async assembleSource(campaignId: number): Promise<RecapDraftSource | null> {
-    const resolvedInbox = await this.notes.listInbox(campaignId, true);
+    const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
     const encounters = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
     // Pull the combat-log event trail for encounters that were actually run (issue #1068).

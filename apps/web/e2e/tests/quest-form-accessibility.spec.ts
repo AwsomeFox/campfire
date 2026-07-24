@@ -7,10 +7,12 @@ import {
   noteVisibilityOptionLabel,
 } from '../../src/components/noteVisibilityA11y';
 import {
+  QUEST_AUDIENCE_DM_HELP,
+  QUEST_AUDIENCE_DM_LABEL,
+  QUEST_AUDIENCE_GROUP_LABEL,
+  QUEST_AUDIENCE_PLAYERS_LABEL,
   QUEST_BODY_LABEL,
   QUEST_GIVER_LABEL,
-  QUEST_HIDDEN_HELP,
-  QUEST_HIDDEN_LABEL,
   QUEST_NEW_FORM_PREFIX,
   QUEST_PARENT_LABEL,
   QUEST_REWARD_LABEL,
@@ -42,7 +44,9 @@ test.describe('quest authoring and note visibility accessibility (issue #452)', 
     const reward = form.getByRole('textbox', { name: QUEST_REWARD_LABEL });
     const giver = form.getByLabel(QUEST_GIVER_LABEL);
     const parent = form.getByLabel(QUEST_PARENT_LABEL);
-    const hidden = form.getByRole('checkbox', { name: QUEST_HIDDEN_LABEL });
+    const audience = form.getByRole('group', { name: QUEST_AUDIENCE_GROUP_LABEL });
+    const dmOnly = audience.getByRole('radio', { name: QUEST_AUDIENCE_DM_LABEL });
+    const visibleToPlayers = audience.getByRole('radio', { name: QUEST_AUDIENCE_PLAYERS_LABEL });
 
     await expect(title).toHaveAttribute('id', questFieldId(QUEST_NEW_FORM_PREFIX, 'title'));
     await expect(body).toHaveAttribute('id', questFieldId(QUEST_NEW_FORM_PREFIX, 'body'));
@@ -50,7 +54,9 @@ test.describe('quest authoring and note visibility accessibility (issue #452)', 
     await expect(giver).toHaveAttribute('id', questFieldId(QUEST_NEW_FORM_PREFIX, 'giver'));
     await expect(parent).toHaveAttribute('id', questFieldId(QUEST_NEW_FORM_PREFIX, 'parent'));
     await expect(title).toHaveAccessibleDescription(QUEST_TITLE_HELP);
-    await expect(hidden).toHaveAccessibleDescription(QUEST_HIDDEN_HELP);
+    await expect(dmOnly).toBeChecked();
+    await expect(visibleToPlayers).not.toBeChecked();
+    await expect(audience.getByText(QUEST_AUDIENCE_DM_HELP)).toBeVisible();
 
     await form.getByRole('button', { name: 'Create quest' }).click();
     await expect(title).toHaveAttribute('aria-invalid', 'true');

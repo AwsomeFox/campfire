@@ -56,10 +56,37 @@ Attach a map image to an encounter and the run-session screen becomes a lightwei
 templates, and fog of war — all shared live over SSE, so every player's device shows
 the same board.
 
+### Generate a map
+
+Don't have an image? Beside the upload dropzone the **Get a map** panel offers a
+**✨ Generate a map** button — Campfire's first-party procedural generator. It's offline,
+license-clean, and reproducible.
+
+1. Pick a **kind** (dungeon, cave, wilderness), **size**, **complexity**, and **theme**.
+   Under **Advanced** you can set (and copy) a **seed** — the same seed always produces the
+   exact same map.
+2. A large **preview** renders straightaway. This preview does **not** attach the map or
+   reveal anything, and **Regenerate** rerolls to a new candidate — previewing and
+   rerolling never leave stray maps behind or use your storage quota.
+3. **Use this map** attaches the map to the encounter and aligns the VTT grid/scale in one
+   step. **Download** saves the SVG; **Copy seed** keeps the recipe to reproduce it later.
+
+The generated map is saved **DM-only** (hidden from the player Handouts card) with an
+aligned grid, then Campfire walks you through the next steps: **check the grid**, **set
+fog**, and **place tokens**.
+
+!!! note "API vs. workflow"
+    The generator engine has shipped for a while as REST endpoints
+    (`POST /campaigns/:id/maps/generate`, `POST /encounters/:id/generate-map`) and the
+    `generate_map` MCP tool an AI DM can call. This wizard is the **human** workflow over
+    those same endpoints — the map you preview and the map you attach are byte-identical,
+    because "Use this map" replays the previewed seed through the same generate call.
+
 ### Add a map & move tokens
 
-As DM, drop an image on the **Battle map** panel (or click to choose one). Attaching a
-map makes it visible to the whole party. Each combatant becomes a **token**; drag one
+As DM, drop an image on the **Battle map** panel (or click to choose one), or **generate**
+one (above). Attaching a map makes it visible to the whole party. Each combatant becomes a
+**token**; drag one
 to move it. The DM can move any token, a **player only their own character's**. Click an
 **unplaced** token to drop it at the centre, then position it. Token **size**
 (tiny → gargantuan) scales the footprint — set it from a combatant's controls; it's a

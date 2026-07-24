@@ -17,6 +17,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -945,6 +946,7 @@ function SessionDetail({
           entityType="session"
           entityId={session.id}
           currentSnapshot={{ recap }}
+          expectedUpdatedAt={loadedUpdatedAt}
           label="Recap history"
           reloadNonce={historyNonce}
           onRestored={() => {
@@ -1189,7 +1191,7 @@ function SharePanel({ sessionId, campaignId, isDm }: { sessionId: number; campai
         ? null
         : new Date(Date.now() + Number(lifetime) * 24 * 60 * 60 * 1000).toISOString();
       const res = await api.post<SessionShareCreated>(`${API}/sessions/${sessionId}/shares`, { label, expiresAt });
-      setNewLink({ shareId: res.share.id, url: `${window.location.origin}/share/${res.token}` });
+      setNewLink({ shareId: res.share.id, url: `${window.location.origin}${joinPublicBase('/share/')}${res.token}` });
       setLabel('');
       setLifetime('7');
       setAcknowledgedNever(false);

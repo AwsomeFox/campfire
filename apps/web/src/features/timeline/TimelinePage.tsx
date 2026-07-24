@@ -25,6 +25,8 @@ import { api, API, ApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { Markdown } from '../../components/Markdown';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextInput, TextArea, DmPanel } from '../../components/ui';
+import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { PageTitle } from '../../components/PageTitle';
@@ -53,11 +55,13 @@ interface EventDraft {
   sortIndex: string;
   body: string;
   dmSecret: string;
+  /** Audience at edit time; create form uses a separate AudienceField defaulting to DM-only (#754). */
   hidden: boolean;
 }
 
 function emptyDraft(sortIndex = 0): EventDraft {
-  return { title: '', inWorldDate: '', era: '', sortIndex: String(sortIndex), body: '', dmSecret: '', hidden: false };
+  // #754: new timeline events default to DM-only prep.
+  return { title: '', inWorldDate: '', era: '', sortIndex: String(sortIndex), body: '', dmSecret: '', hidden: true };
 }
 
 function draftFrom(e: TimelineEvent): EventDraft {
@@ -109,11 +113,16 @@ export default function TimelinePage() {
   const [creating, setCreating] = useState(false);
   const [newDraft, setNewDraft] = useState<EventDraft>(emptyDraft());
   const [newFieldErrors, setNewFieldErrors] = useState<TimelineEventFieldErrors>({});
+  // #754: create-time audience defaults to DM-only (separate from draft.hidden for edit).
+  const [createAudience, setCreateAudience] = useState<AudienceValue>('dm');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState<EventDraft>(emptyDraft());
   const [editFieldErrors, setEditFieldErrors] = useState<TimelineEventFieldErrors>({});
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Selected timeline event for the Visible-to-players bar (#754). Set on public
+  // create and when the DM opens Edit on an event so existing visible events get the bar.
+  const [visibilityEventId, setVisibilityEventId] = useState<number | null>(null);
 
   const newEventTriggerRef = useRef<HTMLButtonElement>(null);
   const editTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
@@ -205,11 +214,14 @@ export default function TimelinePage() {
     setBusy(true);
     setActionError(null);
     try {
-      await api.post<TimelineEvent>(`${API}/campaigns/${cid}/timeline`, draftToPayload(newDraft));
+      const payload = { ...draftToPayload(newDraft), hidden: audienceToHidden(createAudience) };
+      const created = await api.post<TimelineEvent>(`${API}/campaigns/${cid}/timeline`, payload);
       setNewDraft(emptyDraft());
       setNewFieldErrors({});
+      setCreateAudience('dm');
       restoreNewEventFocusRef.current = true;
       setCreating(false);
+      if (!created.hidden) setVisibilityEventId(created.id);
       await load();
     } catch {
       setActionError("Couldn't create the event.");
@@ -312,6 +324,20 @@ export default function TimelinePage() {
       {actionError && <ErrorNote message={actionError} />}
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {isDm && visibilityEventId != null && (
+        <VisibleToPlayersBar
+          visible={!!events.find((e) => e.id === visibilityEventId && !e.hidden)}
+          onHide={async () => {
+            await api.patch<TimelineEvent>(`${API}/timeline/${visibilityEventId}`, { hidden: true });
+            await load();
+          }}
+          onUndoHide={async () => {
+            await api.patch<TimelineEvent>(`${API}/timeline/${visibilityEventId}`, { hidden: false });
+            await load();
+          }}
+        />
+      )}
+
       {/* Current in-world date */}
       {loading && !calendar ? (
         <div className="card elev-sm">
@@ -401,6 +427,8 @@ export default function TimelinePage() {
             setDraft={setNewDraft}
             fieldErrors={newFieldErrors}
             onClearFieldError={(field) => setNewFieldErrors((fe) => ({ ...fe, [field]: undefined }))}
+            createAudience={createAudience}
+            onCreateAudienceChange={setCreateAudience}
           />
           <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
             <Btn onClick={createEvent} disabled={busy}>Create event</Btn>
@@ -408,6 +436,7 @@ export default function TimelinePage() {
               ghost
               onClick={() => {
                 setNewFieldErrors({});
+                setCreateAudience('dm');
                 restoreNewEventFocusRef.current = true;
                 setCreating(false);
               }}
@@ -508,6 +537,13 @@ export default function TimelinePage() {
                         setEditDraft(draftFrom(e));
                         setEditFieldErrors({});
                         setEditingId(e.id);
+                        // #754: track the edited event for the "Visible to players"
+                        // bar so it isn't limited to events created this session.
+                        // Set unconditionally (even when hidden): the bar's `visible`
+                        // guard renders nothing while the event stays hidden, and
+                        // keeping it mounted means revealing the event mid-edit shows
+                        // the bar without needing a fresh create/edit cycle.
+                        setVisibilityEventId(e.id);
                         setActionError(null);
                       }}
                     >
@@ -530,13 +566,19 @@ function EventForm({
   setDraft,
   fieldErrors,
   onClearFieldError,
+  createAudience,
+  onCreateAudienceChange,
 }: {
   idPrefix: string;
   draft: EventDraft;
   setDraft: Dispatch<SetStateAction<EventDraft>>;
   fieldErrors: TimelineEventFieldErrors;
   onClearFieldError: (field: 'title' | 'order') => void;
+  /** When set, this is a create form — Audience replaces the hidden checkbox (#754). */
+  createAudience?: AudienceValue;
+  onCreateAudienceChange?: (next: AudienceValue) => void;
 }) {
+  const isCreate = createAudience != null && onCreateAudienceChange != null;
   const titleId = timelineFieldId(idPrefix, 'title');
   const titleErrorId = timelineFieldErrorId(idPrefix, 'title');
   const dateId = timelineFieldId(idPrefix, 'inWorldDate');
@@ -646,15 +688,24 @@ function EventForm({
       <p id={dmSecretHelpId} className="text-muted" style={{ margin: 0, fontSize: 11 }}>
         {TIMELINE_DM_SECRET_HELP}
       </p>
-      <label htmlFor={hiddenId} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-        <input
-          id={hiddenId}
-          type="checkbox"
-          checked={draft.hidden}
-          onChange={(e) => setDraft((d) => ({ ...d, hidden: e.target.checked }))}
+      {isCreate ? (
+        <AudienceField
+          value={createAudience}
+          onChange={onCreateAudienceChange}
+          entityLabel="timeline event"
+          name="timeline-audience"
         />
-        Hidden from players (prep)
-      </label>
+      ) : (
+        <label htmlFor={hiddenId} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          <input
+            id={hiddenId}
+            type="checkbox"
+            checked={draft.hidden}
+            onChange={(e) => setDraft((d) => ({ ...d, hidden: e.target.checked }))}
+          />
+          Hidden from players (prep)
+        </label>
+      )}
     </div>
   );
 }

@@ -13,8 +13,56 @@ import {
   cacheWillUpdateJson,
   matchApiImageCache,
   matchApiJsonCache,
+  matchIconShardCache,
   matchNetworkOnlyApi,
 } from "./src/lib/pwaCachePolicy";
+import { normalizeBasePrefix } from "./src/lib/public-base";
+
+/**
+ * Reverse-proxy subpath (issue #798).
+ *
+ * `PUBLIC_BASE` is the single setting that drives every path the SPA emits.
+ * The operator sets it once in their environment; the Docker build stamps it
+ * into the image via `ARG PUBLIC_BASE` (see Dockerfile), and `vite build`
+ * picks it up from `process.env` here. Root deployments (the default) leave
+ * it `/` — every path is then identical to the pre-#798 behavior.
+ *
+ * The proxy contract is "strip prefix, then forward": the reverse proxy
+ * terminates `https://host/campfire/...` and forwards to this origin AFTER
+ * stripping `/campfire`. So the SERVER's routing never sees the prefix; only
+ * the browser-facing assets/manifest/SW/router/API client need to know about
+ * it. See apps/web/src/lib/public-base.ts for the full contract.
+ */
+const PUBLIC_BASE = normalizeBasePrefix(process.env.PUBLIC_BASE);
+const HAS_SUBPATH = PUBLIC_BASE !== "/";
+// Vite's `base` must end with `/` (it's joined to asset paths like `assets/x.js`).
+// Our canonical prefix never ends with `/` (except the bare root), so append one.
+const viteBase = PUBLIC_BASE === "/" ? "/" : `${PUBLIC_BASE}/`;
+
+/**
+ * Build a regex that matches a path PREFIXED with the public base — used by
+ * the service-worker navigate-fallback deny list and runtime-caching guards so
+ * that, e.g. `/campfire/api/...` is correctly excluded from the SPA shell even
+ * though the SW itself is scoped to `/campfire/`. The patterns are anchored to
+ * the START of the pathname so a trailing path segment can't accidentally match
+ * (e.g. `/api` must not deny `/foo/api`).
+ *
+ * Root deployments get the historical `/^\/api/` style patterns unchanged.
+ */
+function denyPath(suffix: string): RegExp {
+  if (PUBLIC_BASE === "/") {
+    return new RegExp(`^${suffix}`);
+  }
+  const escaped = PUBLIC_BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tail = suffix.replace(/^\//, "");
+  return new RegExp(`^${escaped}/${tail}`);
+}
+
+/** Strip the public base from a dev-proxy path without regex metachar surprises. */
+function stripPublicBase(path: string): string {
+  if (path.startsWith(PUBLIC_BASE)) return path.slice(PUBLIC_BASE.length) || "/";
+  return path;
+}
 
 export default defineConfig({
   // Single-source the app version from apps/web/package.json (kept equal to the
@@ -23,32 +71,32 @@ export default defineConfig({
   // the real build version without an authed /admin/metrics call (issue #432).
   define: {
     __APP_VERSION__: JSON.stringify(pkgVersion),
+    // Stamp the normalized public base into the bundle as a string literal so
+    // the runtime API client / router / SW can read it without re-parsing env.
+    __PUBLIC_BASE__: JSON.stringify(PUBLIC_BASE),
   },
+  // Issue #798: deploy under a reverse-proxy subpath. Vite rewrites every
+  // emitted asset/chunk URL to `${base}assets/...` and rewrites index.html's
+  // script/style/link hrefs to the same prefix, so the browser fetches
+  // `/campfire/assets/...` instead of `/assets/...`. Root: base is `/`.
+  base: viteBase,
   // Issue #462: split the ~1MB main chunk into vendor + app chunks for better
   // caching and faster initial load on low-end mobile. The main chunk drops
   // below 500KB and vendors (react, router, etc.) cache separately.
   build: {
-    // Keep the warning visible — we want to stay under 500KB for the app chunk.
     chunkSizeWarningLimit: 500,
     rollupOptions: {
       output: {
-        // Function-based manualChunks is more robust — it gracefully handles
-        // packages that may or may not be in the dependency tree.
         manualChunks(id) {
-          // React core — the largest single vendor, stable across releases.
           if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/') || id.includes('node_modules/react-router-dom/')) {
             return 'vendor-react';
           }
-          // Markdown rendering — pulled in by Markdown component, heavy but stable.
           if (id.includes('node_modules/marked/') || id.includes('node_modules/dompurify/')) {
             return 'vendor-markdown';
           }
-          // Drag-and-drop — used by encounter initiative tracker.
           if (id.includes('node_modules/@dnd-kit/')) {
             return 'vendor-dnd';
           }
-          // date-fns is tree-shaken heavily; don't extract it or we break
-          // the build (it's not a single entry module).
         },
       },
     },
@@ -58,7 +106,6 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
-      // We register the SW ourselves from main.tsx via `virtual:pwa-register`.
       injectRegister: false,
       includeAssets: ["apple-touch-icon.png"],
       manifest: {
@@ -70,12 +117,13 @@ export default defineConfig({
         background_color: "#161826",
         display: "standalone",
         // Issue #797: do not lock the installed PWA to portrait — encounter maps,
-        // AI table, and player display need landscape on tablets/phones. `"any"`
-        // lets the OS/user rotate freely; there is no route-local Screen Orientation
-        // lock (any future lock must be user-initiated, reversible, and failure-tolerant).
+        // AI table, and player display need landscape on tablets/phones.
         orientation: "any",
-        scope: "/",
-        start_url: "/",
+        // Issue #798: scope/start_url must be prefixed so the install lives
+        // UNDER the public base — otherwise a subpath deployment's PWA scope
+        // would escape to the origin root. Root: unchanged (`/`).
+        scope: viteBase,
+        start_url: viteBase,
         icons: [
           { src: "pwa-192x192.png", sizes: "192x192", type: "image/png" },
           { src: "pwa-512x512.png", sizes: "512x512", type: "image/png" },
@@ -88,32 +136,25 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // Precache the app shell so it opens offline between sessions.
+        // Local terser minification of the generated SW can fail intermittently
+        // (workbox-build renderChunk); development mode skips minify. Production
+        // CI images omit this env var so the SW ships minified.
+        ...(process.env.VITE_PWA_DEV_SW === "1" ? { mode: "development" as const } : {}),
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff,woff2}"],
-        // Offline navigations fall back to the cached SPA shell...
         navigateFallback: "index.html",
-        // ...except backend routes, which must never resolve to the shell.
-        navigateFallbackDenylist: [/^\/api/, /^\/healthz/, /^\/readyz/],
+        navigateFallbackDenylist: [
+          denyPath("/api"),
+          denyPath("/healthz"),
+          denyPath("/readyz"),
+        ],
         cleanupOutdatedCaches: true,
-        // Issue #730: on activate, drop the legacy campfire-api bucket and scrub
-        // any sensitive URLs that an older worker may have cached.
         importScripts: ["sw-sensitive-purge.js"],
         runtimeCaching: [
           {
-            // Issues #879 / #730: SSE streams, backups, exports, admin/credential
-            // / capability-token surfaces, and unbounded attachment downloads must
-            // never enter Cache Storage. NetworkOnly means Workbox does not
-            // clone/consume the body for a cache write (critical for never-ending
-            // event streams) and offline archive requests fail at the network
-            // boundary instead of replaying a stale zip/JSON. Matchers live in
-            // lib/pwaCachePolicy.ts and are embedded into sw.js via
-            // Function.prototype.toString().
             urlPattern: matchNetworkOnlyApi,
             handler: "NetworkOnly",
           },
           {
-            // Bounded attachment thumbnails — separate quota from JSON so a
-            // burst of thumbs cannot evict campaign list/summary responses.
             urlPattern: matchApiImageCache,
             handler: "NetworkFirst",
             options: {
@@ -127,30 +168,6 @@ export default defineConfig({
             },
           },
           {
-            // Read-only JSON GETs (e.g. campaign summary) stay available offline
-            // by serving the last successful response from cache — but ONLY as a
-            // fallback. NetworkFirst here means: whenever the network can be
-            // reached the live response wins and the render reflects the API;
-            // the cache is consulted solely when the fetch genuinely fails
-            // (offline). We deliberately do NOT set `networkTimeoutSeconds`: a
-            // timeout would let a slow-but-online backend (e.g. a cold server
-            // right after a login/seed) fall back to a stale cached body and
-            // render it as truth for a full page view (issue #268). Waiting for
-            // the real response is the correct trade — fresh data over fast-but-wrong.
-            //
-            // The JSON bucket is global across sign-ins, so it is purged at every
-            // auth-identity change (see lib/swCache.ts) to keep one account's
-            // data from ever bleeding into another's.
-            //
-            // PROVEN-LIVE EXCLUSION (issue #579): `/me` and `/auth/*` are matched
-            // by the NetworkOnly rule above. cacheWillUpdateJson additionally
-            // rejects text/event-stream, Content-Disposition: attachment,
-            // Cache-Control: no-store, and bodies over API_JSON_MAX_BYTES so a
-            // mis-routed download can never poison the offline JSON set
-            // (issues #879 / #730). Attachment bytes and role/fog-specific VTT
-            // map renders stay out of this matcher too (secrecy leak #463).
-            // Issue #730 further allowlists only campaign/entity/rule JSON reads
-            // rather than matching every remaining API GET.
             urlPattern: matchApiJsonCache,
             handler: "NetworkFirst",
             options: {
@@ -164,21 +181,7 @@ export default defineConfig({
             },
           },
           {
-            // Full game-icons.net catalog body shards (issue #349) —
-            // apps/web/public/icons/shards/shard-NNN.json, fetched on demand by
-            // lib/icons/index.ts#resolveIcon for any non-curated icon. The shard
-            // URLs are NOT content-addressed: a shard's contents are position-in-
-            // sorted-slug-list ÷ 100, so regenerating the icon set reshuffles which
-            // icons land in shard-NNN.json while the URL stays the same. Under
-            // CacheFirst + a 365-day TTL an installed PWA would then serve a stale
-            // shard forever and silently show wrong/missing icons (issue #354).
-            // StaleWhileRevalidate keeps the offline-first, no-repeat-cost behaviour
-            // (cached shard served instantly) but revalidates in the background, so
-            // any future icon-set regeneration self-heals on the next view.
-            // Deliberately NOT in globPatterns above, so a fresh install/update
-            // never downloads the ~6 MB of shards up front — only icons a user
-            // actually views ever get fetched.
-            urlPattern: ({ url }) => url.pathname.startsWith("/icons/shards/"),
+            urlPattern: matchIconShardCache,
             handler: "StaleWhileRevalidate",
             options: {
               cacheName: "campfire-icon-shards",
@@ -189,7 +192,6 @@ export default defineConfig({
         ],
       },
       devOptions: {
-        // Keep the SW out of `vite dev` to avoid caching surprises while coding.
         enabled: false,
       },
     }),
@@ -197,17 +199,20 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/api": {
+      [HAS_SUBPATH ? `${PUBLIC_BASE}/api` : "/api"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
-      "/healthz": {
+      [HAS_SUBPATH ? `${PUBLIC_BASE}/healthz` : "/healthz"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
-      "/readyz": {
+      [HAS_SUBPATH ? `${PUBLIC_BASE}/readyz` : "/readyz"]: {
         target: "http://localhost:8080",
         changeOrigin: true,
+        rewrite: HAS_SUBPATH ? stripPublicBase : undefined,
       },
     },
   },

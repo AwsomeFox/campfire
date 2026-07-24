@@ -118,7 +118,7 @@ export class SearchService {
       this.locations.listForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
       this.sessions.listForCampaign(campaignId, role),
-      this.notes.listForCampaign(campaignId, user, role, {}),
+      this.notes.listAllForCampaign(campaignId, user, role, {}),
       this.timeline.listEvents(campaignId, role),
       this.inventory.listForCampaign(campaignId),
       this.comments.listForCampaign(campaignId, role),

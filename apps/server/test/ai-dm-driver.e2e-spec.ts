@@ -35,6 +35,11 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     await h.enableExperimental();
   });
 
+  beforeEach(() => {
+    // tool_error / budget_exhausted stops leave unconsumed scripted turns — isolate each case.
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -73,6 +78,124 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     expect(res.body.tokensUsed).toBe(300);
     expect(res.body.budgetRemaining).toBe(100_000 - 300);
     expect(res.body.seat.tokensUsed).toBe(300);
+  });
+
+  it('#1021 driver: executes loot/treasury tools end-to-end and persists aftermath state', async () => {
+    const campaignId = await h.createCampaign('Driver Loot Aftermath');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    // Start a live encounter so successful grants append to the combat log (#1021).
+    const hero = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Loot Hero', stats: { DEX: 14 }, hpCurrent: 12, hpMax: 12 });
+    expect(hero.status).toBe(201);
+    const enc = await request(h.server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loot Fight' });
+    expect(enc.status).toBe(201);
+    const encounterId = enc.body.id as number;
+    const rolled = await request(h.server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(rolled.status).toBe(201);
+    const start = await request(h.server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(start.status).toBe(201);
+    expect(start.body.status).toBe('running');
+
+    h.script(
+      {
+        text: 'You gather rewards from the fallen foe.',
+        toolCalls: [
+          { id: 'loot_gold', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: 25 } } },
+          {
+            id: 'loot_item',
+            name: 'add_inventory_item',
+            arguments: { campaignId, ownerType: 'party', name: 'Potion of Healing', qty: 1 },
+          },
+        ],
+      },
+      { text: 'The spoils are secured.' },
+    );
+
+    const grant = await h.sendMessage(campaignId, { input: 'Resolve loot.' });
+    expect(grant.status).toBe(201);
+    expect(grant.body.toolCalls).toEqual([
+      { name: 'adjust_treasury', isError: false, proposed: false },
+      { name: 'add_inventory_item', isError: false, proposed: false },
+    ]);
+
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body.gp).toBe(25);
+
+    type InvItem = { id: number; name: string; ownerType: string; qty: number };
+    const inventory = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(inventory.status).toBe(200);
+    const potion = (inventory.body as InvItem[]).find((i) => i.name === 'Potion of Healing');
+    expect(potion).toEqual(expect.objectContaining({ name: 'Potion of Healing', ownerType: 'party', qty: 1 }));
+    if (!potion) throw new Error('expected Potion of Healing in party inventory');
+
+    h.script(
+      {
+        text: 'You split the stack for the party.',
+        toolCalls: [
+          {
+            id: 'loot_update',
+            name: 'update_inventory_item',
+            arguments: { itemId: potion.id, qtyDelta: 2, idempotencyKey: 'driver-loot-topup-1' },
+          },
+        ],
+      },
+      { text: 'The potion bundle is topped up.' },
+    );
+
+    const update = await h.sendMessage(campaignId, { input: 'Add two more potions.' });
+    expect(update.status).toBe(201);
+    expect(update.body.toolCalls).toEqual([{ name: 'update_inventory_item', isError: false, proposed: false }]);
+
+    const inventoryAfter = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+    expect(inventoryAfter.status).toBe(200);
+    const potionAfter = (inventoryAfter.body as InvItem[]).find((i) => i.id === potion.id);
+    expect(potionAfter).toBeDefined();
+    if (!potionAfter) throw new Error('expected topped-up potion in party inventory');
+    expect(potionAfter.qty).toBe(3);
+
+    // Grants appear in the persistent encounter combat log (not only a transient toast).
+    const events = await request(h.server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    expect(events.status).toBe(200);
+    const notes = (events.body as Array<{ type: string; actor: string | null; detail: string }>).filter(
+      (e) => e.type === 'note' && e.actor === 'AI DM',
+    );
+    expect(notes.some((e) => e.detail.includes('Granted treasury') && e.detail.includes('+25 gp'))).toBe(true);
+    expect(notes.some((e) => e.detail.includes('Granted item: Potion of Healing'))).toBe(true);
+    expect(notes.some((e) => e.detail.includes('Increased party item quantity by +2'))).toBe(true);
+
+    const audit = await h.getAudit(campaignId);
+    const driverToolEvents = audit.body.filter((e: { action: string }) => e.action === 'ai-dm.driver.tool');
+    const seatActor = `ai-dm-seat:${campaignId}`;
+    expect(driverToolEvents).toHaveLength(3);
+    expect(driverToolEvents.every((e: { actor: string }) => e.actor === seatActor)).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'treasury.update')).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'item.create')).toBe(true);
+    expect(audit.body.some((e: { action: string }) => e.action === 'item.update')).toBe(true);
+  });
+
+  it('#1021 driver: blocks treasury spends at execution time', async () => {
+    const campaignId = await h.createCampaign('Driver Treasury Guard');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script(
+      {
+        text: 'I will adjust party funds.',
+        toolCalls: [{ id: 'spend_gold', name: 'adjust_treasury', arguments: { campaignId, delta: { gp: -5 } } }],
+      },
+      { text: 'I cannot reduce treasury directly without review.' },
+    );
+
+    const res = await h.sendMessage(campaignId, { input: 'Spend 5 gp from party funds.' });
+    expect(res.status).toBe(201);
+    expect(res.body.toolCalls).toEqual([{ name: 'adjust_treasury', isError: true, proposed: false }]);
+
+    const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
+    expect(treasury.status).toBe(200);
+    expect(treasury.body).toMatchObject({ cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 });
   });
 
   it('#312 driver: multi-step tool loop terminates on a stop turn and audits each step', async () => {
@@ -196,6 +319,10 @@ describe('ai-dm driver runtime — gating + access (e2e)', () => {
     campaignId = await h.createCampaign('Driver Gating');
   });
 
+  beforeEach(() => {
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -255,6 +382,9 @@ describe('ai-dm driver — mode-switch session teardown (#1071)', () => {
   beforeAll(async () => {
     h = await createAiEvalHarness({ model: 'driver-teardown-model' });
     await h.enableExperimental();
+  });
+  beforeEach(() => {
+    h.resetMock();
   });
   afterAll(async () => {
     await h.close();
@@ -409,6 +539,10 @@ describe('ai-dm driver — provider streaming failure unlocks composers (#1046)'
     await h.enableExperimental();
   });
 
+  beforeEach(() => {
+    h.resetMock();
+  });
+
   afterAll(async () => {
     await h.close();
   });
@@ -476,6 +610,10 @@ describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
     await h.enableExperimental();
     // Shrink the watchdog so the e2e does not wait the production 30s.
     setDriverStreamIdleTimeoutMsForTests(50);
+  });
+
+  beforeEach(() => {
+    h.resetMock();
   });
 
   afterAll(async () => {

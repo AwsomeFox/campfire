@@ -18,6 +18,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
@@ -323,6 +324,20 @@ export default function NpcPage() {
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
+      {isDm && (
+        <VisibleToPlayersBar
+          visible={!npc.hidden}
+          onHide={async () => {
+            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+            setNpc(updated);
+          }}
+          onUndoHide={async () => {
+            const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+            setNpc(updated);
+          }}
+        />
+      )}
+
       {proposeDone && !editing && (
         <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
@@ -395,6 +410,7 @@ export default function NpcPage() {
                   entityType="npc"
                   entityId={id}
                   currentSnapshot={{ body: npc.body }}
+                  expectedUpdatedAt={npc.updatedAt}
                   reloadNonce={historyNonce}
                   onRestored={() => {
                     setHistoryNonce((n) => n + 1);

@@ -25,6 +25,8 @@ import type {
   EncounterEvent,
   EncounterWithCombatants,
   FogState,
+  GenerateMapParams,
+  GeneratedMapResult,
   GridType,
   HpResyncDirection,
   HpSyncConflict,
@@ -57,10 +59,11 @@ import { ImageUpload, MapUploadButton, encounterMapUrl, uploadAttachment } from 
 import { GetAMapPanel } from '../../components/GetAMapPanel';
 import { NotFoundState } from '../../components/NotFoundState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
-import { resolveToolActivity } from '../ai-dm/toolActivity';
+import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
 import {
   advanceCombatLogAnnouncements,
@@ -525,25 +528,33 @@ export default function RunSessionPage() {
   // only adds the "why did this just change" signal for whoever's watching.
   const liveActivity = useAiDmLiveActivity();
   const [aiToasts, setAiToasts] = useState<Array<{ key: number; chip: ReturnType<typeof resolveToolActivity>; at: number }>>([]);
-  const lastToastAtRef = useRef<number | null>(null);
+  const lastToastEventRef = useRef<string | null>(null);
   const toastSeq = useRef(0);
   useEffect(() => {
     const activity = liveActivity.encounterActivity;
-    if (!activity || activity.at === lastToastAtRef.current) return;
-    lastToastAtRef.current = activity.at;
-    // Re-resolve with THIS encounter's id so the chip can deep-link back here — tool
-    // events are id-only (#338), so the generic app-level resolution above couldn't
-    // know it. `lastToolEvent` is set in the same reducer step as `encounterActivity`
-    // whenever it was an encounter-resource event, so it's the same underlying event.
-    const chip =
-      liveActivity.lastToolEvent && Number.isFinite(eid)
-        ? resolveToolActivity(liveActivity.lastToolEvent, { campaignId: cid, encounterId: eid })
-        : activity.chip;
+    if (!activity) return;
+    // Issue #825: only attribute encounter-class AI activity to THIS open fight when the
+    // server-derived encounterId matches. Cross-encounter tools (prep B while watching A)
+    // must not toast here as if they hit A. Party/campaign tools still surface here.
+    const event = activity.event;
+    const activityEncounterId = activity.encounterId ?? event.encounterId;
+    if (toolResource(event.name) === 'encounter') {
+      if (activityEncounterId === undefined || !Number.isFinite(eid) || activityEncounterId !== eid) {
+        return;
+      }
+    }
+    const eventKey = `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}:${event.encounterId ?? ''}`;
+    if (eventKey === lastToastEventRef.current) return;
+    lastToastEventRef.current = eventKey;
+    const chip = resolveToolActivity(event, { campaignId: cid, encounterId: eid });
     const key = ++toastSeq.current;
     setAiToasts((prev) => [...prev, { key, chip, at: activity.at }].slice(-3));
+    announce(`The AI DM ${chip.label.toLowerCase()}.`, {
+      dedupeKey: `ai-dm-tool:${cid}:${eventKey}`,
+    });
     const timer = setTimeout(() => setAiToasts((prev) => prev.filter((t) => t.key !== key)), 8000);
     return () => clearTimeout(timer);
-  }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid]);
+  }, [liveActivity.encounterActivity, cid, eid, announce]);
 
   // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.
@@ -653,9 +664,14 @@ export default function RunSessionPage() {
     setActionError(null);
     refetchEncounter();
   }, [refetchEncounter]);
-  // Drop action errors when navigating to a different encounter.
+  // Post-attach map-setup guidance (issue #409) — shown right after a generated map is
+  // attached, dismissible, and reset when navigating to a different encounter.
+  const [showMapGuidance, setShowMapGuidance] = useState(false);
+  // Drop action errors (and any lingering map-attach guidance) when navigating to a
+  // different encounter.
   useEffect(() => {
     setActionError(null);
+    setShowMapGuidance(false);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -1027,6 +1043,23 @@ export default function RunSessionPage() {
   // Shared AoE templates (issue #238) — replace the whole template list (DM only, server-enforced).
   const setEncounterAoe = useCallback((aoe: AoeTemplate[]) => queueEncounterPatch({ aoe }), [queueEncounterPatch]);
 
+  // First-party map-generation wizard (issue #409). "Use this map" replays the previewed
+  // seed through POST /encounters/:id/generate-map, which ATOMICALLY generates the map,
+  // saves it hidden (never on the player Handouts card), sets it as the encounter's battle
+  // map, and aligns the VTT grid/scale — all server-side, in one call. We then refresh and
+  // guide the DM through grid check → fog → token placement. (`showMapGuidance` state is
+  // declared earlier, beside the other transient encounter UI state.)
+  const generateAndAttachMap = useCallback(
+    async (params: GenerateMapParams) => {
+      setActionError(null);
+      await api.post<GeneratedMapResult>(`${API}/encounters/${eid}/generate-map`, params);
+      invalidateEncounter(queryClient, eid);
+      setShowMapGuidance(true);
+      announce('Generated map attached. Check the grid, set fog, then place tokens.');
+    },
+    [eid, queryClient, announce],
+  );
+
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
@@ -1145,6 +1178,20 @@ export default function RunSessionPage() {
         />
       )}
 
+      {isDm && (
+        <VisibleToPlayersBar
+          visible={!encounter.hidden}
+          onHide={async () => {
+            await api.patch(`${API}/encounters/${eid}`, { hidden: true });
+            invalidateEncounter(queryClient, eid);
+          }}
+          onUndoHide={async () => {
+            await api.patch(`${API}/encounters/${eid}`, { hidden: false });
+            invalidateEncounter(queryClient, eid);
+          }}
+        />
+      )}
+
       <div className="flex items-center gap-2.5 flex-wrap">
         <h1 className="text-2xl font-extrabold text-white m-0 min-w-0 break-words">{encounter.name}</h1>
         <span className={STATUS_TAG_CLASS[encounter.status]}>
@@ -1260,9 +1307,8 @@ export default function RunSessionPage() {
         )}
       </div>
 
-      {/* Transient "the AI just acted on this encounter" row(s) (#344 point 2) — sourced
-          from `tool` stream events filtered to the encounter resource; the combatant/HP/
-          turn data itself already arrived via the encounter SSE refetch above. */}
+      {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
+          events touching encounter or party state (including loot/treasury grants). */}
       {aiToasts.length > 0 && (
         <div className="flex flex-col gap-1" style={{ paddingLeft: 2 }}>
           {aiToasts.map((toast) => (
@@ -1337,6 +1383,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
+          onGenerateMap={isDm ? generateAndAttachMap : undefined}
+          showGuidance={showMapGuidance}
+          onDismissGuidance={() => setShowMapGuidance(false)}
           onPing={sendPing}
           pings={pings}
           onError={surfaceActionError}
@@ -1705,6 +1754,9 @@ function BattleMap({
   onSetGrid,
   onSetFog,
   onSetAoe,
+  onGenerateMap,
+  showGuidance,
+  onDismissGuidance,
   onPing,
   pings,
   onError,
@@ -1720,6 +1772,11 @@ function BattleMap({
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
+  /** Generate + attach a map by replaying its previewed seed (issue #409). DM-only. */
+  onGenerateMap?: (params: GenerateMapParams) => Promise<void>;
+  /** After a generated map is attached, walk the DM through grid/fog/token placement. */
+  showGuidance?: boolean;
+  onDismissGuidance?: () => void;
   onPing: (x: number, y: number) => void;
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
@@ -2161,13 +2218,53 @@ function BattleMap({
             onError={onError}
           />
           {/* Open, license-clean map sources (issue #303): generator links + One Page Dungeon
-              (CC-BY-SA) import. Complements the built-in procedural generator (#306). */}
-          <GetAMapPanel campaignId={campaignId} onImported={(id) => onSetMap(id)} onError={onError} />
+              (CC-BY-SA) import — plus the built-in procedural generator wizard (#306/#409),
+              wired to the atomic generate-and-attach path via onGenerate. */}
+          <GetAMapPanel
+            campaignId={campaignId}
+            onImported={(id) => onSetMap(id)}
+            onGenerate={onGenerateMap}
+            onError={onError}
+          />
         </div>
       )}
 
       {mapImageUrl && (
         <>
+          {/* Post-attach guidance (issue #409): after a generated map is attached it stays
+              hidden (DM-only) with an aligned grid — walk the DM through the next steps so
+              the map is table-ready. Dismissible; only shown right after an attach. */}
+          {isDm && showGuidance && (
+            <div
+              data-testid="map-attach-guidance"
+              className="cf-inset"
+              style={{ margin: '8px 14px 0', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                <span className="card-kicker">Map attached — next steps</span>
+                <span style={{ flex: 1 }} />
+                <button
+                  type="button"
+                  aria-label="Dismiss map setup guidance"
+                  onClick={onDismissGuidance}
+                  className="btn btn-ghost"
+                  style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+                The map is saved DM-only (hidden from the player Handouts card) with its grid
+                pre-aligned. To make it table-ready:
+              </p>
+              <ol className="text-muted" style={{ fontSize: 12, margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <li><strong>Check the grid</strong> — open <em>Grid &amp; fog</em> to confirm cell size and scale.</li>
+                <li><strong>Set fog</strong> — toggle <em>Fog</em> on, then use the <em>Reveal</em> tool to show only what the party can see.</li>
+                <li><strong>Place tokens</strong> — drop each combatant from the <em>Unplaced</em> tray onto the map.</li>
+              </ol>
+            </div>
+          )}
+
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
           <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}

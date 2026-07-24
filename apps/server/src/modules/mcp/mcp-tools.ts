@@ -76,6 +76,8 @@ import {
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
+import { fromJsonText } from '../../common/json';
+import { resolveSavingThrow } from './saving-throw-math';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -825,7 +827,7 @@ export class McpToolsService {
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        const resolvedInbox = await this.notes.listInbox(campaignId as number, true);
+        const resolvedInbox = await this.notes.listAllInbox(campaignId as number, true);
         const encounterList = await this.encounters.listForCampaign(campaignId as number);
         const encounters = await Promise.all(
           encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
@@ -885,19 +887,19 @@ export class McpToolsService {
       'read_inbox',
       'DM only: list player inbox items for a campaign — messages players sent up via submit_inbox_item. ' +
         'Defaults to open (unresolved) items; pass resolved=true for the resolved history (newest first), ' +
-        'including any entity link each item was resolved into.',
+        'including any entity link each item was resolved into. Returns a page ' +
+        '({ items, total, hasMore, nextCursor (null when exhausted), limit }) — default 50, max 200; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
         resolved: z.boolean().optional().describe('If true, list resolved items instead of open ones'),
-        limit: LimitArg(200, 200),
-        offset: OffsetArg,
+        limit: LimitArg(200, 50),
+        cursor: z.string().max(512).optional().describe('Opaque cursor from a previous page\'s nextCursor'),
       },
-      async ({ campaignId, resolved, limit, offset }) => {
+      async ({ campaignId, resolved, limit, cursor }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
-        // issue #71: limit/offset pushed into SQL.
         return this.notes.listInbox(campaignId as number, (resolved as boolean | undefined) ?? false, {
           limit: limit as number | undefined,
-          offset: offset as number | undefined,
+          cursor: cursor as string | undefined,
         });
       },
     );
@@ -1117,24 +1119,29 @@ export class McpToolsService {
       'list_notes',
       'List notes visible to the caller in a campaign: private (author only), dm_shared (author+dm), party_shared ' +
         '(everyone), or whisper (author + the single targeted recipient + any dm). A whisper the caller is not the ' +
-        'target of is never returned. Optionally filter by the entity the note is linked to, or to just the caller\'s own notes.',
+        'target of is never returned. Optionally filter by the entity the note is linked to, visibility, or to just ' +
+        'the caller\'s own notes. Returns a page ({ items, total, hasMore, nextCursor (null when exhausted), limit }) — default 50, max 200; ' +
+        'newest first; continue with cursor (issue #608).',
       {
         campaignId: CampaignIdArg,
         entityType: EntityType.optional().describe('Filter to notes linked to this entity type'),
         entityId: Id.optional().describe('Filter to notes linked to this entity id (use with entityType)'),
         mine: z.boolean().optional().describe('If true, only the caller\'s own notes'),
-        limit: LimitArg(200, 200),
-        offset: OffsetArg,
+        visibility: NoteVisibility.optional().describe('Filter to a single visibility'),
+        q: z.string().max(200).optional().describe('Free-text search over each note body and its anchored entity name (Unicode-aware case folding), applied across the full visible set before paging'),
+        limit: LimitArg(200, 50),
+        cursor: z.string().max(512).optional().describe('Opaque cursor from a previous page\'s nextCursor'),
       },
-      async ({ campaignId, entityType, entityId, mine, limit, offset }) => {
+      async ({ campaignId, entityType, entityId, mine, visibility, q, limit, cursor }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        // issue #71: limit/offset pushed into SQL (was rows.slice() after a full read).
         return this.notes.listForCampaign(campaignId as number, user, role, {
           entityType: entityType as string | undefined,
           entityId: entityId as number | undefined,
           mine: mine as boolean | undefined,
+          visibility: visibility as z.infer<typeof NoteVisibility> | undefined,
+          q: q as string | undefined,
           limit: limit as number | undefined,
-          offset: offset as number | undefined,
+          cursor: cursor as string | undefined,
         });
       },
     );
@@ -1475,8 +1482,8 @@ export class McpToolsService {
       'create_quest',
       'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
         'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, a ' +
-        'dmSecret field (DM-only text, stripped from non-DM reads), and a hidden flag (true = excluded WHOLESALE ' +
-        'from every non-DM read until the DM reveals it by setting hidden=false — for prepping future content).',
+        'dmSecret field (DM-only text, stripped from non-DM reads), and a hidden flag (omit/true = DM-only prep by ' +
+        'default, issue #754 — excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
       { campaignId: CampaignIdArg, propose: ProposeArg, ...QuestCreate.shape },
       async ({ campaignId, propose, ...fields }) => {
         const validated = QuestCreate.parse(fields);
@@ -1778,7 +1785,10 @@ export class McpToolsService {
         'name (case-insensitive, same campaign) is updated in place — a true upsert, so an identical re-run is ' +
         'idempotent rather than duplicating. A genuinely new name creates a new NPC. DM; with propose:true any ' +
         'member may submit a proposal instead. Supports a dmSecret field (DM-only text, stripped from non-DM reads), ' +
-        'an optional locationId, and a hidden flag (true = excluded WHOLESALE from every non-DM read until revealed via hidden=false).',
+        'an optional locationId, and a hidden flag whose omission depends on the branch: on CREATE, omit (or true) ' +
+        'means DM-only prep by default (issue #754) — excluded WHOLESALE from every non-DM read until revealed via ' +
+        'hidden=false; on UPDATE (an existing name or npcId), omitting hidden leaves the NPC’s current visibility ' +
+        'unchanged, since only supplied fields are applied — pass hidden explicitly to change it.',
       {
         campaignId: CampaignIdArg,
         npcId: Id.optional().describe('Existing NPC id (update); omit to create'),
@@ -2779,23 +2789,94 @@ export class McpToolsService {
       },
     );
 
+    // #1040: saving_throw — resolve a save server-side using the character's real stats
+    // + proficiency, comparing against a DC in one verifiable call. Uses the 5e formula
+    // (d20 + abilityMod + (proficient ? profBonus(level) : 0)); if the campaign uses a
+    // different rule system with different modifier math, a subsequent PR can route the
+    // computation through the rule-system adapter. Members may call this; the roll is
+    // audited and persisted to the shared dice log so every member sees it.
+    this.writeTool(
+      server,
+      user,
+      'saving_throw',
+      'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
+        'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((max(1, level) - 1) / 4); ' +
+        'level is clamped to at least 1) when the ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares ' +
+        'to the DC. Returns ' +
+        '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
+        'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
+      {
+        characterId: Id.describe('Character id — from list_members or get_party'),
+        ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
+        dc: z.number().int().min(1).max(100).describe('Difficulty class to beat (1–100; homebrew/high-level effects may exceed typical PHB DCs)'),
+        advantage: z.enum(['normal', 'advantage', 'disadvantage']).optional().describe('Roll mode; defaults to normal'),
+      },
+      async ({ characterId, ability, dc, advantage }) => {
+        const character = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireMember(user, character.campaignId, { write: true });
+        const abilityKey = ability as 'STR' | 'DEX' | 'CON' | 'INT' | 'WIS' | 'CHA';
+        const dcNum = dc as number;
+        const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
+
+        const resolved = resolveSavingThrow({
+          stats: fromJsonText<Record<string, number>>(character.stats, {}),
+          saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
+          ability: abilityKey,
+          level: character.level,
+        });
+        const { score, abilityMod, proficient, profBonus, bonus } = resolved;
+
+        const diceExpr =
+          rollMode === 'advantage'
+            ? `2d20kh1${bonus >= 0 ? `+${bonus}` : bonus}`
+            : rollMode === 'disadvantage'
+              ? `2d20kl1${bonus >= 0 ? `+${bonus}` : bonus}`
+              : `1d20${bonus >= 0 ? `+${bonus}` : bonus}`;
+
+        const label = `${abilityKey} save (${proficient ? 'proficient' : 'unproficient'})`;
+        const persisted = await this.encounters.rollDiceForCampaign(
+          character.campaignId,
+          { expr: diceExpr, label, dc: dcNum },
+          user,
+          role,
+        );
+
+        return {
+          characterId: character.id,
+          ability: abilityKey,
+          dc: dcNum,
+          mode: rollMode,
+          score,
+          abilityMod,
+          profBonus,
+          proficient,
+          bonus,
+          total: persisted.total,
+          rolls: persisted.rolls,
+          success: persisted.total >= dcNum,
+          diceLogId: persisted.id,
+        };
+      },
+    );
+
     this.writeTool(
       server,
       user,
       'create_encounter',
       'DM only: create a new encounter (combat tracker) in a campaign, status=preparing. Auto-adds every campaign ' +
         'character as a combatant with hp from their sheet and initiative modifier from DEX. Optionally attach it to a ' +
-        'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Pass hidden=true to keep ' +
-        'the encounter DM-only prep (issue #262): its roster + difficulty stay invisible to players until you reveal it. ' +
-        'To build a balanced fight automatically, call generate_encounter first (non-mutating preview), then create it ' +
-        'here (hidden:true) and add_combatant once per suggested line with its ruleEntryId + count.',
+        'location/quest/session (issue #126) so combat is tied to where/why/when it happened. Omitting hidden ' +
+        'defaults to DM-only prep (issue #754/#262): its roster + difficulty stay invisible to players until you reveal it. ' +
+        'Pass hidden=false only for an intentional public create. To build a balanced fight automatically, call ' +
+        'generate_encounter first (non-mutating preview), then create it here and add_combatant once per suggested line ' +
+        'with its ruleEntryId + count.',
       {
         campaignId: CampaignIdArg,
         name: z.string().min(1).max(120).describe('Encounter name'),
         locationId: Id.optional().describe('Attach the encounter to a location (where it happens)'),
         questId: Id.optional().describe('Attach the encounter to a quest (why it happens)'),
         sessionId: Id.optional().describe('Attach the encounter to a session (when it happens)'),
-        hidden: z.boolean().optional().describe('Create the encounter hidden (DM-only prep) — its roster + difficulty are withheld from players until revealed (issue #262)'),
+        hidden: z.boolean().optional().describe('Omit or true = DM-only prep (default, #754); false = visible to players immediately'),
       },
       async ({ campaignId, name, locationId, questId, sessionId, hidden }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
@@ -3060,18 +3141,25 @@ export class McpToolsService {
       server,
       user,
       'draft_content',
-      'EXPERIMENTAL co-DM (issue #313): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for the human ' +
-        'DM to review — nothing is written to canon directly. DM role required, the server-wide experimental flag must ' +
-        'be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, location, beat ' +
-        '(a story beat/next objective, filed as a quest), recap (filed as a session), encounter (reuses generate_encounter ' +
-        '#304), or map (reuses generate_map #306). `count` (npc/location/beat only) drafts several at once. Returns the ' +
+      'EXPERIMENTAL co-DM (issue #313 / #1056): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for ' +
+        'the human DM to review — nothing is written to canon directly. DM role required, the server-wide experimental ' +
+        'flag must be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, ' +
+        'location, beat (a story beat/next objective, filed as a quest), quest (a full quest draft), faction, recap ' +
+        '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
+        '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map | quest | faction'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | quest | faction | recap | encounter | map'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
-        count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
+        count: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .optional()
+          .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
       },
       async ({ campaignId, target, prompt, count }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
