@@ -71,6 +71,7 @@ import {
   CoDmDraftTarget,
   CampaignDmRepair,
   ParticipantSupportPreferenceUpsert,
+  RevisionEntityType,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
@@ -105,6 +106,7 @@ import { SchedulingService } from '../sessions/scheduling.service';
 import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
+import { RevisionsService } from '../revisions/revisions.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -357,6 +359,7 @@ export class McpToolsService {
     private readonly scheduling: SchedulingService,
     private readonly scribe: ScribeService,
     private readonly users: UsersService,
+    private readonly revisions: RevisionsService,
   ) {}
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
@@ -826,9 +829,20 @@ export class McpToolsService {
         const encounters = await Promise.all(
           encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
         );
+        // Combat-log events only matter for encounters that were run (issue #1068). DM-only tool
+        // → full DM view (no role redaction).
+        const foughtEncounterIds = new Set(
+          encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
+        );
+        const events = await Promise.all(
+          encounterList.map((e) =>
+            foughtEncounterIds.has(e.id) ? this.encounters.listEvents(e.id) : Promise.resolve([]),
+          ),
+        );
+        const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
         const source = {
           resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants })),
+          encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
         };
         return {
           template: RECAP_TEMPLATE,
@@ -922,11 +936,11 @@ export class McpToolsService {
           ),
       },
       async ({ query, type, pack }) => {
-        const results = await this.rules.search(
+        const page = await this.rules.search(
           { q: query as string, type: type as z.infer<typeof RuleEntryType> | undefined, pack: pack as string | undefined },
           5,
         );
-        return results.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
+        return page.items.map((entry, i) => (i === 0 ? entry : { ...entry, body: undefined }));
       },
     );
 
@@ -977,6 +991,26 @@ export class McpToolsService {
         // non-DM the same way get_encounter's roster is (issue #262).
         const role = await this.access.requireMember(user, row.campaignId);
         return this.encounters.getDifficulty(encounterId as number, role);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_encounter_events',
+      'List an encounter\'s persistent combat log (issue #1068) — the round-by-round event trail of damage, healing, ' +
+        'conditions, deaths, rolls, turns, notes, and DM overrides/corrections, in chronological (insertion) order. ' +
+        'Read-only; persists NOTHING. Use this to reconstruct "what happened during the fight" for a recap or to ' +
+        'narrate consequences — it complements get_encounter (current roster/turn state) with the historical trail. ' +
+        'Role-aware (issue #869): a hidden encounter 404s for non-DM callers, and for non-DMs actor/target names (and ' +
+        'name-bearing detail) are projected from CURRENT hidden-NPC visibility so a later reveal unmasks historical ' +
+        'lines; stable actorId/targetId are always returned.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        // Same role-scoped redaction the REST GET :id/events route applies (issue #869):
+        // a non-DM PAT must not read raw names/detail on a hidden encounter or hidden NPCs.
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.encounters.listEvents(encounterId as number, role);
       },
     );
 
@@ -1346,6 +1380,30 @@ export class McpToolsService {
       async ({ campaignId }) => {
         await this.access.requireMember(user, campaignId as number);
         return this.scheduling.getFeed(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'list_entity_revisions',
+      'List the prose revision history for an entity (session, quest, npc, location, faction, or note). ' +
+        'Returns prior snapshots ordered newest-first. DM role required for world-building entities; note revisions ' +
+        'are accessible to any campaign member who can read the note.',
+      {
+        entityType: RevisionEntityType.describe('Entity type (session|quest|npc|location|faction|note)'),
+        entityId: Id.describe('Entity id'),
+      },
+      async ({ entityType, entityId }) => {
+        const type = RevisionEntityType.parse(entityType);
+        if (type === 'note') {
+          // Note access mirrors the web path: any member who can read the note sees its history.
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          await this.access.requireMember(user, campaignId);
+        } else {
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          await this.access.requireRole(user, campaignId, 'dm');
+        }
+        return this.revisions.listForEntity(type, entityId as number);
       },
     );
   }
@@ -1784,6 +1842,24 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.npcs.remove(npcId as number, user, role);
         return { ok: true, npcId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_npc_disposition',
+      'Set an NPC\'s disposition (attitude/stance toward the party) in real time (DM). The live social-scene counterpart ' +
+        'to upsert_npc\'s disposition field — allows the AI DM to flip attitude during dialogue without a full NPC proposal. ' +
+        'Disposition is free text (max 40 chars); typical values: friendly, neutral, hostile, suspicious, terrified.',
+      {
+        npcId: Id.describe('NPC id'),
+        disposition: z.string().max(40).describe('New disposition label (e.g. "hostile", "friendly", "suspicious")'),
+      },
+      async ({ npcId, disposition }) => {
+        const row = await this.npcs.getRowOrThrow(npcId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.npcs.update(npcId as number, { disposition: disposition as string }, user, role);
       },
     );
 
@@ -2994,7 +3070,7 @@ export class McpToolsService {
         'budget; the proposer is recorded as the AI seat + model.',
       {
         campaignId: CampaignIdArg,
-        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map'),
+        target: CoDmDraftTarget.describe('What to draft: npc | location | beat | recap | encounter | map | quest | faction'),
         prompt: z.string().min(1).max(20_000).describe('Free-text brief, e.g. "a shady fence tied to the thieves guild"'),
         count: z.number().int().min(1).max(10).optional().describe('How many to draft (npc/location/beat only)'),
       },
@@ -3033,9 +3109,11 @@ export class McpToolsService {
       server,
       user,
       'update_inventory_item',
-      'player: update an inventory item\'s name/qty/notes, or MOVE it by changing ownerType/characterId. Character ' +
+      'player: update an inventory item\'s name/notes/icon, or MOVE it by changing ownerType/characterId. Character ' +
         'items are writable only by the dm or the owning player; a move requires write access at both source and ' +
-        'destination.',
+        'destination. Quantity (issue #782): prefer qtyDelta + idempotencyKey for atomic +/-; an absolute qty ' +
+        'requires expectedUpdatedAt (CAS) and 409s on conflict. A qtyDelta that would take quantity negative 400s ' +
+        'without changing the item.',
       { itemId: Id.describe('Inventory item id — from list_inventory'), ...InventoryItemUpdate.shape },
       async ({ itemId, ...fields }) => {
         const row = await this.inventory.getRowOrThrow(itemId as number);
@@ -3240,8 +3318,8 @@ export class McpToolsService {
       server,
       user,
       'update_scheduled_session',
-      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Moving `scheduledAt` re-notifies ' +
-        'the party.',
+      'DM only: update a scheduled game night\'s time/duration/title/location/notes. Meaningful changes ' +
+        '(time, duration, venue/VTT link, notes) re-notify the party once with a field summary; title-only edits stay silent.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions'), ...ScheduledSessionUpdate.shape },
       async ({ scheduleId, ...fields }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
@@ -3255,7 +3333,7 @@ export class McpToolsService {
       server,
       user,
       'cancel_scheduled_session',
-      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs.',
+      'DM only: cancel a scheduled game night, deleting the schedule entry and all its RSVPs, and notifying the party.',
       { scheduleId: Id.describe('Scheduled session id — from list_scheduled_sessions') },
       async ({ scheduleId }) => {
         const row = await this.scheduling.getRowOrThrow(scheduleId as number);
@@ -3302,6 +3380,52 @@ export class McpToolsService {
       async ({ campaignId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.scheduling.disableFeed(campaignId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'import_ddb_character',
+      'Import a character from a public D&D Beyond sheet (player+ role). Pass either `ddbId` (numeric character id) ' +
+        'or `url` (a D&D Beyond character/share link). The sheet must be set to Public on DDB. Only available for D&D 5e ' +
+        'campaigns — rejected with 400 for other rule systems.',
+      {
+        campaignId: CampaignIdArg,
+        ddbId: z.string().max(200).optional().describe('D&D Beyond numeric character id'),
+        url: z.string().max(500).optional().describe('D&D Beyond character URL (e.g. https://www.dndbeyond.com/characters/12345678)'),
+      },
+      async ({ campaignId, ddbId, url }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'player');
+        return this.characters.importFromDdb(campaignId as number, { ddbId: ddbId as string | undefined, url: url as string | undefined }, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_entity_revision',
+      'Restore a prior prose revision for an entity (session, quest, npc, location, faction, or note). The current ' +
+        'content is captured as a new revision first, so the restore is itself reversible. DM role required for ' +
+        'world-building entities; notes require authorship.',
+      {
+        entityType: RevisionEntityType.describe('Entity type (session|quest|npc|location|faction|note)'),
+        entityId: Id.describe('Entity id'),
+        revisionId: Id.describe('Revision id to restore'),
+      },
+      async ({ entityType, entityId, revisionId }) => {
+        const type = RevisionEntityType.parse(entityType);
+        if (type === 'note') {
+          const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+          const role = await this.access.requireMember(user, campaignId);
+          // Note restore is author-only (mirrors the web path).
+          const noteAccess = await this.revisions.loadNoteAccess(entityId as number);
+          if (noteAccess?.authorUserId !== user.id) throw new ForbiddenException('Only the author may restore this note');
+          return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
+        }
+        const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
+        const role = await this.access.requireRole(user, campaignId, 'dm');
+        return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
       },
     );
   }

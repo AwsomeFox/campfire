@@ -102,7 +102,10 @@ describe('inventory & treasury (e2e)', () => {
         .post(`/api/v1/campaigns/${campaignId}/inventory`)
         .set(dm)
         .send({ name: 'Torch', qty: 5 });
-      const patchRes = await request(server).patch(`/api/v1/inventory/${itemRes.body.id}`).set(viewer).send({ qty: 4 });
+      const patchRes = await request(server)
+        .patch(`/api/v1/inventory/${itemRes.body.id}`)
+        .set(viewer)
+        .send({ qtyDelta: -1, idempotencyKey: 'viewer-forbidden-qty' });
       expect(patchRes.status).toBe(403);
       const deleteRes = await request(server).delete(`/api/v1/inventory/${itemRes.body.id}`).set(viewer);
       expect(deleteRes.status).toBe(403);
@@ -172,7 +175,10 @@ describe('inventory & treasury (e2e)', () => {
       const itemId = createRes.body.id;
 
       // another player may not touch it
-      const otherPatch = await request(server).patch(`/api/v1/inventory/${itemId}`).set(otherPlayer).send({ qty: 2 });
+      const otherPatch = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(otherPlayer)
+        .send({ qtyDelta: 1, idempotencyKey: 'other-forbidden-qty' });
       expect(otherPatch.status).toBe(403);
       const otherDelete = await request(server).delete(`/api/v1/inventory/${itemId}`).set(otherPlayer);
       expect(otherDelete.status).toBe(403);
@@ -183,8 +189,11 @@ describe('inventory & treasury (e2e)', () => {
         .send({ name: 'Planted evidence', ownerType: 'character', characterId: ownCharacterId });
       expect(otherCreate.status).toBe(403);
 
-      // the owner may
-      const ownerPatch = await request(server).patch(`/api/v1/inventory/${itemId}`).set(player).send({ qty: 2, notes: 'Well-worn.' });
+      // the owner may (atomic delta + notes)
+      const ownerPatch = await request(server)
+        .patch(`/api/v1/inventory/${itemId}`)
+        .set(player)
+        .send({ qtyDelta: 1, idempotencyKey: 'owner-qty-notes', notes: 'Well-worn.' });
       expect(ownerPatch.status).toBe(200);
       expect(ownerPatch.body.qty).toBe(2);
       expect(ownerPatch.body.notes).toBe('Well-worn.');
@@ -253,7 +262,10 @@ describe('inventory & treasury (e2e)', () => {
         .send({ name: 'Iron rations', qty: 10, notes: 'Found in the mine.' });
       expect(createRes.status).toBe(201);
 
-      const patchRes = await request(server).patch(`/api/v1/inventory/${createRes.body.id}`).set(player).send({ qty: 8 });
+      const patchRes = await request(server)
+        .patch(`/api/v1/inventory/${createRes.body.id}`)
+        .set(player)
+        .send({ qtyDelta: -2, idempotencyKey: 'stash-spend-2' });
       expect(patchRes.status).toBe(200);
       expect(patchRes.body.qty).toBe(8);
 
@@ -271,6 +283,203 @@ describe('inventory & treasury (e2e)', () => {
 
       const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
       expect(listRes.body.some((i: { name: string }) => i.name === 'Elsewhere item')).toBe(false);
+    });
+
+    // ---- issue #782: atomic qty deltas, CAS absolute set, idempotency ----
+
+    it('qtyDelta requires idempotencyKey; absolute qty requires expectedUpdatedAt (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Arrow', qty: 5 });
+      expect(created.status).toBe(201);
+
+      const noKey = await request(server).patch(`/api/v1/inventory/${created.body.id}`).set(dm).send({ qtyDelta: 1 });
+      expect(noKey.status).toBe(400);
+      expect(noKey.body.message).toMatch(/idempotencyKey/i);
+
+      const noCas = await request(server).patch(`/api/v1/inventory/${created.body.id}`).set(dm).send({ qty: 9 });
+      expect(noCas.status).toBe(400);
+      expect(noCas.body.message).toMatch(/expectedUpdatedAt/i);
+
+      const both = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(dm)
+        .send({ qty: 9, qtyDelta: 1, idempotencyKey: 'both-shapes', expectedUpdatedAt: created.body.updatedAt });
+      expect(both.status).toBe(400);
+      expect(both.body.message).toMatch(/not both/i);
+    });
+
+    it('qtyDelta composes; zero boundary rejects without changing the row (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Ration', qty: 2 });
+      expect(created.status).toBe(201);
+      const id = created.body.id;
+
+      const up = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(player)
+        .send({ qtyDelta: 1, idempotencyKey: 'ration-up-1' });
+      expect(up.status).toBe(200);
+      expect(up.body.qty).toBe(3);
+
+      const down = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'ration-down-1' });
+      expect(down.status).toBe(200);
+      expect(down.body.qty).toBe(2);
+
+      const floor = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(player)
+        .send({ qtyDelta: -2, idempotencyKey: 'ration-to-zero' });
+      expect(floor.status).toBe(200);
+      expect(floor.body.qty).toBe(0);
+
+      const over = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(player)
+        .send({ qtyDelta: -1, idempotencyKey: 'ration-below-zero' });
+      expect(over.status).toBe(400);
+
+      const after = await request(server).get(`/api/v1/inventory/${id}`).set(dm);
+      expect(after.body.qty).toBe(0);
+    });
+
+    it('idempotent qtyDelta retry returns the committed item without re-applying (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Torch bundle', qty: 1 });
+      const id = created.body.id;
+      const key = 'retry-torch-inc';
+
+      const first = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: 1, idempotencyKey: key });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      const retry = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: 1, idempotencyKey: key });
+      expect(retry.status).toBe(200);
+      expect(retry.body).toMatchObject({ id, qty: 2, updatedAt: first.body.updatedAt });
+
+      const misuse = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 2, idempotencyKey: key });
+      expect(misuse.status).toBe(409);
+      expect(misuse.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      // Same qtyDelta but different accompanying fields must also 409 — fingerprint
+      // covers name/notes/move/icon so a "corrected" retry cannot silently drop them.
+      const differentFields = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key, name: 'Torch bundle (lit)', notes: 'smoky' });
+      expect(differentFields.status).toBe(409);
+      expect(differentFields.body.code).toBe('IDEMPOTENCY_KEY_REUSE');
+
+      const live = await request(server).get(`/api/v1/inventory/${id}`).set(dm);
+      expect(live.body.qty).toBe(2);
+      expect(live.body.name).toBe('Torch bundle');
+    });
+
+    it('prunes expired inventory_qty_idempotency rows on the next qty write (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Oil flask', qty: 1 });
+      const id = created.body.id as number;
+      const key = 'oil-ttl-replay';
+
+      const first = await request(server).patch(`/api/v1/inventory/${id}`).set(dm).send({ qtyDelta: 1, idempotencyKey: key });
+      expect(first.status).toBe(200);
+      expect(first.body.qty).toBe(2);
+
+      // Age the idempotency row past the TTL window, then touch qty again — prune
+      // runs inside the write tx, so the stale key is gone and a "retry" re-applies.
+      const { DB } = await import('../src/db/db.module');
+      const { inventoryQtyIdempotency } = await import('../src/db/schema');
+      const { eq } = await import('drizzle-orm');
+      const {
+        INVENTORY_QTY_IDEMPOTENCY_TTL_MS,
+      } = await import('../src/modules/inventory/inventory.service');
+      const db = ctx.app.get(DB);
+      const stale = new Date(Date.now() - INVENTORY_QTY_IDEMPOTENCY_TTL_MS - 60_000).toISOString();
+      db.update(inventoryQtyIdempotency)
+        .set({ createdAt: stale })
+        .where(eq(inventoryQtyIdempotency.key, key))
+        .run();
+
+      const afterTtl = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qtyDelta: 1, idempotencyKey: key });
+      expect(afterTtl.status).toBe(200);
+      expect(afterTtl.body.qty).toBe(3);
+    });
+
+    it('absolute qty CAS: stale expectedUpdatedAt returns 409 with current item (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Gem', qty: 1 });
+      const id = created.body.id;
+      const staleUpdatedAt = created.body.updatedAt;
+
+      await new Promise((r) => setTimeout(r, 10));
+      const mid = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(player)
+        .send({ qtyDelta: 1, idempotencyKey: 'gem-mid-inc' });
+      expect(mid.status).toBe(200);
+      expect(mid.body.qty).toBe(2);
+
+      const stale = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qty: 10, expectedUpdatedAt: staleUpdatedAt, idempotencyKey: 'gem-stale-set' });
+      expect(stale.status).toBe(409);
+      expect(stale.body.code).toBe('INVENTORY_QTY_CONFLICT');
+      expect(stale.body.current).toMatchObject({ id, qty: 2 });
+
+      const after = await request(server).get(`/api/v1/inventory/${id}`).set(dm);
+      expect(after.body.qty).toBe(2);
+
+      const ok = await request(server)
+        .patch(`/api/v1/inventory/${id}`)
+        .set(dm)
+        .send({ qty: 10, expectedUpdatedAt: after.body.updatedAt, idempotencyKey: 'gem-reapply-set' });
+      expect(ok.status).toBe(200);
+      expect(ok.body.qty).toBe(10);
+    });
+
+    it('move and qtyDelta in one write both apply (#782)', async () => {
+      const server = ctx.app.getHttpServer();
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Potion', qty: 3 });
+      const res = await request(server)
+        .patch(`/api/v1/inventory/${created.body.id}`)
+        .set(player)
+        .send({
+          ownerType: 'character',
+          characterId: ownCharacterId,
+          qtyDelta: -1,
+          idempotencyKey: 'move-and-drink',
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.ownerType).toBe('character');
+      expect(res.body.characterId).toBe(ownCharacterId);
+      expect(res.body.qty).toBe(2);
     });
   });
 

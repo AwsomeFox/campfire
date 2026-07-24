@@ -1,4 +1,6 @@
 import request from 'supertest';
+import { sql } from 'drizzle-orm';
+import { DB, type DrizzleDb } from '../src/db/db.module';
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 
 /**
@@ -487,7 +489,16 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
   let playerId: number;
   let campaignId: number;
 
-  type Notification = { id: number; type: string; title: string; body: string; entityType: string | null; entityId: number | null; actorName: string };
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    data?: Record<string, unknown> | null;
+  };
 
   async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
     const res = await agent.get('/api/v1/notifications');
@@ -536,8 +547,62 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     // Issue #446: schedule row id is stamped so the UI can open the exact card.
     expect(scheduled[0].entityId).toBe(res.body.id);
     expect(scheduled[0].entityType).toBeNull();
+    // Issue #820: structured metadata carries the instant (no UTC date baked into title).
+    expect(scheduled[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId: res.body.id,
+      changeType: 'created',
+      scheduledAt: res.body.scheduledAt,
+    });
+    expect(scheduled[0].title).not.toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(scheduled[0].title).not.toMatch(/scheduled for \d{4}-\d{2}-\d{2}/);
     // The scheduling DM does not notify themselves.
     expect(ofType(await listFor(dm), 'session_scheduled')).toHaveLength(0);
+  });
+
+  it('venue/VTT-link and notes changes notify once; title-only edits stay silent; cancel notifies', async () => {
+    const future = new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString();
+    const created = await dm
+      .post(`/api/v1/campaigns/${campaignId}/schedule`)
+      .send({ scheduledAt: future, title: 'Lifecycle night' });
+    expect(created.status).toBe(201);
+    const scheduleId = created.body.id as number;
+    const before = ofType(await listFor(player), 'session_scheduled').length;
+
+    // Title-only: no ping.
+    const titleOnly = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({ title: 'Lifecycle night (renamed)' });
+    expect(titleOnly.status).toBe(200);
+    expect(ofType(await listFor(player), 'session_scheduled')).toHaveLength(before);
+
+    // Venue (VTT link) + notes: one coalesced update ping, field names only.
+    const venueNotes = await dm.patch(`/api/v1/schedule/${scheduleId}`).send({
+      location: 'https://vtt.example/room/secret-invite',
+      notes: 'private prep: surprise dragon',
+    });
+    expect(venueNotes.status).toBe(200);
+    const afterVenue = ofType(await listFor(player), 'session_scheduled');
+    expect(afterVenue).toHaveLength(before + 1);
+    const updatePing = afterVenue[0];
+    expect(updatePing.data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'updated',
+      changedFields: expect.arrayContaining(['venue', 'notes']),
+    });
+    expect(updatePing.title).toMatch(/updated/i);
+    expect(JSON.stringify(updatePing)).not.toMatch(/secret-invite|surprise dragon/i);
+
+    // Cancellation notifies with a cancelled snapshot.
+    const cancel = await dm.delete(`/api/v1/schedule/${scheduleId}`);
+    expect(cancel.status).toBe(200);
+    const afterCancel = ofType(await listFor(player), 'session_scheduled');
+    expect(afterCancel).toHaveLength(before + 2);
+    expect(afterCancel[0].data).toMatchObject({
+      kind: 'schedule',
+      scheduleId,
+      changeType: 'cancelled',
+    });
+    expect(afterCancel[0].title).toMatch(/cancelled/i);
   });
 
   it("a player's RSVP notifies the DM (not the RSVPing player)", async () => {
@@ -646,5 +711,146 @@ describe('coverage gaps: scheduling / quests / party notes / proposals (issue #2
     expect(resolved.length).toBe(before + 1);
     expect(resolved[0].title).toContain('rejected');
     expect(resolved[0].body).toContain('not this time');
+  });
+});
+
+/**
+ * Issue #832: posting to the DM scribe inbox notifies every current DM except the
+ * author. Real cookie sessions — notifications hang off users.id.
+ */
+describe('inbox submission notifies DMs (issue #832, e2e)', () => {
+  let ctx: TestAppContext;
+  let creatorDm: ReturnType<typeof request.agent>;
+  let coDm: ReturnType<typeof request.agent>;
+  let coDmId: number;
+  let player: ReturnType<typeof request.agent>;
+  let campaignId: number;
+
+  type Notification = {
+    id: number;
+    type: string;
+    title: string;
+    body: string;
+    entityType: string | null;
+    entityId: number | null;
+    actorName: string;
+    readAt: string | null;
+  };
+
+  async function listFor(agent: ReturnType<typeof request.agent>): Promise<Notification[]> {
+    const res = await agent.get('/api/v1/notifications');
+    expect(res.status).toBe(200);
+    return res.body as Notification[];
+  }
+
+  const ofType = (rows: Notification[], type: string) => rows.filter((n) => n.type === type);
+
+  /** Inbox create fans out inbox_submitted off the request path; let that settle before asserts. */
+  const settleInboxNotify = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  beforeAll(async () => {
+    ctx = await createTestAppNoDevAuth();
+    const server = ctx.app.getHttpServer();
+
+    const adminAgent = request.agent(server);
+    await adminAgent.post('/api/v1/auth/setup').send({ username: 'inbox832-admin', password: 'admin-password-1' });
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-dm', password: 'password-dm-1', displayName: 'Creator DM' });
+    const coCreate = await adminAgent
+      .post('/api/v1/users')
+      .send({ username: 'inbox832-co-dm', password: 'password-co-1', displayName: 'Co DM' });
+    coDmId = coCreate.body.id;
+    await adminAgent.post('/api/v1/users').send({ username: 'inbox832-player', password: 'password-pl-1', displayName: 'Pat Player' });
+
+    creatorDm = request.agent(server);
+    await creatorDm.post('/api/v1/auth/login').send({ username: 'inbox832-dm', password: 'password-dm-1' });
+    coDm = request.agent(server);
+    await coDm.post('/api/v1/auth/login').send({ username: 'inbox832-co-dm', password: 'password-co-1' });
+    player = request.agent(server);
+    await player.post('/api/v1/auth/login').send({ username: 'inbox832-player', password: 'password-pl-1' });
+
+    const campaign = await creatorDm.post('/api/v1/campaigns').send({ name: 'Inbox Notify Keep' });
+    campaignId = campaign.body.id;
+    const playerMe = await player.get('/api/v1/me');
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: playerMe.body.user.id, role: 'player' });
+    await creatorDm.post(`/api/v1/campaigns/${campaignId}/members`).send({ userId: coDmId, role: 'dm' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('a player inbox post notifies every DM with a deep-link id; the player gets nothing', async () => {
+    const inbox = await player
+      .post(`/api/v1/campaigns/${campaignId}/inbox`)
+      .send({ body: 'Can we explore the catacombs next session?' });
+    expect(inbox.status).toBe(201);
+    const inboxId = inbox.body.id as number;
+    await settleInboxNotify();
+
+    const creatorNotifs = ofType(await listFor(creatorDm), 'inbox_submitted');
+    expect(creatorNotifs).toHaveLength(1);
+    expect(creatorNotifs[0].title).toContain('Pat Player');
+    expect(creatorNotifs[0].body).toContain('catacombs');
+    expect(creatorNotifs[0].entityId).toBe(inboxId);
+    expect(creatorNotifs[0].actorName).toBe('Pat Player');
+    expect(creatorNotifs[0].readAt).toBeNull();
+
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    expect(coNotifs).toHaveLength(1);
+    expect(coNotifs[0].entityId).toBe(inboxId);
+
+    expect(ofType(await listFor(player), 'inbox_submitted')).toHaveLength(0);
+  });
+
+  it('a DM author posting to their own inbox does not notify themselves', async () => {
+    const beforeCreator = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+
+    const inbox = await creatorDm.post(`/api/v1/campaigns/${campaignId}/inbox`).send({ body: 'DM self-capture' });
+    expect(inbox.status).toBe(201);
+    await settleInboxNotify();
+
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(beforeCreator);
+    expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo + 1);
+    const coNotifs = ofType(await listFor(coDm), 'inbox_submitted');
+    const selfCapture = coNotifs.find((n) => n.body.includes('DM self-capture'));
+    expect(selfCapture).toBeDefined();
+    expect(selfCapture!.title).toContain('Creator DM');
+  });
+
+  it('a campaign with no other DMs still succeeds without notifying anyone when the sole DM is the author', async () => {
+    const lone = await creatorDm.post('/api/v1/campaigns').send({ name: 'Solo DM Inbox' });
+    expect(lone.status).toBe(201);
+    const loneId = lone.body.id as number;
+
+    const before = ofType(await listFor(creatorDm), 'inbox_submitted').length;
+    const post = await creatorDm.post(`/api/v1/campaigns/${loneId}/inbox`).send({ body: 'Solo note' });
+    expect(post.status).toBe(201);
+    await settleInboxNotify();
+    expect(ofType(await listFor(creatorDm), 'inbox_submitted')).toHaveLength(before);
+  });
+
+  it('keeps inbox create durable when inbox_submitted notification delivery fails', async () => {
+    const db = ctx.app.get<DrizzleDb>(DB);
+    await db.run(sql`
+      CREATE TRIGGER fail_inbox_submitted_notification
+      BEFORE INSERT ON notifications
+      WHEN NEW.type = 'inbox_submitted'
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated notification failure');
+      END
+    `);
+    try {
+      const beforeCo = ofType(await listFor(coDm), 'inbox_submitted').length;
+      const inbox = await player
+        .post(`/api/v1/campaigns/${campaignId}/inbox`)
+        .send({ body: 'Notify failure must not block inbox create' });
+      expect(inbox.status).toBe(201);
+      expect(inbox.body.body).toContain('Notify failure');
+      await settleInboxNotify();
+      expect(ofType(await listFor(coDm), 'inbox_submitted')).toHaveLength(beforeCo);
+    } finally {
+      await db.run(sql`DROP TRIGGER IF EXISTS fail_inbox_submitted_notification`);
+    }
   });
 });

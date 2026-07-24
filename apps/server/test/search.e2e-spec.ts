@@ -388,6 +388,50 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
     expect(res.body.results).toEqual([]);
   });
 
+  it('matches multilingual titles with NFKC + fixed-locale fold (issue #624)', async () => {
+    const server = ctx.app.getHttpServer();
+    const strasseId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Straße Guard', body: 'Watches the east gate.' })
+    ).body.id;
+    const cafeId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Café Müller', body: 'Sells tea.' })
+    ).body.id;
+    const istanbulId = (
+      await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'İstanbul Courier', body: 'Runs messages.' })
+    ).body.id;
+
+    const strasseRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('strasse')}`)
+      .set(dm);
+    expect(strasseRes.status).toBe(200);
+    const strasseHit = (strasseRes.body.results as Result[]).find((r) => r.type === 'npc' && r.id === strasseId);
+    expect(strasseHit).toBeTruthy();
+    // Original spelling preserved in title/snippet — not the folded form.
+    expect(strasseHit!.title).toBe('Straße Guard');
+    expect(strasseHit!.title).toContain('ß');
+
+    const cafeRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('CAFÉ')}`)
+      .set(player);
+    expect(cafeRes.body.results.some((r: Result) => r.type === 'npc' && r.id === cafeId && r.title === 'Café Müller')).toBe(true);
+
+    const istanbulRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent('istanbul')}`)
+      .set(dm);
+    expect(istanbulRes.body.results.some((r: Result) => r.type === 'npc' && r.id === istanbulId && r.title === 'İstanbul Courier')).toBe(
+      true,
+    );
+  });
+
   it('name/title matches rank ahead of body matches', async () => {
     const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/search?q=Vex`).set(dm);
     const results: Result[] = res.body.results;

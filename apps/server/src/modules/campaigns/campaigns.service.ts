@@ -43,6 +43,7 @@ import {
   inventoryItems,
   partyTreasury,
   aiDmSeats,
+  aiScribeConfigs,
   encounterEvents,
   auditLog,
   participantSupportPreferences,
@@ -67,15 +68,12 @@ import { InvitesService } from '../membership/invites.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { ALLOWED_MIME_TO_EXT, MAX_UPLOAD_BYTES, sniffImageMime } from '../attachments/attachments.service';
+import { copyAttachmentBytes, remapAttachmentFileUrl } from '../attachments/attachment-copy';
+import { FsDeletionService, type FsDeletionOutcome } from '../attachments/fs-deletion.service';
+import { uploadsRoot } from '../attachments/uploads-path';
 import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../common/avatar-url';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { sanitizeAttachmentFilename } from '../attachments/filename';
-
-/** Mirrors AttachmentsService's private helper — see modules/attachments/attachments.service.ts. */
-function uploadsRoot(): string {
-  const dataDir = process.env.DATA_DIR ?? path.resolve(__dirname, '..', '..', '..', 'data');
-  return path.join(dataDir, 'uploads');
-}
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -263,6 +261,7 @@ export class CampaignsService {
     private readonly roleResolver: RoleResolver,
     private readonly members: MembersService,
     private readonly invites: InvitesService,
+    private readonly fsDeletion: FsDeletionService,
   ) {}
 
   /**
@@ -600,7 +599,9 @@ export class CampaignsService {
    *    (+combatants), and discussion threads, with every intra-campaign
    *    reference (quest parent/giver, npc location/faction, combatant
    *    character, note/comment entity link, campaign currentLocationId)
-   *    remapped to the cloned rows' new ids.
+   *    remapped to the cloned rows' new ids. Encounter runtime combat state
+   *    (status/round/turnIndex/currentCombatantId/endedAt, combatant HP/conditions/
+   *    initiative) is reset to a fresh 'preparing' fight — issue #548.
    *  - 'template': prep only — quests/npcs/locations/factions copied but play
    *    state stripped: quest statuses reset to 'available', objectives
    *    unchecked, locations back to 'unexplored', and sessions/notes/
@@ -609,11 +610,12 @@ export class CampaignsService {
    *
    * Never copied in either mode: members (only the caller becomes dm — cloning
    * must not silently grant other users access to the new campaign), api
-   * tokens, audit history, proposals, and attachments (their bytes live on
-   * disk keyed by campaign id; mapAttachmentId is therefore reset to null).
-   * Other members' private notes are also excluded — same visibility rule as
-   * GET /notes and the export module: the cloning dm cannot read them, so the
-   * clone must not carry them either.
+   * tokens, audit history, proposals, and campaign/encounter map attachments
+   * (mapAttachmentId stays null). Character portrait attachments ARE copied
+   * and remapped (#524) so cloned sheets keep working when the source campaign
+   * is later deleted. Other members' private notes are also excluded — same
+   * visibility rule as GET /notes and the export module: the cloning dm cannot
+   * read them, so the clone must not carry them either.
    *
    * All inserts run in one synchronous db.transaction() (better-sqlite3 —
    * same pattern as remove()/RulesService.installOpen5eSrd), so a mid-clone
@@ -646,7 +648,48 @@ export class CampaignsService {
       ? await this.db.select().from(combatants).where(inArray(combatants.encounterId, encounterIds))
       : [];
 
+    // AI seat + scribe config (issue #1078): read up front with the other bulk reads.
+    const [[aiSeatRow], [aiScribeConfigRow]] = await Promise.all([
+      this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, id)).limit(1),
+      this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, id)).limit(1),
+    ]);
+
+    // Issue #524: portrait attachments referenced by characters (and comment avatar
+    // snapshots of those same ids) are copied into the clone — collect their rows now
+    // so the tx can insert remapped attachment rows before character inserts.
+    const portraitSrcIds = new Set<number>();
+    if (!template) {
+      for (const c of characterRows) {
+        const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
+        if (aid != null) portraitSrcIds.add(aid);
+      }
+      for (const c of commentRows) {
+        const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
+        if (aid != null) portraitSrcIds.add(aid);
+      }
+    }
+    const portraitAttRows = portraitSrcIds.size
+      ? await this.db
+          .select()
+          .from(attachments)
+          .where(
+            and(
+              eq(attachments.campaignId, id),
+              inArray(attachments.id, [...portraitSrcIds]),
+              eq(attachments.state, ATTACHMENT_STATE_COMMITTED),
+            ),
+          )
+      : [];
+
     const ts = nowIso();
+    /** Portrait byte copies deferred until after the DB tx commits (#524 / #725 shape). */
+    const pendingPortraitCopies: {
+      srcCampaignId: number;
+      dstCampaignId: number;
+      srcAttachmentId: number;
+      dstAttachmentId: number;
+      mime: string;
+    }[] = [];
     const newId = this.db.transaction((tx) => {
       const [campaignRow] = tx
         .insert(campaigns)
@@ -787,26 +830,67 @@ export class CampaignsService {
       }
 
       if (!template) {
+        // Issue #524: recreate portrait attachment rows under the clone and remap
+        // every character.portraitUrl / comment avatar that pointed at them. Bytes
+        // are published after the tx commits (pendingPortraitCopies) via the shared
+        // copyAttachmentBytes helper — same remap shape as importCampaign.
+        const attMap = new Map<number, number>();
+        for (const a of portraitAttRows) {
+          const [row] = tx
+            .insert(attachments)
+            .values({
+              campaignId: cloneId,
+              uploaderUserId: a.uploaderUserId,
+              kind: a.kind,
+              filename: a.filename,
+              mime: a.mime,
+              size: a.size,
+              hidden: a.hidden,
+              state: ATTACHMENT_STATE_COMMITTED,
+              createdAt: ts,
+              updatedAt: ts,
+            })
+            .returning()
+            .all();
+          attMap.set(a.id, row.id);
+          pendingPortraitCopies.push({
+            srcCampaignId: id,
+            dstCampaignId: cloneId,
+            srcAttachmentId: a.id,
+            dstAttachmentId: row.id,
+            mime: a.mime,
+          });
+        }
+        /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
+        const remapClonedPortraitUrl = (url: string | null): string | null => {
+          if (url == null) return null;
+          const remapped = remapAttachmentFileUrl(url, attMap);
+          if (remapped != null) return remapped;
+          // Dangling local attachment ref (bytes not copied) — drop rather than orphan.
+          if (historicalAvatarAttachmentId(url) != null) return null;
+          return url;
+        };
+
         const charMap = new Map<number, number>();
         for (const c of characterRows) {
+          // Spread every persisted column (#524) so NOT NULL fields with defaults
+          // (xp, status, skills, actions, spellSlots, dmSecret, hpTemp, death_*)
+          // cannot silently reset — only id/campaignId/timestamps/deletedAt are replaced.
+          const {
+            id: _srcId,
+            campaignId: _srcCampaignId,
+            createdAt: _createdAt,
+            updatedAt: _updatedAt,
+            deletedAt: _deletedAt,
+            portraitUrl: srcPortraitUrl,
+            ...characterFields
+          } = c;
           const [row] = tx
             .insert(characters)
             .values({
+              ...characterFields,
               campaignId: cloneId,
-              ownerUserId: c.ownerUserId,
-              name: c.name,
-              species: c.species,
-              className: c.className,
-              level: c.level,
-              background: c.background,
-              stats: c.stats,
-              ac: c.ac,
-              hpCurrent: c.hpCurrent,
-              hpMax: c.hpMax,
-              conditions: c.conditions,
-              portraitUrl: c.portraitUrl,
-              ddbId: c.ddbId,
-              notes: c.notes,
+              portraitUrl: remapClonedPortraitUrl(srcPortraitUrl),
               createdAt: ts,
               updatedAt: ts,
             })
@@ -878,16 +962,19 @@ export class CampaignsService {
             .values({
               campaignId: cloneId,
               name: e.name,
-              status: e.status,
-              round: e.round,
-              turnIndex: e.turnIndex,
+              // Fresh fights only — never copy live/ended combat runtime (issue #548).
+              status: 'preparing',
+              round: 0,
+              turnIndex: 0,
+              currentCombatantId: null,
               // Where/why/when links (issue #126/#864): remap through the clone maps.
               // A dangling/cross-campaign source link drops to null rather than copying
               // a stale foreign id into the new campaign.
               locationId: e.locationId != null ? (locMap.get(e.locationId) ?? null) : null,
               questId: e.questId != null ? (questMap.get(e.questId) ?? null) : null,
               sessionId: e.sessionId != null ? (sessionMap.get(e.sessionId) ?? null) : null,
-              endedAt: e.endedAt,
+              hidden: e.hidden, // entity-level secrecy (issue #262) is preserved on clone
+              endedAt: null,
               createdAt: ts,
               updatedAt: ts,
             })
@@ -896,20 +983,23 @@ export class CampaignsService {
           encounterMap.set(e.id, row.id);
           for (const c of combatantRows) {
             if (c.encounterId !== e.id) continue;
+            const mappedCharacterId = c.characterId != null ? (charMap.get(c.characterId) ?? null) : null;
             tx.insert(combatants)
               .values({
                 encounterId: row.id,
                 kind: c.kind,
-                characterId: c.characterId != null ? (charMap.get(c.characterId) ?? null) : null,
+                characterId: mappedCharacterId,
                 npcId: c.npcId != null ? (npcMap.get(c.npcId) ?? null) : null,
                 name: c.name,
-                initiative: c.initiative,
+                initiative: null,
                 initMod: c.initMod,
-                hpCurrent: c.hpCurrent,
+                hpCurrent: c.hpMax,
                 hpMax: c.hpMax,
-                conditions: c.conditions,
+                conditions: '[]',
                 ruleEntryId: c.ruleEntryId, // compendium entries are server-global — no remap needed
                 sortOrder: c.sortOrder,
+                // Match cloned character.updatedAt (= ts) so /end HP write-back CAS works (#466).
+                sheetSyncedUpdatedAt: mappedCharacterId != null ? ts : null,
               })
               .run();
           }
@@ -918,12 +1008,10 @@ export class CampaignsService {
         // Full clones retain discussion history; templates deliberately strip it
         // with the rest of play state. Anchor ids, reply parents, and live speaking
         // character ids are remapped. Account/character display names stay as posted.
-        // Attachment-backed avatars cannot: clone deliberately skips attachment bytes
-        // (see mapAttachmentId null above), so local `/attachments/:id/file` snapshots
-        // are dropped while safe remote HTTPS portraits are preserved.
-        // Every EntityType that clone materializes gets a remap map. Campaign is
-        // handled inline; faction was previously omitted and silently dropped
-        // faction-anchored threads even though import/export round-trips them.
+        // Issue #524: attachment-backed avatars remap through attMap when that
+        // portrait was copied; otherwise drop the local ref. Safe remote HTTPS
+        // portraits are preserved. Campaign mapAttachmentId stays null (maps still
+        // not cloned). Every EntityType that clone materializes gets a remap map.
         const commentEntityMaps: Record<string, Map<number, number>> = {
           quest: questMap,
           npc: npcMap,
@@ -936,6 +1024,8 @@ export class CampaignsService {
         const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
           const safe = safeHistoricalAvatarUrl(url);
           if (!safe) return null;
+          const remapped = remapAttachmentFileUrl(safe, attMap);
+          if (remapped != null) return remapped;
           if (historicalAvatarAttachmentId(safe) != null) return null;
           return safe;
         };
@@ -989,8 +1079,51 @@ export class CampaignsService {
         }
       }
 
+      // AI seat + scribe config (issue #1078): carry the DM's hand-authored steering
+      // and trigger settings across clone; reset runtime counters to zero.
+      if (aiSeatRow) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cloneId,
+          mode: aiSeatRow.mode,
+          enabled: aiSeatRow.enabled,
+          model: aiSeatRow.model,
+          instructions: aiSeatRow.instructions,
+          tokenBudget: aiSeatRow.tokenBudget,
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigRow) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cloneId,
+          postSession: aiScribeConfigRow.postSession,
+          cron: aiScribeConfigRow.cron,
+          budgetPerRun: aiScribeConfigRow.budgetPerRun,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+
       return cloneId;
     });
+
+    // Issue #524: publish portrait bytes after the entity rows committed, so a
+    // rolled-back clone never leaves half-written uploads. Missing source files
+    // degrade to the #84 row-without-file shape (GET 404s that one portrait).
+    for (const p of pendingPortraitCopies) {
+      try {
+        copyAttachmentBytes(p);
+      } catch (err) {
+        importLog.warn(
+          `clone portrait copy failed src=${p.srcCampaignId}/${p.srcAttachmentId} -> ${p.dstCampaignId}/${p.dstAttachmentId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     // Same membership rule as create(): the caller becomes the clone's dm.
     if (!user.devRole) {
@@ -1091,6 +1224,10 @@ export class CampaignsService {
     // Issue #813: immutable prose versions (tips + superseded), remapped below.
     const revisionRows = asArr(doc.revisions);
 
+    // Issue #1078: AI seat + scribe config from the export document.
+    const aiSeatSrc = asRec(doc.aiSeat);
+    const aiScribeConfigSrc = asRec(doc.aiScribeConfig);
+
     const importerId = String(user.id);
     const ts = nowIso();
 
@@ -1125,22 +1262,25 @@ export class CampaignsService {
 
     // srcAttachmentId -> new attachment id, populated inside the tx.
     const attMap = new Map<number, number>();
-    /** Rewrite a source portraitUrl (…/attachments/<srcId>/file) to point at the freshly imported attachment. */
+    /**
+     * Rewrite a source portraitUrl through attMap (shared helper with clone — #524 / #236).
+     * Preserve safe remote HTTPS portraits; drop dangling local attachment refs.
+     */
     const remapPortraitUrl = (url: unknown): string | null => {
-      if (typeof url !== 'string') return null;
-      const m = url.match(/\/attachments\/(\d+)\/file(?:[?#].*)?$/);
-      if (!m) return null;
-      const newId = attMap.get(Number(m[1]));
-      return newId != null ? `/api/v1/attachments/${newId}/file` : null;
+      const safe = safeHistoricalAvatarUrl(url);
+      if (!safe) return null;
+      const remapped = remapAttachmentFileUrl(safe, attMap);
+      if (remapped != null) return remapped;
+      return historicalAvatarAttachmentId(safe) == null ? safe : null;
     };
     /** Preserve safe remote historical avatars; remap local attachment snapshots. */
     const remapHistoricalAvatarUrl = (url: unknown): string | null => {
       const safe = safeHistoricalAvatarUrl(url);
       if (!safe) return null;
-      const sourceAttachmentId = historicalAvatarAttachmentId(safe);
-      if (sourceAttachmentId == null) return safe;
-      const newId = attMap.get(sourceAttachmentId);
-      return newId != null ? `/api/v1/attachments/${newId}/file` : null;
+      const remapped = remapAttachmentFileUrl(safe, attMap);
+      if (remapped != null) return remapped;
+      // Remote HTTPS (or other non-attachment) — keep; dangling local attachment — drop.
+      return historicalAvatarAttachmentId(safe) == null ? safe : null;
     };
 
     // STAGE: write each attachment's bytes into a unique staging dir now. The
@@ -1842,6 +1982,33 @@ export class CampaignsService {
         }
       }
 
+      // AI seat + scribe config (issue #1078): restore from export with counters zeroed.
+      if (aiSeatSrc && Object.keys(aiSeatSrc).length > 0) {
+        tx.insert(aiDmSeats).values({
+          campaignId: cid,
+          mode: str(aiSeatSrc.mode, 'off'),
+          enabled: boolOf(aiSeatSrc.enabled),
+          model: str(aiSeatSrc.model),
+          instructions: str(aiSeatSrc.instructions),
+          tokenBudget: Math.max(0, intOr(aiSeatSrc.tokenBudget, 0)),
+          tokensUsed: 0,
+          turnCount: 0,
+          lastTurnAt: null,
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+      if (aiScribeConfigSrc && Object.keys(aiScribeConfigSrc).length > 0) {
+        tx.insert(aiScribeConfigs).values({
+          campaignId: cid,
+          postSession: boolOf(aiScribeConfigSrc.postSession),
+          cron: boolOf(aiScribeConfigSrc.cron),
+          budgetPerRun: Math.max(0, intOr(aiScribeConfigSrc.budgetPerRun, 2000)),
+          createdAt: ts,
+          updatedAt: ts,
+        }).run();
+      }
+
       // Issue #725: fold the importer's dm membership AND the import audit row
       // INTO the same transaction as the entity rows. Previously these ran AFTER
       // the commit, so a failure here (a disabled user, a DB error) left a
@@ -2177,8 +2344,23 @@ export class CampaignsService {
    * a rarer, heavier operation than a single attachment delete). Purge acts on live OR
    * trashed campaigns (includeDeleted) so the disk wipe can only ever run through here.
    */
-  async purge(id: number, user: RequestUser): Promise<void> {
+  async purge(id: number, user: RequestUser): Promise<FsDeletionOutcome> {
     await this.getOrThrow(id, { includeDeleted: true });
+
+    const auditCtx = {
+      scope: 'campaign_purge' as const,
+      auditPrefix: 'campaign.purge',
+      actor: auditActor(user),
+      actorRole: 'dm' as const,
+      campaignId: id,
+      entityType: 'campaign',
+      entityId: id,
+    };
+    await this.fsDeletion.auditRequested(auditCtx);
+
+    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
+    const plannedFsCleanup = await this.fsDeletion.reserveUploadPaths([campaignUploadsDir], auditCtx);
+
 
     // This hand-rolled cascade is the ONLY teardown mechanism on databases created
     // before FK enforcement shipped (issue #69) — SQLite cannot ALTER-ADD a foreign
@@ -2257,26 +2439,9 @@ export class CampaignsService {
       tx.delete(campaigns).where(eq(campaigns.id, id)).run();
     });
 
-    // Best-effort: remove the on-disk upload directory for this campaign. The DB rows
-    // are already gone (source of truth), so a failure here just leaves an orphaned
-    // directory — logged-free, matching AttachmentsService.remove()'s best-effort fs.rm.
-    // Synchronous wipe: the e2e purge assertion reads the directory immediately after
-    // the HTTP response returns. Async fs.rm raced that check on Node 22.x CI.
-    const campaignUploadsDir = path.join(uploadsRoot(), String(id));
-    try {
-      fs.rmSync(campaignUploadsDir, { recursive: true, force: true });
-    } catch {
-      /* best-effort — DB rows are already gone; a stray directory is harmless */
-    }
+    await this.fsDeletion.auditMetadataComplete(auditCtx);
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: 'dm',
-      action: 'campaign.purge',
-      entityType: 'campaign',
-      entityId: id,
-      campaignId: id,
-    });
+    return this.fsDeletion.completeReservedUploadPaths(plannedFsCleanup, auditCtx);
   }
 
   async summary(id: number, role: Role): Promise<CampaignSummary> {

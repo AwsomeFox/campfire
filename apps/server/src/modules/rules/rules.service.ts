@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import {
   PF2E_PACK_SLUG,
   SF2E_PACK_SLUG,
@@ -14,13 +14,24 @@ import {
   type RulePackInstallJob,
   type RulePackInstallSource,
   type RulePackUpload,
+  type RuleSearchPage,
 } from '@campfire/schema';
 import { DB, RULE_ENTRIES_FTS_AVAILABLE, type DrizzleDb } from '../../db/db.module';
 import { rulePacks, ruleEntries, combatants, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { foldForSearch } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { auditActor, auditActorRole } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
+import {
+  clampRuleSearchLimit,
+  decodeRuleSearchCursor,
+  encodeRuleSearchCursor,
+  nameMatchBucket,
+  type BrowseCursor,
+  type FtsCursor,
+  type LikeCursor,
+} from './rules-search';
 import {
   ALL_OPEN5E_SECTIONS,
   MAX_ENTRIES_PER_SECTION,
@@ -170,9 +181,10 @@ function effectiveEntryProvenance(
  */
 function nameMatchRank(q: string) {
   // Strip LIKE wildcards so user input can't skew the bucketing (mirrors the
-  // sanitisation in the LIKE fallback below); lower() both sides for
-  // case-insensitive comparison independent of the column's collation.
-  const needle = q.trim().replace(/[%_]/g, '').toLowerCase();
+  // sanitisation in the LIKE fallback below). Fold the needle with the shared
+  // helper (#624); SQL lower() on the column remains ASCII-limited on SQLite —
+  // FTS path is preferred when available; LIKE fallback is best-effort for ASCII.
+  const needle = foldForSearch(q.trim().replace(/[%_]/g, ''));
   return sql`CASE
     WHEN lower(${ruleEntries.name}) = ${needle} THEN 0
     WHEN lower(${ruleEntries.name}) LIKE ${`${needle}%`} THEN 1
@@ -1398,56 +1410,196 @@ export class RulesService {
    *
    * Both paths order results by nameMatchRank() so exact/prefix name matches
    * rank ahead of body-only matches (issue #33), with FTS bm25 rank (or name,
-   * in the LIKE fallback) breaking ties within a bucket.
+   * in the LIKE fallback) breaking ties within a bucket, and `id` as the final
+   * stable tiebreak (issue #613). Empty-query browse orders by lower(name), id.
+   *
+   * Returns a paginated page (`items` / `total` / `hasMore` / `nextCursor`) —
+   * never a silently truncated array. Default page size is 50; pass `cursor`
+   * from a previous `nextCursor` to continue. The optional second `limit` arg
+   * is kept for MCP / AI-driver callers that want a smaller top-N page.
    */
-  async search(params: { q: string; type?: RuleEntryType; pack?: string }, limit = 50): Promise<RuleEntry[]> {
+  async search(
+    params: { q: string; type?: RuleEntryType; pack?: string; cursor?: string; limit?: number },
+    limitArg?: number,
+  ): Promise<RuleSearchPage> {
+    const limit = clampRuleSearchLimit(params.limit ?? limitArg);
+    const empty = (total = 0): RuleSearchPage => ({ items: [], total, hasMore: false, limit });
+
     const packFilter = params.pack ? await this.db.select().from(rulePacks).where(eq(rulePacks.slug, params.pack)).limit(1) : undefined;
-    if (params.pack && (!packFilter || packFilter.length === 0)) return [];
+    if (params.pack && (!packFilter || packFilter.length === 0)) return empty();
     const packId = packFilter?.[0]?.id;
 
     if (!params.q.trim()) {
-      const conditions = [
-        params.type ? eq(ruleEntries.type, params.type) : undefined,
-        packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
-      ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-      const rows = await this.db
-        .select()
-        .from(ruleEntries)
-        .where(conditions.length ? and(...conditions) : undefined)
-        .limit(limit);
-      return rows.map(entryToDomain);
+      return this.searchBrowse({ type: params.type, packId, cursor: params.cursor, limit });
     }
 
     if (this.ftsAvailable) {
       const ftsQuery = toFtsQuery(params.q);
-      if (!ftsQuery) return [];
-      const conditions = [
-        params.type ? eq(ruleEntries.type, params.type) : undefined,
-        packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
-      ].filter((c): c is NonNullable<typeof c> => c !== undefined);
-      const rows = await this.db
-        .select({ entry: ruleEntries })
-        .from(ruleEntries)
-        .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
-        .where(and(sql`rule_entries_fts MATCH ${ftsQuery}`, ...conditions))
-        .orderBy(nameMatchRank(params.q), sql`rule_entries_fts.rank`)
-        .limit(limit);
-      return rows.map((r) => entryToDomain(r.entry));
+      if (!ftsQuery) return empty();
+      return this.searchFts({ q: params.q, ftsQuery, type: params.type, packId, cursor: params.cursor, limit });
     }
 
-    // LIKE fallback — documented in README as the no-fts5 path.
-    const like = `%${params.q.replace(/[%_]/g, '')}%`;
-    const conditions = [
-      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
-      params.type ? eq(ruleEntries.type, params.type) : undefined,
-      packId !== undefined ? eq(ruleEntries.packId, packId) : undefined,
+    return this.searchLike({ q: params.q, type: params.type, packId, cursor: params.cursor, limit });
+  }
+
+  /** Empty-query browse: deterministic lower(name), id order with keyset cursor. */
+  private async searchBrowse(opts: {
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'browse') as BrowseCursor | undefined;
+    const baseConditions = [
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
     ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(lower(${ruleEntries.name}) > ${cursor.n} OR (lower(${ruleEntries.name}) = ${cursor.n} AND ${ruleEntries.id} > ${cursor.i}))`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countEntries(baseConditions);
+    const rows = await this.db
+      .select()
+      .from(ruleEntries)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(sql`lower(${ruleEntries.name})`, asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map(entryToDomain);
+    const last = page[page.length - 1];
+    // Cursor `n` must match SQL lower(name) used in ORDER BY / keyset (ASCII-oriented).
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'browse',
+            n: last.name.toLowerCase(),
+            i: last.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async searchFts(opts: {
+    q: string;
+    ftsQuery: string;
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'fts') as FtsCursor | undefined;
+    const rankExpr = nameMatchRank(opts.q);
+    const baseConditions = [
+      sql`rule_entries_fts MATCH ${opts.ftsQuery}`,
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(
+          ${rankExpr} > ${cursor.b}
+          OR (${rankExpr} = ${cursor.b} AND rule_entries_fts.rank > ${cursor.r})
+          OR (${rankExpr} = ${cursor.b} AND rule_entries_fts.rank = ${cursor.r} AND ${ruleEntries.id} > ${cursor.i})
+        )`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countFts(baseConditions);
+    const rows = await this.db
+      .select({ entry: ruleEntries, ftsRank: sql<number>`rule_entries_fts.rank` })
+      .from(ruleEntries)
+      .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
+      .where(and(...conditions))
+      .orderBy(rankExpr, sql`rule_entries_fts.rank`, asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map((r) => entryToDomain(r.entry));
+    const last = page[page.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'fts',
+            b: nameMatchBucket(opts.q, last.entry.name),
+            r: Number(last.ftsRank),
+            i: last.entry.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async searchLike(opts: {
+    q: string;
+    type?: RuleEntryType;
+    packId?: number;
+    cursor?: string;
+    limit: number;
+  }): Promise<RuleSearchPage> {
+    const cursor = decodeRuleSearchCursor(opts.cursor, 'like') as LikeCursor | undefined;
+    const rankExpr = nameMatchRank(opts.q);
+    const like = `%${opts.q.replace(/[%_]/g, '')}%`;
+    const baseConditions = [
+      sql`(${ruleEntries.name} LIKE ${like} OR ${ruleEntries.summary} LIKE ${like} OR ${ruleEntries.body} LIKE ${like})`,
+      opts.type ? eq(ruleEntries.type, opts.type) : undefined,
+      opts.packId !== undefined ? eq(ruleEntries.packId, opts.packId) : undefined,
+    ].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const keyset = cursor
+      ? sql`(
+          ${rankExpr} > ${cursor.b}
+          OR (${rankExpr} = ${cursor.b} AND ${ruleEntries.name} > ${cursor.n})
+          OR (${rankExpr} = ${cursor.b} AND ${ruleEntries.name} = ${cursor.n} AND ${ruleEntries.id} > ${cursor.i})
+        )`
+      : undefined;
+    const conditions = [...baseConditions, keyset].filter((c): c is NonNullable<typeof c> => c !== undefined);
+
+    const total = await this.countEntries(baseConditions);
     const rows = await this.db
       .select()
       .from(ruleEntries)
       .where(and(...conditions))
-      .orderBy(nameMatchRank(params.q), ruleEntries.name)
-      .limit(limit);
-    return rows.map(entryToDomain);
+      .orderBy(rankExpr, asc(ruleEntries.name), asc(ruleEntries.id))
+      .limit(opts.limit + 1);
+
+    const hasMore = rows.length > opts.limit;
+    const page = hasMore ? rows.slice(0, opts.limit) : rows;
+    const items = page.map(entryToDomain);
+    const last = page[page.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? encodeRuleSearchCursor({
+            v: 1,
+            m: 'like',
+            b: nameMatchBucket(opts.q, last.name),
+            n: last.name,
+            i: last.id,
+          })
+        : undefined;
+    return { items, total, hasMore, nextCursor, limit: opts.limit };
+  }
+
+  private async countEntries(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(ruleEntries)
+      .where(conditions.length ? and(...conditions) : undefined);
+    return Number(row?.n ?? 0);
+  }
+
+  private async countFts(conditions: Array<ReturnType<typeof sql> | ReturnType<typeof eq>>): Promise<number> {
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)` })
+      .from(ruleEntries)
+      .innerJoin(sql`rule_entries_fts`, sql`rule_entries_fts.rowid = ${ruleEntries.id}`)
+      .where(and(...conditions));
+    return Number(row?.n ?? 0);
   }
 }

@@ -17,9 +17,20 @@ import { useClearAnnouncementsOnScope } from '../components/useClearAnnouncement
 import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 
 function Splash() {
+  // Pulse is decorative; under prefers-reduced-motion CSS freezes it (issue #594).
+  // Keep an explicit status so loading feedback is never motion-only.
   return (
-    <div className="min-h-screen flex items-center justify-center">
-      <span className="flex justify-center animate-pulse text-[var(--color-accent)]"><GameIcon slug="campfire" size={52} /></span>
+    <div
+      className="min-h-screen flex items-center justify-center"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+      data-testid="auth-splash"
+    >
+      <span className="flex justify-center animate-pulse text-[var(--color-accent)]" aria-hidden="true">
+        <GameIcon slug="campfire" size={52} />
+      </span>
+      <span className="sr-only">Loading…</span>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import type { AbilityRepresentation, MonsterStatblockData, RuleSystemAdapter } from './index';
+import { initModDescThenSortOrderAsc } from './initiative-tiebreak';
 
 // ---------- OSR (Old-School Renaissance) rule-system adapter (issues #70, #300) ----------
 // A single shared adapter for the B/X-descended retroclone family: Basic Fantasy RPG
@@ -188,6 +189,9 @@ export const OsrAdapter: RuleSystemAdapter = {
     // Inline of resolveAbilityModifier — no runtime import from ./index (cycle).
     return representation === 'score' ? osrAbilityModifier(dex) : Math.trunc(dex);
   },
+  // OSR individual initiative is DEX-influenced; on a tied total, higher DEX (initMod)
+  // first, then sortOrder — same default as 5e-family systems (issue #611).
+  initiativeTiebreak: initModDescThenSortOrderAsc,
   conditions: OSR_CONDITIONS,
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;

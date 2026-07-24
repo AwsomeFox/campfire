@@ -6,6 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { auditActor } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { AttachmentsService } from './attachments.service';
+import { FsDeletionService } from './fs-deletion.service';
 import { StorageQuotaDto } from './attachments.dto';
 
 /**
@@ -21,6 +22,7 @@ import { StorageQuotaDto } from './attachments.dto';
 export class StorageController {
   constructor(
     private readonly attachments: AttachmentsService,
+    private readonly fsDeletion: FsDeletionService,
     private readonly audit: AuditService,
   ) {}
 
@@ -82,5 +84,24 @@ export class StorageController {
       });
     }
     return result;
+  }
+
+  @Post('fs-cleanup/retry')
+  @ApiOperation({
+    summary: 'Retry pending filesystem deletions',
+    description:
+      'Server-admin only. Re-attempts every path in the fs_deletion_queue (issue #727). Returns how many queue rows were cleared.',
+  })
+  @ApiResponse({ status: 201, description: 'Retry sweep finished.' })
+  async retryFsCleanup(@CurrentUser() actor: RequestUser) {
+    const cleared = await this.fsDeletion.drainQueue('manual');
+    await this.audit.log({
+      actor: auditActor(actor),
+      actorRole: 'admin',
+      action: 'storage.fs_cleanup.retry',
+      entityType: 'storage',
+      detail: `cleared=${cleared}`,
+    });
+    return { cleared };
   }
 }

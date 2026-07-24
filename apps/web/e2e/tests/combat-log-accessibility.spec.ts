@@ -320,7 +320,12 @@ test('combat log remains named, reflow-safe, keyboard reachable, and axe-clean o
     expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(320);
     expect(await log.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
 
-    const results = await new AxeBuilder({ page }).include('[role="log"]').analyze();
+    // Scope to the combat log only — the encounter page also mounts SharedDiceLog
+    // as role="log" (#590), and discarded dice faces use muted strikethrough that
+    // intentionally fails AA contrast.
+    const results = await new AxeBuilder({ page })
+      .include('[role="log"][aria-labelledby]')
+      .analyze();
     expect(results.violations).toEqual([]);
   } finally {
     await context.close();

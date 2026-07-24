@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { MentionTarget, Role, SearchResponse, SearchResult, SearchResultType } from '@campfire/schema';
 import type { RequestUser } from '../../common/user.types';
+import { compareSearchText, foldForSearch, foldedIncludes, foldedIndexOf } from '../../common/text-search';
 import { NpcsService } from '../npcs/npcs.service';
 import { FactionsService } from '../factions/factions.service';
 import { QuestsService } from '../quests/quests.service';
@@ -27,13 +28,16 @@ type Field = { field: string; text: string };
  * Build the snippet shown for a hit. For a short field (a name/title) we show it
  * whole; for long prose (body/recap) we window ±SNIPPET_PAD chars around the first
  * occurrence of the needle so the match is visible in context. The needle is the
- * already-lowercased query; `text` is matched case-insensitively.
+ * already-folded query (see foldForSearch); `text` is matched via the same fold.
+ * The returned snippet always slices the original `text` so spelling is preserved.
  */
-function makeSnippet(text: string, needle: string): string {
-  const idx = text.toLowerCase().indexOf(needle);
+function makeSnippet(text: string, foldedNeedle: string): string {
+  const idx = foldedIndexOf(text, foldedNeedle);
   if (idx < 0) return text.slice(0, SNIPPET_PAD * 2).trim();
-  const start = Math.max(0, idx - SNIPPET_PAD);
-  const end = Math.min(text.length, idx + needle.length + SNIPPET_PAD);
+  // Folded index is exact when NFKC is length-stable; clamp for compatibility forms.
+  const approx = Math.min(Math.max(0, idx), text.length);
+  const start = Math.max(0, approx - SNIPPET_PAD);
+  const end = Math.min(text.length, approx + foldedNeedle.length + SNIPPET_PAD);
   const core = text.slice(start, end).replace(/\s+/g, ' ').trim();
   return `${start > 0 ? '…' : ''}${core}${end < text.length ? '…' : ''}`;
 }
@@ -88,7 +92,8 @@ export class SearchService {
   ) {}
 
   async search(campaignId: number, user: RequestUser, role: Role, q: string, limit = DEFAULT_LIMIT): Promise<SearchResponse> {
-    const needle = q.trim().toLowerCase();
+    // Fold once; encounter/schedule helpers receive this same folded needle (#624).
+    const needle = foldForSearch(q.trim());
     if (!needle) return { query: q, results: [] };
 
     const isDm = role === 'dm';
@@ -126,12 +131,13 @@ export class SearchService {
 
     const results: SearchResult[] = [];
     const push = (type: SearchResultType, id: number, title: string, fields: Field[], extra?: Partial<SearchResult>) => {
-      const hit = fields.find((f) => f.text && f.text.toLowerCase().includes(needle));
+      const hit = fields.find((f) => f.text && foldedIncludes(f.text, needle));
       if (!hit) return;
       results.push({
         type,
         id,
         campaignId,
+        // Titles/snippets keep original spelling — fold is comparison-only (#624).
         title,
         snippet: makeSnippet(hit.text, needle),
         matchedField: hit.field,
@@ -254,8 +260,10 @@ export class SearchService {
       }
     }
 
-    // name/title hits first, then by title for a stable ordering.
-    results.sort((a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || a.title.localeCompare(b.title));
+    // name/title hits first, then by title with explicit en collation (#624).
+    results.sort(
+      (a, b) => fieldRank(a.matchedField) - fieldRank(b.matchedField) || compareSearchText(a.title, b.title),
+    );
     return { query: q, results: results.slice(0, limit) };
   }
 

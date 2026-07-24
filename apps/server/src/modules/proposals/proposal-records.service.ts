@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -28,9 +28,9 @@ import { projectProposal, projectProposals } from './proposal-projection';
 // their proposals carry generate params, not a persisted row. `map` is not one of the
 // note-pin EntityTypes (a map is an attachment, not an entity table), so this union is
 // standalone rather than derived from EntityType. Factions (issue #221) stay DM-write-only.
-export type ProposableEntityType = Exclude<EntityType, 'campaign' | 'faction'> | 'map';
+export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map';
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -234,6 +234,17 @@ export class ProposalRecordsService {
       case 'encounter':
       case 'map':
         return null;
+      case 'faction': {
+        const [row] = await this.db
+          .select()
+          .from(factions)
+          .where(and(eq(factions.id, entityId), eq(factions.campaignId, campaignId)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Faction ${entityId} not found`);
+        // Factions with hidden=true are DM-only prep — non-DMs must not see them.
+        if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
+        return { ...row };
+      }
     }
   }
 
