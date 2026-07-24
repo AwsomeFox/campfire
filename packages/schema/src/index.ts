@@ -1453,7 +1453,8 @@ export type OsrInstallSystem = z.infer<typeof OsrInstallSystem>;
  * because Zod alone can't express the per-source subset without a discriminated union.
  */
 export const RulePackInstallSection = z.enum([
-  // 5e-shaped (Open5e, Pathfinder 1e; PF2e ignores the filter, OSR uses a subset)
+  // 5e-shaped (Open5e, Pathfinder 1e; OSR uses a subset). PF2e/SF2e now honor their
+  // own native section keys (below) rather than ignoring the filter.
   'spells',
   'monsters',
   'items',
@@ -4365,7 +4366,7 @@ export const EncounterGenerate = z.object({
   // active characters (issue #115 lifecycle).
   party: z.array(z.number().int().min(1).max(20)).max(20).optional(),
   filters: EncounterGenerateFilters.optional(),
-  // Upper bound on the number of monsters (before the shape's own bound). Defaults to 12.
+  // Upper bound on the number of monsters/hazards (before the shape's own bound). Defaults to 12.
   count: z.number().int().min(1).max(30).optional(),
   shape: EncounterShape.optional(),
   // Deterministic seed. Omit to have the server mint one (returned in the suggestion so
@@ -4386,10 +4387,10 @@ export const EncounterSuggestionCombatant = z.object({
   ruleEntryId: Id, // compendium statblock id — feed straight to add_combatant
   name: z.string(),
   entryType: z.enum(['monster', 'hazard']).default('monster'),
-  cr: z.number().nullable(), // numeric rating used by the active encounter budget
-  xp: z.number().int().nonnegative(), // per-monster XP (5e CR→XP table)
-  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it
-  count: z.number().int().min(1), // how many of this monster to add
+  cr: z.number().nullable(), // numeric rating used by the active budget — CR for monsters, level-as-CR for PF2e/SF2e hazards (null if unparseable)
+  xp: z.number().int().nonnegative(), // per-entry XP (monster or hazard; 5e CR→XP table)
+  hpMax: z.number().int().nullable(), // resolved max HP, when the statblock carries it (null when unknown)
+  count: z.number().int().min(1), // how many of this entry (monster or hazard) to add
 });
 export type EncounterSuggestionCombatant = z.infer<typeof EncounterSuggestionCombatant>;
 
