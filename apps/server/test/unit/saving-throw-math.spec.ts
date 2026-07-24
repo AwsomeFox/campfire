@@ -1,30 +1,10 @@
 import { describe, it, expect } from '@jest/globals';
+import { abilityMod, profBonus, resolveSavingThrow } from '../../src/modules/mcp/saving-throw-math';
 
 /**
- * #1040: Verify the 5e saving throw math used by the new `saving_throw` MCP tool.
- * The tool itself is integration-tested via mcp-tools e2e; this covers the pure
- * math functions in isolation so regressions in the formula are caught.
+ * #1040: Verify the 5e saving throw math used by the `saving_throw` MCP tool.
+ * Imports the production helpers so formula regressions fail here, not only in e2e.
  */
-
-/** 5e ability modifier from a 3-18 score. */
-function abilityMod(score: number): number {
-  return Math.floor((score - 10) / 2);
-}
-
-/** 5e proficiency bonus by character level: +2 at 1-4, +3 at 5-8, +4 at 9-12, etc. */
-function profBonus(level: number): number {
-  return 2 + Math.floor((Math.max(1, level) - 1) / 4);
-}
-
-/**
- * The bonus applied to the d20 roll for a save. Adds prof bonus only when the ability
- * is in the character's saveProficiencies array.
- */
-function saveBonus(score: number, level: number, proficient: boolean): number {
-  const mod = abilityMod(score);
-  const prof = profBonus(level);
-  return mod + (proficient ? prof : 0);
-}
 
 describe('Saving throw math (#1040)', () => {
   describe('abilityMod', () => {
@@ -65,26 +45,100 @@ describe('Saving throw math (#1040)', () => {
     });
   });
 
-  describe('saveBonus', () => {
+  describe('resolveSavingThrow', () => {
     it('proficient level-5 DEX 16 save: +6 (+3 dex, +3 prof)', () => {
-      expect(saveBonus(16, 5, true)).toBe(6);
+      const result = resolveSavingThrow({
+        stats: { DEX: 16 },
+        saveProficiencies: ['DEX'],
+        ability: 'DEX',
+        level: 5,
+      });
+      expect(result).toEqual({
+        score: 16,
+        abilityMod: 3,
+        proficient: true,
+        profBonus: 3,
+        bonus: 6,
+      });
     });
 
     it('unproficient level-5 DEX 16 save: +3 (dex only)', () => {
-      expect(saveBonus(16, 5, false)).toBe(3);
+      expect(
+        resolveSavingThrow({
+          stats: { DEX: 16 },
+          saveProficiencies: [],
+          ability: 'DEX',
+          level: 5,
+        }).bonus,
+      ).toBe(3);
     });
 
     it('level-1 STR 10 unproficient: +0', () => {
-      expect(saveBonus(10, 1, false)).toBe(0);
+      expect(
+        resolveSavingThrow({
+          stats: { STR: 10 },
+          saveProficiencies: [],
+          ability: 'STR',
+          level: 1,
+        }).bonus,
+      ).toBe(0);
     });
 
     it('level-20 CON 20 proficient: +11 (+5 con, +6 prof)', () => {
-      expect(saveBonus(20, 20, true)).toBe(11);
+      expect(
+        resolveSavingThrow({
+          stats: { CON: 20 },
+          saveProficiencies: ['CON'],
+          ability: 'CON',
+          level: 20,
+        }).bonus,
+      ).toBe(11);
     });
 
     it('negative ability modifier is preserved even when proficient', () => {
       // Level-1 STR 8 proficient: STR -1 + prof 2 = +1
-      expect(saveBonus(8, 1, true)).toBe(1);
+      expect(
+        resolveSavingThrow({
+          stats: { STR: 8 },
+          saveProficiencies: ['STR'],
+          ability: 'STR',
+          level: 1,
+        }).bonus,
+      ).toBe(1);
+    });
+
+    it('normalizes mixed-case stats keys (issue #48)', () => {
+      const result = resolveSavingThrow({
+        stats: { Dex: 14 },
+        saveProficiencies: [],
+        ability: 'DEX',
+        level: 1,
+      });
+      expect(result.score).toBe(14);
+      expect(result.abilityMod).toBe(2);
+      expect(result.bonus).toBe(2);
+    });
+
+    it('matches save proficiency case-insensitively', () => {
+      const result = resolveSavingThrow({
+        stats: { WIS: 12 },
+        saveProficiencies: ['wis'],
+        ability: 'WIS',
+        level: 5,
+      });
+      expect(result.proficient).toBe(true);
+      expect(result.bonus).toBe(4); // +1 wis +3 prof
+    });
+
+    it('defaults missing ability score to 10', () => {
+      const result = resolveSavingThrow({
+        stats: {},
+        saveProficiencies: [],
+        ability: 'CHA',
+        level: 1,
+      });
+      expect(result.score).toBe(10);
+      expect(result.bonus).toBe(0);
     });
   });
 });

@@ -75,6 +75,7 @@ import {
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
 import { fromJsonText } from '../../common/json';
+import { resolveSavingThrow } from './saving-throw-math';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
@@ -2764,8 +2765,9 @@ export class McpToolsService {
       'saving_throw',
       'Roll a saving throw for a character using their actual stats + proficiency (5e). Server reads the ability score, ' +
         'computes the modifier (floor((score - 10) / 2)), adds the proficiency bonus (2 + floor((level - 1) / 4)) when the ' +
-        'ability is in saveProficiencies, rolls 1d20, and compares to the DC. Returns {total, roll, mod, profBonus, ' +
-        'proficient, dc, success}. Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
+        'ability is in saveProficiencies, rolls 1d20 (or 2d20kh1/kl1), and compares to the DC. Returns ' +
+        '{characterId, ability, dc, mode, score, abilityMod, profBonus, proficient, bonus, total, rolls, success, diceLogId}. ' +
+        'Optionally set advantage="advantage"|"disadvantage" to roll 2d20 keep-highest/lowest.',
       {
         characterId: Id.describe('Character id — from list_members or get_party'),
         ability: z.enum(['STR', 'DEX', 'CON', 'INT', 'WIS', 'CHA']).describe('Save ability key'),
@@ -2779,16 +2781,13 @@ export class McpToolsService {
         const dcNum = dc as number;
         const rollMode = (advantage as 'normal' | 'advantage' | 'disadvantage' | undefined) ?? 'normal';
 
-        // Parse stored JSON columns
-        const stats = fromJsonText<Record<string, number>>(character.stats, {});
-        const saveProfs = fromJsonText<string[]>(character.saveProficiencies, []);
-
-        // 5e math (matches roll_dice's implicit rules-system and the PF1e path per grep).
-        const score = Number(stats[abilityKey] ?? stats[abilityKey.toLowerCase()] ?? 10);
-        const mod = Math.floor((score - 10) / 2);
-        const proficient = saveProfs.includes(abilityKey);
-        const profBonus = 2 + Math.floor((Math.max(1, character.level) - 1) / 4);
-        const bonus = mod + (proficient ? profBonus : 0);
+        const resolved = resolveSavingThrow({
+          stats: fromJsonText<Record<string, number>>(character.stats, {}),
+          saveProficiencies: fromJsonText<string[]>(character.saveProficiencies, []),
+          ability: abilityKey,
+          level: character.level,
+        });
+        const { score, abilityMod, proficient, profBonus, bonus } = resolved;
 
         const diceExpr =
           rollMode === 'advantage'
@@ -2811,7 +2810,7 @@ export class McpToolsService {
           dc: dcNum,
           mode: rollMode,
           score,
-          abilityMod: mod,
+          abilityMod,
           profBonus,
           proficient,
           bonus,
