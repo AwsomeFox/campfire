@@ -10,6 +10,8 @@ import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { CampaignsModule } from '../campaigns/campaigns.module';
 import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
+import { MembershipModule } from '../membership/membership.module';
+import { CharactersModule } from '../characters/characters.module';
 import { AiDriverService } from './ai-driver.service';
 import { AiDriverController } from './ai-driver.controller';
 import { AiDmStreamService } from './ai-driver-stream.service';
@@ -49,6 +51,8 @@ import { AI_PROVIDER_RESOLVER, ConfigAiProviderResolver } from './ai-provider-re
     CampaignsModule,
     RulesModule,
     EncountersModule,
+    MembershipModule,
+    CharactersModule,
   ],
   controllers: [AiDriverController],
   providers: [
