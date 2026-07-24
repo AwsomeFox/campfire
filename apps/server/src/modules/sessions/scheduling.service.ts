@@ -369,9 +369,18 @@ export class SchedulingService {
       input.note !== undefined && persistedNote !== (existing?.note ?? '').trim();
 
     if (existing) {
+      const update: {
+        status: typeof input.status;
+        userName: string;
+        updatedAt: string;
+        note?: string;
+      } = { status: input.status, userName: user.name, updatedAt: ts };
+      if (input.note !== undefined) {
+        update.note = input.note.trim();
+      }
       await this.db
         .update(sessionRsvps)
-        .set({ status: input.status, note: persistedNote, userName: user.name, updatedAt: ts })
+        .set(update)
         .where(eq(sessionRsvps.id, existing.id));
     } else {
       await this.db.insert(sessionRsvps).values({
