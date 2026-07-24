@@ -22,7 +22,6 @@ import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResol
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
-import { EncountersService } from '../encounters/encounters.service';
 import {
   formatCalendarForPrompt,
   formatListForPrompt,
