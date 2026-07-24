@@ -8,6 +8,7 @@ import { EventsModule } from '../events/events.module';
 import { SessionsService } from './sessions.service';
 import { SessionSharesService } from './session-shares.service';
 import { SchedulingService } from './scheduling.service';
+import { SessionRemindersService } from './session-reminders.service';
 import { CampaignSessionsController, SessionsController } from './sessions.controller';
 import { CampaignSessionSharesController, SessionSharesController, SharedRecapController } from './session-shares.controller';
 import {
@@ -30,7 +31,7 @@ import {
     CampaignCalendarFeedController,
     CalendarFeedController,
   ],
-  providers: [SessionsService, SessionSharesService, SchedulingService],
-  exports: [SessionsService, SessionSharesService, SchedulingService],
+  providers: [SessionsService, SessionSharesService, SchedulingService, SessionRemindersService],
+  exports: [SessionsService, SessionSharesService, SchedulingService, SessionRemindersService],
 })
 export class SessionsModule {}

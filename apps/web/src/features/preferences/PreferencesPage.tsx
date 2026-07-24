@@ -4,8 +4,8 @@
  * (~L1156-1227): Theme card (accent swatches + free hex input, live preview),
  * semantic reading mode (persisted as the backwards-compatible
  * PreferencesUpdate.textSize field and applied by AuthProvider), and a display-name
- * field. The design's Notifications card was removed rather than shipped as a
- * dead placeholder — notifications are their own larger feature (issue #6).
+ * field. Issue #789 re-adds the Notifications card (per-campaign category
+ * delivery modes + quiet hours) as {@link NotificationPreferencesCard}.
  * The AI scribe card is live — MCP is a real, shipped API (see /tokens +
  * apps/mcp) — so it links to token creation instead of claiming "not
  * available".
@@ -39,6 +39,7 @@ import {
 } from '../../app/accentPalette';
 import { Card, ErrorNote } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
+import { NotificationPreferencesCard } from './NotificationPreferencesCard';
 
 // Swatch hexes converted from the design's accent palette (Campfire.dc.html
 // `accents:` state — oklch(0.72 0.13 55) "ember", oklch(0.72 0.12 150) "moss",
@@ -485,6 +486,8 @@ export default function PreferencesPage() {
         </button>
         {saved && <span className="text-muted" style={{ fontSize: 12 }}>{t('preferences.saved')}</span>}
       </div>
+
+      <NotificationPreferencesCard />
 
       <DeleteAccountCard username={user.username} />
     </div>
