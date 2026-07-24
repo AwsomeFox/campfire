@@ -192,7 +192,10 @@ test.describe('RunSessionPage wires the shared transform (issue #464)', () => {
     expect(source).toMatch(/from ['"]\.\/mapRenderedBounds['"]/);
     expect(source).toMatch(/computeContainedRect/);
     expect(source).toMatch(/pointerToMapPercent/);
-    expect(source).toMatch(/cellSizePx/);
+    // Cell size now flows through the shared grid-calibration transform (#417) rather than a
+    // bare cellSizePx call, but it is still derived from the map rect, never the 16:9 surface.
+    expect(source).toMatch(/calibrationToPx/);
+    expect(source).toMatch(/resolveGridCalibration/);
     // The old bug: cell size from the 16:9 surface width.
     expect(source).not.toMatch(/\(gridSize! \/ 100\) \* surfaceW/);
     // Module must document the issue id for future calibrations (#417).

@@ -843,6 +843,14 @@ export const encounters = sqliteTable('encounters', {
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
   aoe: text('aoe'),
+  // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
+  // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.
+  // Added by migration on older DBs (see db/db.module.ts migrateEncountersTableForGridCalibration).
+  gridOffsetX: real('grid_offset_x').notNull().default(0),
+  gridOffsetY: real('grid_offset_y').notNull().default(0),
+  gridCellHeight: real('grid_cell_height'),
+  gridRotation: real('grid_rotation').notNull().default(0),
+  gridOpacity: real('grid_opacity').notNull().default(0.35),
   // Entity-level secrecy (issue #262) — see quests.hidden. A hidden encounter's roster +
   // difficulty are DM-only, and the encounter is dropped wholesale from non-DM reads until
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).

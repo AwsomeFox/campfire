@@ -955,6 +955,29 @@ function migrateEncountersTableForAoeHex(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before grid calibration (issue #417): `encounters` gained
+ * `grid_offset_x` / `grid_offset_y` / `grid_rotation` / `grid_opacity` (NOT NULL with
+ * defaults that reproduce the classic top-left square grid) and the nullable
+ * `grid_cell_height` (null = square cells, same as grid_size). Plain ADD COLUMNs — same
+ * shape as migrateEncountersTableForVtt / migrateEncountersTableForAoeHex above. Existing
+ * encounters backfill to the defaults, so their overlay is byte-for-byte unchanged.
+ */
+function migrateEncountersTableForGridCalibration(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('grid_offset_x')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_x REAL NOT NULL DEFAULT 0');
+  if (!has('grid_offset_y')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_offset_y REAL NOT NULL DEFAULT 0');
+  if (!has('grid_cell_height')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_cell_height REAL');
+  if (!has('grid_rotation')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_rotation REAL NOT NULL DEFAULT 0');
+  if (!has('grid_opacity')) sqlite.exec('ALTER TABLE encounters ADD COLUMN grid_opacity REAL NOT NULL DEFAULT 0.35');
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -2121,6 +2144,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0071_ai_dm_usage_history', run: migrateAiDmUsageHistoryTable },
   { name: '0072_combatants_turn_state', run: migrateCombatantsTableForTurnState },
   { name: '0073_campaigns_turn_controls', run: migrateCampaignsTableForTurnControls },
+  { name: '0074_encounters_grid_calibration', run: migrateEncountersTableForGridCalibration },
 ];
 
 /**
