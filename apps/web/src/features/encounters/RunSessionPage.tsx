@@ -2220,7 +2220,6 @@ function BattleMap({
           {isDm && showGuidance && (
             <div
               data-testid="map-attach-guidance"
-              role="status"
               className="cf-inset"
               style={{ margin: '8px 14px 0', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }}
             >

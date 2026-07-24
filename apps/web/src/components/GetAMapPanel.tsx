@@ -85,7 +85,10 @@ export function GetAMapPanel({
   // The first-party procedural generator (#306) — surfaced as its own wizard (#409) rather
   // than the external-source list, which is why GetAMapPanel historically filtered it out.
   const builtinGenerator = (sources ?? []).find((s) => s.kind === 'generator-builtin');
-  const canGenerate = !!onGenerate && !!builtinGenerator;
+  // Discoverability is driven by the SURFACE opting in (providing onGenerate), not by the
+  // /maps/sources fetch: the wizard talks to the dedicated preview endpoint, so it must stay
+  // reachable even while sources are still loading or if that request fails.
+  const canGenerate = !!onGenerate;
 
   const hasSources = !!sources && sources.length > 0;
   if (!hasSources && !canDraftWithAi && !canGenerate) return null;
