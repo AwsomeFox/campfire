@@ -7,6 +7,7 @@ import { AiDmService } from '../ai-dm/ai-dm.service';
 import { McpToolsService, type DriverTool, type DriverToolset } from '../mcp/mcp-tools';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { RulesService } from '../rules/rules.service';
+import { EncountersService } from '../encounters/encounters.service';
 import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
 import type {
   AiProvider,
@@ -330,6 +331,35 @@ const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
 export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
 /** Per-call treasury grant cap (per denomination) for autonomous live play. */
 export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+
+/** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
+const DRIVER_LOOT_COMBAT_LOG_TOOLS = new Set(['adjust_treasury', 'add_inventory_item', 'update_inventory_item']);
+
+const TREASURY_DENOMS = ['pp', 'gp', 'ep', 'sp', 'cp'] as const;
+
+/** Human-readable combat-log detail for a successful driver loot/treasury grant. */
+export function formatDriverLootCombatLogDetail(toolName: string, args: Record<string, unknown>): string | null {
+  if (toolName === 'adjust_treasury') {
+    const delta = args.delta;
+    if (!delta || typeof delta !== 'object' || Array.isArray(delta)) return 'Granted treasury';
+    const rec = delta as Record<string, unknown>;
+    const parts = TREASURY_DENOMS.filter((d) => typeof rec[d] === 'number' && (rec[d] as number) > 0).map(
+      (d) => `+${rec[d] as number} ${d}`,
+    );
+    return parts.length > 0 ? `Granted treasury (${parts.join(', ')})` : 'Granted treasury';
+  }
+  if (toolName === 'add_inventory_item') {
+    const name = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : 'item';
+    const qty = typeof args.qty === 'number' && Number.isFinite(args.qty) ? args.qty : 1;
+    return `Granted item: ${name} ×${qty}`;
+  }
+  if (toolName === 'update_inventory_item') {
+    const qtyDelta = typeof args.qtyDelta === 'number' ? args.qtyDelta : null;
+    if (qtyDelta != null && qtyDelta > 0) return `Increased party item quantity by +${qtyDelta}`;
+    return 'Updated party inventory';
+  }
+  return null;
+}
 
 /**
  * update_encounter fields the driver may set — VTT overlays only. Prep fields (name, links,
@@ -741,6 +771,7 @@ export class AiDriverService {
     @Inject(AI_PROVIDER_RESOLVER) private readonly resolver: AiProviderResolver,
     private readonly campaigns: CampaignsService,
     private readonly rules: RulesService,
+    private readonly encounters: EncountersService,
   ) {
     // Mode-switch teardown without an AiDm→AiDriver DI edge (forwardRef blows the stack here).
     this.aiDm.registerDriverSessionTeardown((campaignId) => this.teardownSession(campaignId));
@@ -1485,6 +1516,24 @@ export class AiDriverService {
         campaignId,
         detail: `${call.name}${proposed ? ' (proposed)' : ''}${useSeatPrincipal ? '' : ' (player-scoped)'}${res.isError ? ' [error]' : ''} by ${triggeredBy.id}`,
       });
+
+      // (7) #1021 — persist successful loot/treasury grants on the active encounter's
+      // combat log so awards survive reload (toast alone is not enough). Best-effort:
+      // a log failure must not fail the grant that already committed.
+      if (!res.isError && !proposed && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(call.name)) {
+        const detail = formatDriverLootCombatLogDetail(call.name, args);
+        if (detail) {
+          try {
+            await this.encounters.appendActiveEncounterNote(campaignId, detail);
+          } catch (err) {
+            this.logger.warn(
+              `Failed to append loot combat-log note after ${call.name} for campaign ${campaignId}: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        }
+      }
 
       if (res.isError) toolErrored = true;
     }

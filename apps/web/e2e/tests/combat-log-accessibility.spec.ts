@@ -386,6 +386,29 @@ test('mobile encounter view announces AI loot/treasury tool activity and keeps t
   await restoreSeedEncounter(page);
   await page.setViewportSize({ width: 320, height: 568 });
   await mockDriverToolEvent(page, campaignId, 'adjust_treasury');
+  // Persist a combat-log note as the driver does after a successful grant (#1021) so the
+  // named Combat log (not only the 8s toast) shows the award under role="log".
+  await page.route(`**/api/v1/encounters/${encounterId}/events**`, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify([
+        {
+          id: 9001,
+          encounterId,
+          round: 1,
+          type: 'note',
+          actor: 'AI DM',
+          target: null,
+          actorId: null,
+          targetId: null,
+          detail: 'Granted treasury (+25 gp)',
+          createdAt: '2026-07-24T00:00:00.000Z',
+        },
+      ]),
+    });
+  });
 
   await page.goto(`/c/${campaignId}/encounters/${encounterId}`);
   await expect(page.getByRole('heading', { name: 'Ambush at the Ember Hearth' })).toBeVisible();
@@ -400,4 +423,7 @@ test('mobile encounter view announces AI loot/treasury tool activity and keeps t
   await expect
     .poll(async () => ((await polite.textContent()) ?? '').toLowerCase().includes('the ai dm adjust treasury'))
     .toBe(true);
+
+  const combatLog = page.getByRole('log', { name: 'Combat log' });
+  await expect(combatLog.getByText(/Granted treasury \(\+25 gp\)/i)).toBeVisible();
 });

@@ -2,6 +2,7 @@ import { describe, it, expect } from '@jest/globals';
 import {
   isDriverToolAllowed,
   guardDriverLivePlayArgs,
+  formatDriverLootCombatLogDetail,
   DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
 } from '../../src/modules/ai-driver/ai-driver.service';
 
@@ -121,5 +122,18 @@ describe('AI Driver loot/treasury tools (#1021)', () => {
       code: 'forbidden_treasury_field',
       message: 'The driver may not use absolute treasury set values; only positive delta grants are allowed.',
     });
+  });
+
+  it('formatDriverLootCombatLogDetail summarizes treasury and inventory grants for the combat log', () => {
+    expect(formatDriverLootCombatLogDetail('adjust_treasury', { delta: { gp: 25, sp: 10 } })).toBe(
+      'Granted treasury (+25 gp, +10 sp)',
+    );
+    expect(formatDriverLootCombatLogDetail('add_inventory_item', { name: 'Potion of Healing', qty: 1 })).toBe(
+      'Granted item: Potion of Healing ×1',
+    );
+    expect(formatDriverLootCombatLogDetail('update_inventory_item', { itemId: 9, qtyDelta: 2 })).toBe(
+      'Increased party item quantity by +2',
+    );
+    expect(formatDriverLootCombatLogDetail('roll_dice', { expr: '1d20' })).toBeNull();
   });
 });

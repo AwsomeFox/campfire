@@ -530,17 +530,18 @@ export default function RunSessionPage() {
   useEffect(() => {
     const activity = liveActivity.encounterActivity;
     if (!activity) return;
-    const event = liveActivity.lastToolEvent;
-    const eventKey = event ? `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}` : String(activity.at);
+    // Pair toast/announce with the activity's source tool event — never global
+    // `lastToolEvent`, which later map/rules tools would incorrectly re-toast.
+    const event = activity.event;
+    const eventKey = `${event.type}:${event.name}:${event.at}:${event.isError}:${event.proposed}`;
     if (eventKey === lastToastEventRef.current) return;
     lastToastEventRef.current = eventKey;
     // Re-resolve with THIS encounter's id so the chip can deep-link back here — tool
     // events are id-only (#338), so the generic app-level resolution above couldn't
-    // know it. `lastToolEvent` is set in the same reducer step as `encounterActivity`.
-    const chip =
-      liveActivity.lastToolEvent && Number.isFinite(eid)
-        ? resolveToolActivity(liveActivity.lastToolEvent, { campaignId: cid, encounterId: eid })
-        : activity.chip;
+    // know it.
+    const chip = Number.isFinite(eid)
+      ? resolveToolActivity(event, { campaignId: cid, encounterId: eid })
+      : activity.chip;
     const key = ++toastSeq.current;
     setAiToasts((prev) => [...prev, { key, chip, at: activity.at }].slice(-3));
     announce(`The AI DM ${chip.label.toLowerCase()}.`, {
@@ -548,7 +549,7 @@ export default function RunSessionPage() {
     });
     const timer = setTimeout(() => setAiToasts((prev) => prev.filter((t) => t.key !== key)), 8000);
     return () => clearTimeout(timer);
-  }, [liveActivity.encounterActivity, liveActivity.lastToolEvent, cid, eid, announce]);
+  }, [liveActivity.encounterActivity, cid, eid, announce]);
 
   // Issue #430: structured so Refresh/dismiss/navigation can clear stale banners
   // without relying solely on the Retry path. Passive SSE/poll must not wipe it.

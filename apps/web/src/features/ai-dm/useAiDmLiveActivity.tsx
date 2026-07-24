@@ -35,6 +35,8 @@ import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChi
 export interface AiDmEncounterActivity {
   chip: ToolChip;
   at: number;
+  /** Source tool event — toast/announce must key off this, not global `lastToolEvent`. */
+  event: ToolStreamEvent;
 }
 
 export interface AiDmLiveActivityState {
@@ -135,7 +137,11 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       if (event.proposed) next.proposalFiledCount = prev.proposalFiledCount + 1;
       const resource = toolResource(event.name);
       if (resource === 'encounter' || resource === 'party') {
-        next.encounterActivity = { chip: resolveToolActivity(event, { campaignId: event.campaignId }), at };
+        next.encounterActivity = {
+          chip: resolveToolActivity(event, { campaignId: event.campaignId }),
+          at,
+          event,
+        };
       }
       return next;
     }

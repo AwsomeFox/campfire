@@ -79,6 +79,21 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     const campaignId = await h.createCampaign('Driver Loot Aftermath');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
 
+    // Start a live encounter so successful grants append to the combat log (#1021).
+    const hero = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Loot Hero', stats: { DEX: 14 }, hpCurrent: 12, hpMax: 12 });
+    expect(hero.status).toBe(201);
+    const enc = await request(h.server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loot Fight' });
+    expect(enc.status).toBe(201);
+    const encounterId = enc.body.id as number;
+    const rolled = await request(h.server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    expect(rolled.status).toBe(201);
+    const start = await request(h.server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(start.status).toBe(201);
+    expect(start.body.status).toBe('running');
+
     h.script(
       {
         text: 'You gather rewards from the fallen foe.',
@@ -105,12 +120,12 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     expect(treasury.status).toBe(200);
     expect(treasury.body.gp).toBe(25);
 
+    type InvItem = { id: number; name: string; ownerType: string; qty: number };
     const inventory = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
     expect(inventory.status).toBe(200);
-    const potion = inventory.body.find((i: { name: string }) => i.name === 'Potion of Healing');
-    expect(potion).toBeDefined();
-    expect(potion.ownerType).toBe('party');
-    expect(potion.qty).toBe(1);
+    const potion = (inventory.body as InvItem[]).find((i) => i.name === 'Potion of Healing');
+    expect(potion).toEqual(expect.objectContaining({ name: 'Potion of Healing', ownerType: 'party', qty: 1 }));
+    if (!potion) throw new Error('expected Potion of Healing in party inventory');
 
     h.script(
       {
@@ -132,9 +147,20 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
     const inventoryAfter = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
     expect(inventoryAfter.status).toBe(200);
-    const potionAfter = inventoryAfter.body.find((i: { id: number }) => i.id === potion.id);
+    const potionAfter = (inventoryAfter.body as InvItem[]).find((i) => i.id === potion.id);
     expect(potionAfter).toBeDefined();
+    if (!potionAfter) throw new Error('expected topped-up potion in party inventory');
     expect(potionAfter.qty).toBe(3);
+
+    // Grants appear in the persistent encounter combat log (not only a transient toast).
+    const events = await request(h.server).get(`/api/v1/encounters/${encounterId}/events`).set(dm);
+    expect(events.status).toBe(200);
+    const notes = (events.body as Array<{ type: string; actor: string | null; detail: string }>).filter(
+      (e) => e.type === 'note' && e.actor === 'AI DM',
+    );
+    expect(notes.some((e) => e.detail.includes('Granted treasury') && e.detail.includes('+25 gp'))).toBe(true);
+    expect(notes.some((e) => e.detail.includes('Granted item: Potion of Healing'))).toBe(true);
+    expect(notes.some((e) => e.detail.includes('Increased party item quantity by +2'))).toBe(true);
 
     const audit = await h.getAudit(campaignId);
     const driverToolEvents = audit.body.filter((e: { action: string }) => e.action === 'ai-dm.driver.tool');
