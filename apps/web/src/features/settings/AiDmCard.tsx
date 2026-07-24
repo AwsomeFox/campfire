@@ -104,9 +104,15 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
   const usagePct = seat.tokenBudget > 0 ? Math.min(100, Math.round((seat.tokensUsed / seat.tokenBudget) * 100)) : 0;
 
   return (
-    <div className="card elev-sm" id="ai-dm" style={{ scrollMarginTop: 72 }}>
+    <div
+      className="card elev-sm settings-anchor"
+      id="ai-dm"
+      tabIndex={-1}
+      aria-labelledby="ai-dm-heading"
+      style={{ scrollMarginTop: 72 }}
+    >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="card-kicker" style={{ margin: 0 }}>AI Dungeon Master</span>
+        <span id="ai-dm-heading" className="card-kicker" style={{ margin: 0 }}>AI Dungeon Master</span>
         <span className={`tag ${MODE_TAG[seat.mode]}`} style={{ fontSize: 10 }}>
           AI is currently: {MODE_LABEL[seat.mode]}
         </span>
@@ -130,14 +136,17 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
  * deep-link anchor the onboarding checklist (#343) targets (e.g. #ai-dm-provider);
  * `scrollMarginTop` keeps the heading clear of the sticky app header when jumped to.
  */
-function Section({ title, id, children }: { title: string; id?: string; children: React.ReactNode }) {
+function Section({ title, id, children }: { title: string; id: string; children: React.ReactNode }) {
+  const headingId = `${id}-heading`;
   return (
     <div
       id={id}
-      className="flex flex-col gap-2"
+      className="flex flex-col gap-2 settings-anchor"
       style={{ borderTop: '1px solid var(--color-neutral-800, #2a2a2a)', paddingTop: 12, marginTop: 4, scrollMarginTop: 72 }}
+      tabIndex={-1}
+      aria-labelledby={headingId}
     >
-      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-neutral-200)' }}>{title}</span>
+      <h3 id={headingId} style={{ margin: 0, fontSize: 12, fontWeight: 700, color: 'var(--color-neutral-200)' }}>{title}</h3>
       {children}
     </div>
   );
@@ -394,7 +403,7 @@ function InstructionsSection({
   }
 
   return (
-    <Section title="Steering instructions">
+    <Section title="Steering instructions" id="ai-dm-instructions">
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         DM-only persona / house rules for the AI. Never shown to players — this is where plot secrets can live.
       </p>
