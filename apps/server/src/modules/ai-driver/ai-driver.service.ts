@@ -264,6 +264,7 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // dice + initiative
   'roll_dice',
   'roll_initiative',
+  'saving_throw', // #1040: character-aware save resolution using real stats + proficiency
   // encounter / turn flow
   'begin_encounter',
   'end_encounter',
