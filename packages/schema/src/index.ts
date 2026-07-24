@@ -1359,6 +1359,10 @@ export const NotificationType = z.enum([
   'character_reassigned',
   'session_scheduled',
   'session_rsvp',
+  // Issue #789: deduplicated pre-session reminder and the optional unanswered-RSVP
+  // nudge. Both belong to the `schedule` notification category (see notificationCategory).
+  'session_reminder',
+  'rsvp_nudge',
   'quest_updated',
   'proposal_submitted',
   'proposal_resolved',
@@ -1398,6 +1402,124 @@ export type Notification = z.infer<typeof Notification>;
 
 export const NotificationUnreadCount = z.object({ count: z.number().int().nonnegative() });
 export type NotificationUnreadCount = z.infer<typeof NotificationUnreadCount>;
+
+// ---------- notification preferences (issue #789) ----------
+// Per-user, per-campaign control over which notification CATEGORIES are delivered
+// and how. Every NotificationType maps to exactly one category (see
+// notificationCategory below); users tune preferences by category, not by the
+// finer-grained type. Preferences are consulted during fan-out
+// (NotificationsService.dispatch) BEFORE a row is written — except the ALWAYS-ON
+// critical categories (`access`, `security`), which ignore preferences AND quiet
+// hours so a member can never silence a security/access notice.
+
+/** Coarse grouping a NotificationType belongs to — the unit users actually tune. */
+export const NotificationCategory = z.enum([
+  'recaps', // recap_posted, recap_share_enabled, recap_share_extended
+  'notes', // note_reply, note_shared
+  'comments', // comment_reply
+  'schedule', // session_scheduled, session_rsvp, session_reminder, rsvp_nudge
+  'quests', // quest_updated
+  'proposals', // proposal_submitted, proposal_resolved
+  'inbox', // inbox_submitted
+  'access', // added_to_campaign, character_reassigned — ALWAYS ON (access control)
+  'security', // ai_dm_alert — ALWAYS ON (security/recovery)
+]);
+export type NotificationCategory = z.infer<typeof NotificationCategory>;
+
+/** How a (non-critical) category is delivered. */
+export const NotificationDeliveryMode = z.enum([
+  'immediate', // write the row now (subject to quiet hours)
+  'digest', // defer; flushed in a batch on the digest cadence
+  'muted', // drop entirely
+]);
+export type NotificationDeliveryMode = z.infer<typeof NotificationDeliveryMode>;
+
+/** Every category value, in display order. */
+export const NOTIFICATION_CATEGORIES = NotificationCategory.options;
+
+/**
+ * Critical categories are ALWAYS delivered immediately regardless of stored
+ * preferences or quiet hours — silencing access-control or security/recovery
+ * notices would be a footgun (issue #789). The UI renders these as locked.
+ */
+export const CRITICAL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = ['access', 'security'];
+
+export function isCriticalNotificationCategory(category: NotificationCategory): boolean {
+  return CRITICAL_NOTIFICATION_CATEGORIES.includes(category);
+}
+
+/** Static NotificationType -> NotificationCategory map (single source of truth). */
+export const NOTIFICATION_TYPE_CATEGORY: Record<NotificationType, NotificationCategory> = {
+  recap_posted: 'recaps',
+  recap_share_enabled: 'recaps',
+  recap_share_extended: 'recaps',
+  note_reply: 'notes',
+  note_shared: 'notes',
+  comment_reply: 'comments',
+  added_to_campaign: 'access',
+  character_reassigned: 'access',
+  session_scheduled: 'schedule',
+  session_rsvp: 'schedule',
+  session_reminder: 'schedule',
+  rsvp_nudge: 'schedule',
+  quest_updated: 'quests',
+  proposal_submitted: 'proposals',
+  proposal_resolved: 'proposals',
+  inbox_submitted: 'inbox',
+  ai_dm_alert: 'security',
+};
+
+/** Resolve the category a notification type belongs to. */
+export function notificationCategory(type: NotificationType): NotificationCategory {
+  return NOTIFICATION_TYPE_CATEGORY[type];
+}
+
+/** Sensible default mode for a category — everything is `immediate` out of the box. */
+export function defaultNotificationMode(_category: NotificationCategory): NotificationDeliveryMode {
+  // Critical categories are effectively immediate-and-locked; everything else
+  // defaults to immediate so behavior matches the pre-preferences fan-out until a
+  // user opts into digest/muted.
+  return 'immediate';
+}
+
+// Quiet hours are a per-user, per-campaign local-time window during which
+// non-critical IMMEDIATE notifications are held (deferred) instead of delivered,
+// then flushed once the window passes. Stored as minutes-of-day in the member's
+// chosen IANA timezone; the window may wrap past midnight (start > end).
+export const QuietHours = z.object({
+  enabled: z.boolean().default(false),
+  startMinute: z.number().int().min(0).max(1439).default(1320), // 22:00 local
+  endMinute: z.number().int().min(0).max(1439).default(420), // 07:00 local
+  timezone: z.string().min(1).max(64).default('UTC'), // IANA tz id
+});
+export type QuietHours = z.infer<typeof QuietHours>;
+
+/** Fully-resolved preferences for a single campaign (defaults filled in). */
+export const NotificationCampaignPreferences = z.object({
+  campaignId: Id,
+  campaignName: z.string().default(''),
+  // one mode per category (critical categories always report 'immediate')
+  categories: z.record(NotificationCategory, NotificationDeliveryMode),
+  quietHours: QuietHours,
+});
+export type NotificationCampaignPreferences = z.infer<typeof NotificationCampaignPreferences>;
+
+/** GET /notifications/preferences — one entry per campaign the caller belongs to. */
+export const NotificationPreferences = z.object({
+  campaigns: z.array(NotificationCampaignPreferences),
+});
+export type NotificationPreferences = z.infer<typeof NotificationPreferences>;
+
+/**
+ * PUT /notifications/preferences/:campaignId body. Additive/partial: only the
+ * provided categories/quiet-hours fields are changed. Attempts to set a critical
+ * category to anything other than 'immediate' are ignored server-side.
+ */
+export const NotificationPreferencesUpdate = z.object({
+  categories: z.record(NotificationCategory, NotificationDeliveryMode).optional(),
+  quietHours: QuietHours.partial().optional(),
+});
+export type NotificationPreferencesUpdate = z.infer<typeof NotificationPreferencesUpdate>;
 
 // ---------- rule packs (Compendium backend) ----------
 // Installed, server-wide rules content (spells/monsters/items/…) imported from

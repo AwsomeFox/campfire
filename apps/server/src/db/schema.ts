@@ -941,6 +941,92 @@ export const notifications = sqliteTable('notifications', {
   createdAt: text('created_at').notNull(),
 });
 
+// Issue #789 — per-user, per-campaign, per-category notification mode
+// ('immediate' | 'digest' | 'muted'). Absent row => the category default
+// (immediate). One row per (user, campaign, category); consulted during fan-out.
+export const notificationPreferences = sqliteTable(
+  'notification_preferences',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(), // recipient users.id (FK->users ON DELETE CASCADE in DDL)
+    campaignId: integer('campaign_id').notNull(), // FK->campaigns ON DELETE CASCADE in DDL
+    category: text('category').notNull(), // NotificationCategory in @campfire/schema
+    mode: text('mode').notNull().default('immediate'), // NotificationDeliveryMode
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    userCampaignCategory: uniqueIndex('idx_notification_prefs_user_campaign_category').on(
+      t.userId,
+      t.campaignId,
+      t.category,
+    ),
+  }),
+);
+
+// Issue #789 — per-user, per-campaign quiet-hours window (local minutes-of-day in
+// `timezone`). Absent row => quiet hours disabled. Suppresses only non-critical
+// IMMEDIATE notifications, which are deferred then flushed once the window passes.
+export const notificationQuietHours = sqliteTable(
+  'notification_quiet_hours',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull(),
+    campaignId: integer('campaign_id').notNull(),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+    startMinute: integer('start_minute').notNull().default(1320),
+    endMinute: integer('end_minute').notNull().default(420),
+    timezone: text('timezone').notNull().default('UTC'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    userCampaign: uniqueIndex('idx_notification_quiet_hours_user_campaign').on(t.userId, t.campaignId),
+  }),
+);
+
+// Issue #789 — deferred notification store. Rows land here instead of
+// `notifications` when the recipient's category mode is 'digest', or when an
+// 'immediate' notification arrives inside their quiet-hours window
+// (reason distinguishes the two). NotificationsService.flushDigests() drains
+// eligible rows into real notifications on the digest cadence.
+export const notificationDigestQueue = sqliteTable('notification_digest_queue', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  campaignId: integer('campaign_id').notNull(),
+  type: text('type').notNull(),
+  title: text('title').notNull(),
+  body: text('body').notNull().default(''),
+  entityType: text('entity_type'),
+  entityId: integer('entity_id'),
+  commentId: integer('comment_id'),
+  data: text('data'),
+  actorName: text('actor_name').notNull().default(''),
+  reason: text('reason').notNull().default('digest'), // 'digest' | 'quiet_hours'
+  createdAt: text('created_at').notNull(),
+});
+
+// Issue #789 — dedup ledger for scheduled-session reminders and unanswered-RSVP
+// nudges. One row per (schedule, user, kind) guarantees a reminder/nudge is sent
+// at most once, so a reschedule or a retried sweep never double-sends.
+export const notificationReminders = sqliteTable(
+  'notification_reminders',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    scheduledSessionId: integer('scheduled_session_id').notNull(),
+    userId: integer('user_id').notNull(),
+    kind: text('kind').notNull(), // 'session_reminder' | 'rsvp_nudge'
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    sessionUserKind: uniqueIndex('idx_notification_reminders_session_user_kind').on(
+      t.scheduledSessionId,
+      t.userId,
+      t.kind,
+    ),
+  }),
+);
+
 // DM-initiated check requests (issue #415) — one row per (request, target character). A DM
 // asks selected players to roll a check/save with an optional DC + consequence; the targeted
 // player reads their pending row(s) over a permission-checked REST read, rolls once via the

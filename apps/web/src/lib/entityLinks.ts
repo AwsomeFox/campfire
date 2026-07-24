@@ -245,8 +245,12 @@ export function notificationHref(notification: Notification): string {
         : `/c/${campaignId}/inbox`;
     case 'ai_dm_alert':
       return `/c/${campaignId}/table`;
+    // Issue #789: session_reminder / rsvp_nudge carry the schedule row id in
+    // entityId (entityType null) — same routing as a schedule ping.
     case 'session_scheduled':
-    case 'session_rsvp': {
+    case 'session_rsvp':
+    case 'session_reminder':
+    case 'rsvp_nudge': {
       // Issue #820: cancelled nights are deleted — route to a stable cancelled
       // detail fed by the notification's structured snapshot (not a live card).
       // The bell stashes the snapshot before navigate (see NotificationsBell).

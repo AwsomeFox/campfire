@@ -1305,6 +1305,73 @@ function migrateCheckRequestsTable(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #789 — notification preferences. Four NEW tables (per-category delivery
+ * mode, quiet hours, the deferred/digest queue, and the reminder/nudge dedup
+ * ledger). All are plain CREATE TABLE / CREATE INDEX IF NOT EXISTS, so this is a
+ * recorded no-op on fresh DBs (BOOTSTRAP_SQL already declares them) and a
+ * one-time create on upgraded DBs. Mirrors bootstrap.sql.ts exactly. The
+ * declared FK REFERENCES are inert at CREATE time (SQLite resolves FK targets at
+ * write time) but kept identical so both paths converge on the same schema.
+ */
+function migrateNotificationPreferencesTables(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      category TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'immediate',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_prefs_user_campaign_category
+      ON notification_preferences(user_id, campaign_id, category);
+
+    CREATE TABLE IF NOT EXISTS notification_quiet_hours (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      start_minute INTEGER NOT NULL DEFAULT 1320,
+      end_minute INTEGER NOT NULL DEFAULT 420,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_quiet_hours_user_campaign
+      ON notification_quiet_hours(user_id, campaign_id);
+
+    CREATE TABLE IF NOT EXISTS notification_digest_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      entity_type TEXT,
+      entity_id INTEGER,
+      comment_id INTEGER,
+      data TEXT,
+      actor_name TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT 'digest',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notification_digest_queue_campaign
+      ON notification_digest_queue(campaign_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS notification_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduled_session_id INTEGER NOT NULL REFERENCES scheduled_sessions(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_reminders_session_user_kind
+      ON notification_reminders(scheduled_session_id, user_id, kind);
+  `);
+}
+
+/**
  * Issue #849: campaign_members.user_id used to be an unconstrained integer, so
  * a typo or stale import could create a "ghost" DM that could never authenticate
  * but still defeated the last-DM guard. SQLite cannot ALTER-ADD a foreign key,
@@ -2220,6 +2287,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0076_campaign_purge_tombstones', run: migrateCampaignPurgeTombstones },
   { name: '0077_combatants_initiative_group', run: migrateCombatantsTableForInitiativeGroup },
   { name: '0078_import_jobs', run: migrateImportJobsTable },
+  { name: '0079_notification_preferences', run: migrateNotificationPreferencesTables },
 ];
 
 /**
