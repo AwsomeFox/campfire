@@ -32,6 +32,7 @@ describe('statblock presentation metadata (issue #763)', () => {
         'pf2e',
         'sf2e',
         'starfinder-1e',
+        'starforged',
       ].sort(),
     );
     for (const adapter of adapters) {

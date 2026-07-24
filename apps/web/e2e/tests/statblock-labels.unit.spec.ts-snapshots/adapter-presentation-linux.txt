@@ -177,5 +177,26 @@
     "creatureType": {
       "full": "Type"
     }
+  },
+  "starforged": {
+    "rating": {
+      "full": "Rating"
+    },
+    "defense": {
+      "full": "Defense"
+    },
+    "hitPoints": {
+      "full": "Hit Points",
+      "short": "HP"
+    },
+    "abilities": {
+      "full": "Abilities"
+    },
+    "actions": {
+      "full": "Actions"
+    },
+    "creatureType": {
+      "full": "Type"
+    }
   }
 }
