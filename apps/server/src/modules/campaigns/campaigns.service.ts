@@ -739,6 +739,9 @@ export class CampaignsService {
       ? Boolean(timelineCalendarRow.currentDate) || Boolean(timelineCalendarRow.note)
       : false;
 
+    const mapAttachmentRows = attachmentRows.filter((a) => a.kind === 'map');
+    const portraitAttachmentRows = attachmentRows.filter((a) => a.kind === 'portrait');
+
     const counts: Record<string, number> = {
       locations: locationRows.length,
       factions: factionRows.length,
@@ -762,9 +765,7 @@ export class CampaignsService {
       treasury: treasuryHasCoins ? 1 : 0,
       revisions: revisionRows.length,
       attachments: attachmentRows.length,
-      mapAttachments:
-        (source.mapAttachmentId != null ? 1 : 0) +
-        (template ? 0 : encounterRows.filter((e) => e.mapAttachmentId != null).length),
+      mapAttachments: mapAttachmentRows.length,
     };
 
     const prepInclusion = (count: number, note?: string) => ({
@@ -800,12 +801,12 @@ export class CampaignsService {
       treasury: playInclusion(treasuryHasCoins ? 1 : 0),
       revisions: playInclusion(revisionRows.length, 'Prose history for copied entities only; dangling links drop.'),
       mapAttachments: {
-        included: attachmentRows.some((a) => a.kind === 'map'),
-        count: counts.mapAttachments,
+        included: mapAttachmentRows.length > 0,
+        count: mapAttachmentRows.length,
         note: 'Campaign and encounter map bytes are copied when present on disk.',
       },
       portraitAttachments: playInclusion(
-        attachmentRows.filter((a) => a.kind === 'portrait').length,
+        portraitAttachmentRows.length,
         'Portrait bytes copy in full mode only.',
       ),
     };
