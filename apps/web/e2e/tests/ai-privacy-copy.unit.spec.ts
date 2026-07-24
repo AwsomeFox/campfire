@@ -15,7 +15,7 @@
  */
 import { expect, test } from '@playwright/test';
 import { AI_EXTERNAL_PROVIDER_PRIVACY } from '@campfire/schema';
-import { FEATURES as LOGIN_FEATURES } from '../../src/features/auth/LoginPage';
+import { FEATURES as LOGIN_FEATURES, LOGIN_FOOTER_TAGLINE } from '../../src/features/auth/LoginPage';
 
 const privacy = AI_EXTERNAL_PROVIDER_PRIVACY;
 
@@ -36,7 +36,7 @@ function privacyNoticeText(): string {
 const PRIVACY_SURFACES: ReadonlyArray<{ name: string; text: string }> = [
   {
     name: 'login footer tagline',
-    text: privacy.loginTagline,
+    text: LOGIN_FOOTER_TAGLINE,
   },
   {
     name: 'login feature (Self-hosted & private)',
@@ -63,7 +63,7 @@ test.describe('External AI provider privacy copy (#455)', () => {
   });
 
   test('login copy states local-by-default and external-provider exception', () => {
-    const tagline = privacy.loginTagline.toLowerCase();
+    const tagline = LOGIN_FOOTER_TAGLINE.toLowerCase();
     expect(tagline, 'login tagline must mention local/default storage').toMatch(
       /stays on your server|local|by default/,
     );

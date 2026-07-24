@@ -51,6 +51,9 @@ function FlameMark({ size = 44 }: { size?: number }) {
   );
 }
 
+/** Footer tagline on the login landing pitch (sourced from the privacy manifest). */
+export const LOGIN_FOOTER_TAGLINE = AI_EXTERNAL_PROVIDER_PRIVACY.loginTagline;
+
 /** The value-prop highlights shown on the landing hero. Icons degrade gracefully. */
 export const FEATURES: { icon: string; title: string; body: string }[] = [
   {
@@ -129,7 +132,7 @@ function LandingPitch() {
       </div>
 
       <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-        {AI_EXTERNAL_PROVIDER_PRIVACY.loginTagline}
+        {LOGIN_FOOTER_TAGLINE}
       </p>
     </section>
   );

@@ -4259,7 +4259,7 @@ export const AI_EXTERNAL_PROVIDER_PRIVACY = {
   localByDefault:
     'By default Campfire stores your campaign on this server and does not contact any LLM vendor. Connected MCP agents read through the API; their traffic stays between your agent and your server unless you point the agent at an external model.',
   externalException:
-    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context below is included; DM-only secrets are stripped unless you explicitly opt in (map generation only).',
+    'When you configure and save an external provider (OpenAI-compatible, Anthropic, or Gemini), Campfire sends prompts to that endpoint for the AI DM seat, Co-DM drafts, scheduled scribe recaps, and map generation. Only the context categories below are included — including DM steering you configure. Hidden entities, dmSecret fields, and other DM-only secrets are stripped by default unless you explicitly opt in (map generation only).',
   contextCategories: [
     {
       label: 'Campaign summary',

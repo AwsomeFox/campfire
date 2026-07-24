@@ -12,7 +12,7 @@ export function AiProviderPrivacyNotice({ compact = false }: { compact?: boolean
   return (
     <section
       id={privacy.settingsAnchorId}
-      aria-labelledby={`${privacy.settingsAnchorId}-title`}
+      aria-label="AI privacy disclosure"
       className="flex flex-col gap-2"
       style={{
         padding: compact ? '10px 12px' : '12px 14px',
@@ -23,12 +23,12 @@ export function AiProviderPrivacyNotice({ compact = false }: { compact?: boolean
       }}
       data-testid="ai-provider-privacy-notice"
     >
-      <h3
+      <p
         id={`${privacy.settingsAnchorId}-title`}
         style={{ margin: 0, fontSize: compact ? 12 : 13, fontWeight: 700, color: 'var(--color-text)' }}
       >
         {privacy.noticeTitle}
-      </h3>
+      </p>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5, lineHeight: 1.45 }}>
         {privacy.localByDefault}
       </p>
