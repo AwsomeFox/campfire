@@ -30,6 +30,17 @@ const MAX_RESTORE_BYTES = 1024 * 1024 * 1024;
 export class BackupController {
   constructor(private readonly backup: BackupService) {}
 
+  @Get('status')
+  @ApiOperation({
+    summary: 'Scheduled backup status',
+    description:
+      'Server-admin only. Read-only view of whether scheduled backups are enabled, the effective cadence, persisted last-run metadata, and recent on-disk archives under BACKUP_DIR.',
+  })
+  @ApiResponse({ status: 200, description: 'Scheduled backup status and on-disk archive listing.' })
+  async status() {
+    return this.backup.getStatus();
+  }
+
   @Get()
   @ApiOperation({
     summary: 'Download a whole-server backup',

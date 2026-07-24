@@ -26,6 +26,8 @@ import {
   DifficultyBand,
   EncounterShape,
   EncounterUpdate,
+  EncounterPreviewRequest,
+  EncounterCommit,
   DangerLevel,
   EntityType,
   ExpectedUpdatedAt,
@@ -1124,6 +1126,50 @@ export class McpToolsService {
           },
           role,
         );
+      },
+    );
+
+    this.tool(
+      server,
+      'preview_encounter',
+      'Preview & TUNE a generated encounter (issue #412) — NON-MUTATING. Returns a multi-slot roster with ' +
+        'per-creature inspection (AC/HP/actions/saves/traits), an XP/difficulty EXPLANATION (headline + detail, not ' +
+        'just a band), actionable warnings (role duplication, action-economy mismatch, missing statblocks, ' +
+        'unsupported-system math, swinginess), and actionable fallbacks when the compendium is empty or the system ' +
+        'lacks budget math. First call with just `difficulty` (+ optional party/filters/shape/count/seed) to generate; ' +
+        'then pass back `roster` (the returned plan[]) with a `tune` op to reroll-all / reroll-slot / swap-slot / ' +
+        'adjust-count / pin / add-slot / remove-slot — deterministic by the per-slot seeds so pinned slots survive ' +
+        'rerolls. Persists NOTHING; commit the tuned plan via commit_encounter.',
+      {
+        campaignId: CampaignIdArg,
+        ...EncounterPreviewRequest.shape,
+      },
+      async ({ campaignId, ...fields }) => {
+        const role = await this.access.requireMember(user, campaignId as number);
+        const request = EncounterPreviewRequest.parse(fields);
+        return this.encounters.previewEncounter(campaignId as number, request, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'commit_encounter',
+      'DM only: COMMIT a tuned encounter roster (issue #412) atomically. Creates the encounter with its combatants ' +
+        'plus optional location/quest/session links, battle map/grid, and token placement in ONE transaction — never ' +
+        'a partial encounter or duplicate combatants. IDEMPOTENT: a retry with the same `idempotencyKey` returns the ' +
+        'SAME encounter (safe to retry a lost response). Pass the `roster` (plan[]) from preview_encounter. Created ' +
+        'hidden + preparing by default (DM prep, #262). The autonomous driver seat MAY commit prep encounters (they ' +
+        'are hidden until the DM reveals them); the co-DM should preview and let the DM confirm. Source/inputs/roster/' +
+        'manual edits are stamped into the audit trail.',
+      {
+        campaignId: CampaignIdArg,
+        ...EncounterCommit.shape,
+      },
+      async ({ campaignId, ...fields }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        const request = EncounterCommit.parse(fields);
+        return this.encounters.commitGeneratedEncounter(campaignId as number, request, user, role);
       },
     );
 

@@ -309,6 +309,10 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   // encounter / turn flow — includes create_encounter so the AI can originate a fight
   // during play (#1075).
   'create_encounter',
+  // commit_encounter (#412): the driver may commit a GENERATED roster as a hidden, preparing
+  // encounter during prep — the same prep-only latitude as generate_map (it never reveals to
+  // players or replaces a live map). preview_encounter is a non-mutating read (always allowed).
+  'commit_encounter',
   'begin_encounter',
   'end_encounter',
   'next_turn',

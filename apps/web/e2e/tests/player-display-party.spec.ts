@@ -9,7 +9,16 @@ import { seed, stateFor } from './seed';
 
 const DM = { username: 'dm', password: 'campfire-dm-pw-1' };
 
-/** Controls auto-hide after idle — nudge the pointer so the producer toggle is hittable. */
+/** Cast is scene-based now (issue #823) — switch the public stage to the Party
+ * scene before asserting on party cards. */
+async function showPartyScene(page: Page) {
+  await page.mouse.move(24, 24);
+  await page.getByTestId('cf-scene-btn-party').click();
+  await expect(page.getByTestId('cf-stage')).toHaveAttribute('data-scene', 'party');
+}
+
+/** Controls auto-hide after idle — nudge the pointer so the producer toggle is hittable.
+ * The alumni toggle lives in the cockpit only while the Party scene is active. */
 async function revealControls(page: Page) {
   await page.mouse.move(24, 24);
   await expect(page.getByRole('checkbox', { name: /Include alumni \/ inactive/i })).toBeVisible();
@@ -65,6 +74,7 @@ test.describe('Player Display party filter (issue #824)', () => {
     const { campaignId, xpRecipients } = seed();
     await page.goto(`/c/${campaignId}/screen`);
     await expect(page.getByRole('heading', { name: 'E2E — Cinderhaven' })).toBeVisible();
+    await showPartyScene(page);
     await expect(page.getByRole('heading', { name: 'Party' })).toBeVisible();
 
     // Seeded mixed-status XP fixtures must not pollute the live Party scene.
@@ -106,6 +116,7 @@ test.describe('Player Display party filter (issue #824)', () => {
     const id = await createCharacter(baseURL!, campaignId, name);
     try {
       await page.goto(`/c/${campaignId}/screen`);
+      await showPartyScene(page);
       await expect(page.getByRole('heading', { name: 'Party' })).toBeVisible();
       await expect(page.getByText(name, { exact: true })).toBeVisible();
 
@@ -130,6 +141,7 @@ test.describe('Player Display party filter (issue #824)', () => {
     const id = await createCharacter(baseURL!, campaignId, name);
     try {
       await page.goto(`/c/${campaignId}/screen`);
+      await showPartyScene(page);
       await expect(page.getByText(name, { exact: true })).toBeVisible();
 
       await patchStatus(baseURL!, id, 'dead');
