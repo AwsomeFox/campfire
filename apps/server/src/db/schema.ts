@@ -156,6 +156,8 @@ export const storyArcs = sqliteTable('story_arcs', {
   summary: text('summary').notNull().default(''),
   status: text('status').notNull().default('planned'),
   sortOrder: integer('sort_order').notNull().default(0),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -174,6 +176,8 @@ export const storyBeats = sqliteTable('story_beats', {
   sessionId: integer('session_id'),
   questId: integer('quest_id'),
   encounterId: integer('encounter_id'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -289,6 +293,8 @@ export const factions = sqliteTable('factions', {
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   reputation: integer('reputation').notNull().default(0),
   standing: text('standing').notNull().default('neutral'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -918,6 +924,8 @@ export const encounters = sqliteTable('encounters', {
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

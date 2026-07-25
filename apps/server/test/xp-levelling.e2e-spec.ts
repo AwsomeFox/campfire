@@ -303,7 +303,7 @@ describe('party XP transaction atomicity against the real SQLite database (issue
     const character = await request(server)
       .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
       .set(dm)
-      .send({ name: 'Transaction Tester', xp: 40 });
+      .send({ name: 'Transaction Tester', status: 'active', xp: 40 });
 
     // Force the final statement in CharactersService.awardXp's transaction to fail.
     const db = ctx.app.get<DrizzleDb>(DB);
@@ -351,7 +351,7 @@ describe('party XP transaction atomicity on mid-loop failure (issue #531)', () =
         request(server)
           .post(`/api/v1/campaigns/${campaign.body.id}/characters`)
           .set(dm)
-          .send({ name: `Member ${i + 1}`, xp }),
+          .send({ name: `Member ${i + 1}`, status: 'active', xp }),
       ),
     );
     expect(created.every((res) => res.status === 201)).toBe(true);

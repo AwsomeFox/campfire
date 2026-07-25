@@ -226,8 +226,8 @@ export function CharacterStatCard({
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {ABILITY_KEYS.map((k) => {
               const score = abilityScore(character, k);
-              const mod = adapter.abilityModifier(score);
-              const value = `${score} (${signed(mod)})`;
+              const mod = score === null ? null : adapter.abilityModifier(score);
+              const value = score === null ? '—' : `${score} (${signed(mod!)})`;
               const def = catalog.find((c) => c.id === `ability:${k}`);
               if (!interactive || !def) return <StatChip key={k} label={k} value={value} />;
               return (
@@ -238,7 +238,7 @@ export function CharacterStatCard({
                   data-testid={`check-roll-ability:${k}`}
                   // No aria-label: the accessible name stays the chip's own text ("STR 10 (+0)")
                   // so existing name-based locators keep working; the breakdown rides in the title.
-                  title={`Roll ${k} check (${signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
+                  title={`Roll ${k} check (${mod === null ? '—' : signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
                   onClick={(e) => rollCheck(def, e)}
                   style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
                 >

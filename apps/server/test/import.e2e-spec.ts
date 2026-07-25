@@ -92,6 +92,7 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       name: 'Rogue',
       className: 'Thief',
       level: 3,
+      status: 'active',
       portraitUrl: 'https://images.example.test/rogue.png',
     });
     characterId = charRes.body.id;

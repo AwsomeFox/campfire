@@ -225,7 +225,10 @@ test.describe('battle-map ping tap completion', () => {
 
     await surface.focus();
     await expect(surface).toBeFocused();
-    await expect(surface).toHaveAttribute('aria-label', 'Ping the map center for everyone');
+    await expect(surface).toHaveAttribute(
+      'aria-label',
+      'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.',
+    );
     await page.keyboard.press('Enter');
     await expect.poll(() => pings.length).toBe(1);
     expect(pings[0].x).toBe(50);
