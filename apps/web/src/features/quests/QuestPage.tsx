@@ -649,7 +649,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                           onClick={() => reorderObjective(i, -1)}
                           disabled={i === 0}
                           aria-label={t('quests.moveUp', { text: o.text })}
-                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-secondary shrink-0"
+                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-[var(--color-text-secondary)] shrink-0"
                         >
                           ↑
                         </button>
@@ -657,7 +657,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                           onClick={() => reorderObjective(i, 1)}
                           disabled={i === quest.objectives.length - 1}
                           aria-label={t('quests.moveDown', { text: o.text })}
-                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-secondary shrink-0"
+                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-[var(--color-text-secondary)] shrink-0"
                         >
                           ↓
                         </button>
