@@ -65,6 +65,7 @@ test.describe('encounter dice — apply rolled damage', () => {
       expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
       // The player's own card auto-expands, so the attack is visible without expanding.
       await expect(page.getByText('Brixi Applybar', { exact: false }).first()).toBeVisible();
 

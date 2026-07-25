@@ -326,7 +326,11 @@ export function CharacterStatCard({
                             className="cf-roll-control"
                             disabled={roller.rolling}
                             title={`Roll ${a.name} damage${onApplyDamage ? ' — apply from the roll toast in combat' : ''}`}
-                            onClick={() => void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`)}
+                            onClick={() =>
+                              void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
+                                applyEligible: !!onApplyDamage,
+                              })
+                            }
                             data-testid="damage-roll-control"
                           >
                             {a.damage}

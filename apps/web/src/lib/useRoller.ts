@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import type { DiceRoll, CheckRollResponse } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
-import { useRollResultToast } from '../components/RollResultToastContext';
+import { useRollResultToast, type ShowRollOptions } from '../components/RollResultToastContext';
 import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
@@ -23,7 +23,7 @@ export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
 
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
-  roll: (expr: string, label: string) => Promise<DiceRoll | null>;
+  roll: (expr: string, label: string, options?: ShowRollOptions) => Promise<DiceRoll | null>;
   /**
    * Issue #415: roll a CATALOG check server-side. The server resolves the authoritative
    * modifier + expression from the rule-system adapter (the client sends only a checkId +
@@ -48,13 +48,13 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   const { showRoll } = useRollResultToast();
 
   const roll = useCallback(
-    async (expr: string, label: string): Promise<DiceRoll | null> => {
+    async (expr: string, label: string, options?: ShowRollOptions): Promise<DiceRoll | null> => {
       setRolling(true);
       onError(null);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
-        showRoll(result);
+        showRoll(result, options);
         rememberLocalDiceAnnouncement(campaignId, result.id);
         announce(formatDiceRollAnnouncement(result, t), {
           dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,

@@ -68,7 +68,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
-import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
+import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
@@ -866,7 +866,12 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
-  useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
+  useRollApplyDamageBridge(onApplyDamageRolled);
+
+  const { setCombatApplyArmed } = useRollResultToast();
+  useEffect(() => {
+    setCombatApplyArmed(encounter?.status === 'running');
+  }, [encounter?.status, setCombatApplyArmed]);
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {

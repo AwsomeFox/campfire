@@ -4,7 +4,7 @@
  * handler while an encounter is running so damage-suitable rolls get a one-tap
  * shortcut into the existing ApplyDamageBar flow.
  */
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
 import type { DiceRoll } from '@campfire/schema';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { RollResultToast } from './RollResultToast';
@@ -18,31 +18,44 @@ function RollResultToastChrome() {
 
 type ApplyDamageHandler = (amount: number, label: string) => void;
 
+export interface ShowRollOptions {
+  /** True when the roller is in an encounter card that can hand off to ApplyDamageBar. */
+  applyEligible?: boolean;
+}
+
 interface RollResultToastContextValue {
-  showRoll: (roll: DiceRoll) => void;
+  showRoll: (roll: DiceRoll, options?: ShowRollOptions) => void;
   setApplyDamageHandler: (handler: ApplyDamageHandler | null) => void;
+  setCombatApplyArmed: (armed: boolean) => void;
 }
 
 const noop: RollResultToastContextValue = {
   showRoll: () => {},
   setApplyDamageHandler: () => {},
+  setCombatApplyArmed: () => {},
 };
 
 const RollResultToastContext = createContext<RollResultToastContextValue>(noop);
 
 export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const [roll, setRoll] = useState<DiceRoll | null>(null);
+  const [rollApplyEligible, setRollApplyEligible] = useState(false);
+  const [combatApplyArmed, setCombatApplyArmed] = useState(false);
   const [applyHandler, setApplyHandler] = useState<ApplyDamageHandler | null>(null);
 
-  const showRoll = useCallback((r: DiceRoll) => {
+  const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
+    setRollApplyEligible(options?.applyEligible ?? false);
   }, []);
 
   const setApplyDamageHandler = useCallback((handler: ApplyDamageHandler | null) => {
     setApplyHandler(handler);
   }, []);
 
-  const dismiss = useCallback(() => setRoll(null), []);
+  const dismiss = useCallback(() => {
+    setRoll(null);
+    setRollApplyEligible(false);
+  }, []);
 
   const handleApply = useCallback(() => {
     if (!roll || !applyHandler || !looksLikeDamageRoll(roll)) return;
@@ -51,10 +64,15 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     dismiss();
   }, [roll, applyHandler, dismiss]);
 
-  const canApply = roll != null && applyHandler != null && looksLikeDamageRoll(roll);
+  const canApply =
+    roll != null &&
+    applyHandler != null &&
+    combatApplyArmed &&
+    rollApplyEligible &&
+    looksLikeDamageRoll(roll);
 
   return (
-    <RollResultToastContext.Provider value={{ showRoll, setApplyDamageHandler }}>
+    <RollResultToastContext.Provider value={{ showRoll, setApplyDamageHandler, setCombatApplyArmed }}>
       {children}
       {roll && (
         <>
@@ -73,7 +91,7 @@ export function useRollResultToast(): RollResultToastContextValue {
 /** Register (or clear) the encounter apply-damage handler for the toast Apply action. */
 export function useRollApplyDamageBridge(handler: ApplyDamageHandler | undefined) {
   const { setApplyDamageHandler } = useRollResultToast();
-  useEffect(() => {
+  useLayoutEffect(() => {
     setApplyDamageHandler(handler ?? null);
     return () => setApplyDamageHandler(null);
   }, [handler, setApplyDamageHandler]);
