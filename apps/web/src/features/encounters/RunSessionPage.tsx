@@ -110,9 +110,8 @@ import {
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import { formatRulerReadout, gridCellUnitPlural, measureToolHelp } from './rulerReadout';
 import {
-  gridCellLabel,
-  gridCellLabelPlural,
   hexAoeCirclePolygons,
   hexPolygons,
   hexKeyboardStepPx,
@@ -2332,7 +2331,7 @@ function aoePolygonPoints(
  * encounter background with combatant tokens overlaid at combatant.tokenX/tokenY (0–100
  * percent). On top of the #39 token drag it adds:
  *  - a configurable square grid overlay (DM sets cell size / scale / unit / snap),
- *  - a click-drag measurement ruler that reads out distance in squares + feet,
+ *  - a click-drag measurement ruler that reads out distance in grid cells + scale units,
  *  - per-token size footprints (tiny→gargantuan) via combatant.tokenSize,
  *  - a square OR hex grid overlay (issue #238, gridType),
  *  - fog of war: the DM reveals rectangular regions; players see only revealed area, and
@@ -2764,8 +2763,12 @@ export function BattleMap({
             hexOrientation,
             gridDistanceRule,
           );
-          const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
+          announce(
+            formatRulerReadout(
+              { cells, scale: gridScale ?? 0, gridUnit, gridType },
+              'announce',
+            ),
+          );
         }
         return;
       }
@@ -3205,8 +3208,7 @@ export function BattleMap({
     onSetAoe(aoeTemplates.filter((t) => t.id !== id));
   }
 
-  // Measurement readout (5e: distance counts whole squares along the longer axis is common,
-  // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
+  // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
     const cells = mapPercentGridDistance(
@@ -3219,8 +3221,7 @@ export function BattleMap({
       hexOrientation,
       gridDistanceRule,
     );
-    const feet = Math.round(cells) * (gridScale ?? 0);
-    return { cells, feet };
+    return { cells };
   })();
 
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
@@ -3368,7 +3369,7 @@ export function BattleMap({
             aria-label="Map tools"
           >
             {modeBtn('move', 'Move')}
-            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
+            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? measureToolHelp(gridType) : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
             {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
@@ -4235,7 +4236,15 @@ export function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
+                        {formatRulerReadout(
+                          {
+                            cells: rulerReadout.cells,
+                            scale: gridScale ?? 0,
+                            gridUnit,
+                            gridType,
+                          },
+                          'display',
+                        )}
                       </div>
                     )}
                   </>
@@ -4318,7 +4327,7 @@ export function BattleMap({
             aria-hidden="true"
           >
             {tool === 'measure'
-              ? 'Click-drag or press Enter to start measuring at the map center, then arrow keys to aim and Enter to finish. Escape cancels.'
+              ? `Click-drag or press Enter to start measuring in ${gridCellUnitPlural(gridType)} at the map center, then arrow keys to aim and Enter to finish. Escape cancels.`
               : tool === 'reveal'
                 ? 'Click-drag or press Enter to start a reveal rectangle at the map center, then arrow keys to resize and Enter to reveal. Escape cancels.'
                 : tool === 'ping'
