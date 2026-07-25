@@ -903,6 +903,9 @@ export const Faction = z.object({
   // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
   reputation: z.number().int().min(-100).max(100).default(0),
   standing: FactionStanding.default('neutral'),
+  // Emblem/banner portrait image (issue #1324). Nullable URL to an attachment
+  // `/api/v1/attachments/:id/file`; absent/empty falls back to faction initials.
+  portraitUrl: z.string().max(500).nullable().default(null),
   ...timestamps,
 });
 export type Faction = z.infer<typeof Faction>;
@@ -948,6 +951,9 @@ export const Location = z.object({
       }),
     )
     .optional(),
+  // Landmark/portrait image (issue #1324). Nullable URL to an attachment; absent
+  // falls back to the status-colored map pin placeholder.
+  portraitUrl: z.string().max(500).nullable().default(null),
   ...timestamps,
 });
 export type Location = z.infer<typeof Location>;
