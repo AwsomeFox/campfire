@@ -42,7 +42,7 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
@@ -1603,6 +1603,7 @@ export default function RunSessionPage() {
           encounter={encounter}
           campaignId={cid}
           isDm={isDm}
+          viewerUserId={myUserId != null ? String(myUserId) : null}
           canDmWrite={canDmWrite}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
@@ -2124,6 +2125,7 @@ function BattleMap({
   encounter,
   campaignId,
   isDm,
+  viewerUserId,
   canDmWrite,
   busy,
   canMoveToken,
@@ -2146,6 +2148,7 @@ function BattleMap({
   encounter: EncounterWithCombatants;
   campaignId: number;
   isDm: boolean;
+  viewerUserId: string | null;
   canDmWrite: boolean;
   busy: boolean;
   canMoveToken: (c: Combatant) => boolean;
@@ -2390,7 +2393,11 @@ function BattleMap({
     return () => onAoeHitLayoutChange?.(null);
   }, [aoeHitLayout, onAoeHitLayoutChange]);
 
-  const aoeTemplates = encounter.aoe ?? [];
+  const aoeTemplates = useMemo(() => {
+    const all = encounter.aoe ?? [];
+    if (isDm) return all;
+    return filterAoeTemplatesForViewer(all, encounter.fog, { viewerUserId });
+  }, [encounter.aoe, encounter.fog, isDm, viewerUserId]);
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
@@ -2916,7 +2923,7 @@ function BattleMap({
   // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
   function addAoe(shape: AoeShape) {
     const sizeFt = shape === 'circle' ? (gridScale ?? 5) * 2 : (gridScale ?? 5) * BASE_AOE_LENGTH_MULT;
-    const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null };
+    const t: AoeTemplate = { id: newAoeId(), shape, x: 50, y: 50, sizeFt, angleDeg: 0, color: null, declaredByUserId: null };
     setSelectedAoeId(t.id);
     onSetAoe([...aoeTemplates, t]);
   }
