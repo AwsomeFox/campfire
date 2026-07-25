@@ -27,13 +27,20 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { Markdown } from '../../components/Markdown';
 import { DraftWithAiButton } from '../ai-dm/DraftWithAiButton';
 import { PageTitle } from '../../components/PageTitle';
+import { useUnsavedWork } from '../../lib/useUnsavedWork';
+import {
+  StorylineContentEditor,
+  storylineDraftMatches,
+  type StorylineContentDraft,
+} from './StorylineContentEditor';
+import type { ConflictField } from '../../components/StaleWriteConflict';
 
 /** Minimal shapes for the play-record link-picker option lists (issue #264). */
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
@@ -88,6 +95,16 @@ const BEAT_GLYPH: Record<BeatStatus, string> = {
   skipped: '✕',
 };
 
+const ARC_CONTENT_CONFLICT_FIELDS: Array<ConflictField<StorylineContentDraft>> = [
+  { key: 'title', label: 'Title' },
+  { key: 'prose', label: 'Summary', merge: true },
+];
+
+const BEAT_CONTENT_CONFLICT_FIELDS: Array<ConflictField<StorylineContentDraft>> = [
+  { key: 'title', label: 'Title' },
+  { key: 'prose', label: 'Body', merge: true },
+];
+
 export default function StorylinesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
@@ -99,6 +116,7 @@ export default function StorylinesPage() {
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
   const [newArcTitle, setNewArcTitle] = useState('');
+  const [newArcSummary, setNewArcSummary] = useState('');
   const [arcCreateError, setArcCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const newArcTitleRef = useRef<HTMLInputElement>(null);
@@ -205,8 +223,12 @@ export default function StorylinesPage() {
     setArcCreateError(null);
     setBusy(true);
     try {
-      const created = await api.post<StoryArc>(`${API}/campaigns/${cid}/arcs`, { title });
+      const created = await api.post<StoryArc>(`${API}/campaigns/${cid}/arcs`, {
+        title,
+        ...(newArcSummary.trim() ? { summary: newArcSummary } : {}),
+      });
       setNewArcTitle('');
+      setNewArcSummary('');
       await load(entityDomId('arc', created.id));
       announce(`Created arc ${created.title}.`);
     } catch {
@@ -282,6 +304,21 @@ export default function StorylinesPage() {
               {...arcCompositionGate.inputProps}
             />
           </div>
+          <div className="field" style={{ flex: '1 1 220px', minWidth: 0 }}>
+            <label htmlFor="storyline-new-arc-summary">Summary (optional)</label>
+            <TextArea
+              id="storyline-new-arc-summary"
+              rows={2}
+              placeholder="Markdown overview of this arc"
+              value={newArcSummary}
+              maxLength={50_000}
+              onChange={(event) => {
+                setNewArcSummary(event.target.value);
+                setArcCreateError(null);
+              }}
+              style={{ fontSize: 13 }}
+            />
+          </div>
           <button type="submit" className="btn btn-primary" style={{ fontSize: 13 }} disabled={busy || !newArcTitle.trim()}>
             + New arc
           </button>
@@ -337,8 +374,19 @@ function ArcCard({
   onChange: RefreshStorylines;
 }) {
   const [newBeatTitle, setNewBeatTitle] = useState('');
+  const [newBeatBody, setNewBeatBody] = useState('');
   const [beatCreateError, setBeatCreateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [editingContent, setEditingContent] = useState(false);
+  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary ?? '' });
+  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary ?? '' });
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(arc.updatedAt);
+  const [contentConflict, setContentConflict] = useState<{ base: StorylineContentDraft; theirs: StorylineContentDraft } | null>(null);
+  const [contentError, setContentError] = useState<string | null>(null);
+  const [contentSaving, setContentSaving] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const editTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
   // Issue #688: surface a failed status/delete inline next to the arc's controls so the
   // author knows their change didn't save — without resetting the select to a value that
   // hides the failure. The select's displayed value reflects server truth (refreshed on
@@ -359,6 +407,82 @@ function ArcCard({
   const newBeatErrorId = `storyline-new-beat-${arc.id}-error`;
   const arcStatusErrorId = `storyline-arc-${arc.id}-status-error`;
   const arcDeleteErrorId = `storyline-arc-${arc.id}-delete-error`;
+
+  useUnsavedWork(
+    `storyline-arc-${arc.id}`,
+    editingContent && !storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary ?? '' }),
+  );
+
+  useEffect(() => {
+    if (!editingContent) {
+      setContentDraft({ title: arc.title, prose: arc.summary ?? '' });
+      setExpectedUpdatedAt(arc.updatedAt);
+    }
+  }, [arc.title, arc.summary, arc.updatedAt, editingContent]);
+
+  useEffect(() => {
+    if (!restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    editTriggerRef.current?.focus();
+  }, [arc, editingContent]);
+
+  const startContentEdit = () => {
+    const draft = { title: arc.title, prose: arc.summary ?? '' };
+    setContentDraft(draft);
+    setContentBase(draft);
+    setExpectedUpdatedAt(arc.updatedAt);
+    setContentConflict(null);
+    setContentError(null);
+    setShowPreview(false);
+    setEditingContent(true);
+  };
+
+  const cancelContentEdit = () => {
+    restoreFocusRef.current = true;
+    setEditingContent(false);
+    setContentConflict(null);
+    setContentError(null);
+    setShowPreview(false);
+  };
+
+  const saveContent = async () => {
+    const title = contentDraft.title.trim();
+    if (!title || contentSaving) return;
+    if (storylineDraftMatches(contentDraft, { title: arc.title, prose: arc.summary ?? '' })) {
+      cancelContentEdit();
+      return;
+    }
+    setContentSaving(true);
+    setContentError(null);
+    try {
+      await api.patch(`${API}/arcs/${arc.id}`, {
+        title,
+        summary: contentDraft.prose,
+        expectedUpdatedAt,
+      });
+      setEditingContent(false);
+      setContentConflict(null);
+      restoreFocusRef.current = true;
+      await onChange(entityDomId('arc', arc.id));
+      announce(`Saved arc ${title}.`);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<StoryArcWithBeats>(`${API}/arcs/${arc.id}`);
+          const theirs = { title: latest.title, prose: latest.summary ?? '' };
+          setContentConflict({ base: contentBase, theirs });
+          setContentBase(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+        } catch {
+          setContentError("This arc changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setContentError("Couldn't save the arc. Try again.");
+      }
+    } finally {
+      setContentSaving(false);
+    }
+  };
 
   const setArcStatus = async (status: ArcStatus) => {
     if (busy) return;
@@ -384,8 +508,12 @@ function ArcCard({
     setBeatCreateError(null);
     setBusy(true);
     try {
-      const created = await api.post<StoryBeat>(`${API}/arcs/${arc.id}/beats`, { title });
+      const created = await api.post<StoryBeat>(`${API}/arcs/${arc.id}/beats`, {
+        title,
+        ...(newBeatBody.trim() ? { body: newBeatBody } : {}),
+      });
       setNewBeatTitle('');
+      setNewBeatBody('');
       await onChange(entityDomId('beat', created.id));
       announce(`Created beat ${created.title} in ${arc.title}.`);
     } catch {
@@ -424,22 +552,23 @@ function ArcCard({
       aria-labelledby={arcTitleId}
       {...entityTargetProps('arc', arc.id)}
     >
+      <h2
+        id={arcTitleId}
+        className={editingContent ? 'sr-only' : undefined}
+        style={editingContent ? undefined : {
+          fontFamily: 'var(--font-heading)',
+          fontWeight: 500,
+          fontSize: 17,
+          opacity: arc.status === 'resolved' || arc.status === 'abandoned' ? 0.7 : 1,
+          flex: '1 1 180px',
+          minWidth: 0,
+          margin: 0,
+          overflowWrap: 'anywhere',
+        }}
+      >
+        {editingContent ? `Edit arc ${arc.title}` : arc.title}
+      </h2>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h2
-          id={arcTitleId}
-          style={{
-            fontFamily: 'var(--font-heading)',
-            fontWeight: 500,
-            fontSize: 17,
-            opacity: arc.status === 'resolved' || arc.status === 'abandoned' ? 0.7 : 1,
-            flex: '1 1 180px',
-            minWidth: 0,
-            margin: 0,
-            overflowWrap: 'anywhere',
-          }}
-        >
-          {arc.title}
-        </h2>
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
@@ -447,7 +576,7 @@ function ArcCard({
               id={arcStatusId}
               className="input"
               value={arc.status}
-              disabled={busy}
+              disabled={busy || contentSaving}
               aria-invalid={statusError ? true : undefined}
               aria-describedby={statusError ? arcStatusErrorId : undefined}
               onChange={(e) => void setArcStatus(e.target.value as ArcStatus)}
@@ -465,12 +594,24 @@ function ArcCard({
             {arc.status}
           </span>
         )}
+        {canDmWrite && !editingContent && (
+          <Btn
+            ref={editTriggerRef}
+            ghost
+            style={{ fontSize: 12 }}
+            disabled={busy || contentSaving}
+            aria-label={`Edit arc ${arc.title}`}
+            onClick={startContentEdit}
+          >
+            Edit
+          </Btn>
+        )}
         {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
             style={{ fontSize: 12 }}
-            disabled={busy}
+            disabled={busy || contentSaving}
             aria-label={`Delete arc ${arc.title}`}
             onClick={() => void removeArc()}
           >
@@ -490,7 +631,37 @@ function ArcCard({
         </div>
       )}
 
-      {arc.summary && <p className="text-muted" style={{ margin: 0, fontSize: 13 }}>{arc.summary}</p>}
+      {arc.summary && !editingContent && (
+        <div className="text-muted text-[13px]">
+          <Markdown>{arc.summary}</Markdown>
+        </div>
+      )}
+      {!arc.summary && !editingContent && canDmWrite && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>No summary yet.</p>
+      )}
+      {editingContent && (
+        <StorylineContentEditor
+          idPrefix={`storyline-arc-${arc.id}`}
+          proseLabel="Summary (markdown)"
+          draft={contentDraft}
+          onDraftChange={setContentDraft}
+          showPreview={showPreview}
+          onShowPreviewChange={setShowPreview}
+          saving={contentSaving}
+          error={contentError}
+          conflict={contentConflict}
+          conflictFields={ARC_CONTENT_CONFLICT_FIELDS}
+          onResolveConflict={(key, value) => setContentDraft((current) => ({ ...current, [key]: value }))}
+          onReloadAllConflict={() => {
+            if (!contentConflict) return;
+            setContentDraft(contentConflict.theirs);
+            setContentBase(contentConflict.theirs);
+            setContentConflict(null);
+          }}
+          onSave={() => void saveContent()}
+          onCancel={cancelContentEdit}
+        />
+      )}
 
       {arc.beats.length === 0 ? (
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>No beats yet.</p>
@@ -538,6 +709,21 @@ function ArcCard({
               {...beatCompositionGate.inputProps}
             />
           </div>
+          <div className="field" style={{ flex: '1 1 200px', minWidth: 0 }}>
+            <label htmlFor={`${newBeatTitleId}-body`} style={{ overflowWrap: 'anywhere' }}>Body (optional)</label>
+            <TextArea
+              id={`${newBeatTitleId}-body`}
+              rows={2}
+              placeholder="Markdown notes for this beat"
+              value={newBeatBody}
+              maxLength={50_000}
+              onChange={(event) => {
+                setNewBeatBody(event.target.value);
+                setBeatCreateError(null);
+              }}
+              style={{ fontSize: 12 }}
+            />
+          </div>
           <button type="submit" className="btn btn-ghost" style={{ fontSize: 12 }} disabled={busy || !newBeatTitle.trim()}>
             + Beat
           </button>
@@ -574,6 +760,14 @@ function BeatRow({
   const [branchTarget, setBranchTarget] = useState<string>('');
   const [branchCreateError, setBranchCreateError] = useState<string | null>(null);
   const [editingLinks, setEditingLinks] = useState(false);
+  const [editingContent, setEditingContent] = useState(false);
+  const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body ?? '' });
+  const [contentBase, setContentBase] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body ?? '' });
+  const [expectedUpdatedAt, setExpectedUpdatedAt] = useState(beat.updatedAt);
+  const [contentConflict, setContentConflict] = useState<{ base: StorylineContentDraft; theirs: StorylineContentDraft } | null>(null);
+  const [contentError, setContentError] = useState<string | null>(null);
+  const [contentSaving, setContentSaving] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
   const [busy, setBusy] = useState(false);
   // Issue #688: per-mutation error surfaces. Each keeps the beat on the page with its
   // data intact and offers a targeted retry; nothing is silently discarded.
@@ -590,6 +784,8 @@ function BeatRow({
   const [branchDeleteError, setBranchDeleteError] = useState<{ id: number; message: string } | null>(null);
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
+  const editTriggerRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
   // Issue #854: Enter confirming IME composition must not create a branch.
   const branchCompositionGateRef = useRef<ReturnType<typeof createCompositionSubmitGate> | null>(null);
   if (branchCompositionGateRef.current === null) {
@@ -606,6 +802,82 @@ function BeatRow({
   const beatStatusErrorId = `storyline-beat-${beat.id}-status-error`;
   const beatDeleteErrorId = `storyline-beat-${beat.id}-delete-error`;
   const beatLinkErrorId = `storyline-beat-${beat.id}-link-error`;
+
+  useUnsavedWork(
+    `storyline-beat-${beat.id}`,
+    editingContent && !storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body ?? '' }),
+  );
+
+  useEffect(() => {
+    if (!editingContent) {
+      setContentDraft({ title: beat.title, prose: beat.body ?? '' });
+      setExpectedUpdatedAt(beat.updatedAt);
+    }
+  }, [beat.title, beat.body, beat.updatedAt, editingContent]);
+
+  useEffect(() => {
+    if (!restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    editTriggerRef.current?.focus();
+  }, [beat, editingContent]);
+
+  const startContentEdit = () => {
+    const draft = { title: beat.title, prose: beat.body ?? '' };
+    setContentDraft(draft);
+    setContentBase(draft);
+    setExpectedUpdatedAt(beat.updatedAt);
+    setContentConflict(null);
+    setContentError(null);
+    setShowPreview(false);
+    setEditingContent(true);
+  };
+
+  const cancelContentEdit = () => {
+    restoreFocusRef.current = true;
+    setEditingContent(false);
+    setContentConflict(null);
+    setContentError(null);
+    setShowPreview(false);
+  };
+
+  const saveContent = async () => {
+    const title = contentDraft.title.trim();
+    if (!title || contentSaving) return;
+    if (storylineDraftMatches(contentDraft, { title: beat.title, prose: beat.body ?? '' })) {
+      cancelContentEdit();
+      return;
+    }
+    setContentSaving(true);
+    setContentError(null);
+    try {
+      await api.patch(`${API}/beats/${beat.id}`, {
+        title,
+        body: contentDraft.prose,
+        expectedUpdatedAt,
+      });
+      setEditingContent(false);
+      setContentConflict(null);
+      restoreFocusRef.current = true;
+      await onChange(entityDomId('beat', beat.id));
+      announce(`Saved beat ${title}.`);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        try {
+          const latest = await api.get<StoryBeatWithBranches>(`${API}/beats/${beat.id}`);
+          const theirs = { title: latest.title, prose: latest.body ?? '' };
+          setContentConflict({ base: contentBase, theirs });
+          setContentBase(theirs);
+          setExpectedUpdatedAt(latest.updatedAt);
+        } catch {
+          setContentError("This beat changed, but the latest version couldn't be loaded. Your draft is still here.");
+        }
+      } else {
+        setContentError("Couldn't save the beat. Try again.");
+      }
+    } finally {
+      setContentSaving(false);
+    }
+  };
 
   // The play-record this beat corresponds to (issue #264): resolve each linked id to a
   // display label + deep-link, so a done beat shows where it landed.
@@ -723,14 +995,22 @@ function BeatRow({
       aria-labelledby={beatTitleId}
       {...entityTargetProps('beat', beat.id)}
     >
+      <h3
+        id={beatTitleId}
+        className={editingContent ? 'sr-only' : undefined}
+        style={editingContent ? undefined : {
+          fontWeight: 500,
+          fontSize: 14,
+          flex: '1 1 150px',
+          minWidth: 0,
+          margin: 0,
+          overflowWrap: 'anywhere',
+        }}
+      >
+        {editingContent ? `Edit beat ${beat.title}` : beat.title}
+      </h3>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <span aria-hidden="true" style={{ width: 14, flex: 'none', textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
-        <h3
-          id={beatTitleId}
-          style={{ fontWeight: 500, fontSize: 14, flex: '1 1 150px', minWidth: 0, margin: 0, overflowWrap: 'anywhere' }}
-        >
-          {beat.title}
-        </h3>
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={beatStatusId}>Status for beat {beat.title}</label>
@@ -738,7 +1018,7 @@ function BeatRow({
               id={beatStatusId}
               className="input"
               value={beat.status}
-              disabled={busy}
+              disabled={busy || contentSaving}
               aria-invalid={statusError ? true : undefined}
               aria-describedby={statusError ? beatStatusErrorId : undefined}
               onChange={(e) => void setStatus(e.target.value as BeatStatus)}
@@ -756,12 +1036,24 @@ function BeatRow({
             {beat.status}
           </span>
         )}
+        {canDmWrite && !editingContent && (
+          <Btn
+            ref={editTriggerRef}
+            ghost
+            style={{ fontSize: 11 }}
+            disabled={busy || contentSaving}
+            aria-label={`Edit beat ${beat.title}`}
+            onClick={startContentEdit}
+          >
+            Edit
+          </Btn>
+        )}
         {canDmWrite && (
           <button
             type="button"
             className="btn btn-ghost"
             style={{ fontSize: 11 }}
-            disabled={busy}
+            disabled={busy || contentSaving}
             aria-label={`Delete beat ${beat.title}`}
             onClick={() => void removeBeat()}
           >
@@ -781,9 +1073,37 @@ function BeatRow({
         </div>
       )}
 
-      {beat.body && (
+      {beat.body && !editingContent && (
         <div style={{ marginLeft: 22 }}>
-          <Markdown className="text-muted !text-[12px]">{beat.body}</Markdown>
+          <Markdown className="text-muted text-[13px]">{beat.body}</Markdown>
+        </div>
+      )}
+      {!beat.body && !editingContent && canDmWrite && (
+        <p className="text-muted" style={{ margin: '0 0 0 22px', fontSize: 12 }}>No body yet.</p>
+      )}
+      {editingContent && (
+        <div style={{ marginLeft: 22 }}>
+          <StorylineContentEditor
+            idPrefix={`storyline-beat-${beat.id}`}
+            proseLabel="Body (markdown)"
+            draft={contentDraft}
+            onDraftChange={setContentDraft}
+            showPreview={showPreview}
+            onShowPreviewChange={setShowPreview}
+            saving={contentSaving}
+            error={contentError}
+            conflict={contentConflict}
+            conflictFields={BEAT_CONTENT_CONFLICT_FIELDS}
+            onResolveConflict={(key, value) => setContentDraft((current) => ({ ...current, [key]: value }))}
+            onReloadAllConflict={() => {
+              if (!contentConflict) return;
+              setContentDraft(contentConflict.theirs);
+              setContentBase(contentConflict.theirs);
+              setContentConflict(null);
+            }}
+            onSave={() => void saveContent()}
+            onCancel={cancelContentEdit}
+          />
         </div>
       )}
 

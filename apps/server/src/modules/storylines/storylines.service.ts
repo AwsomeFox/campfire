@@ -141,13 +141,28 @@ export class StorylinesService {
     return arcToDomain(row);
   }
 
-  async updateArc(id: number, input: StoryArcUpdateInput, user: RequestUser, role: Role): Promise<StoryArc> {
+  async updateArc(
+    id: number,
+    input: StoryArcUpdateInput,
+    user: RequestUser,
+    role: Role,
+    opts?: { expectedUpdatedAt?: string },
+  ): Promise<StoryArc> {
     const existing = await this.getArcRowOrThrow(id);
-    const [row] = await this.db
+    const updated = await this.db
       .update(storyArcs)
-      .set({ ...input, updatedAt: nowIso() })
-      .where(eq(storyArcs.id, id))
+      .set({ ...input, updatedAt: nextUpdatedAt(existing.updatedAt) })
+      .where(
+        opts?.expectedUpdatedAt
+          ? and(eq(storyArcs.id, id), eq(storyArcs.updatedAt, opts.expectedUpdatedAt))
+          : eq(storyArcs.id, id),
+      )
       .returning();
+    if (!updated[0]) {
+      const current = await this.getArcRowOrThrow(id);
+      throw staleWrite(opts?.expectedUpdatedAt, current.updatedAt);
+    }
+    const row = updated[0];
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
