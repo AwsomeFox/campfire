@@ -2481,7 +2481,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
   { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
   { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
-  { name: '0088_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0089_audit_log_request_id', run: migrateAuditLogForRequestId },
 ];
 
 /**
