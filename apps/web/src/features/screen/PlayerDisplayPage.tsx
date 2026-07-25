@@ -47,6 +47,7 @@ import { useAuth } from '../../app/auth';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
 import { STATUS_LABEL } from '../characters/status';
+import { initials } from '../../lib/avatarText';
 import {
   safeCombatants,
   safeLocation,
@@ -1024,6 +1025,29 @@ function PartyScene({
               >
                 <div className="cf-party-top">
                   <span className="cf-party-name">
+                    {c.portraitUrl ? (
+                      <img
+                        src={c.portraitUrl}
+                        alt=""
+                        style={{ width: '3.2cqh', height: '3.2cqh', borderRadius: '50%', objectFit: 'cover' }}
+                      />
+                    ) : (
+                      <span
+                        style={{
+                          width: '3.2cqh',
+                          height: '3.2cqh',
+                          borderRadius: '50%',
+                          background: 'var(--color-accent-900)',
+                          color: 'var(--color-accent-200)',
+                          display: 'grid',
+                          placeItems: 'center',
+                          fontSize: '1.6cqh',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {initials(c.name)}
+                      </span>
+                    )}
                     <span className="cf-clamp-1" title={c.name}>
                       {c.name}
                     </span>

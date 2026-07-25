@@ -1187,6 +1187,25 @@ function migrateNpcsTableForIconSlug(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before NPC portraits (issue #1320): `npcs.portrait_url`
+ * didn't exist. Plain nullable ADD COLUMN — same shape as migrateNpcsTableForFactionId
+ * above. Existing NPCs get NULL (no portrait), preserving the pre-migration behavior
+ * where an NPC rendered an icon or initials; a DM opts an NPC into a portrait by
+ * uploading one. New DBs never hit this path — BOOTSTRAP_SQL already declares the column.
+ */
+function migrateNpcsTableForPortraitUrl(sqlite: Database.Database): void {
+  const hasNpcsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='npcs'")
+    .get();
+  if (!hasNpcsTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(npcs)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'portrait_url')) return;
+
+  sqlite.exec('ALTER TABLE npcs ADD COLUMN portrait_url TEXT');
+}
+
+/**
  * Migration for DBs created before AI provider config storage (issue #310): the
  * `ai_provider_configs` table didn't exist. This is a NEW table (not an ADD COLUMN),
  * so — like the `factions` table (see migrateNpcsTableForFactionId's note) —
@@ -2617,6 +2636,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
   { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
+  { name: '0096_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
 ];
 
 /**

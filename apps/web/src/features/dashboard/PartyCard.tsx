@@ -52,22 +52,37 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                 minHeight: 44,
               }}
             >
-              <span
-                style={{
-                  width: 34,
-                  height: 34,
-                  flex: 'none',
-                  borderRadius: '50%',
-                  background: 'var(--color-accent-900)',
-                  color: 'var(--color-accent-200)',
-                  display: 'grid',
-                  placeItems: 'center',
-                  fontSize: 12,
-                  fontWeight: 500,
-                }}
-              >
-                {initials(c.name)}
-              </span>
+              {c.portraitUrl ? (
+                <img
+                  src={c.portraitUrl}
+                  alt=""
+                  style={{
+                    width: 34,
+                    height: 34,
+                    flex: 'none',
+                    borderRadius: '50%',
+                    objectFit: 'cover',
+                    border: '1px solid var(--color-neutral-700)',
+                  }}
+                />
+              ) : (
+                <span
+                  style={{
+                    width: 34,
+                    height: 34,
+                    flex: 'none',
+                    borderRadius: '50%',
+                    background: 'var(--color-accent-900)',
+                    color: 'var(--color-accent-200)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    fontSize: 12,
+                    fontWeight: 500,
+                  }}
+                >
+                  {initials(c.name)}
+                </span>
+              )}
               <span style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 13.5 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>

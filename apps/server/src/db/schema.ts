@@ -268,6 +268,7 @@ export const npcs = sqliteTable('npcs', {
   factionId: integer('faction_id'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  portraitUrl: text('portrait_url'),
   // Slug of a bundled game-icons.net entity icon (issue #302), or '' for none.
   // Nullable/absent in older DBs pre-migration; see migrateNpcsTableForIconSlug().
   iconSlug: text('icon_slug').notNull().default(''),

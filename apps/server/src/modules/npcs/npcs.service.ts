@@ -27,6 +27,7 @@ export function toDomain(row: typeof npcs.$inferSelect): Npc {
     factionId: row.factionId,
     body: row.body,
     dmSecret: row.dmSecret,
+    portraitUrl: row.portraitUrl,
     iconSlug: row.iconSlug,
     hidden: row.hidden,
     createdAt: row.createdAt,
@@ -137,6 +138,7 @@ export class NpcsService {
         factionId: input.factionId ?? null,
         body: input.body ?? '',
         dmSecret: input.dmSecret ?? '',
+        portraitUrl: input.portraitUrl ?? null,
         iconSlug: input.iconSlug ?? '',
         // Private-by-default prep (#754): omit → DM-only; pass false to reveal at create.
         hidden: resolveCreateHidden(input.hidden),

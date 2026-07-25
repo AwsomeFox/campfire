@@ -844,6 +844,7 @@ export const Npc = z.object({
   factionId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  portraitUrl: z.string().max(500).nullable().default(null),
   // Optional on-theme icon (issue #302): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in place of the initials
   // avatar. '' means "no icon — fall back to initials". The web app validates
