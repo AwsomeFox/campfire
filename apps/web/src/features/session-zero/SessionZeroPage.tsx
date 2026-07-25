@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Session zero / table charter — issue #122.
  *
@@ -18,7 +19,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
-import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
@@ -98,6 +99,7 @@ function isEmptyCharter(c: SessionZero): boolean {
 }
 
 export default function SessionZeroPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { isDm, canDmWrite } = useCampaignAccess();
@@ -146,7 +148,7 @@ export default function SessionZeroPage() {
     } catch (e) {
       if (sequence !== loadSequence.current) return;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
-      else setError("Couldn't load the session-zero charter.");
+      else setError(t('sessionZero.errors.load'));
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
@@ -204,10 +206,10 @@ export default function SessionZeroPage() {
           setExpectedUpdatedAt(latest.updatedAt);
           setCharter(latest);
         } catch {
-          setActionError("The charter changed, but the latest version couldn't be loaded. Your draft is still here.");
+          setActionError(t('sessionZero.charterStale'));
         }
       } else {
-        setActionError("Couldn't save the charter.");
+        setActionError(t('sessionZero.errors.save'));
       }
     } finally {
       setBusy(false);
@@ -231,7 +233,7 @@ export default function SessionZeroPage() {
       setVisibleSupports((rows) => [...rows.filter((row) => row.id !== saved.id), saved]);
       setSupportMessage('Your support preference was saved.');
     } catch (e) {
-      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't save your support preference.");
+      setSupportMessage(translateApiError(e, t, { fallbackKey: 'sessionZero.errors.saveSupport' }));
     } finally {
       setSupportBusy(false);
     }
@@ -249,7 +251,7 @@ export default function SessionZeroPage() {
       setConfirmDeleteSupport(false);
       setSupportMessage('Your support preference was deleted.');
     } catch (e) {
-      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't delete your support preference.");
+      setSupportMessage(translateApiError(e, t, { fallbackKey: 'sessionZero.errors.deleteSupport' }));
     } finally {
       setSupportBusy(false);
     }
@@ -258,7 +260,7 @@ export default function SessionZeroPage() {
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -266,7 +268,7 @@ export default function SessionZeroPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="padlock" title="You don't have access to this campaign" />
+        <EmptyState icon="padlock" title={t('sessions.accessDenied')} />
       </div>
     );
   }
@@ -300,7 +302,7 @@ export default function SessionZeroPage() {
       ) : charter && isEmptyCharter(charter) ? (
         <EmptyState
           icon="life-buoy"
-          title="No session-zero charter yet"
+          title={t('sessionZero.empty.title')}
           hint={isDm ? 'Record your table’s lines & veils, safety tools, and house rules with "Edit charter".' : "The DM hasn’t recorded the table's charter yet."}
         />
       ) : charter ? (
@@ -506,24 +508,25 @@ function ChipList({ items }: { items: string[] }) {
 }
 
 function CharterView({ charter }: { charter: SessionZero }) {
+  const { t } = useTranslation();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <Section title="Lines" hint="Hard limits — content that never appears at the table.">
+      <Section title={t('sessionZero.charter.lines.title')} hint={t('sessionZero.charter.lines.hint')}>
         <ChipList items={charter.lines} />
       </Section>
-      <Section title="Veils" hint="Soft limits — content that stays off-screen (fade to black).">
+      <Section title={t('sessionZero.charter.veils.title')} hint={t('sessionZero.charter.veils.hint')}>
         <ChipList items={charter.veils} />
       </Section>
-      <Section title="Safety tools" hint="Tools the table has agreed to use (X-Card, Open Door, Script Change…).">
+      <Section title={t('sessionZero.charter.safetyTools.title')} hint={t('sessionZero.charter.safetyTools.hint')}>
         <ChipList items={charter.safetyTools} />
       </Section>
       {charter.houseRules.trim() !== '' && (
-        <Section title="House rules">
+        <Section title={t('sessionZero.charter.houseRules.title')}>
           <Markdown>{charter.houseRules}</Markdown>
         </Section>
       )}
       {charter.toneAndExpectations.trim() !== '' && (
-        <Section title="Tone & content expectations">
+        <Section title={t('sessionZero.charter.tone.title')}>
           <Markdown>{charter.toneAndExpectations}</Markdown>
         </Section>
       )}

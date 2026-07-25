@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Admin observability dashboard card (issue #22). Server-admin only — mounted at
  * the top of the /admin console. Reads GET /admin/metrics (cheap COUNT(*) +
@@ -7,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { AdminMetrics } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 
 const REFRESH_MS = 30_000;
@@ -52,6 +53,7 @@ function formatUptime(seconds: number): string {
 }
 
 export function MetricsCard() {
+  const { t } = useTranslation();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,7 +62,7 @@ export function MetricsCard() {
     try {
       setMetrics(await api.get<AdminMetrics>(`${API}/admin/metrics`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load server metrics.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 

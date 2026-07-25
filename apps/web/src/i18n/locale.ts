@@ -13,7 +13,12 @@ export const LANG_STORAGE_KEY = 'cf.lang';
 export const SYSTEM_LOCALE = 'system' as const;
 
 /** Languages Campfire currently ships a translation catalog for. */
-export const SUPPORTED_LANGUAGES = [{ code: 'en', label: 'English' }] as const;
+export const SUPPORTED_LANGUAGES = [
+  { code: 'en', label: 'English' },
+  { code: 'ar', label: 'العربية' },
+  /** Pseudo-locale: accentized English for layout/overflow audits (issue #629). */
+  { code: 'pseudo', label: '⒫⒮⒠⒰⒟︎⒪⒞' },
+] as const;
 export type LanguageCode = (typeof SUPPORTED_LANGUAGES)[number]['code'];
 export type LocalePreference = typeof SYSTEM_LOCALE | LanguageCode;
 
@@ -112,9 +117,10 @@ export function browserLocale(navigatorLike: Pick<Navigator, 'language' | 'langu
 export function resolveCatalogLocale(requestedLocale: string | undefined): LanguageCode {
   if (requestedLocale) {
     const normalized = requestedLocale.toLowerCase();
-    const match = SUPPORTED_LANGUAGES.find(({ code }) =>
-      normalized === code || normalized.startsWith(`${code}-`),
-    );
+    const match = SUPPORTED_LANGUAGES.find(({ code }) => {
+      const lc = code.toLowerCase();
+      return normalized === lc || normalized.startsWith(`${lc}-`);
+    });
     if (match) return match.code;
   }
   return 'en';

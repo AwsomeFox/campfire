@@ -262,13 +262,20 @@ export function isTransientError(err: unknown): boolean {
 export function translateApiError(
   err: unknown,
   t: (key: string, opts?: { defaultValue?: string }) => string,
+  opts?: { fallbackKey?: string },
 ): string {
   if (!(err instanceof ApiError)) {
-    return err instanceof Error ? err.message : String(err);
+    return opts?.fallbackKey
+      ? t(opts.fallbackKey, { defaultValue: err instanceof Error ? err.message : String(err) })
+      : err instanceof Error
+        ? err.message
+        : String(err);
   }
   if (err.code) {
-    // `defaultValue` makes this a safe fallback: unknown codes render the server message.
     return t(`errors.${err.code}`, { defaultValue: err.message });
+  }
+  if (opts?.fallbackKey) {
+    return t(opts.fallbackKey, { defaultValue: err.message });
   }
   return err.message;
 }

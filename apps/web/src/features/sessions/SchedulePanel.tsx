@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Session scheduling (issue #13) — the "Schedule" tab of SessionsPage.
  * Planned game nights with per-member availability (RSVP yes/maybe/no) and the
@@ -89,6 +90,7 @@ const SCHEDULE_CONFLICT_FIELDS: Array<ConflictField<ScheduleDraft>> = [
 ];
 
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
@@ -145,7 +147,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
       setSchedules(list);
     } catch (e) {
       if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
-        setError("Couldn't load the schedule.");
+        setError(t('sessions.errors.loadSchedule'));
       }
     } finally {
       setLoading(false);
@@ -258,8 +260,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
         <Card>
           <EmptyState
             icon="calendar"
-            title="No session on the calendar"
-            hint={isDm ? 'Use “+ Schedule session” to pick the next game night.' : 'Your DM hasn’t scheduled the next session yet.'}
+            title={t('sessions.empty.noCalendar')}
+            hint={isDm ? t('sessions.empty.noCalendarHintDm') : t('sessions.empty.noCalendarHintPlayer')}
           />
         </Card>
       )}
@@ -337,6 +339,7 @@ function ScheduleItem({
   myIds: Set<string>;
   onChange: () => void;
 }) {
+  const { t } = useTranslation();
   const { canDmWrite, canMemberWrite } = useCampaignAccess();
   const announce = useAnnounce();
   const rsvpLegendId = `schedule-rsvp-legend-${schedule.id}`;
@@ -452,7 +455,7 @@ function ScheduleItem({
       await api.delete(`${API}/schedule/${schedule.id}`);
       onChange();
     } catch {
-      setError("Couldn't cancel the session.");
+      setError(t('sessions.errors.cancelSession'));
       setBusy(false);
     }
   }
@@ -466,7 +469,7 @@ function ScheduleItem({
       await api.patch<ScheduledSessionWithRsvps>(`${API}/schedule/${schedule.id}`, { durationMinutes });
       onChange();
     } catch {
-      setError("Couldn't update the session length.");
+      setError(t('sessions.errors.updateSessionLength'));
     } finally {
       setBusy(false);
     }
@@ -930,6 +933,7 @@ function FeedCard({
   /** Schedule-level reload — invoked after rotate/disable so the list stays fresh. */
   onChange: () => void;
 }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const [busy, setBusy] = useState(false);
   const [mutateError, setMutateError] = useState<string | null>(null);
@@ -941,7 +945,7 @@ function FeedCard({
   const feedPanel = usePanelData<CalendarFeed>(
     useCallback(() => api.get<CalendarFeed>(`${API}/campaigns/${campaignId}/calendar-feed`), [campaignId]),
     true,
-    "Couldn't load the calendar feed.",
+    t('sessions.errors.loadCalendarFeed'),
   );
   const feed = feedPanel.data;
   const feedError = feedPanel.error;
@@ -964,7 +968,7 @@ function FeedCard({
       feedPanel.setData(next);
       onChange();
     } catch {
-      setMutateError("Couldn't update the calendar feed.");
+      setMutateError(t('sessions.errors.updateCalendarFeed'));
     } finally {
       setBusy(false);
     }
@@ -981,7 +985,7 @@ function FeedCard({
       feedPanel.setData(next);
       onChange();
     } catch {
-      setMutateError("Couldn't disable the calendar feed.");
+      setMutateError(t('sessions.errors.disableCalendarFeed'));
     } finally {
       setBusy(false);
     }

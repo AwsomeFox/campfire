@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Public read-only recap view — the page behind a DM-minted share link
  * (/share/:token). Renders without an account: fetches the unauthenticated
@@ -15,6 +16,7 @@ import { Markdown } from '../../components/Markdown';
 import { GameIcon } from '../../components/GameIcon';
 
 export default function SharedRecapPage() {
+  const { t } = useTranslation();
   useFormattingLocale();
   const { token } = useParams<{ token: string }>();
   const [recap, setRecap] = useState<SharedRecap | null>(null);
@@ -36,7 +38,7 @@ export default function SharedRecapPage() {
         if (e instanceof ApiError && e.status === 404) {
           setNotFound(true);
         } else {
-          setError("Couldn't load this recap. Try again in a moment.");
+          setError(t('sessions.errors.loadRecapRetry'));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -68,8 +70,8 @@ export default function SharedRecapPage() {
         <Card>
           <EmptyState
             icon="candle-flame"
-            title="This share link is no longer active"
-            hint="It may have been revoked, or the recap was removed. Ask your DM for a fresh link."
+            title={t('sessions.empty.shareInactiveTitle')}
+            hint={t('sessions.empty.shareInactiveHint')}
           />
         </Card>
       )}

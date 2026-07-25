@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Run session — live combat tracker. /c/:campaignId/encounters/:encounterId.
  * Mirrors design/claude-design/Campfire.dc.html "Run session" live state
@@ -41,7 +42,7 @@ import type {
 import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
@@ -245,6 +246,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSaved: (updated: Partial<EncounterWithCombatants>) => void;
 }) {
+  const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
@@ -288,7 +290,7 @@ function EncounterLinks({
       const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
       onSaved(updated);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update links.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.updateLinks' }));
     } finally {
       setSaving(false);
     }
@@ -564,6 +566,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function RunSessionPage() {
+  const { t } = useTranslation();
   const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
   const cid = Number(campaignId);
   const eid = Number(encounterId);
@@ -725,9 +728,7 @@ export default function RunSessionPage() {
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
     encounterQuery.error && !notFound
-      ? encounterQuery.error instanceof ApiError
-        ? encounterQuery.error.message
-        : "Couldn't load this encounter."
+      ? translateApiError(encounterQuery.error, t, { fallbackKey: 'encounters.errors.loadEncounter' })
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
   // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
@@ -882,7 +883,7 @@ export default function RunSessionPage() {
   }, []);
 
   const reportError = useCallback((err: unknown) => {
-    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
+    setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })));
   }, []);
   /** BattleMap / card rollers pass a plain string (or null to clear). */
   const surfaceActionError = useCallback((message: string | null) => {
@@ -1253,7 +1254,7 @@ export default function RunSessionPage() {
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="Encounter not found." />
+        <ErrorNote message={t('encounters.notFoundDetail')} />
       </div>
     );
   }
@@ -1271,7 +1272,7 @@ export default function RunSessionPage() {
   if (notFound && !encounter) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <NotFoundState title="Encounter not found" backTo={`/c/${cid}/encounters`} backLabel="← Back to encounters" />
+        <NotFoundState title={t('encounters.notFound')} backTo={`/c/${cid}/encounters`} backLabel={t('encounters.backToList')} />
       </div>
     );
   }
@@ -1650,13 +1651,13 @@ export default function RunSessionPage() {
           <div style={{ padding: 16 }}>
             <EmptyState
               icon="crossed-swords"
-              title="No combatants yet"
+              title={t('encounters.empty.noCombatants')}
               hint={
                 isDm
                   ? characters.some((c) => c.status === 'active')
-                    ? 'Add the party from the Party tab, then enemies.'
-                    : 'Add combatants below — this campaign has no active party to auto-add.'
-                  : 'Waiting on the DM.'
+                    ? t('encounters.empty.noCombatantsHintDmActive')
+                    : t('encounters.empty.noCombatantsHintDmNoParty')
+                  : t('encounters.empty.noCombatantsHintPlayer')
               }
             />
           </div>
@@ -2049,6 +2050,7 @@ function BattleMap({
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
+  const { t } = useTranslation();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
@@ -2237,7 +2239,7 @@ function BattleMap({
       const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
       onSetMap(attachment.id);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+      onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.uploadMap' }));
     } finally {
       setUploading(false);
     }
@@ -4393,6 +4395,7 @@ function AddCombatantPanel({
   rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<AddTab>('manual');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -4508,7 +4511,7 @@ function AddCombatantPanel({
       setManualCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4530,7 +4533,7 @@ function AddCombatantPanel({
       setCompCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4566,7 +4569,7 @@ function AddCombatantPanel({
       }
       await addFromCompendium(entry);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4584,7 +4587,7 @@ function AddCombatantPanel({
       });
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4618,7 +4621,7 @@ function AddCombatantPanel({
       setNpcInit('');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }

@@ -1,0 +1,58 @@
+{
+  "sessions": {
+    "title": "Sessions",
+    "schedule": "Schedule",
+    "accessDenied": "You don't have access to this campaign",
+    "errors": {
+      "loadRecap": "Couldn't load this recap.",
+      "loadScribe": "Couldn't load the AI scribe.",
+      "runScribe": "Couldn't run the scribe.",
+      "saveScribe": "Couldn't save the scribe config.",
+      "loadSchedule": "Couldn't load the schedule.",
+      "saveSession": "Couldn't save the session.",
+      "loadSessions": "Couldn't load sessions.",
+      "saveRecap": "Couldn't save the recap.",
+      "reloadRecap": "Couldn't reload the latest recap.",
+      "deleteSession": "Couldn't delete the session.",
+      "loadAttendance": "Couldn't load attendance.",
+      "loadRoster": "Couldn't load the character roster.",
+      "saveAttendance": "Couldn't save attendance.",
+      "loadShareLinks": "Couldn't load share links.",
+      "createShareLink": "Couldn't create a share link.",
+      "publishRecap": "Couldn't publish the recap.",
+      "cancelSession": "Couldn't cancel the session.",
+      "updateSessionLength": "Couldn't update the session length.",
+      "loadCalendarFeed": "Couldn't load the calendar feed.",
+      "updateCalendarFeed": "Couldn't update the calendar feed.",
+      "disableCalendarFeed": "Couldn't disable the calendar feed.",
+      "loadCharacters": "Couldn't load characters for linking.",
+      "loadAuditLog": "Couldn't load the audit log.",
+      "shareLinkAction": "Couldn't {{action}} this link.",
+      "loadRecapRetry": "Couldn't load this recap. Try again in a moment."
+    },
+    "shareActions": {
+      "revoke": "revoke",
+      "extend": "extend",
+      "rename": "rename"
+    },
+    "empty": {
+      "noSessions": "No sessions yet — add your first recap",
+      "noSessionsHint": "Use \"+ Add recap\" to log your first session.",
+      "selectSession": "Select a session",
+      "selectSessionHint": "Pick a recap from the timeline on the left.",
+      "noRecap": "No recap yet",
+      "noRecapHint": "Write a recap after the session or let the scribe draft one.",
+      "shareErrorTitle": "Couldn't load this recap",
+      "shareErrorHint": "The link may be invalid or expired.",
+      "noSchedule": "No upcoming session",
+      "noScheduleHint": "Schedule the next game night below.",
+      "noScribeRuns": "No scribe runs yet",
+      "noScribeRunsHint": "Run it on demand, or turn on a sweep in Configure.",
+      "noCalendar": "No session on the calendar",
+      "noCalendarHintDm": "Use \"+ Schedule session\" to pick the next game night.",
+      "noCalendarHintPlayer": "Your DM hasn't scheduled the next session yet.",
+      "shareInactiveTitle": "This share link is no longer active",
+      "shareInactiveHint": "It may have been revoked, or the recap was removed. Ask your DM for a fresh link."
+    }
+  }
+}
