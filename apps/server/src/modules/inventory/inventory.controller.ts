@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -20,6 +20,14 @@ export class CampaignInventoryController {
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
     await this.access.requireMember(user, campaignId);
     return this.inventory.listForCampaign(campaignId);
+  }
+
+  @Get('trash')
+  @ApiOperation({ summary: 'List trashed inventory items', description: 'Soft-deleted items in this campaign, newest first. Player+ required.' })
+  @ApiResponse({ status: 200, description: 'Trashed inventory items.' })
+  async listTrash(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, campaignId, 'player');
+    return this.inventory.listTrashForCampaign(campaignId);
   }
 
   @Post()
@@ -102,11 +110,21 @@ export class InventoryController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete an inventory item', description: 'player role required; character items only by dm or the owning player.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete an inventory item', description: 'Soft-deletes the item to campaign trash. player role required; character items only by dm or the owning player.' })
+  @ApiResponse({ status: 200, description: 'Soft-deleted item.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'player');
     return this.inventory.remove(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Restore a soft-deleted inventory item', description: 'Restores the item from trash to its original owner (party stash if the character is gone). player role required; restricted to dm, the deleting player, or the owning player. Any player may restore party-stash items.' })
+  @ApiResponse({ status: 200, description: 'Restored item.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.inventory.getRowOrThrow(id, { includeDeleted: true });
+    const role = await this.access.requireRole(user, row.campaignId, 'player');
+    return this.inventory.restore(id, user, role);
   }
 }
