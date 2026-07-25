@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
@@ -714,15 +714,19 @@ export class EncountersService {
     return result;
   }
 
-  async listEvents(encounterId: number, viewerRole?: Role): Promise<EncounterEvent[]> {
+  async listEvents(encounterId: number, viewerRole?: Role, afterId?: number): Promise<EncounterEvent[]> {
     const row = await this.getRowOrThrow(encounterId);
     if (viewerRole !== undefined && !isVisibleTo({ hidden: row.hidden }, viewerRole)) {
       throw new NotFoundException(`Encounter ${encounterId} not found`);
     }
+    const whereClause =
+      afterId != null
+        ? and(eq(encounterEvents.encounterId, encounterId), gt(encounterEvents.id, afterId))
+        : eq(encounterEvents.encounterId, encounterId);
     const rows = await this.db
       .select()
       .from(encounterEvents)
-      .where(eq(encounterEvents.encounterId, encounterId))
+      .where(whereClause)
       .orderBy(encounterEvents.id);
     const events = rows.map(eventToDomain);
     if (viewerRole === undefined || viewerRole === 'dm' || events.length === 0) {
