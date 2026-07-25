@@ -8,8 +8,20 @@
  *   failures never look like session expiry
  */
 
+import {
+  apiBudgetKind,
+  ApiAmbiguousMutationError,
+  ApiReadTimeoutError,
+  budgetForKind,
+  fetchWithBudget,
+  isAmbiguousMutation,
+  isReadTimeout,
+} from './apiTimeouts';
+import { noteReadConnecting, noteReadOffline, noteReadStale, noteReadSuccess } from './connectionSync';
 import { noteUnauthorizedResponse } from './sessionExpiry';
 import { registerInFlightAction } from './reloadGuard';
+
+export { ApiAmbiguousMutationError, ApiReadTimeoutError, isAmbiguousMutation, isReadTimeout };
 
 /** A single field-level validation failure parsed from the server's `errors[]`. */
 export interface FieldError {
@@ -122,13 +134,18 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
   const isMutation = method !== 'GET' && method !== 'HEAD';
   const clearInFlight = isMutation ? registerInFlightAction() : null;
 
+  const fetchInit: RequestInit = {
+    ...init,
+    credentials: 'include',
+    headers,
+    body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
+  };
+  const budgetKind = apiBudgetKind(method, fetchInit);
+  const isRead = budgetKind === 'read';
+  if (isRead) noteReadConnecting();
+
   try {
-    const res = await fetch(path, {
-      ...init,
-      credentials: 'include',
-      headers,
-      body: init?.json !== undefined ? JSON.stringify(init.json) : init?.body,
-    });
+    const res = await fetchWithBudget(path, fetchInit, budgetKind, budgetForKind(budgetKind));
     if (!res.ok) {
       // Proven HTTP 401 (not a network throw): fan out before shaping the error so
       // AuthProvider can transition a sleeping tab even when the caller swallows ApiError.
@@ -161,11 +178,25 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     // Success with no body: 204/205 by spec, but many endpoints (e.g. DELETE)
     // return 200 with a 0-byte body. Guard against parsing empty/non-JSON bodies
     // so a succeeded operation isn't reported as a failure.
-    if (res.status === 204 || res.status === 205) return undefined as T;
-    if (res.headers.get('Content-Length') === '0') return undefined as T;
+    if (res.status === 204 || res.status === 205) {
+      if (isRead) noteReadSuccess();
+      return undefined as T;
+    }
+    if (res.headers.get('Content-Length') === '0') {
+      if (isRead) noteReadSuccess();
+      return undefined as T;
+    }
     const text = await res.text();
     if (text === '') return undefined as T;
-    return JSON.parse(text) as T;
+    const parsed = JSON.parse(text) as T;
+    if (isRead) noteReadSuccess();
+    return parsed;
+  } catch (error) {
+    if (isRead && !init?.signal?.aborted) {
+      if (isReadTimeout(error) || isTransientError(error)) noteReadStale();
+      else if (!(error instanceof ApiError)) noteReadOffline();
+    }
+    throw error;
   } finally {
     clearInFlight?.();
   }
@@ -182,28 +213,43 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
   const devUser = localStorage.getItem('cf.devUser');
   if (devRole) headers.set('x-dev-role', devRole);
   if (devUser) headers.set('x-dev-user', devUser);
-  const res = await fetch(path, { ...init, credentials: 'include', headers });
-  if (!res.ok) {
-    noteUnauthorizedResponse(path, res.status);
-    // Reuse the same error shaping as `request` so callers' catch blocks are identical.
-    let message = res.statusText;
-    let code: string | undefined;
-    let currentUpdatedAt: string | undefined;
-    let expectedUpdatedAt: string | undefined;
-    try {
-      const body = await res.json();
-      const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
-      if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
-      ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
-      message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
-    } catch {
-      /* non-json error body */
+  noteReadConnecting();
+  try {
+    const res = await fetchWithBudget(
+      path,
+      { ...init, credentials: 'include', headers },
+      'read',
+      budgetForKind('read'),
+    );
+    if (!res.ok) {
+      noteUnauthorizedResponse(path, res.status);
+      // Reuse the same error shaping as `request` so callers' catch blocks are identical.
+      let message = res.statusText;
+      let code: string | undefined;
+      let currentUpdatedAt: string | undefined;
+      let expectedUpdatedAt: string | undefined;
+      try {
+        const body = await res.json();
+        const rawCode = (body as { code?: unknown; error?: unknown }).code ?? (body as { error?: unknown }).error;
+        if (typeof rawCode === 'string' && rawCode.length > 0) code = rawCode;
+        ({ currentUpdatedAt, expectedUpdatedAt } = parseStaleWriteFields(body));
+        message = Array.isArray(body.message) ? body.message.join('; ') : (body.message ?? message);
+      } catch {
+        /* non-json error body */
+      }
+      throw new ApiError(res.status, message, [], code, currentUpdatedAt, expectedUpdatedAt);
     }
-    throw new ApiError(res.status, message, [], code, currentUpdatedAt, expectedUpdatedAt);
+    const text = await res.text();
+    const data = (text === '' ? undefined : JSON.parse(text)) as T;
+    noteReadSuccess();
+    return { data, headers: res.headers };
+  } catch (error) {
+    if (!init?.signal?.aborted) {
+      if (isReadTimeout(error) || isTransientError(error)) noteReadStale();
+      else if (!(error instanceof ApiError)) noteReadOffline();
+    }
+    throw error;
   }
-  const text = await res.text();
-  const data = (text === '' ? undefined : JSON.parse(text)) as T;
-  return { data, headers: res.headers };
 }
 
 export const api = {
@@ -238,6 +284,8 @@ export function isStaleWrite(err: unknown): err is ApiError {
  *     answer is final for this request.
  */
 export function isTransientError(err: unknown): boolean {
+  if (isAmbiguousMutation(err)) return false;
+  if (isReadTimeout(err)) return true;
   // A failure from `fetch` itself (network/offline/DNS/CORS) has no HTTP status —
   // it surfaces as a bare TypeError. Treat any non-ApiError as transient: the
   // request never reached a definitive HTTP answer, so retrying is the right move.

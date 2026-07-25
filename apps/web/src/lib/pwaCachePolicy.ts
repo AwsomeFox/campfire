@@ -41,6 +41,13 @@ export const API_JSON_MAX_ENTRIES = 80;
 export const API_IMAGE_MAX_ENTRIES = 40;
 export const API_CACHE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
+/**
+ * Workbox NetworkFirst network wait (issue #581). After this many seconds with no
+ * response, the service worker serves the last cached GET so half-open networks
+ * do not block offline reads. Kept in sync with {@link API_READ_BUDGET.connectMs}.
+ */
+export const API_NETWORK_TIMEOUT_SECONDS = 8;
+
 /** Soft body caps — oversized responses are never written to Cache Storage. */
 export const API_JSON_MAX_BYTES = 512 * 1024; // 512 KiB
 export const API_IMAGE_MAX_BYTES = 256 * 1024; // 256 KiB (thumbs)
