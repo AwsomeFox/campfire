@@ -951,6 +951,7 @@ function LayoutContent() {
           roleLabel={roleLabel}
           navGroups={moreSheetNavGroups}
           isActivePath={isActivePath}
+          adminActive={onAdminRoute}
           isAdmin={isAdmin}
           switchCampaignState={switchCampaignState}
           onSwitchCampaignClick={onSwitchCampaignClick}
@@ -976,6 +977,7 @@ function MoreSheet({
   roleLabel,
   navGroups,
   isActivePath,
+  adminActive,
   isAdmin,
   switchCampaignState,
   onSwitchCampaignClick,
@@ -987,6 +989,7 @@ function MoreSheet({
   roleLabel: string | null;
   navGroups: NavGroup[];
   isActivePath: (to?: string) => boolean;
+  adminActive: boolean;
   isAdmin: boolean;
   switchCampaignState: { switchFrom: string } | undefined;
   onSwitchCampaignClick: (event: { preventDefault(): void }) => void;
@@ -1065,7 +1068,7 @@ function MoreSheet({
           {isAdmin && (
             <MoreSheetItem
               item={{ key: 'admin', label: t('nav.serverAdmin'), to: '/admin' }}
-              active={isActivePath('/admin')}
+              active={adminActive}
               onNavigate={onClose}
             />
           )}
