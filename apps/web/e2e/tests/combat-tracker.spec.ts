@@ -101,6 +101,10 @@ test.describe('combat tracker — DM view', () => {
     await expect(page.getByText(boss.name).first()).toBeVisible();
     await expect(page.getByRole('button', { name: new RegExp(`(Reduce|Increase) ${boss.name}'s HP`) })).toHaveCount(0);
     await expect(page.getByLabel(`Initiative for ${boss.name}`)).toHaveCount(0);
+
+    // Encounter-level map/grid/fog controls are also hidden (#470).
+    await expect(page.getByRole('button', { name: /upload|replace|remove map/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /reveal/i })).toHaveCount(0);
   });
 });
 

@@ -387,20 +387,25 @@ export class EncountersService {
   }
 
   /**
-   * Reject a combat write against an 'ended' encounter (issue #163). `end()` was
-   * carefully guarded against double-firing, but per-combatant writes (add / update /
-   * remove / roll-initiative) never checked status — so after a fight was over any
-   * owning player or DM could keep editing the historical record, and every combatant
-   * HP patch ALSO rewrote the linked character's live sheet HP through the write-through
-   * in updateCombatant, corrupting current HP outside any session context. An ended
-   * encounter's combatant rows are a frozen historical snapshot; mutating them is a
-   * state conflict (409). Viewing stays allowed (getWithCombatantsOrThrow is untouched),
-   * and /reopen is the supported path back to a mutable 'running' encounter.
+   * Reject a write against an 'ended' encounter (issues #163, #470). Combatant mutations
+   * were the first gap: per-combatant writes never checked status, so after a fight any
+   * owning player or DM could keep editing the historical record and every combatant HP
+   * patch rewrote the linked character's live sheet HP through write-through in
+   * updateCombatant. Encounter-level fields (map/grid/fog/AoE/links/name/hidden) were
+   * still mutable via updateEncounter, so the board could drift after the session. An
+   * ended encounter is a frozen historical snapshot; mutating it is a state conflict
+   * (409). Viewing stays allowed (getWithCombatantsOrThrow is untouched), and /reopen is
+   * the supported path back to a mutable 'running' encounter.
    */
   private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
     if (encounterRow.status === 'ended') {
-      throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before modifying combatants`);
+      throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
     }
+  }
+
+  /** Public seam for sibling modules (e.g. map attach) to reject ended-encounter writes (#470). */
+  async ensureMutable(encounterId: number): Promise<void> {
+    this.assertMutable(await this.getRowOrThrow(encounterId));
   }
 
   /**
@@ -1163,6 +1168,7 @@ export class EncountersService {
     opts?: { expectedUpdatedAt?: string },
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
     // Optimistic concurrency (#532): 409 on a stale expectedUpdatedAt before any write.
     this.revisions.assertNotStale(encounterRow, opts?.expectedUpdatedAt);
 
