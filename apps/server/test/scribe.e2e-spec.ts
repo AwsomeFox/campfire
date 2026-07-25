@@ -400,36 +400,90 @@ describe('AI scribe — post-session sweep (e2e)', () => {
     await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
     await seedResolvedInbox(harness, campaignId, 'The dragon was driven from its lair.');
 
-    // Opt this campaign into the post-session trigger.
     const cfg = await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ postSession: true });
     expect(cfg.status).toBe(200);
     expect(cfg.body.postSession).toBe(true);
 
-    // A scheduled game night in the past (its end time already elapsed).
     const past = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     const sched = await request(harness.server)
       .post(`${API}/campaigns/${campaignId}/schedule`)
       .set(dm)
       .send({ scheduledAt: past, durationMinutes: 60, title: 'Session 12' });
     expect(sched.status).toBe(201);
+    const scheduledSessionId = sched.body.id as number;
 
     harness.script({ text: 'With fire and steel the wyrm was routed from the mountain.' });
 
-    // Drive the sweep directly (the interval calls this; here we call it deterministically).
-    const svc = harness.ctx.app.get(
-      (await import('../src/modules/scribe/scribe.service')).ScribeService,
-    );
+    const svc = harness.ctx.app.get(ScribeService);
     const results = await svc.sweep();
     const mine = results.find((r) => r.job.campaignId === campaignId);
     expect(mine?.job.status).toBe('succeeded');
     expect(mine?.job.trigger).toBe('post_session');
+    expect(mine?.job.scheduledSessionId).toBe(scheduledSessionId);
+    expect(mine?.sourcePreview?.resolvedInbox).toBe(1);
 
     const proposals = await request(harness.server).get(`${API}/campaigns/${campaignId}/proposals`).set(dm);
     expect(proposals.body).toHaveLength(1);
     expect(proposals.body[0].entityType).toBe('session');
+
+    // Exactly-once per scheduled session: no pending session means sweep skips this campaign.
+    const again = await svc.sweep();
+    const retry = again.find((r) => r.job.campaignId === campaignId);
+    expect(retry).toBeUndefined();
+    expect(proposals.body).toHaveLength(1);
   });
 
-  it('sweep() runs cron-enabled campaigns without a scheduled session', async () => {
+  it('scopes post-session material to one scheduled game night (#499)', async () => {
+    await harness.enableExperimental();
+    const campaignId = await harness.createCampaign('Scribe Session Scope');
+    await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
+    await request(harness.server).put(`${API}/campaigns/${campaignId}/scribe`).set(dm).send({ postSession: true });
+
+    const svc = harness.ctx.app.get(ScribeService);
+
+    // First ended session — no material yet; records no_material and marks session processed.
+    const firstPast = new Date(Date.now() - 8 * 60 * 60 * 1000).toISOString();
+    const first = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: firstPast, durationMinutes: 60, title: 'Session A' });
+    const firstSweep = await svc.sweep();
+    const firstRun = firstSweep.find((r) => r.job.campaignId === campaignId);
+    expect(firstRun?.job.status).toBe('no_material');
+    expect(firstRun?.job.scheduledSessionId).toBe(first.body.id);
+
+    // Second ended session — only this night's inbox should be assembled.
+    const secondPast = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const second = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/schedule`)
+      .set(dm)
+      .send({ scheduledAt: secondPast, durationMinutes: 60, title: 'Session B' });
+    const scheduledSessionId = second.body.id as number;
+    await seedResolvedInbox(harness, campaignId, 'Tonight the vault trap was disarmed.');
+
+    harness.script({ text: 'The rogue disarmed the vault trap under torchlight.' });
+    const results = await svc.sweep();
+    const mine = results.find((r) => r.job.campaignId === campaignId);
+    expect(mine?.job.status).toBe('succeeded');
+    expect(mine?.job.scheduledSessionId).toBe(scheduledSessionId);
+    expect(mine?.sourcePreview?.resolvedInbox).toBe(1);
+
+    const proposals = await request(harness.server).get(`${API}/campaigns/${campaignId}/proposals`).set(dm);
+    expect(proposals.body).toHaveLength(1);
+    const payload = typeof proposals.body[0].payload === 'string' ? JSON.parse(proposals.body[0].payload) : proposals.body[0].payload;
+    expect(payload.recap).toContain('vault trap');
+
+    harness.script({ text: 'A forced second draft of the vault night.' });
+    const forced = await request(harness.server)
+      .post(`${API}/campaigns/${campaignId}/scribe/run`)
+      .set(dm)
+      .send({ force: true, scheduledSessionId });
+    expect(forced.status).toBe(201);
+    expect(forced.body.job.status).toBe('succeeded');
+    expect(forced.body.sourcePreview?.scheduledSessionId).toBe(scheduledSessionId);
+  });
+
+  it('sweep() runs cron-enabled campaigns with cursor-scoped material', async () => {
     await harness.enableExperimental();
     const campaignId = await harness.createCampaign('Scribe Cron Sweep');
     await harness.configureSeat(campaignId, { enabled: true, tokenBudget: 5000 });
@@ -440,9 +494,7 @@ describe('AI scribe — post-session sweep (e2e)', () => {
 
     harness.script({ text: 'Patrols doubled along the ridge road.' });
 
-    const svc = harness.ctx.app.get(
-      (await import('../src/modules/scribe/scribe.service')).ScribeService,
-    );
+    const svc = harness.ctx.app.get(ScribeService);
     const results = await svc.sweep();
     const mine = results.find((r) => r.job.campaignId === campaignId);
     expect(mine?.job.status).toBe('succeeded');

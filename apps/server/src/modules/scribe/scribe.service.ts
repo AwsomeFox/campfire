@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   Note,
@@ -11,11 +11,22 @@ import type {
   ScribeJob,
   ScribeJobStatus,
   ScribeRunResult,
+  ScribeSourcePreview,
+  ScribeSourceStats,
   ScribeTrigger,
 } from '@campfire/schema';
 import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats, aiScribeConfigs, aiScribeJobs, campaigns, proposals, scheduledSessions } from '../../db/schema';
+import {
+  aiDmSeats,
+  aiScribeConfigs,
+  aiScribeJobs,
+  campaigns,
+  encounters,
+  proposals,
+  scheduledSessions,
+  sessions,
+} from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -30,8 +41,27 @@ import { createAiProvider, type AiProvider } from '../ai-dm/providers';
 import { AI_DM_PROVIDER, type AiDmProvider } from '../ai-dm/ai-dm.provider';
 import { buildRecapDraft, type RecapDraftSource } from '../sessions/sessions.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
+import {
+  filterSourceByScope,
+  isSessionScope,
+  postSessionScope,
+  scheduledSessionWindow,
+  sourceStatsFrom,
+  estimatePromptTokens,
+  type ScribeCursorScope,
+  type ScribeSessionScope,
+  type ScribeSourceScope,
+} from './scribe-scope';
 
 type ScribeConfigUpdateInput = z.infer<typeof ScribeConfigUpdate>;
+
+type RunOpts = {
+  dryRun?: boolean;
+  narrationLanguage?: NarrationLanguage;
+  force?: boolean;
+  scheduledSessionId?: number;
+  scope?: ScribeSourceScope;
+};
 
 /**
  * The synthetic actor a sweep-triggered (post-session / cron) run files its proposal
@@ -49,7 +79,15 @@ const SCRIBE_SYSTEM_USER: RequestUser = {
 /** Default scribe config for a campaign that has never configured one (never persisted). */
 function defaultConfig(campaignId: number): ScribeConfig {
   const ts = nowIso();
-  return { campaignId, postSession: false, cron: false, budgetPerRun: 2000, createdAt: ts, updatedAt: ts };
+  return {
+    campaignId,
+    postSession: false,
+    cron: false,
+    budgetPerRun: 2000,
+    sourceCursorAt: null,
+    createdAt: ts,
+    updatedAt: ts,
+  };
 }
 
 function configToDomain(row: typeof aiScribeConfigs.$inferSelect): ScribeConfig {
@@ -58,9 +96,19 @@ function configToDomain(row: typeof aiScribeConfigs.$inferSelect): ScribeConfig 
     postSession: row.postSession,
     cron: row.cron,
     budgetPerRun: row.budgetPerRun,
+    sourceCursorAt: row.sourceCursorAt ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+function parseSourceStats(raw: string | null | undefined): ScribeSourceStats | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ScribeSourceStats;
+  } catch {
+    return null;
+  }
 }
 
 function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
@@ -74,13 +122,16 @@ function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
     tokensUsed: row.tokensUsed,
     provider: row.provider,
     detail: row.detail,
+    sourceHash: row.sourceHash ?? null,
+    scheduledSessionId: row.scheduledSessionId ?? null,
+    sourceStats: parseSourceStats(row.sourceStats),
     createdBy: row.createdBy,
     createdAt: row.createdAt,
   };
 }
 
 /**
- * Automatic / scheduled AI scribe (issue #316).
+ * Automatic / scheduled AI scribe (issue #316), session-scoped post-session runs (#499).
  *
  * A server-side job that DRAFTS a session recap from a campaign's own material
  * (the resolved scribe-inbox threads + the encounters that were run — the SAME
@@ -88,22 +139,9 @@ function jobToDomain(row: typeof aiScribeJobs.$inferSelect): ScribeJob {
  * the prose, then files it ALWAYS as a PROPOSAL for the DM to approve. Nothing is
  * ever written to canon unreviewed — the co-DM discipline of the whole AI program.
  *
- * Governance reuses the AI-DM seat's (issue #28): the run is gated on the
- * server-wide `experimentalAiDm` flag AND the per-campaign seat being enabled, and
- * its token cost is metered against the seat's budget (a hard cap — a run that would
- * exhaust it is refused). The provider comes from the encrypted per-campaign/server
- * config (#310 `resolveEffectiveConfig` -> #309 `createAiProvider`); when none is
- * configured it falls back to the injected `AI_DM_PROVIDER` seam (the shipped no-op,
- * or whatever an operator/eval-harness bound there).
- *
- * Triggers:
- *   - on-demand  : `POST /campaigns/:id/scribe/run` or the `run_scribe` MCP tool.
- *   - post-session / cron : the periodic `sweep()` (opt-in per campaign, off by
- *     default) drafts after a scheduled game night's end time passes.
- *
- * Idempotent: a re-run over unchanged material (same source hash), or while a prior
- * scribe recap proposal is still pending review, is a no-op that returns the existing
- * proposal — a sweep firing every hour never stacks duplicate recaps.
+ * Post-session runs bind to exactly one ended scheduled game night and assemble only
+ * material from that session's time window. Cron runs use a durable source cursor.
+ * Idempotent per scheduled session + source hash; `force` bypasses for explicit reruns.
  */
 @Injectable()
 export class ScribeService implements OnApplicationBootstrap {
@@ -123,13 +161,6 @@ export class ScribeService implements OnApplicationBootstrap {
     @Inject(AI_DM_PROVIDER) private readonly fallbackProvider: AiDmProvider,
   ) {}
 
-  /**
-   * Start the periodic post-session/cron sweep — ONLY when an operator opts in via
-   * `SCRIBE_SWEEP_INTERVAL_MS` (a positive integer, ms). Off by default: automatic
-   * recaps are a deliberate opt-in, and leaving the timer unset keeps tests and a
-   * plain self-host free of any background generation. The timer is `.unref()`d so
-   * it never keeps Node alive, and `sweep()` is public so it can be driven directly.
-   */
   onApplicationBootstrap(): void {
     const raw = process.env.SCRIBE_SWEEP_INTERVAL_MS;
     const ms = raw ? Number(raw) : NaN;
@@ -147,7 +178,6 @@ export class ScribeService implements OnApplicationBootstrap {
     return row ? configToDomain(row) : defaultConfig(campaignId);
   }
 
-  /** Upsert the per-campaign scribe config (dm only, gated at the controller). Omitted fields unchanged. */
   async putConfig(campaignId: number, input: ScribeConfigUpdateInput, user: RequestUser): Promise<ScribeConfig> {
     const ts = nowIso();
     const [existing] = await this.db.select().from(aiScribeConfigs).where(eq(aiScribeConfigs.campaignId, campaignId)).limit(1);
@@ -158,6 +188,7 @@ export class ScribeService implements OnApplicationBootstrap {
         postSession: input.postSession ?? base.postSession,
         cron: input.cron ?? base.cron,
         budgetPerRun: input.budgetPerRun ?? base.budgetPerRun,
+        sourceCursorAt: base.sourceCursorAt,
         createdAt: ts,
         updatedAt: ts,
       });
@@ -194,21 +225,18 @@ export class ScribeService implements OnApplicationBootstrap {
     return rows.map(jobToDomain);
   }
 
-  // ── source assembly (reuses draft_session_recap's material) ─────────────────
+  // ── source assembly ───────────────────────────────────────────────────────
 
   /**
-   * Assemble a recap's source material — the resolved scribe-inbox threads and the
-   * encounters that were run — the SAME structured source `draft_session_recap`
-   * hands a connected agent (issue #62). The scribe then has the provider write the
-   * prose from it. `null` when there's nothing to recap.
+   * Assemble recap source material. When `scope` is set, only inbox notes resolved
+   * during the window, encounters fought/linked in the window, and dice rolls logged
+   * in the window are included (#499). Without scope, all campaign material is loaded
+   * then filtered (on-demand default).
    */
-  async assembleSource(campaignId: number): Promise<RecapDraftSource | null> {
+  async assembleSource(campaignId: number, scope?: ScribeSourceScope): Promise<RecapDraftSource | null> {
     const resolvedInbox = await this.notes.listAllInbox(campaignId, true);
     const encounterList = await this.encounters.listForCampaign(campaignId);
-    const encounters = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
-    // Pull the combat-log event trail for encounters that were actually run (issue #1068).
-    // Preparing encounters have no meaningful log; skip the DB work. The scribe runs as the
-    // DM/system actor, so no viewer role is passed — the full (unredacted) DM view is correct.
+    const encountersWithCombatants = await Promise.all(encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)));
     const foughtEncounterIds = new Set(
       encounterList.filter((e) => e.status === 'running' || e.status === 'ended').map((e) => e.id),
     );
@@ -218,9 +246,38 @@ export class ScribeService implements OnApplicationBootstrap {
       ),
     );
     const eventsByEncounter = new Map(encounterList.map((e, i) => [e.id, events[i]]));
+    const encounterRows = await this.db
+      .select({
+        id: encounters.id,
+        endedAt: encounters.endedAt,
+        updatedAt: encounters.updatedAt,
+        sessionId: encounters.sessionId,
+      })
+      .from(encounters)
+      .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, encounterList.map((e) => e.id))));
+
+    const encounterMeta = new Map(encounterRows.map((r) => [r.id, r]));
+    const sessionPlayedAtById = await this.sessionPlayedAtMap(campaignId);
+
     const source: RecapDraftSource = {
-      resolvedInbox: resolvedInbox.map((n: Note) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
-      encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
+      resolvedInbox: resolvedInbox.map((n: Note) => ({
+        body: n.body,
+        resolvedNote: n.resolvedNote,
+        entityName: n.entityName,
+        updatedAt: n.updatedAt,
+      })),
+      encounters: encountersWithCombatants.map((e) => {
+        const meta = encounterMeta.get(e.id);
+        return {
+          name: e.name,
+          status: e.status,
+          combatants: e.combatants,
+          events: eventsByEncounter.get(e.id) ?? [],
+          endedAt: meta?.endedAt ?? null,
+          updatedAt: meta?.updatedAt ?? null,
+          sessionId: meta?.sessionId ?? null,
+        };
+      }),
       diceRolls: (await this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
         label: r.label,
         actor: r.actor,
@@ -233,91 +290,121 @@ export class ScribeService implements OnApplicationBootstrap {
         createdAt: r.createdAt,
       })),
     };
-    const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
-    if (fought.length === 0 && source.resolvedInbox.length === 0 && (source.diceRolls?.length ?? 0) === 0) return null;
-    return source;
+
+    const scoped = scope ? filterSourceByScope(source, scope, sessionPlayedAtById) : source;
+    const fought = scoped.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
+    if (fought.length === 0 && scoped.resolvedInbox.length === 0 && (scoped.diceRolls?.length ?? 0) === 0) return null;
+    return scoped;
+  }
+
+  private async sessionPlayedAtMap(campaignId: number): Promise<Map<number, string | null>> {
+    const rows = await this.db
+      .select({ id: sessions.id, playedAt: sessions.playedAt })
+      .from(sessions)
+      .where(and(eq(sessions.campaignId, campaignId), isNull(sessions.deletedAt)));
+    return new Map(rows.map((r) => [r.id, r.playedAt ?? null]));
   }
 
   // ── the run engine ──────────────────────────────────────────────────────────
 
-  /**
-   * Execute one scribe run for a campaign: assemble source -> provider writes the
-   * recap -> file it as a PROPOSAL -> ping the DM -> record the job. Always records a
-   * job row (even for a no-op) so runs are auditable and idempotent. `user` is the
-   * proposal's proposer + audit actor; a sweep passes the synthetic system actor.
-   */
   async run(
     campaignId: number,
     trigger: ScribeTrigger,
     user: RequestUser,
-    opts: { dryRun?: boolean; narrationLanguage?: NarrationLanguage } = {},
+    opts: RunOpts = {},
   ): Promise<ScribeRunResult> {
     const dryRun = opts.dryRun ?? false;
+    const force = opts.force ?? false;
+    const scope = opts.scope ?? (await this.resolveRunScope(campaignId, trigger, opts.scheduledSessionId));
 
-    // 1. Gate on the experimental flag + the seat being enabled (same governance as a turn).
+    if (trigger === 'post_session' && scope && isSessionScope(scope)) {
+      const already = await this.hasPostSessionJob(campaignId, scope.scheduledSessionId);
+      if (already && !force) {
+        return this.record(campaignId, trigger, user, 'skipped', {
+          detail: `post_session already recorded for scheduled session #${scope.scheduledSessionId}`,
+          scheduledSessionId: scope.scheduledSessionId,
+        });
+      }
+    }
+
     const all = await this.settings.getAll();
-    if (!all.experimentalAiDm) return this.record(campaignId, trigger, user, 'disabled', { detail: 'experimentalAiDm off' });
+    if (!all.experimentalAiDm) return this.record(campaignId, trigger, user, 'disabled', { detail: 'experimentalAiDm off', scope });
     const [seat] = await this.db.select().from(aiDmSeats).where(eq(aiDmSeats.campaignId, campaignId)).limit(1);
     if (!seat || !seat.enabled) {
-      return this.record(campaignId, trigger, user, 'disabled', { detail: 'AI DM seat not enabled' });
+      return this.record(campaignId, trigger, user, 'disabled', { detail: 'AI DM seat not enabled', scope });
     }
 
-    // 2. Assemble the source. Nothing to recap -> no_material.
-    const source = await this.assembleSource(campaignId);
-    if (!source) return this.record(campaignId, trigger, user, 'no_material', { detail: 'no inbox/encounter material' });
+    const source = await this.assembleSource(campaignId, scope);
+    const stats = source ? sourceStatsFrom(source, scope) : sourceStatsFrom({ resolvedInbox: [], encounters: [] }, scope);
+    if (!source) {
+      return this.record(campaignId, trigger, user, 'no_material', {
+        detail: scope && isSessionScope(scope)
+          ? `no inbox/encounter material for scheduled session #${scope.scheduledSessionId}`
+          : 'no inbox/encounter material',
+        scope,
+        sourceStats: stats,
+      });
+    }
+
     const draft = buildRecapDraft(source);
     const sourceHash = createHash('sha256').update(JSON.stringify(source)).digest('hex');
+    const sourcePreview: ScribeSourcePreview = { ...stats, estimatedPromptTokens: estimatePromptTokens(draft) };
 
-    // 3. Idempotency: never stack recap proposals. If a prior scribe run's proposal is
-    //    still PENDING review, or a prior run already drafted THIS exact source, skip.
-    const priorSucceeded = await this.db
-      .select()
-      .from(aiScribeJobs)
-      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.status, 'succeeded')))
-      .orderBy(desc(aiScribeJobs.id));
-    for (const prior of priorSucceeded) {
-      if (prior.proposalId === null) continue;
-      const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, prior.proposalId)).limit(1);
-      if (!prop) continue;
-      if (prop.status === 'pending') {
-        return this.record(campaignId, trigger, user, 'skipped', {
-          detail: 'a scribe recap proposal is already pending review',
-          proposalId: prior.proposalId,
-          sourceHash,
-        });
-      }
-      if (prior.sourceHash === sourceHash) {
-        return this.record(campaignId, trigger, user, 'skipped', {
-          detail: 'identical source already drafted',
-          proposalId: prior.proposalId,
-          sourceHash,
-        });
+    if (!force) {
+      const priorSucceeded = await this.db
+        .select()
+        .from(aiScribeJobs)
+        .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.status, 'succeeded')))
+        .orderBy(desc(aiScribeJobs.id));
+      for (const prior of priorSucceeded) {
+        if (prior.proposalId === null) continue;
+        const [prop] = await this.db.select().from(proposals).where(eq(proposals.id, prior.proposalId)).limit(1);
+        if (!prop) continue;
+        if (prop.status === 'pending') {
+          return this.record(campaignId, trigger, user, 'skipped', {
+            detail: 'a scribe recap proposal is already pending review',
+            proposalId: prior.proposalId,
+            sourceHash,
+            scope,
+            sourceStats: stats,
+            sourcePreview,
+          });
+        }
+        if (prior.sourceHash === sourceHash) {
+          return this.record(campaignId, trigger, user, 'skipped', {
+            detail: 'identical source already drafted',
+            proposalId: prior.proposalId,
+            sourceHash,
+            scope,
+            sourceStats: stats,
+            sourcePreview,
+          });
+        }
       }
     }
 
-    // 4. Budget: the seat's token budget is a hard cap.
     const remaining = seat.tokenBudget - seat.tokensUsed;
     if (remaining <= 0) {
       return this.record(campaignId, trigger, user, 'over_budget', {
         detail: `budget exhausted (${seat.tokensUsed}/${seat.tokenBudget})`,
         sourceHash,
+        scope,
+        sourceStats: stats,
+        sourcePreview,
       });
     }
-    // Server-wide admin token cap (#384/#315): the scribe spends provider tokens, so it must
-    // respect the global ceiling too. Recorded as over_budget (not thrown) so a periodic sweep
-    // degrades gracefully rather than crashing when the server cap is hit.
     try {
       await this.aiDm.assertWithinServerTokenCap();
     } catch (err) {
       return this.record(campaignId, trigger, user, 'over_budget', {
         detail: err instanceof Error ? err.message : 'server-wide AI token cap reached',
         sourceHash,
+        scope,
+        sourceStats: stats,
+        sourcePreview,
       });
     }
 
-    // 5. Serialize the authoritative budget re-check, provider call, and
-    // metering as one campaign-scoped spend operation (#1058). The lock helper
-    // releases in `finally`, including config/provider/metering failures.
     type SpendResult =
       | { ok: true; text: string; tokensUsed: number; providerName: string }
       | {
@@ -346,8 +433,6 @@ export class ScribeService implements OnApplicationBootstrap {
         };
       }
 
-      // The pre-lock global-cap check above is only a fast failure. Re-check it
-      // while this campaign cannot spend so a waiting scribe never uses a stale pass.
       try {
         await this.aiDm.assertWithinServerTokenCap();
       } catch (err) {
@@ -366,8 +451,6 @@ export class ScribeService implements OnApplicationBootstrap {
       let tokensUsed: number;
       let providerName: string;
       try {
-        // Read consent at provider-call time (never from a persisted job/source
-        // snapshot) so revocation immediately removes a preference from future runs.
         const aiSupports = await this.supportPreferences.listForAi(campaignId);
         const supportGuidance = aiSupports.length > 0
           ? `\n\nParticipant-authorized practical supports (apply respectfully; do not infer diagnoses):\n${JSON.stringify(aiSupports)}`
@@ -413,10 +496,6 @@ export class ScribeService implements OnApplicationBootstrap {
 
       tokensUsed = Math.max(0, Math.floor(tokensUsed));
 
-      // Meter every completed provider call before releasing the mutex, even
-      // when it returned no prose. Empty output can still carry paid usage; if
-      // we skipped accounting here, the next spender could pass the same gate.
-      // The SQL clamp remains defense in depth against counter overshoot.
       try {
         await this.aiDm.meterTurn(campaignId, tokensUsed, {
           actor: auditActor(user),
@@ -450,33 +529,32 @@ export class ScribeService implements OnApplicationBootstrap {
       return this.record(campaignId, trigger, user, spend.status, {
         detail: spend.detail,
         sourceHash,
+        scope,
+        sourceStats: stats,
+        sourcePreview,
         ...(spend.tokensUsed !== undefined ? { tokensUsed: spend.tokensUsed } : {}),
         ...(spend.providerName !== undefined ? { provider: spend.providerName } : {}),
       });
     }
     const { text, tokensUsed, providerName } = spend;
 
-    // 7. Dry run: preview only — metered (a real call was made) but nothing filed.
     if (dryRun) {
       const job = await this.record(campaignId, trigger, user, 'succeeded', {
         detail: 'dry-run preview (no proposal filed)',
         sourceHash,
         tokensUsed,
         provider: providerName,
+        scope,
+        sourceStats: stats,
       });
-      return { ...job, preview: text };
+      return { ...job, preview: text, sourcePreview };
     }
 
-    // 8. File the recap as a session-create PROPOSAL (never a direct canon write). This
-    //    auto-notifies the DM(s) that a proposal awaits review (proposalRecords.create).
     const title = source.encounters.find((e) => e.status === 'running' || e.status === 'ended')?.name
       ? `Recap: ${source.encounters.find((e) => e.status === 'running' || e.status === 'ended')!.name}`
-      : 'Session recap (AI draft)';
-    // Attribute the recap to the AI scribe, not the human who triggered it (#383). An on-demand
-    // run passes the triggering DM as `user`; without this the proposal's proposer/proposerUserId
-    // would be that DM's name + id — affirmatively misattributing an AI-written recap to a human in
-    // the review queue and audit-facing proposer field, and excluding it from the AI-drafts filter.
-    // The `ai-dm:` prefix matches the same badge/filter the co-DM path uses.
+      : scope && isSessionScope(scope) && scope.scheduledSessionId
+        ? `Session recap (scheduled #${scope.scheduledSessionId})`
+        : 'Session recap (AI draft)';
     const proposal = await this.proposalRecords.create(
       campaignId,
       'session',
@@ -497,6 +575,8 @@ export class ScribeService implements OnApplicationBootstrap {
       detail: `${trigger} via ${providerName} -> proposal #${proposal.id} (+${tokensUsed} tokens)`,
     });
 
+    await this.advanceSourceCursor(campaignId, scope);
+
     const job = await this.record(campaignId, trigger, user, 'succeeded', {
       detail: `drafted recap proposal #${proposal.id}`,
       sourceHash,
@@ -504,19 +584,14 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalCount: 1,
       tokensUsed,
       provider: providerName,
+      scope,
+      sourceStats: stats,
     });
-    return { ...job, proposalIds: [proposal.id] };
+    return { ...job, proposalIds: [proposal.id], sourcePreview };
   }
 
   // ── post-session / cron sweep ────────────────────────────────────────────────
 
-  /**
-   * One sweep pass (called by the opt-in interval; public so it can be driven
-   * directly / in tests). For every campaign whose scribe config opts into
-   * `postSession` (and whose most recent scheduled game night has already ended) or
-   * `cron`, run the scribe. `run()` is idempotent, so a sweep never duplicates a
-   * recap. Returns the runs it performed.
-   */
   async sweep(now: Date = new Date()): Promise<ScribeRunResult[]> {
     const configs = await this.db.select().from(aiScribeConfigs);
     const results: ScribeRunResult[] = [];
@@ -530,18 +605,23 @@ export class ScribeService implements OnApplicationBootstrap {
       for (const row of lifecycleRows) liveCampaignIds.add(row.id);
     }
     for (const cfg of configs) {
-      // Issue #867: never background-generate for a trashed campaign — Trash freezes
-      // jobs the same way it freezes REST/MCP/AI. Missing campaigns are also skipped.
       if (!liveCampaignIds.has(cfg.campaignId)) continue;
 
-      const trigger: ScribeTrigger | null = cfg.postSession && (await this.hasEndedSession(cfg.campaignId, now))
-        ? 'post_session'
-        : cfg.cron
-          ? 'cron'
-          : null;
+      let trigger: ScribeTrigger | null = null;
+      let scope: ScribeSourceScope | undefined;
+      if (cfg.postSession) {
+        const pending = await this.findNextEndedScheduledSession(cfg.campaignId, now);
+        if (pending) {
+          trigger = 'post_session';
+          scope = pending.scope;
+        }
+      } else if (cfg.cron) {
+        trigger = 'cron';
+        scope = this.cursorScopeFromConfig(configToDomain(cfg));
+      }
       if (!trigger) continue;
       try {
-        results.push(await this.run(cfg.campaignId, trigger, SCRIBE_SYSTEM_USER));
+        results.push(await this.run(cfg.campaignId, trigger, SCRIBE_SYSTEM_USER, { scope }));
       } catch (err) {
         this.logger.warn(`scribe run for campaign ${cfg.campaignId} failed: ${err instanceof Error ? err.message : err}`);
       }
@@ -549,37 +629,123 @@ export class ScribeService implements OnApplicationBootstrap {
     return results;
   }
 
-  /** True when the campaign has at least one scheduled session whose end time is in the past AND after the last post_session scribe run (#1066). */
-  private async hasEndedSession(campaignId: number, now: Date): Promise<boolean> {
-    // Find the last successful (or attempted) post_session run as a watermark.
-    const [lastRun] = await this.db
-      .select({ createdAt: aiScribeJobs.createdAt })
-      .from(aiScribeJobs)
-      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')))
-      .orderBy(desc(aiScribeJobs.createdAt))
-      .limit(1);
-    const watermark = lastRun ? Date.parse(lastRun.createdAt) : 0;
+  /** Oldest ended scheduled session without a prior post_session job (#499). */
+  private async findNextEndedScheduledSession(
+    campaignId: number,
+    now: Date,
+  ): Promise<{ scope: ScribeSessionScope } | null> {
+    const rows = await this.db
+      .select()
+      .from(scheduledSessions)
+      .where(eq(scheduledSessions.campaignId, campaignId))
+      .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
 
-    const rows = await this.db.select().from(scheduledSessions).where(eq(scheduledSessions.campaignId, campaignId));
-    return rows.some((r) => {
-      const start = Date.parse(r.scheduledAt);
-      if (!Number.isFinite(start)) return false;
-      const endTime = start + (r.durationMinutes ?? 0) * 60_000;
-      // Session must have ended AND ended after the last post_session run.
-      return endTime <= now.getTime() && endTime > watermark;
-    });
+    const processed = await this.db
+      .select({ scheduledSessionId: aiScribeJobs.scheduledSessionId })
+      .from(aiScribeJobs)
+      .where(and(eq(aiScribeJobs.campaignId, campaignId), eq(aiScribeJobs.trigger, 'post_session')));
+    const done = new Set(processed.map((r) => r.scheduledSessionId).filter((id): id is number => id != null));
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const scheduledEnd = Date.parse(row.scheduledAt) + (row.durationMinutes ?? 0) * 60_000;
+      if (scheduledEnd > now.getTime()) continue;
+      if (done.has(row.id)) continue;
+      const next = rows[i + 1];
+      return {
+        scope: postSessionScope(row.id, row.scheduledAt, row.durationMinutes ?? 0, {
+          now,
+          nextSessionStartAt: next?.scheduledAt ?? null,
+        }),
+      };
+    }
+    return null;
+  }
+
+  private async hasPostSessionJob(campaignId: number, scheduledSessionId: number): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: aiScribeJobs.id })
+      .from(aiScribeJobs)
+      .where(
+        and(
+          eq(aiScribeJobs.campaignId, campaignId),
+          eq(aiScribeJobs.trigger, 'post_session'),
+          eq(aiScribeJobs.scheduledSessionId, scheduledSessionId),
+        ),
+      )
+      .limit(1);
+    return !!row;
+  }
+
+  private cursorScopeFromConfig(config: ScribeConfig): ScribeCursorScope | undefined {
+    if (!config.sourceCursorAt) return undefined;
+    const sinceMs = Date.parse(config.sourceCursorAt);
+    if (!Number.isFinite(sinceMs)) return undefined;
+    return { sinceAt: config.sourceCursorAt, sinceMs };
+  }
+
+  private async resolveRunScope(
+    campaignId: number,
+    trigger: ScribeTrigger,
+    scheduledSessionId?: number,
+  ): Promise<ScribeSourceScope | undefined> {
+    if (scheduledSessionId != null) {
+      const rows = await this.db
+        .select()
+        .from(scheduledSessions)
+        .where(eq(scheduledSessions.campaignId, campaignId))
+        .orderBy(asc(scheduledSessions.scheduledAt), asc(scheduledSessions.id));
+      const idx = rows.findIndex((r) => r.id === scheduledSessionId);
+      const row = rows[idx];
+      if (row) {
+        const next = rows[idx + 1];
+        return postSessionScope(row.id, row.scheduledAt, row.durationMinutes ?? 0, {
+          nextSessionStartAt: next?.scheduledAt ?? null,
+        });
+      }
+    }
+    if (trigger === 'cron') return this.cursorScopeFromConfig(await this.getConfig(campaignId));
+    return undefined;
+  }
+
+  private async advanceSourceCursor(campaignId: number, scope?: ScribeSourceScope): Promise<void> {
+    const ts = nowIso();
+    if (scope && isSessionScope(scope)) {
+      await this.db
+        .update(aiScribeConfigs)
+        .set({ sourceCursorAt: scope.windowEnd, updatedAt: ts })
+        .where(eq(aiScribeConfigs.campaignId, campaignId));
+      return;
+    }
+    await this.db
+      .update(aiScribeConfigs)
+      .set({ sourceCursorAt: ts, updatedAt: ts })
+      .where(eq(aiScribeConfigs.campaignId, campaignId));
   }
 
   // ── job recording ────────────────────────────────────────────────────────────
 
-  /** Insert a job row and return the ScribeRunResult wrapping it. */
   private async record(
     campaignId: number,
     trigger: ScribeTrigger,
     user: RequestUser,
     status: ScribeJobStatus,
-    extra: { detail?: string; sourceHash?: string; proposalId?: number; proposalCount?: number; tokensUsed?: number; provider?: string } = {},
+    extra: {
+      detail?: string;
+      sourceHash?: string;
+      proposalId?: number;
+      proposalCount?: number;
+      tokensUsed?: number;
+      provider?: string;
+      scope?: ScribeSourceScope;
+      sourceStats?: ScribeSourceStats;
+      sourcePreview?: ScribeSourcePreview;
+      scheduledSessionId?: number;
+    } = {},
   ): Promise<ScribeRunResult> {
+    const scheduledSessionId =
+      extra.scheduledSessionId ??
+      (extra.scope && isSessionScope(extra.scope) ? extra.scope.scheduledSessionId : null);
     const [row] = await this.db
       .insert(aiScribeJobs)
       .values({
@@ -592,6 +758,8 @@ export class ScribeService implements OnApplicationBootstrap {
         tokensUsed: extra.tokensUsed ?? 0,
         provider: extra.provider ?? '',
         detail: extra.detail ?? '',
+        scheduledSessionId: scheduledSessionId ?? null,
+        sourceStats: extra.sourceStats ? JSON.stringify(extra.sourceStats) : null,
         createdBy: auditActor(user),
         createdAt: nowIso(),
       })
@@ -602,10 +770,10 @@ export class ScribeService implements OnApplicationBootstrap {
       proposalIds: extra.proposalId ? [extra.proposalId] : [],
       dryRun: false,
       preview: null,
+      sourcePreview: extra.sourcePreview ?? null,
     };
   }
 
-  /** True when the campaign exists — used by the controller to 404 cleanly. */
   async campaignExists(campaignId: number): Promise<boolean> {
     const [row] = await this.db.select({ id: campaigns.id }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
     return !!row;

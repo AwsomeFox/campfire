@@ -1217,6 +1217,8 @@ export const aiScribeConfigs = sqliteTable('ai_scribe_configs', {
   postSession: integer('post_session', { mode: 'boolean' }).notNull().default(false),
   cron: integer('cron', { mode: 'boolean' }).notNull().default(false),
   budgetPerRun: integer('budget_per_run').notNull().default(2000),
+  // Durable cursor for cron/incremental assembly (#499).
+  sourceCursorAt: text('source_cursor_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1232,6 +1234,9 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   provider: text('provider').notNull().default(''),
   detail: text('detail').notNull().default(''),
+  // Post-session exactly-once binding + archived assembly counts (#499).
+  scheduledSessionId: integer('scheduled_session_id'),
+  sourceStats: text('source_stats'),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
