@@ -274,8 +274,11 @@ export function translateApiError(
   if (err.code) {
     return t(`errors.${err.code}`, { defaultValue: err.message });
   }
+  if (err.message) {
+    return err.message;
+  }
   if (opts?.fallbackKey) {
-    return t(opts.fallbackKey, { defaultValue: err.message });
+    return t(opts.fallbackKey);
   }
   return err.message;
 }
