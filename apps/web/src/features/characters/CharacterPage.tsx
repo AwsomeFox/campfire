@@ -23,7 +23,11 @@
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useLiveEncounterState } from '../../lib/useLiveEncounterState';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { CharacterSheetNav } from './CharacterSheetNav';
+import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
+import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
@@ -138,6 +142,12 @@ export default function CharacterPage() {
   const [pendingUndo, setPendingUndo] = useState(false);
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
+  const { liveEncounter } = useLiveEncounterState(Number.isFinite(cid) ? cid : undefined);
+  const { tab, setTab, tabRefs, onTabKeyDown } = useCharacterSheetTab({
+    campaignId: cid,
+    characterId: id,
+    canViewDmSecret: isDm,
+  });
 
   const load = useCallback(async () => {
     setError(null);
@@ -313,8 +323,34 @@ export default function CharacterPage() {
         </Card>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start">
-        <div className="space-y-4 min-w-0">
+      <CharacterSheetNav
+        tab={tab}
+        setTab={setTab}
+        tabRefs={tabRefs}
+        onTabKeyDown={onTabKeyDown}
+        liveEncounter={liveEncounter != null}
+      />
+
+      {/*
+        Play vs Build/Profile IA (issue #646): at-table controls live in Play;
+        advancement, story, portrait, and DM admin live in Build. Both panels stay
+        mounted (WAI-ARIA tabpanels) so deep links and aria-controls resolve; the
+        inactive panel is hidden to cut mobile scroll depth.
+      */}
+      <div
+        id="character-sheet-panel-play"
+        role="tabpanel"
+        aria-labelledby="character-sheet-tab-play"
+        tabIndex={0}
+        data-testid="character-sheet-panel-play"
+        className={tab === 'play' ? 'space-y-4 min-w-0' : 'hidden'}
+        hidden={tab !== 'play'}
+      >
+        <section
+          id={characterSheetSectionId('abilities')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.abilities}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-3">
             <p className="card-kicker">Ability scores</p>
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
@@ -332,7 +368,13 @@ export default function CharacterPage() {
               })}
             </div>
           </Card>
+        </section>
 
+        <section
+          id={characterSheetSectionId('hp')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.hp}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-3">
             <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
               <p className="card-kicker mb-0">Hit points & Defenses</p>
@@ -379,85 +421,165 @@ export default function CharacterPage() {
               </div>
             )}
           </Card>
+        </section>
 
-          <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
-
-          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
-
-          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-
-          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
-
-          <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
-
-          <Card className="space-y-3">
-            <div className="flex items-center justify-between">
-              <p className="card-kicker mb-0">Background</p>
-            </div>
-            <div className="space-y-1.5 text-[13px]">
-              <div className="flex justify-between gap-2">
-                <span className="text-muted">Species</span>
-                <span>{character.species || '—'}</span>
-              </div>
-              <div className="flex justify-between gap-2">
-                <span className="text-muted">Background</span>
-                <span>{character.background || '—'}</span>
-              </div>
-            </div>
-            <StoryBody character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
-          </Card>
-
-          <Card className="space-y-2">
-            <div className="flex items-baseline gap-2.5">
-              <p className="card-kicker mb-0">Inventory</p>
-              <span className="tag tag-neutral">soon</span>
-            </div>
-            <p className="text-xs text-slate-500">Item tracking arrives with the Compendium — no inventory API yet.</p>
-          </Card>
-
+        <section
+          id={characterSheetSectionId('conditions')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.conditions}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-2.5">
             <p className="card-kicker mb-0">Conditions</p>
             <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
           </Card>
+        </section>
 
-          {isDm && <DmSecretCard character={character} onChange={load} onError={setActionError} />}
+        <section
+          id={characterSheetSectionId('actions')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.actions}
+          className="scroll-mt-24"
+        >
+          <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
+        </section>
+
+        <section
+          id={characterSheetSectionId('saves')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.saves}
+          className="scroll-mt-24"
+        >
+          <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+        </section>
+
+        <section
+          id={characterSheetSectionId('skills')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.skills}
+          className="scroll-mt-24"
+        >
+          <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
+        </section>
+
+        <section
+          id={characterSheetSectionId('slots')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.slots}
+          className="scroll-mt-24"
+        >
+          <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+        </section>
+      </div>
+
+      <div
+        id="character-sheet-panel-build"
+        role="tabpanel"
+        aria-labelledby="character-sheet-tab-build"
+        tabIndex={0}
+        data-testid="character-sheet-panel-build"
+        className={tab === 'build' ? 'grid grid-cols-1 md:grid-cols-[1fr_280px] gap-4 items-start min-w-0' : 'hidden'}
+        hidden={tab !== 'build'}
+      >
+        <div className="space-y-4 min-w-0">
+          <section
+            id={characterSheetSectionId('xp')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.xp}
+            className="scroll-mt-24"
+          >
+            <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
+          </section>
+
+          <section
+            id={characterSheetSectionId('background')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.background}
+            className="scroll-mt-24"
+          >
+            <Card className="space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="card-kicker mb-0">Background</p>
+              </div>
+              <div className="space-y-1.5 text-[13px]">
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted">Species</span>
+                  <span>{character.species || '—'}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-muted">Background</span>
+                  <span>{character.background || '—'}</span>
+                </div>
+              </div>
+              <StoryBody character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
+            </Card>
+          </section>
+
+          <section
+            id={characterSheetSectionId('inventory')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.inventory}
+            className="scroll-mt-24"
+          >
+            <Card className="space-y-2">
+              <div className="flex items-baseline gap-2.5">
+                <p className="card-kicker mb-0">Inventory</p>
+                <span className="tag tag-neutral">soon</span>
+              </div>
+              <p className="text-xs text-slate-500">Item tracking arrives with the Compendium — no inventory API yet.</p>
+            </Card>
+          </section>
+
+          {isDm && (
+            <section
+              id={characterSheetSectionId('dm-secret')}
+              aria-label={CHARACTER_SHEET_SECTION_LABEL['dm-secret']}
+              className="scroll-mt-24"
+            >
+              <DmSecretCard character={character} onChange={load} onError={setActionError} />
+            </section>
+          )}
         </div>
 
         <div className="space-y-4 min-w-0">
-          <Card className="items-center text-center py-6 space-y-1.5">
-            {canEdit ? (
-              <ImageUpload
-                campaignId={cid}
-                kind="portrait"
-                shape="circle"
-                previewUrl={character.portraitUrl ?? undefined}
-                label="Portrait"
-                onUploaded={savePortrait}
-                onError={setActionError}
-              />
-            ) : character.portraitUrl ? (
-              <img
-                src={character.portraitUrl}
-                alt=""
-                className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
-              />
-            ) : (
-              <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-[var(--color-neutral-600)]">
-                Portrait
-              </span>
-            )}
-            {canEdit && <span className="text-[length:var(--type-label)] text-slate-500">Click or drop to change</span>}
-          </Card>
-          <Card className="space-y-2">
-            <p className="card-kicker mb-0">Player</p>
-            <div className="space-y-1.5 text-[13px]">
-              <div className="flex justify-between">
-                <span className="text-muted">Owner</span>
-                <span>{ownerLabel(character.ownerUserId)}</span>
+          <section
+            id={characterSheetSectionId('portrait')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.portrait}
+            className="scroll-mt-24"
+          >
+            <Card className="items-center text-center py-6 space-y-1.5">
+              {canEdit ? (
+                <ImageUpload
+                  campaignId={cid}
+                  kind="portrait"
+                  shape="circle"
+                  previewUrl={character.portraitUrl ?? undefined}
+                  label="Portrait"
+                  onUploaded={savePortrait}
+                  onError={setActionError}
+                />
+              ) : character.portraitUrl ? (
+                <img
+                  src={character.portraitUrl}
+                  alt=""
+                  className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
+                />
+              ) : (
+                <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-[var(--color-neutral-600)]">
+                  Portrait
+                </span>
+              )}
+              {canEdit && <span className="text-[length:var(--type-label)] text-slate-500">Click or drop to change</span>}
+            </Card>
+          </section>
+          <section
+            id={characterSheetSectionId('player')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.player}
+            className="scroll-mt-24"
+          >
+            <Card className="space-y-2">
+              <p className="card-kicker mb-0">Player</p>
+              <div className="space-y-1.5 text-[13px]">
+                <div className="flex justify-between">
+                  <span className="text-muted">Owner</span>
+                  <span>{ownerLabel(character.ownerUserId)}</span>
+                </div>
+                <DdbProvenanceRow ddbId={character.ddbId} canEdit={canEdit} />
               </div>
-              <DdbProvenanceRow ddbId={character.ddbId} canEdit={canEdit} />
-            </div>
-          </Card>
+            </Card>
+          </section>
         </div>
       </div>
 

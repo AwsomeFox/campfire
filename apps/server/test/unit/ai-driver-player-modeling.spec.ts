@@ -38,7 +38,9 @@ describe('ai-driver-player-modeling', () => {
     notifications = {};
     supportPreferences = { listForPublicAiNarration: jest.fn<any>().mockResolvedValue([]) };
     resolver = { resolveEffectiveConfig: jest.fn() };
-    campaigns = {};
+    campaigns = {
+      getOrThrow: jest.fn<any>().mockResolvedValue({ id: 1, narrationLanguage: 'en' }),
+    };
     rules = {};
     encounters = {};
     members = {

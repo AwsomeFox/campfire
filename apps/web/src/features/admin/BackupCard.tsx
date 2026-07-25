@@ -1,10 +1,11 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Backup & export card — extracted from AdminPage.tsx as part of the /admin/*
  * page split (issue #350). Lives on /admin/storage, alongside StorageCard.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { Campaign } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 
 const CAMPAIGN_SELECT_ID = 'backup-campaign';
@@ -13,6 +14,7 @@ const MARKDOWN_DESCRIPTION_ID = 'backup-markdown-description';
 const PRIVACY_DESCRIPTION_ID = 'backup-privacy-description';
 
 export function BackupCard() {
+  const { t } = useTranslation();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignId, setCampaignId] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +32,7 @@ export function BackupCard() {
     } catch (err) {
       setCampaigns([]);
       setCampaignId('');
-      setError(err instanceof ApiError ? err.message : "Couldn't load campaigns.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setIsLoading(false);
     }

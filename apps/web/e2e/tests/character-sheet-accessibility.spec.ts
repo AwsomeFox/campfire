@@ -91,6 +91,8 @@ test.describe('character sheet accessibility (issue #448)', () => {
         skills.getByRole('button', { name: skillProficiencyLabel('Athletics', 'none') }),
       ).toHaveAttribute('aria-pressed', 'false');
 
+      await page.getByRole('tab', { name: /Build & profile/ }).click();
+
       const xp = page.getByRole('textbox', { name: XP_AWARD_LABEL });
       await expect(xp).toBeVisible();
       await expect(xp).toHaveAccessibleDescription(XP_AWARD_HELP);
@@ -99,6 +101,8 @@ test.describe('character sheet accessibility (issue #448)', () => {
       await expect(page.getByRole('alert').filter({ hasText: /other than 0/i })).toBeVisible();
       await expect(xp).toHaveAttribute('aria-invalid', 'true');
       await expect(xp).toHaveAccessibleDescription(/other than 0/i);
+
+      await page.getByRole('tab', { name: /^Play/ }).click();
 
       const hpGroup = page.getByRole('group', { name: `${name} hit points` });
       await expect(

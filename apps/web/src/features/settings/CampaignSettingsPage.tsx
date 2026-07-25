@@ -251,7 +251,15 @@ export default function CampaignSettingsPage() {
               title={t('settings.categories.ai.label')}
               description={t('settings.categories.ai.description')}
             >
-              <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
+              <AiDmCard
+                key={`aidm-${campaign.id}`}
+                campaignId={id}
+                campaign={campaign}
+                onCampaignSaved={(c) => {
+                  setCampaign(c);
+                  void refreshCampaigns();
+                }}
+              />
             </SettingsCategory>
 
             <SettingsCategory

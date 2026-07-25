@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Whole-server backup & restore workflow (issue #444). Server-admin only —
  * create/download archives, inspect scheduled cadence, dry-run inspect with
@@ -7,7 +8,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAuth } from '../../app/auth';
 import { clearApiCache } from '../../lib/swCache';
-import { ApiError } from '../../lib/api';
+import { translateApiError } from '../../lib/api';
 import { Card, Btn, ErrorNote } from '../../components/ui';
 import { PasswordInput } from '../../components/PasswordInput';
 import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
@@ -162,6 +163,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
 }
 
 export function ServerBackupWorkflowCard() {
+  const { t } = useTranslation();
   const { me, refresh } = useAuth();
   const fileInputId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -196,7 +198,7 @@ export function ServerBackupWorkflowCard() {
       setStatus(await fetchBackupStatus());
     } catch (err) {
       setStatus(null);
-      setStatusError(err instanceof ApiError ? err.message : "Couldn't load backup status.");
+      setStatusError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 
@@ -231,7 +233,7 @@ export function ServerBackupWorkflowCard() {
       if (controller.signal.aborted) {
         setDownloadNote('Download cancelled.');
       } else {
-        setDownloadError(err instanceof ApiError ? err.message : "Couldn't create the backup.");
+        setDownloadError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
       }
     } finally {
       downloadAbortRef.current = null;
@@ -271,7 +273,7 @@ export function ServerBackupWorkflowCard() {
       setInspectResult(await inspectBackupArchive(pendingFile, controller.signal));
     } catch (err) {
       if (!controller.signal.aborted) {
-        setInspectError(err instanceof ApiError ? err.message : "Couldn't inspect that archive.");
+        setInspectError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
       }
     } finally {
       inspectAbortRef.current = null;
@@ -311,7 +313,7 @@ export function ServerBackupWorkflowCard() {
       });
     } catch (err) {
       if (!controller.signal.aborted) {
-        setRestoreError(err instanceof ApiError ? err.message : "Couldn't restore that archive.");
+        setRestoreError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
       }
       restoreAbortRef.current = null;
       setRestoreBusy(false);

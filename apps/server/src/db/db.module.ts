@@ -2060,6 +2060,22 @@ function migrateCampaignsTableForTurnControls(sqlite: Database.Database): void {
 }
 
 /**
+ * Issue #635: campaign AI narration language. Plain NOT NULL DEFAULT 'en' ADD COLUMN —
+ * existing campaigns keep English narration. Fresh DBs never hit this path (BOOTSTRAP_SQL
+ * already declares narration_language).
+ */
+function migrateCampaignsTableForNarrationLanguage(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'narration_language')) {
+    sqlite.exec("ALTER TABLE campaigns ADD COLUMN narration_language TEXT NOT NULL DEFAULT 'en'");
+  }
+}
+
+/**
  * Issue #877: create the participant-owned access-support table. This is a new
  * table rather than columns on the shared session_zero row so ownership,
  * per-participant deletion, human visibility, and AI consent remain independent.
@@ -2455,7 +2471,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
   { name: '0085_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
-  { name: '0086_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
+  { name: '0086_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
+  { name: '0087_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
 ];
 
 /**
