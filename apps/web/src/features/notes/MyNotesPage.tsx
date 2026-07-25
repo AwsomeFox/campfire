@@ -605,8 +605,11 @@ export default function MyNotesPage() {
           busy={updatingVisibilityId === pendingPartyConfirm.noteId}
           danger={false}
           onConfirm={() => {
-            const note = notes.find((n) => n.id === pendingPartyConfirm.noteId);
-            if (note) void applyVisibilityChange(note, pendingPartyConfirm.to);
+            const request = pendingPartyConfirm;
+            if (!request) return;
+            setPendingPartyConfirm(null);
+            const note = notes.find((n) => n.id === request.noteId);
+            if (note) void applyVisibilityChange(note, request.to);
           }}
           onCancel={() => setPendingPartyConfirm(null)}
         />
