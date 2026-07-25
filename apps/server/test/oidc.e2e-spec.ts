@@ -9,6 +9,7 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
+  mergeLatestChildV8Coverage,
 } from './oidc-spawn-coverage';
 
 /**
@@ -174,13 +175,8 @@ async function spawnAppOnce(
   });
 
   const killChild = async (): Promise<void> => {
-    const releaseChild = (): void => {
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      child.unref?.();
-    };
     if (exitState.current || child.killed) {
-      releaseChild();
+      await mergeLatestChildV8Coverage();
       return;
     }
     child.kill('SIGTERM');
@@ -192,7 +188,7 @@ async function spawnAppOnce(
       child.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, 200));
     }
-    releaseChild();
+    await mergeLatestChildV8Coverage();
   };
 
   try {
@@ -410,8 +406,6 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
   afterAll(async () => {
     await idp.close();
-    // Allow NODE_V8_COVERAGE blobs to flush after the last child exits.
-    await new Promise((r) => setTimeout(r, 100));
     await mergeChildV8Coverage();
     cleanupChildV8CoverageDir();
   });
