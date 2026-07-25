@@ -49,7 +49,9 @@ export function EntitySecrecyControls({
       setPendingUndo(true);
       announce(t('secrecy.revealSuccessUndo'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('secrecy.revealFailed'));
+      const msg = err instanceof Error ? err.message : t('secrecy.revealFailed');
+      setError(msg);
+      announce(msg, { assertive: true });
     } finally {
       setBusy(false);
     }

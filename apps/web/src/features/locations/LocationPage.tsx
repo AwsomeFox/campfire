@@ -518,11 +518,11 @@ export default function LocationPage() {
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
-            {canDmWrite && location.status === 'unexplored' && (
+            {canDmWrite && (
               <EntitySecrecyControls
                 entityKind="location"
                 entityName={location.name}
-                hidden
+                hidden={location.status === 'unexplored'}
                 preview={revealPreview}
                 onReveal={async () => {
                   await setStatus('explored');
