@@ -2,7 +2,7 @@
  * Link from a list (or search) surface into a detail page while capturing list origin
  * for the shared DetailPageWayfinding return link (issue #652).
  */
-import { type ComponentProps, type MouseEvent } from 'react';
+import { forwardRef, type ComponentProps, type MouseEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { captureListOrigin } from '../lib/detailListOrigin';
 
@@ -10,17 +10,20 @@ type ListDetailLinkProps = Omit<ComponentProps<typeof Link>, 'state'> & {
   to: string;
 };
 
-export function ListDetailLink({
-  to,
-  onClick,
-  target,
-  reloadDocument,
-  replace,
-  relative,
-  preventScrollReset,
-  download,
-  ...rest
-}: ListDetailLinkProps) {
+export const ListDetailLink = forwardRef<HTMLAnchorElement, ListDetailLinkProps>(function ListDetailLink(
+  {
+    to,
+    onClick,
+    target,
+    reloadDocument,
+    replace,
+    relative,
+    preventScrollReset,
+    download,
+    ...rest
+  },
+  ref,
+) {
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -42,6 +45,7 @@ export function ListDetailLink({
 
   return (
     <Link
+      ref={ref}
       to={to}
       onClick={handleClick}
       target={target}
@@ -53,4 +57,4 @@ export function ListDetailLink({
       {...rest}
     />
   );
-}
+});
