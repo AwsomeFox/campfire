@@ -62,6 +62,7 @@ import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
 import { CombatantActionsList } from './CombatantActionsList';
@@ -1862,6 +1863,8 @@ export default function RunSessionPage() {
       {canDmWrite && <CheckRequestPanel campaignId={cid} characters={characters} encounterId={eid} onError={surfaceActionError} />}
 
       <SharedDiceLog campaignId={cid} />
+
+      <EntityDiscussion campaignId={cid} entityType="encounter" entityId={encounter.id} />
 
       {confirmEnd && (
         <ConfirmDialog
