@@ -824,6 +824,24 @@ function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before physical/manual roll provenance (issue #673):
+ * `dice_rolls` gained `source` (rolled|manual), optional `actor`, and optional `natural20`.
+ * Existing rows default to `rolled` — their meaning is unchanged.
+ */
+function migrateDiceRollsTableForManualProvenance(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('source')) sqlite.exec("ALTER TABLE dice_rolls ADD COLUMN source TEXT NOT NULL DEFAULT 'rolled'");
+  if (!has('actor')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN actor TEXT');
+  if (!has('natural20')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN natural20 INTEGER');
+}
+
+/**
  * Migration for DBs created before trash consistency (issue #701): factions,
  * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
  * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
@@ -2534,6 +2552,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0089_characters_resources', run: migrateCharactersTableForResources },
   { name: '0090_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
   { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
 ];
 
 /**

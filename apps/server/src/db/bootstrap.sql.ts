@@ -741,6 +741,10 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   total INTEGER NOT NULL,
   label TEXT,
   dc INTEGER,
+  -- Issue #673: honest provenance for paper-table / physical rolls.
+  source TEXT NOT NULL DEFAULT 'rolled',
+  actor TEXT,
+  natural20 INTEGER,
   -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
   -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
   terms TEXT,

@@ -947,6 +947,10 @@ export const diceRolls = sqliteTable('dice_rolls', {
   // Optional check context (issue #130): label + difficulty class. success is derived.
   label: text('label'),
   dc: integer('dc'),
+  // Issue #673: honest provenance for paper-table / physical rolls logged by a DM.
+  source: text('source').notNull().default('rolled'),
+  actor: text('actor'),
+  natural20: integer('natural20'),
   createdAt: text('created_at').notNull(),
 });
 

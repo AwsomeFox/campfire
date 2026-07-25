@@ -22,6 +22,7 @@ import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { NotesService } from '../notes/notes.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
 import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { AiDmService } from '../ai-dm/ai-dm.service';
@@ -114,6 +115,7 @@ export class ScribeService implements OnApplicationBootstrap {
     private readonly settings: SettingsService,
     private readonly notes: NotesService,
     private readonly encounters: EncountersService,
+    private readonly rolls: RollsService,
     private readonly proposalRecords: ProposalRecordsService,
     private readonly providerConfig: AiProviderConfigService,
     private readonly aiDm: AiDmService,
@@ -219,9 +221,20 @@ export class ScribeService implements OnApplicationBootstrap {
     const source: RecapDraftSource = {
       resolvedInbox: resolvedInbox.map((n: Note) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
       encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
+      diceRolls: (await this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
+        label: r.label,
+        actor: r.actor,
+        rollerName: r.rollerName,
+        total: r.total,
+        dc: r.dc,
+        success: r.success,
+        natural20: r.natural20,
+        source: r.source,
+        createdAt: r.createdAt,
+      })),
     };
     const fought = source.encounters.filter((e) => e.status === 'running' || e.status === 'ended');
-    if (fought.length === 0 && source.resolvedInbox.length === 0) return null;
+    if (fought.length === 0 && source.resolvedInbox.length === 0 && (source.diceRolls?.length ?? 0) === 0) return null;
     return source;
   }
 

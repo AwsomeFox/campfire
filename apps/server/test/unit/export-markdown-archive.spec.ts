@@ -98,6 +98,7 @@ function buildService(entities: {
     { getOwn: async () => null } as any,
     { listForCampaign: noop as any, getTreasury: async () => null } as any,
     { listForCampaign: noop as any } as any,
+    { listForCampaign: noop as any } as any, // rolls
   );
 }
 

@@ -6969,6 +6969,23 @@ export const RollRequest = z.object({
   dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
+
+/** Honest provenance for a dice-log entry (issue #673). */
+export const DiceRollSource = z.enum(['rolled', 'manual']);
+export type DiceRollSource = z.infer<typeof DiceRollSource>;
+
+/** Sentinel `expr` stored for a paper-table / physical roll — not a dice expression. */
+export const PHYSICAL_ROLL_EXPR = 'physical';
+
+/** DM input for logging a roll that happened off-screen (issue #673). */
+export const ManualRollRequest = z.object({
+  total: z.number().int().min(-999).max(9999).describe('Final result the player reported'),
+  label: z.string().max(120).optional().describe('Optional check label, e.g. "DEX save"'),
+  actor: z.string().max(120).optional().describe('Who rolled at the table (character/NPC name); defaults to the logger'),
+  natural20: z.number().int().min(1).max(20).optional().describe('Optional natural d20 face before modifiers — recorded, not re-rolled'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
+});
+export type ManualRollRequest = z.infer<typeof ManualRollRequest>;
 // Per-term breakdown entry for a compound dice expression (issue #536). Named so the
 // roller, the persistence layer, and the web UI all share one shape. A die term carries
 // its rolls + the kept subset; a modifier term carries only its signed value.
@@ -7001,6 +7018,12 @@ export const RollResult = z.object({
   label: z.string().max(120).optional(),
   dc: z.number().int().optional(),
   success: z.boolean().optional(),
+  // Issue #673: manual/physical rolls carry honest provenance — no fabricated dice math.
+  source: DiceRollSource.optional(),
+  /** Who rolled at the table when `source` is `manual` (character/NPC name). */
+  actor: z.string().max(120).optional(),
+  /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
+  natural20: z.number().int().min(1).max(20).optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 

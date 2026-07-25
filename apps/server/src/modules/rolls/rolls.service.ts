@@ -66,6 +66,7 @@ export function retentionIsUnbounded(): boolean {
 function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
   const kept = row.kept != null ? fromJsonText<number[]>(row.kept, []) : undefined;
   const terms = row.terms != null ? fromJsonText<RollResultTerm[]>(row.terms, []) : undefined;
+  const source = row.source === 'manual' ? 'manual' : 'rolled';
   return {
     id: row.id,
     campaignId: row.campaignId,
@@ -80,6 +81,9 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     ...(row.label ? { label: row.label } : {}),
     // success is derived, not stored — it's always total >= dc when a dc is set.
     ...(row.dc != null ? { dc: row.dc, success: row.total >= row.dc } : {}),
+    source,
+    ...(row.actor ? { actor: row.actor } : {}),
+    ...(row.natural20 != null ? { natural20: row.natural20 } : {}),
     createdAt: row.createdAt,
   };
 }
@@ -131,6 +135,9 @@ export class RollsService implements OnApplicationBootstrap {
         total: result.total,
         label: result.label ?? null,
         dc: result.dc ?? null,
+        source: result.source ?? 'rolled',
+        actor: result.actor ?? null,
+        natural20: result.natural20 ?? null,
         createdAt: nowIso(),
       })
       .returning();
