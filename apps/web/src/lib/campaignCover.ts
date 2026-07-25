@@ -57,16 +57,16 @@ const MOTIF_INK: Record<CampaignCoverMotifId, string> = {
 function motifTexture(id: CampaignCoverMotifId, focalX: number, focalY: number): string | null {
   const tint =
     id === 'hearth'
-      ? '245%2C158%2C11'
+      ? '245,158,11'
       : id === 'arcane'
-        ? '167%2C139%2C250'
+        ? '167,139,250'
         : id === 'moss'
-          ? '52%2C211%2C153'
+          ? '52,211,153'
           : id === 'storm'
-            ? '56%2C189%2C248'
+            ? '56,189,248'
             : id === 'void'
-              ? '148%2C163%2C184'
-              : '145%2C138%2C252';
+              ? '148,163,184'
+              : '145,138,252';
   return `radial-gradient(circle at ${focalX}% ${focalY}%, rgba(${tint},0.22) 0.6px, transparent 0.7px)`;
 }
 
@@ -124,5 +124,6 @@ export function resolveCampaignCover(opts: {
 export function coverMonogram(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) return '?';
-  return trimmed.charAt(0).toUpperCase();
+  const first = Array.from(trimmed)[0];
+  return first ? first.toUpperCase() : '?';
 }

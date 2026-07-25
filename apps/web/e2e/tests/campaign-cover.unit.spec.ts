@@ -38,11 +38,14 @@ test.describe('campaign cover helpers (issue #676)', () => {
     expect(tile.overlay).toContain('linear-gradient');
     expect(tile.heightPx).toBeGreaterThan(strip.heightPx);
     expect(tile.motifId).toBe(motifForCampaign(3));
+    expect(tile.motifTexture).toMatch(/rgba\(\d+,\d+,\d+,/);
+    expect(tile.motifTexture).not.toContain('%2C');
   });
 
   test('coverMonogram uppercases the first grapheme', () => {
     expect(coverMonogram('emberfall')).toBe('E');
     expect(coverMonogram('  ')).toBe('?');
+    expect(coverMonogram('🧙‍♂️ Arcane')).toBe('🧙');
   });
 });
 

@@ -41,7 +41,7 @@ export function CampaignCover({
     <span
       className="cf-cover-monogram"
       style={{ color: cover.inkColor }}
-      aria-hidden={name.trim() ? undefined : true}
+      aria-hidden
     >
       {coverMonogram(name)}
     </span>
