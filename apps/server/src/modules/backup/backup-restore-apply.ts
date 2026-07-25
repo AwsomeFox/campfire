@@ -163,7 +163,6 @@ export function applyRestoredState(input: RestoreApplyInput): RestoreApplyResult
   const incomingKeyfile = `${keyfilePath}.incoming-${token}`;
 
   let rollbackSnapshotted = false;
-  let dbSwapped = false;
   let uploadsSwapped = false;
   let keyfileSwapped = false;
 
@@ -211,7 +210,6 @@ export function applyRestoredState(input: RestoreApplyInput): RestoreApplyResult
 
     reportProgress(phases, onProgress, 'swapping-database');
     movePath(incomingDbPath, dbPath);
-    dbSwapped = true;
     maybeFault('after-db-swap');
 
     reportProgress(phases, onProgress, 'swapping-uploads');
