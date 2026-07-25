@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import type { TextSize, TimeFormat, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { MCP_CATALOG_COUNTS } from '../../lib/mcp-catalog.generated';
 import { joinPublicBase } from '../../lib/public-base';
 import {
   localeController,
@@ -601,7 +602,7 @@ export default function PreferencesPage() {
           <span className="tag tag-accent">{t('preferences.mcpLive')}</span>
         </div>
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
-          {t('preferences.mcpBlurb')}
+          {t('preferences.mcpBlurb', { toolCount: MCP_CATALOG_COUNTS.tools })}
         </p>
         <div className="cf-inset" style={{ padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span className="text-muted" style={{ fontSize: 'var(--type-meta)' }}>{t('preferences.mcpEndpoint')}</span>
