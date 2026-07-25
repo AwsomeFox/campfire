@@ -190,6 +190,7 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
       const key = name.toLowerCase();
       if (!existingNames.has(key)) {
         existingNames.add(key);
+        // Bound the generated id to the schema max(40) and keep it stable.
         const slug = key.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
         instances.push({
           id: `legacy_${slug}`.slice(0, 40),
@@ -2708,7 +2709,43 @@ export class EncountersService {
       beforeFail = fresh.deathSaveFailures;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (conditionsTouched) {
-        // Rebase the add/remove deltas against the FRESH row's conditions (issue
+        if (
+          patch.removeConditionInstanceId !== undefined ||
+          patch.conditionInstances !== undefined ||
+          patch.addConditionInstance !== undefined ||
+          patch.updateConditionInstance !== undefined
+        ) {
+          // Instance-level condition writes (issue #423): apply a single
+          // add/update/remove delta against the fresh instances, or replace the
+          // whole array, then derive the legacy string[] conditions array.
+          let instances = parseConditionInstances(fresh.conditionInstances, []);
+          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
+          if (patch.conditionInstances !== undefined) {
+            instances = [...patch.conditionInstances];
+          } else {
+            if (patch.addConditionInstance !== undefined) {
+              // Add a single instance (idempotent: replace if id already present).
+              const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
+              if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
+              else instances.push(patch.addConditionInstance);
+            }
+            if (patch.updateConditionInstance !== undefined) {
+              // Update a single instance by id; ignore if not present (no-op).
+              const upd = patch.updateConditionInstance;
+              const updIdx = instances.findIndex((i) => i.id === upd.id);
+              if (updIdx >= 0) instances[updIdx] = upd;
+            }
+            if (patch.removeConditionInstanceId !== undefined) {
+              // Remove only the targeted instance — not all instances.
+              instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+            }
+          }
+          const derived = deriveConditionNames(instances);
+          afterConditions = new Set(derived);
+          writeSet.conditionInstances = toJsonText(instances);
+          writeSet.conditions = toJsonText(derived);
+        } else {
+          // Rebase the add/remove deltas against the FRESH row's conditions (issue
           // #747). A stale whole-array write — derived outside the tx from the
           // pre-await read — let two concurrent callers clobber each other: caller A
           // adds 'poisoned' while caller B removes 'prone', and whichever wrote
@@ -2724,25 +2761,7 @@ export class EncountersService {
           for (const c of patch.addConditions ?? []) current.add(c);
           afterConditions = new Set(current);
           writeSet.conditions = toJsonText([...current]);
-      }
-      if (conditionInstancesTouched) {
-        let instances = parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, []));
-        if (patch.conditionInstances !== undefined) {
-          instances = patch.conditionInstances;
-        } else {
-          if (patch.addConditionInstance) instances = [...instances, patch.addConditionInstance];
-          if (patch.removeConditionInstanceId) {
-            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
-          }
-          if (patch.updateConditionInstance) {
-            instances = instances.map((i) => (i.id === patch.updateConditionInstance!.id ? patch.updateConditionInstance! : i));
-          }
         }
-        writeSet.conditionInstances = toJsonText(instances);
-        writeSet.conditions = toJsonText(deriveConditionNames(instances));
-        conditionsTouched = true;
-        beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
-        afterConditions = new Set(deriveConditionNames(instances));
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
