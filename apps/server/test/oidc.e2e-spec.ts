@@ -9,7 +9,6 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
-  mergeLatestChildV8Coverage,
 } from './oidc-spawn-coverage';
 
 /**
@@ -175,7 +174,15 @@ async function spawnAppOnce(
   });
 
   const killChild = async (): Promise<void> => {
-    if (exitState.current || child.killed) return;
+    const releaseChild = (): void => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref?.();
+    };
+    if (exitState.current || child.killed) {
+      releaseChild();
+      return;
+    }
     child.kill('SIGTERM');
     const deadline = Date.now() + CHILD_KILL_GRACE_MS;
     while (!exitState.current && Date.now() < deadline) {
@@ -185,7 +192,7 @@ async function spawnAppOnce(
       child.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, 200));
     }
-    await mergeLatestChildV8Coverage();
+    releaseChild();
   };
 
   try {
