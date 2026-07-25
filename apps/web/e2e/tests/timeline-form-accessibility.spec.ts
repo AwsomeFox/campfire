@@ -174,13 +174,16 @@ test.describe('timeline authoring form accessibility (issue #453)', () => {
     await expect(editForm).toBeVisible();
     await expect(page.getByTestId('timeline-event-create-form')).toBeVisible();
 
+    await editForm.getByRole('button', { name: 'Delete' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Delete DLRNAV Sundering?' });
+    await expect(dialog).toBeVisible();
     const deleteResponse = page.waitForResponse(
       (response) =>
         response.url().includes('/timeline/') &&
         response.request().method() === 'DELETE' &&
         response.ok(),
     );
-    await editForm.getByRole('button', { name: 'Delete' }).click();
+    await dialog.getByRole('button', { name: 'Delete event' }).click();
     await deleteResponse;
 
     await expect(page.getByTestId('timeline-event-edit-form')).toHaveCount(0);

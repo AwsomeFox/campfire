@@ -102,7 +102,8 @@ test.describe('component gates keep non-motion feedback (issue #594)', () => {
     expect(splash).toMatch(/data-testid="auth-splash"/);
 
     const ui = readFileSync(UI, 'utf8');
-    expect(ui).toMatch(/data-testid="skeleton"/);
+    expect(ui).toMatch(/SKELETON_TEST_IDS/);
+    expect(ui).toMatch(/data-testid=\{testId\}/);
     expect(ui).toMatch(/role="status"/);
     expect(ui).toMatch(/Loading…/);
     expect(ui).toMatch(/animate-pulse/);

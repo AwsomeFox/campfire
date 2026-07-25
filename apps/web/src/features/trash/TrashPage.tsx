@@ -3,11 +3,12 @@
  * (#116) promised but never built. Deleting an entity shows an Undo toast that says
  * "restore it from the campaign Trash"; this is that Trash. It lists the campaign's
  * soft-deleted child entities (GET /campaigns/:id/trash — DM-only) and offers a
- * one-click Restore (POST /<type>/:id/restore) so a mis-click is recoverable long
+ * one-click Restore (POST /<route>/:id/restore via TYPE_META — e.g. /sessions/:id/restore,
+ * /timeline/:id/restore for timeline events) so a mis-click is recoverable long
  * after the toast has expired.
  *
  * Route: /c/:campaignId/trash. Covers the entity types with a DM-gated restore route
- * today: sessions, characters, quests, npcs, locations (see TrashedEntityType).
+ * today: sessions, characters, quests, npcs, locations, timeline events (see TrashedEntityType).
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -26,6 +27,7 @@ const TYPE_META: Record<TrashedEntityType, { label: string; route: string; icon:
   quest: { label: 'Quest', route: 'quests', icon: ENTITY_ICON.quest },
   npc: { label: 'NPC', route: 'npcs', icon: ENTITY_ICON.npc },
   location: { label: 'Location', route: 'locations', icon: ENTITY_ICON.location },
+  timeline_event: { label: 'Timeline event', route: 'timeline', icon: ENTITY_ICON.timeline },
 };
 
 export default function TrashPage() {
@@ -102,7 +104,7 @@ export default function TrashPage() {
       </div>
 
       <p className="text-[13px] text-muted m-0">
-        Deleted sessions, characters, quests, NPCs and locations land here — restore any of them to bring the entity back
+        Deleted sessions, characters, quests, NPCs, locations, and timeline events land here — restore any of them to bring the entity back
         exactly as it was. Nothing here is permanent yet.
       </p>
 

@@ -36,6 +36,7 @@ function pc(partial: Partial<Character> & Pick<Character, 'id' | 'name' | 'statu
     skills: {},
     actions: [],
     spellSlots: {},
+    resources: {},
     portraitUrl: null,
     ddbId: null,
     notes: '',
