@@ -69,9 +69,12 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
   test('useRoller and SharedDiceLog call showRoll after a local roll', () => {
     const rollerSource = readFileSync(resolve(ROOT, 'src/lib/useRoller.ts'), 'utf8');
     const logSource = readFileSync(resolve(ROOT, 'src/features/dice/SharedDiceLog.tsx'), 'utf8');
+    const cardSource = readFileSync(resolve(ROOT, 'src/components/CharacterStatCard.tsx'), 'utf8');
     expect(rollerSource).toMatch(/showRoll\(result/);
     expect(rollerSource).toMatch(/showRoll\(res\.roll\)/);
-    expect(rollerSource).toMatch(/onApply: onApplyDamage/);
+    expect(rollerSource).toMatch(/beginRollAnimation\(expr\)/);
     expect(logSource).toMatch(/showRoll\(result\)/);
+    expect(logSource).toMatch(/beginRollAnimation\(cleaned\)/);
+    expect(cardSource).toMatch(/onApply: onApplyDamage/);
   });
 });

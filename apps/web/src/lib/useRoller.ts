@@ -45,12 +45,13 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   const [last, setLast] = useState<DiceRoll | null>(null);
   const { t } = useTranslation();
   const announce = useAnnounce();
-  const { showRoll } = useRollResultToast();
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
 
   const roll = useCallback(
     async (expr: string, label: string, options?: ShowRollOptions): Promise<DiceRoll | null> => {
       setRolling(true);
       onError(null);
+      beginRollAnimation(expr);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
@@ -61,19 +62,21 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         });
         return result;
       } catch (err) {
+        cancelRollAnimation();
         onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
         return null;
       } finally {
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, showRoll, t],
+    [campaignId, onError, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
   const rollCheck = useCallback(
     async (characterId: number, checkId: string, mode: CheckRollMode = 'flat', dc?: number): Promise<CheckRollResponse | null> => {
       setRolling(true);
       onError(null);
+      beginRollAnimation(mode === 'advantage' || mode === 'disadvantage' ? '2d20kh1' : '1d20');
       try {
         const res = await api.post<CheckRollResponse>(`${API}/characters/${characterId}/checks/roll`, {
           checkId,
@@ -88,13 +91,14 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
         });
         return res;
       } catch (err) {
+        cancelRollAnimation();
         onError(err instanceof ApiError ? err.message : "Couldn't roll the check.");
         return null;
       } finally {
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, showRoll, t],
+    [campaignId, onError, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
   return { roll, rollCheck, rolling, last, dismiss: () => setLast(null) };

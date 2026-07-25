@@ -1403,6 +1403,111 @@ a:hover .cf-name-reveal {
     bottom: 16px;
   }
 }
+
+/* --- BG-style dice roll overlay (issue #1352) --- */
+.cf-dice-roll-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--cf-layer-modal, 1200);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.55) 100%);
+}
+.cf-dice-roll-overlay__stage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  max-width: min(92vw, 420px);
+  padding: 16px;
+}
+.cf-dice-roll-overlay__die {
+  perspective: 480px;
+  width: 72px;
+  height: 72px;
+}
+.cf-dice-roll-overlay__die--d4 { width: 64px; height: 64px; }
+.cf-dice-roll-overlay__die--d20 { width: 80px; height: 80px; }
+.cf-dice-roll-overlay__inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #f4ead8 0%, #d9c9a8 55%, #c4b08a 100%);
+  border: 2px solid rgba(40, 28, 12, 0.45);
+  box-shadow:
+    0 8px 22px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transform-style: preserve-3d;
+}
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__inner {
+  border-radius: 18px;
+  transform: rotate(45deg);
+}
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__value,
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__type {
+  transform: rotate(-45deg);
+}
+.cf-dice-roll-overlay__value {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+  color: #2a1f12;
+  font-variant-numeric: tabular-nums;
+}
+.cf-dice-roll-overlay__die--d4 .cf-dice-roll-overlay__value { font-size: 24px; }
+.cf-dice-roll-overlay__type {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(42, 31, 18, 0.55);
+}
+.cf-dice-roll-overlay__inner--tumble {
+  animation: cf-die-overlay-tumble 0.42s linear infinite;
+}
+.cf-dice-roll-overlay__inner--land {
+  animation: cf-die-overlay-land 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.cf-dice-roll-overlay__die--dropped .cf-dice-roll-overlay__inner {
+  opacity: 0.38;
+  filter: grayscale(0.35);
+}
+@keyframes cf-die-overlay-tumble {
+  0%   { transform: rotateX(0deg) rotateY(0deg) rotateZ(0deg) scale(1); }
+  25%  { transform: rotateX(90deg) rotateY(45deg) rotateZ(-20deg) scale(1.04); }
+  50%  { transform: rotateX(180deg) rotateY(90deg) rotateZ(10deg) scale(0.98); }
+  75%  { transform: rotateX(270deg) rotateY(135deg) rotateZ(-8deg) scale(1.06); }
+  100% { transform: rotateX(360deg) rotateY(180deg) rotateZ(0deg) scale(1); }
+}
+@keyframes cf-die-overlay-land {
+  0%   { transform: rotateX(200deg) rotateY(-120deg) scale(1.15); }
+  70%  { transform: rotateX(-8deg) rotateY(6deg) scale(1.02); }
+  100% { transform: rotateX(0deg) rotateY(0deg) scale(1); }
+}
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__inner--tumble {
+  animation: cf-die-overlay-tumble-d20 0.42s linear infinite;
+}
+.cf-dice-roll-overlay__die--d20 .cf-dice-roll-overlay__inner--land {
+  animation: cf-die-overlay-land-d20 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes cf-die-overlay-tumble-d20 {
+  0%   { transform: rotate(45deg) rotateX(0deg) rotateY(0deg) scale(1); }
+  100% { transform: rotate(45deg) rotateX(360deg) rotateY(540deg) scale(1); }
+}
+@keyframes cf-die-overlay-land-d20 {
+  0%   { transform: rotate(45deg) rotateX(160deg) rotateY(-90deg) scale(1.12); }
+  100% { transform: rotate(45deg) rotateX(0deg) rotateY(0deg) scale(1); }
+}
+
 .cf-tabbar a,
 .cf-tabbar button {
   display: flex;
@@ -1552,7 +1657,9 @@ a:hover .cf-name-reveal {
   .cf-hp-flash-heal,
   .cf-anim-ready,
   .cf-anim-levelup,
-  .cf-sparkle {
+  .cf-sparkle,
+  .cf-dice-roll-overlay__inner--tumble,
+  .cf-dice-roll-overlay__inner--land {
     animation: none !important;
   }
 }

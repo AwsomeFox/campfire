@@ -64,7 +64,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   // N rolls" footnote; undefined until the first successful feed fetch.
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
-  const { showRoll } = useRollResultToast();
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
   const exprId = useId();
   const rollAnnouncementRef = useRef<{
     campaignId: number;
@@ -163,6 +163,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
       if (!cleaned) return null;
       setRolling(true);
       setError(null);
+      beginRollAnimation(cleaned);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr: cleaned });
         const batch = formatDiceRollAnnouncementBatch([result], t);
@@ -186,6 +187,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         showRoll(result);
         return result;
       } catch (err) {
+        cancelRollAnimation();
         const message = err instanceof ApiError ? err.message : t('dice.rollError');
         setError(message);
         announce(message, { assertive: true });
@@ -194,7 +196,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
         setRolling(false);
       }
     },
-    [campaignId, limit, announce, showRoll, t],
+    [campaignId, limit, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
   async function rollFromInput(e: FormEvent) {

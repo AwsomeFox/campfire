@@ -76,6 +76,8 @@ test.describe('global reduced-motion CSS policy (issue #594)', () => {
       'cf-anim-ready',
       'cf-anim-levelup',
       'cf-sparkle',
+      'cf-dice-roll-overlay__inner--tumble',
+      'cf-dice-roll-overlay__inner--land',
     ]) {
       expect(reduceBlock, `${cls} must remain disabled under reduce`).toContain(cls);
     }
