@@ -9,6 +9,7 @@ import { RevisionsService } from '../../src/modules/revisions/revisions.service'
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
+import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { Dnd5eAdapter, Pf2eAdapter, resourceVocabularyForAdapter } from '@campfire/schema';
 import { makeTempDataDir } from './fixtures';
 import { eq } from 'drizzle-orm';
@@ -31,9 +32,10 @@ describe('inline spell slots & character resources (issue #422)', () => {
     const rolls = new RollsService(db);
     const fsDeletion = new FsDeletionService(db, audit);
     const attachments = new AttachmentsService(db, audit, fsDeletion);
+    const campaignLibrary = new CampaignLibraryService(db, audit);
 
     charactersService = new CharactersService(db, audit, revisions, events, rolls);
-    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments);
+    encountersService = new EncountersService(db, audit, events, rolls, revisions, attachments, campaignLibrary);
   });
 
   afterEach(() => {
