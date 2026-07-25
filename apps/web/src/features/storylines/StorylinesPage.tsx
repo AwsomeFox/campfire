@@ -1215,9 +1215,17 @@ function BeatRow({
   };
 
   const cancelBranchEdit = () => {
+    const branch = editingBranch;
     setEditingBranch(null);
     setEditBranchError(null);
-    requestAnimationFrame(() => branchEditTriggerRef.current?.focus());
+    // Restore focus to the branch row container (stable id + tabIndex={-1}),
+    // not the edit button — the button is unmounted while the edit form is
+    // shown, so branchEditTriggerRef.current is null at this point.
+    if (branch) {
+      requestAnimationFrame(() => {
+        document.getElementById(branchDomId(branch.id))?.focus();
+      });
+    }
   };
 
   const saveBranch = async () => {
@@ -1234,6 +1242,11 @@ function BeatRow({
       });
       setEditingBranch(null);
       await onChange(branchDomId(branch.id));
+      // The edit form unmounts on save; move focus to the updated branch row
+      // container so keyboard users keep their place.
+      requestAnimationFrame(() => {
+        document.getElementById(branchDomId(branch.id))?.focus();
+      });
       announce(`Updated branch ${label} from ${beat.title}.`);
     } catch {
       setEditBranchError("Couldn't save the branch. Your edits have been kept — try again.");

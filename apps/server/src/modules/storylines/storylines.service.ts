@@ -525,10 +525,15 @@ export class StorylinesService {
     if (input.label !== undefined) set.label = input.label;
     if (input.toBeatId !== undefined) set.toBeatId = input.toBeatId;
     if (input.sortOrder !== undefined) set.sortOrder = input.sortOrder;
+    if (Object.keys(set).length === 0) {
+      // No fields to update — return the existing row unchanged instead of
+      // issuing an empty UPDATE, which some drivers reject as invalid SQL.
+      return branchToDomain(existing);
+    }
     const [row] = await this.db
       .update(storyBranches)
       .set(set)
-      .where(eq(storyBranches.id, branchId))
+      .where(and(eq(storyBranches.id, branchId), eq(storyBranches.beatId, beatId)))
       .returning();
     await this.audit.log({
       actor: auditActor(user),
