@@ -668,6 +668,7 @@ function ArcCard({
       onTrashed({ type: 'story_arc', id: arc.id, label: arc.title });
       await onChange();
     } catch {
+      setConfirmingDelete(false);
       setDeleteError("Couldn't delete the arc. It's still here — try again.");
     } finally {
       setBusy(false);
@@ -1153,6 +1154,7 @@ function BeatRow({
       onTrashed({ type: 'story_beat', id: beat.id, label: beat.title });
       await onChange();
     } catch {
+      setConfirmingDelete(false);
       setDeleteError("Couldn't delete the beat. It's still here — try again.");
     } finally {
       setBusy(false);

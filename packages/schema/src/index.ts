@@ -294,8 +294,9 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 // trashed *campaigns* on the home page — a soft-deleted entity was unrecoverable once
 // its Undo toast expired. GET /campaigns/:id/trash lists a campaign's soft-deleted
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
-// and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
-// its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
+// and drive Restore (POST /<route>/:id/restore). `type` is the entity kind; most map
+// to a pluralized route base (session -> /sessions/:id/restore), but some differ
+// (story_arc -> /arcs, story_beat -> /beats) — see TrashPage TYPE_META.
 export const TrashedEntityType = z.enum([
   'session',
   'character',
