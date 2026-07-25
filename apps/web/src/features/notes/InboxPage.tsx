@@ -366,7 +366,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
   const href = entityHref(campaignId, item);
   const resolvedOn = item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : null;
   return (
-    <Card className="!p-4 space-y-2.5" {...entityTargetProps('inbox', item.id)}>
+    <Card density="default" className="space-y-2.5" {...entityTargetProps('inbox', item.id)}>
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
           {firstGrapheme(item.authorName || '?')}
@@ -479,7 +479,7 @@ function InboxItem({
   }
 
   return (
-    <Card className={`!p-4 space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`} {...entityTargetProps('inbox', item.id)}>
+    <Card density="default" className={`space-y-2.5 ${expanded ? 'border-amber-500/40' : ''}`} {...entityTargetProps('inbox', item.id)}>
       <div className="flex gap-2.5 items-start">
         <span className="h-[30px] w-[30px] shrink-0 rounded-full bg-[var(--color-neutral-900)] flex items-center justify-center text-[11px] text-[var(--color-neutral-400)]">
           {firstGrapheme(item.authorName || '?')}

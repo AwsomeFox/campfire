@@ -426,7 +426,7 @@ export function RevisionHistoryPanel({
   }
 
   return (
-    <Card className="!p-4 sm:!p-5">
+    <Card density="default">
       <button
         type="button"
         className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-wide text-slate-500"

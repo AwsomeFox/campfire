@@ -4428,7 +4428,7 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
       : `${sessionsPath}?session=${sessionId}&action=edit-recap`;
 
   return (
-    <section className="cf-card p-5 space-y-3" aria-labelledby="encounter-next-heading">
+    <Card density="comfortable" className="space-y-3" aria-labelledby="encounter-next-heading">
       <div className="space-y-1">
         <h2 id="encounter-next-heading" className="text-sm font-bold text-white m-0">
           Next
@@ -4462,7 +4462,7 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
           </Link>
         )}
       </nav>
-    </section>
+    </Card>
   );
 }
 

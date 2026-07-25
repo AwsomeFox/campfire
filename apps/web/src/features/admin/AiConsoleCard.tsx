@@ -133,7 +133,7 @@ export function AiConsoleCard() {
               aria-checked={ov.killSwitchEnabled}
               onClick={toggleKill}
               disabled={busy}
-              className={`cf-btn !min-h-0 !py-1.5 text-xs ${ov.killSwitchEnabled ? '' : '!bg-rose-600 !border-rose-500'}`}
+              className={`cf-btn cf-density-compact text-xs ${ov.killSwitchEnabled ? '' : '!bg-rose-600 !border-rose-500'}`}
             >
               {ov.killSwitchEnabled ? 'On — click to pause' : 'Paused — click to enable'}
             </button>

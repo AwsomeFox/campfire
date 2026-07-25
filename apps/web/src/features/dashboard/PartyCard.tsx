@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Character } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { EmptyState } from '../../components/ui';
+import { EmptyState, Card } from '../../components/ui';
 import { StatusTag } from '../characters/status';
 import { initials } from '../../lib/avatarText';
 
@@ -11,11 +11,11 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
   const canCreate = canPlayerWrite || canDmWrite;
 
   return (
-    <div className="card elev-sm">
+    <Card density="compact" elev="sm">
       <div style={{ display: 'flex', alignItems: 'center' }}>
         <span className="card-kicker">Party</span>
         <div style={{ flex: 1 }} />
-        <Link to={`/c/${campaignId}/party`} className="btn btn-ghost" style={{ fontSize: 12 }}>
+        <Link to={`/c/${campaignId}/party`} className="btn btn-ghost btn-density-compact" style={{ fontSize: 12 }}>
           Roster →
         </Link>
       </div>
@@ -113,6 +113,6 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
           );
         })
       )}
-    </div>
+    </Card>
   );
 }

@@ -338,12 +338,12 @@ export default function NpcPage() {
       )}
 
       {proposeDone && !editing && (
-        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+        <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
           <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
             View my proposals
           </Link>
-        </div>
+        </Card>
       )}
 
       {!editing && (

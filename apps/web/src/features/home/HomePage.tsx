@@ -203,9 +203,12 @@ function CampaignTile({
   onNavigate?: (event: { preventDefault(): void }) => void;
 }) {
   return (
-    <div
-      className="card elev-sm text-left overflow-hidden flex flex-col"
-      style={{ padding: 0, gap: 0, ...(archived ? { opacity: 0.72 } : {}) }}
+    <Card
+      density="compact"
+      elev="sm"
+      flush
+      className="text-left overflow-hidden flex flex-col gap-0"
+      style={archived ? { opacity: 0.72 } : undefined}
     >
       <Link
         to={href}
@@ -248,13 +251,12 @@ function CampaignTile({
         <Link
           to={dashboardHref}
           onClick={onNavigate}
-          className="btn btn-ghost"
-          style={{ fontSize: 12, minHeight: 36, width: '100%', justifyContent: 'center' }}
+          className="cf-btn cf-btn-ghost cf-density-compact text-xs inline-flex w-full justify-center no-underline"
         >
           Dashboard
         </Link>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -347,7 +349,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
       </div>
       <div className="flex flex-col gap-2">
         {trashed.map((c) => (
-          <div key={c.id} className="card elev-sm flex items-center gap-3" style={{ opacity: 0.85 }}>
+          <Card key={c.id} density="compact" elev="sm" className="flex items-center gap-3" style={{ opacity: 0.85 }}>
             <div className="flex-1 min-w-0">
               <div className="card-title" style={{ fontSize: 14 }}>{c.name}</div>
               <div className="text-muted" style={{ fontSize: 11.5 }}>
@@ -370,7 +372,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
             >
               Delete permanently
             </button>
-          </div>
+          </Card>
         ))}
       </div>
       {error && <ErrorNote message={error} />}
