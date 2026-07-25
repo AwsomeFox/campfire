@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -17,7 +17,7 @@ export function GlobalSearchPalette({
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const titleId = useRef(`global-search-title-${Math.random().toString(36).slice(2)}`).current;
+  const titleId = useId();
   const { ariaKeyshortcuts } = useKeyboardCommandHint('globalSearch');
 
   const dialogRef = useDialog<HTMLDivElement>({

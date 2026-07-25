@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -29,7 +29,7 @@ export function ShortcutHelpDialog({
   const { t } = useTranslation();
   const [rebindingId, setRebindingId] = useState<KeyboardCommandId | null>(null);
   const [rebindError, setRebindError] = useState<string | null>(null);
-  const titleId = useRef(`shortcut-help-title-${Math.random().toString(36).slice(2)}`).current;
+  const titleId = useId();
   const dialogRef = useDialog<HTMLDivElement>({ onClose, inertBackground: true });
   const conflicts = findBindingConflicts(bindings);
 

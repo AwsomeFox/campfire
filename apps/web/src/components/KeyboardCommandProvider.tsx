@@ -87,7 +87,11 @@ const KeyboardCommandInternalContext = createContext<InternalContextValue | null
 
 function loadInitialBindings(): Record<KeyboardCommandId, KeyChord> {
   if (typeof window === 'undefined') return { ...DEFAULT_KEYBOARD_BINDINGS };
-  return mergeBindings(parseStoredBindings(localStorage.getItem(KEYBOARD_BINDINGS_STORAGE_KEY)));
+  try {
+    return mergeBindings(parseStoredBindings(localStorage.getItem(KEYBOARD_BINDINGS_STORAGE_KEY)));
+  } catch {
+    return { ...DEFAULT_KEYBOARD_BINDINGS };
+  }
 }
 
 export function KeyboardCommandProvider({
@@ -169,9 +173,6 @@ export function KeyboardCommandProvider({
       };
       const matched = matchKeyboardCommand(event, bindings, enabled);
       if (!matched) return;
-      // Guarded commands without a registered handler are already disabled via `enabled`.
-      if (matched === 'encounterNextTurn' && !enabled.encounterNextTurn) return;
-      if (matched === 'quickCapture' && !canMemberWrite) return;
       event.preventDefault();
       dispatchCommand(matched);
     }

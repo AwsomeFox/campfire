@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { api, API, ApiError } from '../lib/api';
@@ -21,7 +21,7 @@ export function QuickCaptureDialog({
   const [error, setError] = useState<string | null>(null);
   const [dest, setDest] = useState<'private' | 'inbox'>('private');
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const titleId = useRef(`quick-capture-title-${Math.random().toString(36).slice(2)}`).current;
+  const titleId = useId();
   const { ariaKeyshortcuts } = useKeyboardCommandHint('quickCapture');
 
   const dialogRef = useDialog<HTMLDivElement>({
