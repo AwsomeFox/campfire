@@ -45,8 +45,12 @@ test.describe('UI control icons (issue #678)', () => {
     for (const rel of CONTROL_SITES) {
       const text = readFileSync(resolve(ROOT, rel), 'utf8');
       if (containsControlGlyph(text)) offenders.push(rel);
-      if (!text.includes('UIIcon') && !text.includes('BrandMark')) {
-        offenders.push(`${rel}: missing UIIcon/BrandMark import`);
+      const usesSharedControls =
+        text.includes('<UIIcon')
+        || text.includes('<BrandMark')
+        || (rel === 'components/Toggle.tsx' && text.includes('UI_CONTROL_ICON'));
+      if (!usesSharedControls) {
+        offenders.push(`${rel}: missing shared control icon usage`);
       }
     }
     expect(offenders, offenders.join('\n')).toEqual([]);

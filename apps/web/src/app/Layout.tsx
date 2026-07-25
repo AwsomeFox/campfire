@@ -1075,7 +1075,7 @@ function MoreSheet({
             aria-label={t('nav.closeMenu')}
             onClick={onClose}
             className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
-            style={{ width: 32, height: 32, color: 'var(--color-text)', lineHeight: 1 }}
+            style={{ width: 32, height: 32, color: 'var(--color-text)' }}
           >
             <UIIcon name="close" size="md" />
           </button>
