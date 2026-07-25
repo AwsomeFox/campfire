@@ -233,19 +233,35 @@ for (const viewport of [
       });
 
       await danger.click();
-      await expect(danger).toBeDisabled();
-      await expect(danger).toHaveAttribute('aria-busy', 'true');
-      style = await buttonStyle(danger);
-      expect(style.background).toBe(await resolveToken(page, '--color-danger-ghost-busy', 'backgroundColor'));
-      expect(style.color).toBe(await resolveToken(page, '--color-danger'));
-      expect(style.cursor).toBe('wait');
+      const dialog = page.getByRole('dialog', { name: /Delete DLRNAV Sundering\?/ });
+      const cancelDialog = dialog.getByRole('button', { name: 'Cancel' });
+      const confirm = dialog.getByRole('button', { name: 'Delete event' });
+      await expect(cancelDialog).toBeFocused();
+      await expect(danger).not.toHaveAttribute('aria-busy', 'true');
+
+      await confirm.click();
+      const busyConfirm = dialog.getByRole('button', { name: 'Deleting event…' });
+      await expect(dialog).toHaveAttribute('aria-busy', 'true');
+      await expect(busyConfirm).toBeDisabled();
+      await expect(busyConfirm).toHaveAttribute('aria-busy', 'true');
+      const busy = await buttonStyle(busyConfirm);
+      expect(busy.background).toBe(await resolveToken(page, '--color-danger-solid-busy', 'backgroundColor'));
+      expect(busy.color).toBe(await resolveToken(page, '--color-danger-solid-foreground'));
+      expect(busy.cursor).toBe('wait');
+      expect(busy.opacity).toBe('1');
+
+      await page.keyboard.press('Escape');
+      await expect(dialog).toBeVisible();
+      releaseDelete();
+      await expect(busyConfirm).toBeHidden();
+      await page.keyboard.press('Escape');
+      await expect(dialog).toBeHidden();
+      await expect(danger).toBeFocused();
 
       await test.info().attach(`danger-page-delete-${viewport.name}`, {
         body: await event.screenshot({ animations: 'disabled' }),
         contentType: 'image/png',
       });
-      releaseDelete();
-      await expect(danger).not.toHaveAttribute('aria-busy', 'true');
 
       await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
       await cancel.focus();

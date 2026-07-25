@@ -839,7 +839,7 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
     if (columns.some((c) => c.name === 'deleted_at')) return;
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
   };
-  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters']) {
+  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters', 'timeline_events']) {
     addDeletedAt(table);
   }
 }

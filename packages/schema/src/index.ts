@@ -290,13 +290,14 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 
 // ---------- per-campaign trash (issue #269) ----------
 // The soft-delete/undo feature (#116) gave every trashable entity a `deleted_at`
-// column + a POST /<type>/:id/restore endpoint, but the only Trash UI was for whole
+// column + a POST /<route>/:id/restore endpoint, but the only Trash UI was for whole
 // trashed *campaigns* on the home page — a soft-deleted entity was unrecoverable once
 // its Undo toast expired. GET /campaigns/:id/trash lists a campaign's soft-deleted
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
-// and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
-// its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location']);
+// and drive Restore. `type` is the entity kind; restore routes are mapped (usually
+// the plural resource name — session -> /sessions/:id/restore — with exceptions such
+// as timeline_event -> /timeline/:id/restore).
+export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location', 'timeline_event']);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({
