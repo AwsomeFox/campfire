@@ -38,7 +38,7 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LEGENDARY_ACTION_SLOT } from '@campfire/schema';
+import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -1368,7 +1368,7 @@ export default function RunSessionPage() {
         {encounter.status === 'running' && (
           <span className="tag tag-neutral">
             Round {encounter.round}
-            {encounter.turnPhase === 'lair' ? ' · Lair (init 20)' : ''}
+            {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
@@ -1587,7 +1587,7 @@ export default function RunSessionPage() {
         >
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-white">Lair action</span>
-            <span className="tag tag-accent">initiative 20</span>
+            <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
               <Btn className="ml-auto" disabled={headerBusy} onClick={nextTurn}>

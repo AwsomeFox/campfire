@@ -3296,9 +3296,12 @@ export class EncountersService {
       endedRound = fresh.round;
       const freshCurrentId = fresh.currentCombatantId;
       const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
-      if (opts.expectedCurrentCombatantId !== undefined && freshPhase === 'combatant' && freshCurrentId !== opts.expectedCurrentCombatantId) {
+      if (
+        opts.expectedCurrentCombatantId !== undefined &&
+        (freshPhase !== 'combatant' || freshCurrentId !== opts.expectedCurrentCombatantId)
+      ) {
         // Someone advanced between the caller's read and this write — refuse rather than
-        // skip a second combatant's turn (double-advance prevention, issue #413).
+        // skip a second combatant's turn or advance from the lair slot (double-advance prevention, issue #413).
         throw new ConflictException({
           code: 'TURN_ALREADY_ADVANCED',
           message: 'The turn already advanced — refresh the encounter before ending the turn again.',

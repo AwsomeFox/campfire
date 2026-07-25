@@ -2015,7 +2015,7 @@ export interface MonsterStatblockData {
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
   legendaryActions?: unknown;
-  /** Regional effects the lair takes on initiative count 20 (issue #618). */
+  /** Lair actions the creature takes on initiative count 20 (issue #618). */
   lairActions?: unknown;
   reactions?: unknown;
 }
