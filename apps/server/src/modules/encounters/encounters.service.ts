@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -21,7 +21,7 @@ import { RevisionsService } from '../revisions/revisions.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import {
-  advanceTurn,
+  advanceEncounterTurn,
   applyCombatantHp,
   buildEncounterRoster,
   crToXp,
@@ -30,9 +30,11 @@ import {
   deriveStartTurnPrompts,
   generateEncounterGroup,
   hpBandFor,
+  initialEncounterTurnState,
   redactEncounterEventsForViewer,
+  resetLegendaryUsage,
   resetTurnStateForStart,
-  retreatTurn,
+  retreatEncounterTurn,
   sortCombatants,
   tickEffectsAtTurnEnd,
   turnIndexFor,
@@ -104,6 +106,8 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     round: row.round,
     turnIndex: row.turnIndex,
     currentCombatantId: row.currentCombatantId,
+    turnPhase: (row.turnPhase as EncounterTurnPhase) ?? 'combatant',
+    lairResumeCombatantId: row.lairResumeCombatantId ?? null,
     locationId: row.locationId,
     questId: row.questId,
     sessionId: row.sessionId,
@@ -164,6 +168,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     // defaults (EMPTY_TURN_STATE / []) rather than failing the whole combatant read.
     turnState: parseTurnState(row.turnState),
     activeEffects: parseActiveEffects(row.activeEffects),
+    legendaryActions: null,
   };
 }
 
@@ -186,6 +191,30 @@ function parseActiveEffects(text: string | null): ActiveEffectType[] {
   if (text == null) return [];
   const parsed = zod.array(ActiveEffect).safeParse(fromJsonText<unknown>(text, null));
   return parsed.success ? parsed.data : [];
+}
+
+/** Attach legendary-action pools from linked statblocks (issue #618). */
+function enrichCombatantsWithLegendaryPools(
+  combatants: Combatant[],
+  statblocks: Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>,
+): Combatant[] {
+  return combatants.map((c) => {
+    if (c.ruleEntryId === null) return c;
+    const mapped = statblocks.get(c.ruleEntryId);
+    if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) return c;
+    const used = c.turnState.used[LEGENDARY_ACTION_SLOT] ?? 0;
+    return {
+      ...c,
+      legendaryActions: { max: LEGENDARY_ACTIONS_PER_ROUND, used },
+    };
+  });
+}
+
+function encounterHasLairSlotFromStatblocks(statblocks: Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>): boolean {
+  for (const mapped of statblocks.values()) {
+    if (statblockSectionHasEntries(mapped.lairActions)) return true;
+  }
+  return false;
 }
 
 function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent {
@@ -446,6 +475,26 @@ export class EncountersService {
   private async adapterForCampaign(campaignId: number): Promise<RuleSystemAdapter> {
     const [row] = await this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).limit(1);
     return ruleSystemAdapter(row?.ruleSystem);
+  }
+
+  /** Batch-load compendium statblocks for boss-action detection (issue #618). */
+  private async statblockMapForCombatants(
+    campaignId: number,
+    list: Combatant[],
+  ): Promise<Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>> {
+    const ruleEntryIds = [...new Set(list.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
+    const out = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
+    if (ruleEntryIds.length === 0) return out;
+    const adapter = await this.adapterForCampaign(campaignId);
+    const rows = await this.db
+      .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+      .from(ruleEntries)
+      .where(inArray(ruleEntries.id, ruleEntryIds));
+    for (const row of rows) {
+      const data = fromJsonText<Record<string, unknown>>(row.dataJson ?? null, {});
+      out.set(row.id, adapter.mapStatblock(data));
+    }
+    return out;
   }
 
   /**
@@ -927,6 +976,8 @@ export class EncountersService {
       status === 'ended' && (viewerRole === undefined || viewerRole === 'dm')
         ? await this.collectHpSyncConflicts(combatantRows)
         : undefined;
+    const statblocks = await this.statblockMapForCombatants(row.campaignId, list);
+    list = enrichCombatantsWithLegendaryPools(list, statblocks);
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
     return {
@@ -3056,7 +3107,13 @@ export class EncountersService {
     // #49), not just position, so later add/remove can't slide the pointer off it.
     const adapter = await this.adapterForCampaign(encounterRow.campaignId);
     const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
-    const currentCombatantId = sorted[0]?.id ?? null;
+    const statblocks = await this.statblockMapForCombatants(encounterRow.campaignId, sorted);
+    const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
+    const initial = initialEncounterTurnState(sorted, hasLairSlot);
+    const currentCombatantId = initial.currentCombatantId;
+    const turnPhase = initial.phase;
+    const lairResumeCombatantId = initial.lairResumeCombatantId;
+    const turnIndex = initial.turnIndex;
 
     // One authoritative live fight per campaign (issue #744): flip status to 'running'
     // AND set the campaign's activeEncounterId in the SAME transaction, after asserting
@@ -3068,7 +3125,15 @@ export class EncountersService {
     this.db.transaction((tx) => {
       this.assertNoOtherLiveEncounter(campaignId, encounterId, tx);
       tx.update(encounters)
-        .set({ status: 'running', round: 1, turnIndex: 0, currentCombatantId, updatedAt: ts })
+        .set({
+          status: 'running',
+          round: 1,
+          turnIndex,
+          currentCombatantId,
+          turnPhase,
+          lairResumeCombatantId,
+          updatedAt: ts,
+        })
         .where(eq(encounters.id, encounterId))
         .run();
       tx.update(campaigns).set({ activeEncounterId: encounterId, updatedAt: ts }).where(eq(campaigns.id, campaignId)).run();
@@ -3076,13 +3141,18 @@ export class EncountersService {
 
     // Seed the combat log with the opening turn (issue #61). Detail stays name-free
     // (issue #869) so listing can redact actor/target without prose leaking identity.
-    const first = sorted[0];
+    const first =
+      turnPhase === 'lair'
+        ? null
+        : currentCombatantId === null
+          ? undefined
+          : sorted.find((c) => c.id === currentCombatantId);
     await this.appendEvent(encounterId, 1, 'turn', {
-      actor: first?.name ?? null,
-      target: first?.name ?? null,
+      actor: turnPhase === 'lair' ? 'Lair' : first?.name ?? null,
+      target: turnPhase === 'lair' ? 'Lair' : first?.name ?? null,
       actorId: first?.id ?? null,
       targetId: first?.id ?? null,
-      detail: 'Combat started',
+      detail: turnPhase === 'lair' ? 'Lair action (initiative 20)' : 'Combat started',
     });
 
     await this.audit.log({
@@ -3227,9 +3297,13 @@ export class EncountersService {
       }
       endedRound = fresh.round;
       const freshCurrentId = fresh.currentCombatantId;
-      if (opts.expectedCurrentCombatantId !== undefined && freshCurrentId !== opts.expectedCurrentCombatantId) {
+      const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
+      if (
+        opts.expectedCurrentCombatantId !== undefined &&
+        (freshPhase !== 'combatant' || freshCurrentId !== opts.expectedCurrentCombatantId)
+      ) {
         // Someone advanced between the caller's read and this write — refuse rather than
-        // skip a second combatant's turn (double-advance prevention, issue #413).
+        // skip a second combatant's turn or advance from the lair slot (double-advance prevention, issue #413).
         throw new ConflictException({
           code: 'TURN_ALREADY_ADVANCED',
           message: 'The turn already advanced — refresh the encounter before ending the turn again.',
@@ -3239,14 +3313,38 @@ export class EncountersService {
 
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
-      const { turnIndex, round, currentCombatantId, skipped } = advanceTurn(sorted, freshCurrentId, fresh.round);
+      const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
+      const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
+      if (ruleEntryIds.length > 0) {
+        const entryRows = tx
+          .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+          .from(ruleEntries)
+          .where(inArray(ruleEntries.id, ruleEntryIds))
+          .all();
+        for (const entry of entryRows) {
+          const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
+          statblocks.set(entry.id, adapter.mapStatblock(data));
+        }
+      }
+      const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
+
+      const advanced = advanceEncounterTurn(
+        sorted,
+        freshCurrentId,
+        fresh.round,
+        freshPhase,
+        hasLairSlot,
+        fresh.lairResumeCombatantId ?? null,
+      );
+      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
       newRound = round;
       newCurrentId = currentCombatantId;
       skippedTurns = skipped;
 
       // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
-      // timed effects down, drop the expired. Only meaningful on a genuine advance.
-      const ending = freshCurrentId === null ? undefined : sorted.find((c) => c.id === freshCurrentId);
+      // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
+      const ending =
+        freshPhase === 'combatant' && freshCurrentId !== null ? sorted.find((c) => c.id === freshCurrentId) : undefined;
       if (ending) {
         endedName = ending.name;
         const { kept, expired } = tickEffectsAtTurnEnd(ending.activeEffects);
@@ -3257,6 +3355,21 @@ export class EncountersService {
           // Durations changed (decremented) even though nothing expired — persist the tick.
           tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
         }
+      } else if (freshPhase === 'lair') {
+        endedName = 'Lair';
+      }
+
+      if (roundWrapped) {
+        for (const row of rows) {
+          const domain = combatantToDomain(row);
+          if (domain.ruleEntryId === null) continue;
+          const mapped = statblocks.get(domain.ruleEntryId);
+          if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
+          const reset = resetLegendaryUsage(domain.turnState);
+          if (reset !== domain.turnState) {
+            tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+          }
+        }
       }
 
       // Reset the STARTING combatant's per-turn action economy (fresh action/bonus/reaction/
@@ -3266,10 +3379,19 @@ export class EncountersService {
         newCurrentName = starting.name;
         const reset = resetTurnStateForStart(starting.turnState);
         tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, starting.id)).run();
+      } else if (phase === 'lair') {
+        newCurrentName = 'Lair';
       }
 
       tx.update(encounters)
-        .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
+        .set({
+          turnIndex,
+          round,
+          currentCombatantId,
+          turnPhase: phase,
+          lairResumeCombatantId,
+          updatedAt: nowIso(),
+        })
         .where(eq(encounters.id, encounterId))
         .run();
     });
@@ -3291,7 +3413,12 @@ export class EncountersService {
       target: newCurrentName,
       actorId: newCurrentId,
       targetId: newCurrentId,
-      detail: opts.endedByPlayer && endedName ? 'ended their turn' : '',
+      detail:
+        opts.endedByPlayer && endedName && endedName !== 'Lair'
+          ? 'ended their turn'
+          : newCurrentName === 'Lair'
+            ? 'Lair action (initiative 20)'
+            : '',
     });
     // Structured effect-expiry events (issue #413): one per expired effect on the combatant
     // whose turn just ended. Detail stays name-free (the effect name is generic content).
@@ -3346,13 +3473,64 @@ export class EncountersService {
       }
       const rows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
       const sorted = this.sortCombatantsWithAdapter(rows.map(combatantToDomain), 'running', adapter);
-      const { turnIndex, round, currentCombatantId } = retreatTurn(sorted, fresh.currentCombatantId, fresh.round);
+      const statblocks = new Map<number, ReturnType<RuleSystemAdapter['mapStatblock']>>();
+      const ruleEntryIds = [...new Set(sorted.map((c) => c.ruleEntryId).filter((id): id is number => id !== null))];
+      if (ruleEntryIds.length > 0) {
+        const entryRows = tx
+          .select({ id: ruleEntries.id, dataJson: ruleEntries.dataJson })
+          .from(ruleEntries)
+          .where(inArray(ruleEntries.id, ruleEntryIds))
+          .all();
+        for (const entry of entryRows) {
+          const data = fromJsonText<Record<string, unknown>>(entry.dataJson ?? null, {});
+          statblocks.set(entry.id, adapter.mapStatblock(data));
+        }
+      }
+      const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
+      const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
+      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped } = retreatEncounterTurn(
+        sorted,
+        fresh.currentCombatantId,
+        fresh.round,
+        freshPhase,
+        hasLairSlot,
+        fresh.lairResumeCombatantId ?? null,
+      );
       newRound = round;
       newCurrentId = currentCombatantId;
-      const back = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
-      newCurrentName = back?.name ?? null;
+
+      if (roundWrapped) {
+        for (const row of rows) {
+          const domain = combatantToDomain(row);
+          if (domain.ruleEntryId === null) continue;
+          const mapped = statblocks.get(domain.ruleEntryId);
+          if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
+          const reset = resetLegendaryUsage(domain.turnState);
+          if (reset !== domain.turnState) {
+            tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+          }
+        }
+      }
+
+      const restored =
+        phase === 'combatant' && currentCombatantId !== null
+          ? sorted.find((c) => c.id === currentCombatantId)
+          : undefined;
+      newCurrentName = phase === 'lair' ? 'Lair' : restored?.name ?? null;
+      if (restored) {
+        const reset = resetTurnStateForStart(restored.turnState);
+        tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
+      }
+
       tx.update(encounters)
-        .set({ turnIndex, round, currentCombatantId, updatedAt: nowIso() })
+        .set({
+          turnIndex,
+          round,
+          currentCombatantId,
+          turnPhase: phase,
+          lairResumeCombatantId,
+          updatedAt: nowIso(),
+        })
         .where(eq(encounters.id, encounterId))
         .run();
     });
@@ -3417,7 +3595,20 @@ export class EncountersService {
       startPrompts: [],
       endPrompts: [],
     };
-    if (status !== 'running' || row.currentCombatantId === null) {
+    if (status !== 'running') {
+      return base;
+    }
+    if (row.turnPhase === 'lair') {
+      const isDm = role === 'dm';
+      return {
+        ...base,
+        current: null,
+        next: null,
+        isYourTurn: false,
+        canEndTurn: isDm,
+      };
+    }
+    if (row.currentCombatantId === null) {
       return base;
     }
 
@@ -3560,6 +3751,18 @@ export class EncountersService {
 
     const logs: Array<{ detail: string }> = [];
     let row!: typeof combatants.$inferSelect;
+    const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+    let legendaryMax = 0;
+    if (existing.ruleEntryId !== null) {
+      const [entry] = await this.db
+        .select({ dataJson: ruleEntries.dataJson })
+        .from(ruleEntries)
+        .where(eq(ruleEntries.id, existing.ruleEntryId))
+        .limit(1);
+      const mapped = adapter.mapStatblock(fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {}));
+      if (statblockSectionHasEntries(mapped.legendaryActions)) legendaryMax = LEGENDARY_ACTIONS_PER_ROUND;
+    }
+
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(combatants).where(eq(combatants.id, combatantId)).limit(1).all();
       const turnState = CombatantTurnState.parse(fromJsonText<unknown>(fresh.turnState, null) ?? {});
@@ -3570,9 +3773,40 @@ export class EncountersService {
         turnState.used = {};
         turnState.movementUsedFt = 0;
       }
-      if (patch.useSlot) turnState.used[patch.useSlot] = (turnState.used[patch.useSlot] ?? 0) + 1;
-      if (patch.releaseSlot) turnState.used[patch.releaseSlot] = Math.max(0, (turnState.used[patch.releaseSlot] ?? 0) - 1);
-      if (patch.setSlotUsed) turnState.used[patch.setSlotUsed.key] = patch.setSlotUsed.used;
+      if (patch.useSlot) {
+        if (patch.useSlot === LEGENDARY_ACTION_SLOT) {
+          if (legendaryMax <= 0) {
+            throw new BadRequestException('This combatant does not have legendary actions.');
+          }
+          const next = (turnState.used[LEGENDARY_ACTION_SLOT] ?? 0) + 1;
+          if (next > legendaryMax) {
+            throw new BadRequestException(`Only ${legendaryMax} legendary actions per round.`);
+          }
+          turnState.used[LEGENDARY_ACTION_SLOT] = next;
+          logs.push({ detail: `used legendary action (${next}/${legendaryMax})` });
+        } else {
+          turnState.used[patch.useSlot] = (turnState.used[patch.useSlot] ?? 0) + 1;
+        }
+      }
+      if (patch.releaseSlot) {
+        if (patch.releaseSlot === LEGENDARY_ACTION_SLOT) {
+          const next = Math.max(0, (turnState.used[LEGENDARY_ACTION_SLOT] ?? 0) - 1);
+          if (next === 0) delete turnState.used[LEGENDARY_ACTION_SLOT];
+          else turnState.used[LEGENDARY_ACTION_SLOT] = next;
+          if (legendaryMax > 0) logs.push({ detail: `released legendary action (${next}/${legendaryMax})` });
+        } else {
+          turnState.used[patch.releaseSlot] = Math.max(0, (turnState.used[patch.releaseSlot] ?? 0) - 1);
+        }
+      }
+      if (patch.setSlotUsed) {
+        if (patch.setSlotUsed.key === LEGENDARY_ACTION_SLOT) {
+          if (legendaryMax <= 0) throw new BadRequestException('This combatant does not have legendary actions.');
+          if (patch.setSlotUsed.used > legendaryMax) {
+            throw new BadRequestException(`Only ${legendaryMax} legendary actions per round.`);
+          }
+        }
+        turnState.used[patch.setSlotUsed.key] = patch.setSlotUsed.used;
+      }
       if (patch.resetMovement) turnState.movementUsedFt = 0;
       if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
       if (patch.concentration !== undefined) {
@@ -3619,7 +3853,12 @@ export class EncountersService {
     if (logs.length > 0) {
       this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     }
-    return combatantToDomain(row);
+    const domain = combatantToDomain(row);
+    if (legendaryMax > 0) {
+      const used = domain.turnState.used[LEGENDARY_ACTION_SLOT] ?? 0;
+      return { ...domain, legendaryActions: { max: legendaryMax, used } };
+    }
+    return domain;
   }
 
   /**
@@ -4020,6 +4259,8 @@ export class EncountersService {
           // Issue #489: persist the re-validated pointer with the status flip.
           currentCombatantId,
           turnIndex,
+          turnPhase: 'combatant',
+          lairResumeCombatantId: null,
           updatedAt: ts,
         })
         .where(eq(encounters.id, encounterId))

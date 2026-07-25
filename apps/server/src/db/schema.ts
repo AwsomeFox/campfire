@@ -872,6 +872,9 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
+  // Boss-fight scheduling (issue #618): 'combatant' | 'lair' (initiative count 20 slot).
+  turnPhase: text('turn_phase').notNull().default('combatant'),
+  lairResumeCombatantId: integer('lair_resume_combatant_id'),
   // Optional where/why/when links (issue #126) + battle map (issue #39). Nullable;
   // added by migration on older DBs (see db/db.module.ts).
   locationId: integer('location_id'),
