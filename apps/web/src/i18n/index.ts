@@ -78,9 +78,11 @@ applyHtmlLang(initialLocale.catalogLocale);
 i18n.on('languageChanged', applyHtmlLang);
 
 localeController.subscribe(() => {
-  const catalogLocale = localeController.resolved.catalogLocale;
+  const { catalogLocale } = localeController.resolved;
   if (i18n.resolvedLanguage !== catalogLocale && i18n.language !== catalogLocale) {
     void i18n.changeLanguage(catalogLocale);
+  } else {
+    applyHtmlLang(catalogLocale);
   }
 });
 

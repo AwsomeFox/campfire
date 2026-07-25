@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
-import type { SessionAttendee } from '@campfire/schema';
+import type { SessionAttendee, SessionListPage } from '@campfire/schema';
 import { SessionCreate, SessionUpdate } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
@@ -30,20 +30,29 @@ export class CampaignSessionsController {
     summary: 'List sessions (play logs) in a campaign',
     description:
       'Requires campaign membership. dmSecret is stripped for non-dm. Newest-first. Each item carries a short ' +
-      '`recapExcerpt` instead of the full recap body (fetch a single session for the full recap). Supports ' +
-      'optional `?limit`/`?offset` paging (default: all sessions).',
+      '`recapExcerpt` instead of the full recap body (fetch a single session for the full recap). Without ' +
+      '`?limit`/`?offset` returns every session (legacy array). With either param returns a paginated page ' +
+      '(`items`, `total`, `hasMore`, `limit`, `offset`) — issue #612.',
   })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max sessions to return (default: all, capped at 200).' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Sessions to skip, for paging (default 0).' })
-  @ApiResponse({ status: 200, description: 'Sessions in the campaign (list-shape, with recapExcerpt).' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max sessions to return. With limit or offset, response is a SessionListPage.' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Sessions to skip. With limit or offset, response is a SessionListPage.' })
+  @ApiResponse({ status: 200, description: 'Sessions in the campaign (list-shape, with recapExcerpt) or a SessionListPage when paging.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
-  ) {
+  ): Promise<SessionListPage | Awaited<ReturnType<SessionsService['listForCampaign']>>> {
     const role = await this.access.requireMember(user, campaignId);
-    return this.sessions.listForCampaign(campaignId, role, parsePageParams({ limit, offset }, SESSIONS_LIST_MAX_LIMIT));
+    const paging = limit !== undefined || offset !== undefined;
+    if (paging) {
+      const page = parsePageParams({ limit, offset }, SESSIONS_LIST_MAX_LIMIT);
+      return this.sessions.listPageForCampaign(campaignId, role, {
+        limit: page.limit,
+        offset: page.offset,
+      });
+    }
+    return this.sessions.listForCampaign(campaignId, role);
   }
 
   @Post()

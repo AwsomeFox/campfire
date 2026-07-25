@@ -34,7 +34,7 @@ function termKeptFlags(rolls: number[], kept?: number[]): boolean[] {
 
 export function RolledTerms({ terms, fontSize = 11 }: RolledTermsProps) {
   return (
-    <span className="text-muted" style={{ fontSize, whiteSpace: 'nowrap' }} aria-label="roll breakdown">
+    <bdi className="text-muted" style={{ fontSize, whiteSpace: 'nowrap' }} aria-label="roll breakdown">
       {terms.map((t, i) => {
         const sep = i === 0 ? '' : ', ';
         if (t.rolls && t.rolls.length > 0) {
@@ -50,7 +50,9 @@ export function RolledTerms({ terms, fontSize = 11 }: RolledTermsProps) {
           return (
             <span key={i}>
               {sep}
-              {t.term}: {dice}
+              <bdi>
+                {t.term}: {dice}
+              </bdi>
             </span>
           );
         }
@@ -58,10 +60,10 @@ export function RolledTerms({ terms, fontSize = 11 }: RolledTermsProps) {
         return (
           <span key={i}>
             {sep}
-            {t.term}
+            <bdi>{t.term}</bdi>
           </span>
         );
       })}
-    </span>
+    </bdi>
   );
 }

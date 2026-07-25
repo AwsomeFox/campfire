@@ -993,8 +993,8 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Session timeline entry */
 .cf-timeline {
-  border-left: 2px solid var(--color-divider);
-  padding-left: 1rem;
+  border-inline-start: 2px solid var(--color-divider);
+  padding-inline-start: 1rem;
 }
 .cf-timeline.active {
   border-color: var(--color-accent);
@@ -1051,7 +1051,7 @@ h1, h2, h3, h4, h5, h6 {
 .cf-prose ul,
 .cf-prose ol {
   margin: 0.5em 0;
-  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
 }
 .cf-prose ul { list-style: disc; }
 .cf-prose ol { list-style: decimal; }
@@ -1061,8 +1061,9 @@ h1, h2, h3, h4, h5, h6 {
 
 .cf-prose blockquote {
   margin: 0.75em 0;
-  padding: 0.25em 0 0.25em 1em;
-  border-left: 3px solid var(--color-accent);
+  padding-block: 0.25em;
+  padding-inline-start: 1em;
+  border-inline-start: 3px solid var(--color-accent);
   color: var(--cf-dim);
 }
 
@@ -1171,7 +1172,7 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   gap: 9px;
   min-height: 32px;
-  padding-left: 4px;
+  padding-inline-start: 4px;
 }
 
 @media (max-width: 479px) {
@@ -1317,7 +1318,7 @@ a:hover .cf-name-reveal {
   flex: 0 0 auto;
   align-items: center;
   gap: 4px;
-  margin-left: auto;
+  margin-inline-start: auto;
 }
 .cf-undo-snackbar__action {
   font-size: 12.5px;

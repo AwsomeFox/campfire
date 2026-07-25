@@ -1532,6 +1532,62 @@ describe('encounters — issue #49: identity-based turn pointer (e2e)', () => {
   });
 });
 
+describe('encounters — issue #610: next-turn skips dead/downed combatants (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let encounterId: number;
+  let aliveId: number;
+  let downedId: number;
+  let nextAliveId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Skip Downed' })).body.id;
+
+    const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Skip Fight', hidden: false });
+    encounterId = encRes.body.id;
+
+    aliveId = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Alive', hpMax: 10 })).body.id;
+    downedId = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Downed', hpMax: 10 })).body.id;
+    nextAliveId = (await request(server).post(`/api/v1/encounters/${encounterId}/combatants`).set(dm).send({ kind: 'monster', name: 'Next', hpMax: 10 })).body.id;
+
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${aliveId}`).set(dm).send({ initiative: 20 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${downedId}`).set(dm).send({ initiative: 15 });
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${nextAliveId}`).set(dm).send({ initiative: 10 });
+
+    await request(server).patch(`/api/v1/encounters/${encounterId}/combatants/${downedId}`).set(dm).send({ hpSet: 0 });
+
+    const startRes = await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect(startRes.status).toBe(201);
+    expect(startRes.body.currentCombatantId).toBe(aliveId);
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('next-turn skips a 0-HP monster and lands on the next living combatant', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(nextAliveId);
+    expect(res.body.turnIndex).toBe(2);
+    expect(res.body.round).toBe(1);
+  });
+
+  it('appends a skipped (down) turn event for the defeated monster', async () => {
+    const server = ctx.app.getHttpServer();
+    const events = (await request(server).get(`/api/v1/encounters/${encounterId}/events`).set(dm)).body as Array<{
+      type: string;
+      detail: string;
+      targetId: number;
+    }>;
+    const skipped = events.filter((e) => e.type === 'turn' && e.detail === 'skipped (down)' && e.targetId === downedId);
+    expect(skipped.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe('encounters — issue #528: removeCombatant increments round on turn wrap (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
