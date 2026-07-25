@@ -65,7 +65,7 @@ test.describe('Character D&D Beyond provenance (issue #720)', () => {
     const ddbId = '12345678';
     await setDdbId(baseURL!, characterId, ddbId);
     try {
-      await page.goto(`/c/${campaignId}/characters/${characterId}`);
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
 
       // The misleading "Not linked — soon" copy is gone...
       await expect(page.getByText('Not linked — soon')).toHaveCount(0);
@@ -87,7 +87,7 @@ test.describe('Character D&D Beyond provenance (issue #720)', () => {
     const name = `720 Manual PC ${Date.now()}`;
     const characterId = await createCharacter(baseURL!, 'dm', name);
     try {
-      await page.goto(`/c/${campaignId}/characters/${characterId}`);
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
 
       await expect(page.getByText('Not linked — soon')).toHaveCount(0);
       await expect(page.getByText('Created manually')).toBeVisible();
@@ -105,7 +105,7 @@ test.describe('Character D&D Beyond provenance (issue #720)', () => {
     const ddbId = '87654321';
     await setDdbId(baseURL!, characterId, ddbId);
     try {
-      await page.goto(`/c/${campaignId}/characters/${characterId}`);
+      await page.goto(`/c/${campaignId}/characters/${characterId}?tab=build`);
 
       // Grant clipboard permissions so writeText resolves (headless otherwise denies).
       await context.grantPermissions(['clipboard-read', 'clipboard-write']);

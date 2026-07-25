@@ -121,9 +121,10 @@ test.describe('semantic reading preferences', () => {
     expect(recapType.lineHeight).toBe(31.5);
 
     await page.goto(`/c/${fixture.campaignId}/characters/${fixture.navigation.characterId}`);
+    // Issue #646: inactive tabpanels are hidden, so Build-only edit controls are not
+    // visible on the default Play tab. Player fixture views a DM-owned nav character
+    // (read-only); DetailPageWayfinding's back link still uses legacy `.btn`.
     expect((await typography(page.locator('.reading-surface').first())).fontSize).toBe(18);
-    // Player fixture views a DM-owned nav character (read-only): edit Btn/cf-btn controls are
-    // hidden, but DetailPageWayfinding's back link still uses legacy `.btn`.
     expect((await typography(page.locator('.btn').first())).fontSize).toBeLessThan(18);
 
     // 1280px at 200% browser zoom has a 640 CSS-pixel layout viewport.
