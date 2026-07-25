@@ -3,6 +3,7 @@ import { Dnd5eAdapter, Pf2eAdapter } from '@campfire/schema';
 import {
   abilityMod,
   sortCombatants,
+  sortEncountersForList,
   turnIndexFor,
   advanceTurn,
   retreatTurn,
@@ -58,6 +59,35 @@ describe('encounters — abilityMod', () => {
     [18, 4],
   ])('score %i -> modifier %i', (score, mod) => {
     expect(abilityMod(score)).toBe(mod);
+  });
+});
+
+describe('encounters — sortEncountersForList', () => {
+  function row(id: number, status: EncounterStatus, updatedAt: string) {
+    return { id, status, updatedAt };
+  }
+
+  it('groups running → preparing → ended, then updatedAt desc within each group', () => {
+    const sorted = sortEncountersForList([
+      row(1, 'ended', '2026-01-01T00:00:00.000Z'),
+      row(2, 'running', '2026-01-02T00:00:00.000Z'),
+      row(3, 'preparing', '2026-01-03T00:00:00.000Z'),
+      row(4, 'ended', '2026-01-04T00:00:00.000Z'),
+      row(5, 'preparing', '2026-01-05T00:00:00.000Z'),
+    ]);
+    expect(sorted.map((e) => e.id)).toEqual([2, 5, 3, 4, 1]);
+  });
+
+  it('pins the authoritative running fight to the top when multiple running rows exist', () => {
+    const sorted = sortEncountersForList(
+      [
+        row(10, 'running', '2026-01-10T00:00:00.000Z'),
+        row(20, 'running', '2026-01-20T00:00:00.000Z'),
+        row(30, 'preparing', '2026-01-30T00:00:00.000Z'),
+      ],
+      { pinActiveId: 10 },
+    );
+    expect(sorted.map((e) => e.id)).toEqual([10, 20, 30]);
   });
 });
 

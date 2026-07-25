@@ -938,6 +938,7 @@ export default function PlayerDisplayPage() {
               onPing={() => {}}
               pings={mapPings}
               onError={() => {}}
+              ruleSystem={summary.campaign.ruleSystem ?? null}
             />
           </section>
         ) : (
