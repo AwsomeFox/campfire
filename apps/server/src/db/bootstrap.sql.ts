@@ -417,6 +417,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entity_type TEXT,
   entity_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  request_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -1067,6 +1068,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_campaign_id_desc ON audit_log(campaign_id, 
 -- #74: retention prune deletes by created_at across all campaigns; index it so the
 -- periodic sweep is a range scan rather than a full-table scan.
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);

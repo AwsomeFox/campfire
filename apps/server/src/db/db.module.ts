@@ -2451,6 +2451,16 @@ function migrateHotHistoryCompositeIndexes(sqlite: Database.Database): void {
   }
 }
 
+function migrateAuditLogForRequestId(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'request_id')) {
+    sqlite.exec('ALTER TABLE audit_log ADD COLUMN request_id TEXT');
+  }
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_log(request_id)');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2541,7 +2551,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
   { name: '0089_characters_resources', run: migrateCharactersTableForResources },
   { name: '0090_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
-  { name: '0091_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
+  { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
 ];
 
 /**

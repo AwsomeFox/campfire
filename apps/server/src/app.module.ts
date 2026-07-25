@@ -60,6 +60,7 @@ import { ScribeModule } from './modules/scribe/scribe.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
+import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -189,6 +190,8 @@ function serveStaticImports(): DynamicModule[] {
     // throttling per-user with IP fallback.
     { provide: APP_GUARD, useClass: IdentityAwareThrottlerGuard },
     { provide: APP_GUARD, useClass: SessionAuthGuard },
+    // After SessionAuthGuard — stamp audit actor into ALS (#684).
+    { provide: APP_GUARD, useClass: RequestContextActorGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
     // Runs after SessionAuthGuard has populated req.tokenContext: enforces the
     // token's server-side writeScope (issue #158) — a 'none' token can't write,
