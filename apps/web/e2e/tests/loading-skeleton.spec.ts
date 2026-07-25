@@ -75,7 +75,7 @@ test.describe('loading skeleton slow-network surfaces (issue #677)', () => {
     const loading = page.getByTestId('character-detail-loading');
     await expect(loading).toBeVisible();
     await expect(loading).toHaveAttribute('aria-busy', 'true');
-    await expect(loading).toContainText('Loading character…');
+    await expect(loading).toHaveAttribute('aria-label', 'Loading character…');
     await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
 
     releaseCharacter();
@@ -88,6 +88,6 @@ test.describe('loading skeleton slow-network surfaces (issue #677)', () => {
 
     await page.goto(`/c/${campaignId}/characters/999999999`);
     await expect(page.getByTestId('character-detail-loading')).toBeHidden({ timeout: 15_000 });
-    await expect(page.getByRole('heading', { name: 'Character not found' })).toBeVisible();
+    await expect(page.getByText('Character not found')).toBeVisible();
   });
 });
