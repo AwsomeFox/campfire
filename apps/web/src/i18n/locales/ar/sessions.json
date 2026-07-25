@@ -11,6 +11,8 @@
       "loadSchedule": "تعذّر تحميل the schedule.",
       "saveSession": "تعذّر الحفظ the session.",
       "loadSessions": "تعذّر تحميل sessions.",
+      "loadMoreSessions": "تعذّر تحميل المزيد من الجلسات.",
+      "loadMorePastSessions": "تعذّر تحميل المزيد من الجلسات السابقة.",
       "saveRecap": "تعذّر الحفظ the recap.",
       "reloadRecap": "Couldn't reload the latest recap.",
       "deleteSession": "تعذّر الحذف the session.",

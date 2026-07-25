@@ -11,6 +11,8 @@
       "loadSchedule": "Couldn't load the schedule.",
       "saveSession": "Couldn't save the session.",
       "loadSessions": "Couldn't load sessions.",
+      "loadMoreSessions": "Couldn't load more sessions.",
+      "loadMorePastSessions": "Couldn't load more past sessions.",
       "saveRecap": "Couldn't save the recap.",
       "reloadRecap": "Couldn't reload the latest recap.",
       "deleteSession": "Couldn't delete the session.",

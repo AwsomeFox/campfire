@@ -1,6 +1,7 @@
 {
   "quests": {
     "title": "Quests",
+    "draftWithAi": "Draft a quest with AI",
     "newQuest": "+ New quest",
     "noCampaign": "لم يتم اختيار حملة.",
     "noAccess": "You don't have access to this campaign",

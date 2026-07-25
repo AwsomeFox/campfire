@@ -53,7 +53,6 @@ import {
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
@@ -1242,10 +1241,20 @@ export default function RunSessionPage() {
   }, []);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
-    const el = combatantRowRefs.current.get(currentCombatantId);
-    if (!el) return;
     const frame = requestAnimationFrame(() => {
-      el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+      requestAnimationFrame(() => {
+        const el =
+          combatantRowRefs.current.get(currentCombatantId) ??
+          document.querySelector<HTMLElement>(
+            `[data-testid="combatant-row-${currentCombatantId}"][data-current-turn="true"]`,
+          );
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const inView = rect.bottom > 0 && rect.top < window.innerHeight;
+        if (inView) return;
+        const targetTop = window.scrollY + rect.top - (window.innerHeight - rect.height) / 2;
+        window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+      });
     });
     return () => cancelAnimationFrame(frame);
   }, [encounter?.status, currentCombatantId]);
