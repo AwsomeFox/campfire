@@ -4333,6 +4333,7 @@ function ApplyDamageBar({
       className="cf-inset"
       role="group"
       aria-label={`Apply ${amount} rolled ${label}`}
+      data-testid="apply-damage-bar"
       style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px' }}
     >
       <span style={{ fontSize: 12.5 }}>
@@ -4404,6 +4405,7 @@ function ApplyDamageBar({
                 style={{ fontSize: 12, padding: '0 12px' }}
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
                 disabled={applyDisabled}
+                data-testid={`apply-damage-target-${c.id}`}
                 onClick={() => onApply(c.id, delta)}
               >
                 {c.name}{acLabel}
