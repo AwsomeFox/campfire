@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import type { EncounterEvent, EncounterWithCombatants } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs } from '../../db/schema';
+import { loadCompendiumExportContext } from '../campaigns/compendium-import';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { QuestsService } from '../quests/quests.service';
 import { NpcsService } from '../npcs/npcs.service';
@@ -207,6 +208,31 @@ export class ExportService {
       encounterList.map((e) => this.encounters.getWithCombatantsOrThrow(e.id)),
     );
 
+    // Issue #584: replace server-local ruleEntryId with stable compendium refs for portability.
+    const ruleEntryIds = [
+      ...new Set(
+        encountersWithCombatants.flatMap((e) =>
+          e.combatants.map((c) => c.ruleEntryId).filter((id): id is number => id != null),
+        ),
+      ),
+    ];
+    const compendiumExport = await loadCompendiumExportContext(this.db, ruleEntryIds);
+    const portableEncounters = encountersWithCombatants.map((enc) => ({
+      ...enc,
+      combatants: enc.combatants.map((c) => {
+        const { ruleEntryId, ...rest } = c;
+        if (ruleEntryId == null) return { ...rest, ruleEntryId: null };
+        const compendiumRef = compendiumExport.refByEntryId.get(ruleEntryId) ?? null;
+        const compendiumSnapshot = compendiumExport.snapshotByEntryId.get(ruleEntryId) ?? null;
+        return {
+          ...rest,
+          ruleEntryId: null,
+          ...(compendiumRef ? { compendiumRef } : {}),
+          ...(compendiumSnapshot ? { compendiumSnapshot } : {}),
+        };
+      }),
+    }));
+
     // AI seat + scribe config (issue #1078): export the DM's hand-authored steering
     // and trigger settings. Runtime counters (tokensUsed, turnCount, lastTurnAt) and
     // provider keys (aiProviderConfigs — encrypted, install-specific) are excluded.
@@ -253,7 +279,13 @@ export class ExportService {
         '(retention pruning during export and/or audit appended after auditMeta.cutoff.snapshotMaxId); ' +
         'page GET /api/v1/campaigns/:campaignId/audit for the live log.',
       proposals: proposalList,
-      encounters: encountersWithCombatants,
+      encounters: portableEncounters,
+      compendiumDependencies: compendiumExport.dependencies,
+      compendiumNote:
+        'Combatants reference compendium statblocks via compendiumRef (packSlug/packVersion/entrySlug/contentHash), ' +
+        'never via server-local ruleEntryId. compendiumSnapshot carries the entry content at export time for ' +
+        'detached import when a dependency pack is missing on the target server. See compendiumDependencies for ' +
+        'the open-license manifest; run POST /campaigns/import/preflight before import to verify resolution.',
       // Issue #266: these were silently omitted before — a DM's export/backup lost
       // factions, the storyline graph, the timeline (events + current in-world date),
       // the session-zero charter, and party inventory/treasury entirely. Now carried

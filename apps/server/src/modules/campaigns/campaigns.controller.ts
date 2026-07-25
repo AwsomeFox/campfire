@@ -60,6 +60,20 @@ export class CampaignsController {
     return this.campaigns.create(body, user);
   }
 
+  @Post('import/preflight')
+  @ApiOperation({
+    summary: 'Preflight a Campfire export for compendium dependencies (issue #584)',
+    description:
+      'Validates compendiumRef resolution for every combatant in an export document before import mutates anything. ' +
+      'Returns the open-license dependency manifest, per-reference resolution status, and whether import can proceed ' +
+      '(or proceed in detached mode when compendiumSnapshot is present). Install missing packs via POST /rules/packs/install.',
+  })
+  @ApiResponse({ status: 200, description: 'Compendium dependency preflight report.' })
+  @ApiResponse({ status: 400, description: 'Body is not a valid Campfire export document.' })
+  async preflightImport(@Body() body: CampaignImportDto, @CurrentUser() _user: RequestUser) {
+    return this.campaigns.preflightImport(body);
+  }
+
   @Post('import')
   @ApiOperation({
     summary: 'Import a campaign from a Campfire JSON export',

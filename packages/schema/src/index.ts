@@ -285,6 +285,10 @@ export const CampaignImport = z
     // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
     scheduledSessions: z.array(ImportedEntity).optional(),
     sessionAttendance: z.array(ImportedEntity).optional(),
+    // Issue #584: open-license packs the export's compendium refs depend on (loose — validated in service).
+    compendiumDependencies: z.array(ImportedEntity).optional(),
+    /** When refs cannot resolve: block (default) or import with detached snapshots. */
+    onUnresolvedCompendium: z.enum(['block', 'detach']).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -1867,6 +1871,94 @@ export const RuleEntryUpdate = z.object({
   iconSlug: z.string().max(80),
 }).partial();
 export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
+
+/**
+ * Portable compendium identity for campaign export/import (issue #584). Replaces
+ * server-local `ruleEntryId` in export documents — numeric ids are autoincrement
+ * values that alias unrelated content on another install.
+ */
+export const CompendiumRef = z.object({
+  packSlug: z.string().min(1).max(80),
+  packVersion: z.string().max(40).default(''),
+  entrySlug: z.string().min(1).max(160),
+  entryType: RuleEntryType,
+  /** sha256 hex of the portable entry payload (see computeRuleEntryContentHash). */
+  contentHash: z.string().length(64),
+});
+export type CompendiumRef = z.infer<typeof CompendiumRef>;
+
+/** Entry content captured at export time for detached import when a pack is missing (issue #584). */
+export const CompendiumSnapshot = z.object({
+  slug: z.string().min(1).max(160),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).default(''),
+  body: z.string().max(50_000).default(''),
+  dataJson: z.string().nullable().default(null),
+  source: z.string().max(200).default(''),
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).default(''),
+});
+export type CompendiumSnapshot = z.infer<typeof CompendiumSnapshot>;
+
+/** One installed/open-licensed pack the export's compendium refs depend on (issue #584). */
+export const CompendiumDependency = z.object({
+  packSlug: z.string().min(1).max(80),
+  packVersion: z.string().max(40).default(''),
+  name: z.string().min(1).max(120),
+  license: z.string().max(120).default(''),
+  sourceUrl: z.string().max(500).default(''),
+  entrySlugs: z.array(z.string().min(1).max(160)),
+});
+export type CompendiumDependency = z.infer<typeof CompendiumDependency>;
+
+export const CompendiumRefStatus = z.enum([
+  'resolved',
+  'missing_pack',
+  'missing_entry',
+  'hash_mismatch',
+  'type_mismatch',
+  'legacy_numeric_id',
+]);
+export type CompendiumRefStatus = z.infer<typeof CompendiumRefStatus>;
+
+export const CompendiumInstallHint = z.object({
+  packSlug: z.string().min(1).max(80),
+  packName: z.string().min(1).max(120),
+  license: z.string().max(120).default(''),
+  sourceUrl: z.string().max(500).default(''),
+  /** Suggested `source` for POST /rules/packs/install when known (e.g. open5e, pf2e). */
+  suggestedSource: z.string().max(40).optional(),
+});
+export type CompendiumInstallHint = z.infer<typeof CompendiumInstallHint>;
+
+export const CompendiumRefReport = z.object({
+  compendiumRef: CompendiumRef.nullable(),
+  legacyRuleEntryId: Id.nullable().optional(),
+  combatantName: z.string().max(120).optional(),
+  status: CompendiumRefStatus,
+  resolvedEntryId: Id.nullable(),
+  expectedContentHash: z.string().length(64).optional(),
+  actualContentHash: z.string().length(64).optional(),
+  installHint: CompendiumInstallHint.nullable().optional(),
+  detached: z.boolean().optional(),
+});
+export type CompendiumRefReport = z.infer<typeof CompendiumRefReport>;
+
+export const CampaignImportPreflight = z.object({
+  compendiumDependencies: z.array(CompendiumDependency),
+  references: z.array(CompendiumRefReport),
+  canImport: z.boolean(),
+  canImportDetached: z.boolean(),
+  unresolvedCount: z.number().int().nonnegative(),
+});
+export type CampaignImportPreflight = z.infer<typeof CampaignImportPreflight>;
+
+/** How import handles compendium refs that cannot be resolved on this server (issue #584). */
+export const OnUnresolvedCompendium = z.enum(['block', 'detach']);
+export type OnUnresolvedCompendium = z.infer<typeof OnUnresolvedCompendium>;
 
 /**
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
