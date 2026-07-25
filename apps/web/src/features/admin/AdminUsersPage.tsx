@@ -16,6 +16,7 @@ import { ResetRequestsCard } from './ResetRequestsCard';
 import { SettingsCard } from './SettingsCard';
 import { GameIcon } from '../../components/GameIcon';
 import { MembershipIntegrityCard } from './MembershipIntegrityCard';
+import { RosterImportCard } from './RosterImportCard';
 
 function AdminUsers() {
   const { t } = useTranslation();
@@ -71,6 +72,7 @@ function AdminUsers() {
       <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="person" size={20} /> Users</h1>
       {error && <ErrorNote message={error} onRetry={load} />}
       <UsersCard users={users ?? []} onChange={load} />
+      <RosterImportCard />
       <MembershipIntegrityCard users={users ?? []} />
       <ResetRequestsCard />
       <SettingsCard settings={settings} onChange={load} />
