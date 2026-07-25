@@ -758,6 +758,12 @@ export const StoryBranchCreate = z.object({
   sortOrder: z.number().int().optional(),
 });
 export type StoryBranchCreate = z.infer<typeof StoryBranchCreate>;
+export const StoryBranchUpdate = z.object({
+  label: z.string().min(1).max(200).optional(),
+  toBeatId: Id.nullable().optional(),
+  sortOrder: z.number().int().optional(),
+});
+export type StoryBranchUpdate = z.infer<typeof StoryBranchUpdate>;
 
 export const StoryBeat = z.object({
   id: Id,
