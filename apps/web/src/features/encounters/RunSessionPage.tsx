@@ -1603,7 +1603,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={encounter.status === 'running' ? onApplyDamageRolled : undefined}
+              onApplyDamage={onApplyDamageRolled}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -3432,7 +3432,7 @@ function CombatantRow({
   campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
-  onApplyDamage?: (amount: number, label: string) => void;
+  onApplyDamage: (amount: number, label: string) => void;
   /** Issue #414: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
   busy: boolean;

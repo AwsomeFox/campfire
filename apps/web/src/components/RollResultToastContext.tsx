@@ -19,8 +19,6 @@ function RollResultToastChrome() {
 type ApplyDamageHandler = (amount: number, label: string) => void;
 
 export interface ShowRollOptions {
-  /** True when the roller is in an encounter card that can hand off to ApplyDamageBar. */
-  applyEligible?: boolean;
   /** Encounter apply-damage handler captured at roll time (character-card rolls). */
   onApply?: ApplyDamageHandler;
 }
@@ -39,13 +37,11 @@ const RollResultToastContext = createContext<RollResultToastContextValue>(noop);
 
 export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const [roll, setRoll] = useState<DiceRoll | null>(null);
-  const [rollApplyEligible, setRollApplyEligible] = useState(false);
   const [rollApplyHandler, setRollApplyHandler] = useState<ApplyDamageHandler | null>(null);
   const [applyHandler, setApplyHandler] = useState<ApplyDamageHandler | null>(null);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
-    setRollApplyEligible(options?.applyEligible ?? false);
     setRollApplyHandler(options?.onApply ?? null);
   }, []);
 
@@ -55,7 +51,6 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const dismiss = useCallback(() => {
     setRoll(null);
-    setRollApplyEligible(false);
     setRollApplyHandler(null);
   }, []);
 

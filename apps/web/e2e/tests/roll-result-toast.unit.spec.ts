@@ -71,7 +71,7 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
     const logSource = readFileSync(resolve(ROOT, 'src/features/dice/SharedDiceLog.tsx'), 'utf8');
     expect(rollerSource).toMatch(/showRoll\(result/);
     expect(rollerSource).toMatch(/showRoll\(res\.roll\)/);
-    expect(rollerSource).toMatch(/onApply/);
+    expect(rollerSource).toMatch(/onApply: onApplyDamage/);
     expect(logSource).toMatch(/showRoll\(result\)/);
   });
 });

@@ -328,7 +328,6 @@ export function CharacterStatCard({
                             title={`Roll ${a.name} damage${onApplyDamage ? ' — apply from the roll toast in combat' : ''}`}
                             onClick={() =>
                               void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
-                                applyEligible: !!onApplyDamage,
                                 onApply: onApplyDamage,
                               })
                             }
