@@ -3615,9 +3615,10 @@ export class McpToolsService {
       'EXPERIMENTAL co-DM (issue #313 / #1056): ask the AI DM to DRAFT content and file it as PENDING PROPOSAL(S) for ' +
         'the human DM to review — nothing is written to canon directly. DM role required, the server-wide experimental ' +
         'flag must be on, and the seat must be enabled with remaining budget. `target` picks what to draft: npc, ' +
-        'location, beat (a story beat/next objective, filed as a quest), quest (a full quest draft), faction, recap ' +
+        'location, beat (a story beat filed as story_beat — pass arcId to pin it to an arc), quest (a full quest draft), faction, recap ' +
         '(filed as a session), encounter (reuses generate_encounter #304), or map (reuses generate_map #306). `count` ' +
-        '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. Returns the ' +
+        '(npc/location/beat/quest/faction only) drafts several at once; recap/encounter/map ignore count. `arcId` (beat only) ' +
+        'pins drafted beats to a story arc. Returns the ' +
         'created proposal ids; approve/reject them with approve_proposal / reject_proposal. Metered against the seat ' +
         'budget; the proposer is recorded as the AI seat + model.',
       {
@@ -3632,8 +3633,9 @@ export class McpToolsService {
           .optional()
           .describe('How many to draft (npc/location/beat/quest/faction only; ignored for recap/encounter/map)'),
         narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
+        arcId: Id.optional().describe('When target is beat, pin drafted beat(s) to this story arc id'),
       },
-      async ({ campaignId, target, prompt, count, narrationLanguage }) => {
+      async ({ campaignId, target, prompt, count, narrationLanguage, arcId }) => {
         const role = await this.access.requireRole(user, campaignId as number, 'dm');
         return this.coDm.draft(
           campaignId as number,
@@ -3642,6 +3644,7 @@ export class McpToolsService {
             prompt: prompt as string,
             ...(count !== undefined ? { count: count as number } : {}),
             ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
+            ...(arcId !== undefined ? { arcId: arcId as number } : {}),
           },
           user,
           role,
