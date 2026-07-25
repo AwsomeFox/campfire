@@ -1224,7 +1224,7 @@ export class CharactersService {
     const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(existing.resources, {});
     const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
 
-    const max = patch.max !== undefined ? Math.max(0, patch.max) : current.max;
+    const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
     let used = patch.used !== undefined ? patch.used : current.used;
     if (patch.delta !== undefined) {
       used += patch.delta;

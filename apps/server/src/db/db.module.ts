@@ -2007,6 +2007,17 @@ function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): vo
   }
 }
 
+function migrateCharactersTableForResources(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'resources')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
+  }
+}
+
 /**
  * Issue #423: `combatants.condition_instances` stores structured condition instances
  * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
@@ -2440,6 +2451,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
+  { name: '0086_characters_resources', run: migrateCharactersTableForResources },
 ];
 
 /**

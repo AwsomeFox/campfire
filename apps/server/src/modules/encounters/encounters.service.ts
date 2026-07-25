@@ -3,6 +3,7 @@ import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { createHash } from 'node:crypto';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -24,7 +25,6 @@ import {
   advanceTurn,
   applyCombatantHp,
   buildEncounterRoster,
-  cascadeConcentrationLoss,
   crToXp,
   deriveEncounterRosterWarnings,
   deriveEndTurnPrompts,
@@ -35,8 +35,6 @@ import {
   resetTurnStateForStart,
   retreatTurn,
   sortCombatants,
-  tickConditionInstancesAtTurnEnd,
-  tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
@@ -181,7 +179,7 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
     for (const name of stringConditions) {
       if (!existingNames.has(name.toLowerCase())) {
         instances.push({
-          id: `cond_${Math.random().toString(36).slice(2, 10)}`,
+          id: `cond_${createHash('sha256').update(name.toLowerCase()).digest('hex').slice(0, 10)}`,
           name,
           ruleEntryId: null,
           source: null,
@@ -2562,7 +2560,12 @@ export class EncountersService {
     // fresh row, so two concurrent condition changes (one adds while another
     // removes a different condition) compose instead of the loser's whole-array
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
-    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    let conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    const conditionInstancesTouched =
+      patch.addConditionInstance !== undefined ||
+      patch.removeConditionInstanceId !== undefined ||
+      patch.updateConditionInstance !== undefined ||
+      patch.conditionInstances !== undefined;
 
     const spFieldsTouched =
       patch.spSet !== undefined ||
@@ -2571,7 +2574,14 @@ export class EncountersService {
       patch.rpDelta !== undefined;
     const deathStateTouched = patch.deathState !== undefined;
 
-    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched && !spFieldsTouched && !deathStateTouched) {
+    if (
+      Object.keys(staticUpdate).length === 0 &&
+      !recomputeHp &&
+      !conditionsTouched &&
+      !conditionInstancesTouched &&
+      !spFieldsTouched &&
+      !deathStateTouched
+    ) {
       return combatantToDomain(existing);
     }
 
@@ -2601,7 +2611,7 @@ export class EncountersService {
       existing.kind === 'character' &&
       existing.characterId !== null &&
       encounterRow.status !== 'ended' &&
-      (recomputeHp || conditionsTouched || spFieldsTouched || deathStateTouched);
+      (recomputeHp || conditionsTouched || conditionInstancesTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -2640,6 +2650,25 @@ export class EncountersService {
         for (const c of patch.addConditions ?? []) current.add(c);
         afterConditions = new Set(current);
         writeSet.conditions = toJsonText([...current]);
+      }
+      if (conditionInstancesTouched) {
+        let instances = parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, []));
+        if (patch.conditionInstances !== undefined) {
+          instances = patch.conditionInstances;
+        } else {
+          if (patch.addConditionInstance) instances = [...instances, patch.addConditionInstance];
+          if (patch.removeConditionInstanceId) {
+            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+          }
+          if (patch.updateConditionInstance) {
+            instances = instances.map((i) => (i.id === patch.updateConditionInstance!.id ? patch.updateConditionInstance! : i));
+          }
+        }
+        writeSet.conditionInstances = toJsonText(instances);
+        writeSet.conditions = toJsonText(deriveConditionNames(instances));
+        conditionsTouched = true;
+        beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
+        afterConditions = new Set(deriveConditionNames(instances));
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -4176,11 +4205,20 @@ export class EncountersService {
     role: Role,
   ) {
     const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
     const combatant = this.db.select().from(combatants).where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId))).limit(1).all()[0];
     if (!combatant) throw new NotFoundException(`No such combatant ${combatantId} in encounter ${encounterId}`);
 
     if (combatant.characterId === null) {
       throw new BadRequestException('Only character combatants have sheet resources');
+    }
+
+    const isDm = role === 'dm';
+    if (!isDm) {
+      const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+      if (!character || character.ownerUserId !== user.id) {
+        throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
+      }
     }
 
     const delta = patch.delta ?? 1;

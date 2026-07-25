@@ -2444,12 +2444,16 @@ export function resourceVocabularyForAdapter(
   }
 
   if (character?.resources) {
+    const rechargeValues = AdapterResourceDef.shape.recharge.options;
     for (const [key, res] of Object.entries(character.resources)) {
       if (!seenKeys.has(key)) {
+        const recharge = rechargeValues.includes(res.recharge as (typeof rechargeValues)[number])
+          ? (res.recharge as AdapterResourceDef['recharge'])
+          : 'long-rest';
         result.push({
           key,
           name: res.name || key,
-          recharge: (res.recharge as AdapterResourceDef['recharge']) || 'long-rest',
+          recharge,
           defaultMax: res.max,
         });
         seenKeys.add(key);
@@ -6270,7 +6274,7 @@ export type ActiveEffect = z.infer<typeof ActiveEffect>;
 /**
  * One structured condition instance on a combatant (issue #423). Carries source/rule-entry provenance,
  * duration/expiry timing, repeat saves, concentration link, stack count, notes, and custom condition flag.
- * Kept in dual-sync with combatant.conditions (string[]) for complete backward compatibility.
+ * The legacy `combatant.conditions` string array is derived from instances via `deriveConditionNames()`.
  */
 export const ConditionInstance = z.object({
   id: z.string().min(1).max(40),
