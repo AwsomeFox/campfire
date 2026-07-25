@@ -520,7 +520,7 @@ function CommentCard({
             </button>
           )}
           {canModerate && (
-            <button onClick={onDelete} className="text-rose-500/80 hover:text-rose-400">
+            <button onClick={onDelete} className="text-rose-400 hover:text-rose-300">
               Delete
             </button>
           )}
