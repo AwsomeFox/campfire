@@ -525,6 +525,8 @@ export const users = sqliteTable('users', {
   textSize: text('text_size').notNull().default('default'),
   // Clock rendering preference: 'system' | '12h' | '24h' (issue #634).
   timeFormat: text('time_format').notNull().default('system'),
+  // Per-player dice overlay skin (issue #1315).
+  diceTheme: text('dice_theme').notNull().default('nocturne'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
