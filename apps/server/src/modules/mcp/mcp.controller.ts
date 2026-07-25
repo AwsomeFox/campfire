@@ -4,6 +4,8 @@ import type { Request, Response } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Public } from '../../common/decorators/public.decorator';
 import { WriteModeExempt } from '../../common/decorators/proposable.decorator';
+import { patchRequestContext } from '../../common/request-context';
+import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { McpToolsService } from './mcp-tools';
 
@@ -56,6 +58,8 @@ export class McpController {
       });
       return;
     }
+
+    patchRequestContext({ actor: auditActor(user) });
 
     const server = this.tools.buildServer(user);
     const transport = new StreamableHTTPServerTransport({

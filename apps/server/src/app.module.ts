@@ -1,6 +1,6 @@
 import { join } from 'path';
 import { Module, type DynamicModule } from '@nestjs/common';
-import { APP_GUARD, APP_PIPE } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ZodValidationPipe } from 'nestjs-zod';
@@ -60,6 +60,7 @@ import { ScribeModule } from './modules/scribe/scribe.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
+import { RequestObservabilityInterceptor } from './common/interceptors/request-observability.interceptor';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -183,6 +184,7 @@ function serveStaticImports(): DynamicModule[] {
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
+    { provide: APP_INTERCEPTOR, useClass: RequestObservabilityInterceptor },
     // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so
     // unauthenticated floods are rejected (429) before route work. The custom subclass keeps
     // that order while resolving identity only for strict AI buckets, making authenticated AI

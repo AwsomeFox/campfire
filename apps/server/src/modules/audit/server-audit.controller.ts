@@ -24,9 +24,16 @@ export class ServerAuditController {
   })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max entries to return (default 100, max 500).' })
   @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Entries to skip, for paging older history (default 0).' })
+  @ApiQuery({
+    name: 'requestId',
+    required: false,
+    type: String,
+    description:
+      'When set, search ALL audit rows (any campaign) stamped with this correlation id instead of the server-admin-only slice (issue #684).',
+  })
   @ApiResponse({ status: 200, description: 'Server-admin audit entries, most-recent-first.' })
-  list(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+  list(@Query('limit') limit?: string, @Query('offset') offset?: string, @Query('requestId') requestId?: string) {
     const page = parsePageParams({ limit, offset }, AUDIT_MAX_LIMIT);
-    return this.audit.listServerAdmin(page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0);
+    return this.audit.listServerAdmin(page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0, requestId);
   }
 }

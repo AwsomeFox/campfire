@@ -89,6 +89,8 @@ import {
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
+import { getRequestContext, getRequestId, patchRequestContext } from '../../common/request-context';
+import { logRequest } from '../../common/request-log';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
 import { fromJsonText } from '../../common/json';
 import { resolveSavingThrow } from './saving-throw-math';
@@ -168,6 +170,26 @@ function ok(data: unknown): ToolResult {
 function fail(err: unknown): ToolResult {
   const envelope = buildMcpEnvelope(err);
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
+}
+
+function campaignIdFromToolArgs(args: Record<string, unknown>): number | undefined {
+  const raw = args.campaignId;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+}
+
+function logMcpTool(name: string, args: Record<string, unknown>, startedAt: number, result: 'ok' | 'error'): void {
+  const requestId = getRequestId();
+  if (!requestId) return;
+  const ctx = getRequestContext();
+  logRequest({
+    requestId,
+    transport: 'mcp',
+    result,
+    latencyMs: Math.max(0, Date.now() - startedAt),
+    tool: name,
+    actor: ctx?.actor,
+    campaignId: campaignIdFromToolArgs(args),
+  });
 }
 
 /**
@@ -529,10 +551,18 @@ export class McpToolsService {
       cb: (args: Record<string, unknown>) => Promise<ToolResult>,
     ) => void;
     const cb = async (args: Record<string, unknown>): Promise<ToolResult> => {
+      const startedAt = Date.now();
       try {
         const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
-        return ok(await handler(validated));
+        patchRequestContext({
+          tool: name,
+          campaignId: campaignIdFromToolArgs(validated),
+        });
+        const data = await handler(validated);
+        logMcpTool(name, validated, startedAt, 'ok');
+        return ok(data);
       } catch (err) {
+        logMcpTool(name, args ?? {}, startedAt, 'error');
         return fail(err);
       }
     };
@@ -1257,7 +1287,8 @@ export class McpToolsService {
         'actions. For a "what changed since last session" delta, pass `sinceId` (the highest id you saw last time) ' +
         'to get only newer entries — one call, no client-side re-filtering — then keep the first row\'s id as the ' +
         'next cursor. `sinceTs` (ISO timestamp) is a wall-clock alternative. Narrow with `action` (e.g. "npc.update") ' +
-        'or `entityType` (e.g. "quest"). Update entries carry the changed fields in `detail`.',
+        'or `entityType` (e.g. "quest"). Pass `requestId` to pivot from a support ticket to the ' +
+        'matching audit rows (issue #684). Update entries carry the changed fields in `detail`.',
       {
         campaignId: CampaignIdArg,
         limit: LimitArg(500, 100),
@@ -1266,8 +1297,9 @@ export class McpToolsService {
         sinceTs: z.string().min(1).optional().describe('Only entries created strictly after this ISO-8601 timestamp'),
         action: z.string().min(1).optional().describe('Filter to a single action, e.g. "npc.update" or "quest.status"'),
         entityType: z.string().min(1).optional().describe('Filter to a single entity type, e.g. "npc", "quest", "session"'),
+        requestId: z.string().min(1).max(128).optional().describe('Filter to rows stamped with this per-request correlation id'),
       },
-      async ({ campaignId, limit, offset, sinceId, sinceTs, action, entityType }) => {
+      async ({ campaignId, limit, offset, sinceId, sinceTs, action, entityType, requestId }) => {
         await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
         // issue #71: offset pages back through history the cap-100 previously hid.
         // issue #161: sinceId/sinceTs + action/entityType turn this into a real delta channel.
@@ -1280,6 +1312,7 @@ export class McpToolsService {
             sinceTs: sinceTs as string | undefined,
             action: action as string | undefined,
             entityType: entityType as string | undefined,
+            requestId: requestId as string | undefined,
           },
         );
       },

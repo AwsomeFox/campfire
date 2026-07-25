@@ -155,6 +155,7 @@ export class ObservabilityService {
       entityType: r.entityType ?? null,
       entityId: r.entityId ?? null,
       detail: r.detail,
+      requestId: r.requestId ?? null,
       createdAt: r.createdAt,
     }));
   }

@@ -499,6 +499,7 @@ export const auditLog = sqliteTable('audit_log', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   detail: text('detail').notNull().default(''),
+  requestId: text('request_id'),
   createdAt: text('created_at').notNull(),
 });
 
