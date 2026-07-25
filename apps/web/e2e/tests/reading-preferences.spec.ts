@@ -121,7 +121,7 @@ test.describe('semantic reading preferences', () => {
     expect(recapType.lineHeight).toBe(31.5);
 
     await page.goto(`/c/${fixture.campaignId}/characters/${fixture.navigation.characterId}`);
-    // Issue #646: inactive tabpanels are hidden, so Build-only .cf-btn controls are not
+    // Issue #646: inactive tabpanels are hidden, so Build-only controls are not
     // visible on the default Play tab. Tab switches use fixed-size seg controls instead.
     expect((await typography(page.locator('.reading-surface').first())).fontSize).toBe(18);
     expect((await typography(page.getByRole('tab', { name: /^Play/ }))).fontSize).toBeLessThan(18);
