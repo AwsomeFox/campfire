@@ -883,7 +883,7 @@ export default function RunSessionPage() {
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163): the interactive
+    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
     if (encounter?.status === 'ended') return false;
@@ -1245,7 +1245,7 @@ export default function RunSessionPage() {
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
-    if (!canDmWrite || !encounter) return;
+    if (!canDmWrite || !encounter || encounter.status === 'ended') return;
     const patch = missingGridDefaults(encounter);
     const encounterPrefix = `${encounter.id}:`;
     if (!patch) {
@@ -1363,6 +1363,8 @@ export default function RunSessionPage() {
 
   if (!encounter) return null;
 
+  const canEditEncounter = canDmWrite && encounter.status !== 'ended';
+
   // The server returns combatants already in initiative order and names the current
   // actor by id (issue #49) — no client-side re-sort, and no positional
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
@@ -1402,7 +1404,7 @@ export default function RunSessionPage() {
           the party sees the same one-tap prompt for their own character. */}
       <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
-      {canDmWrite && (
+      {canEditEncounter && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
@@ -1556,7 +1558,7 @@ export default function RunSessionPage() {
       <EncounterLinks
         campaignId={cid}
         encounter={encounter}
-        canEdit={canDmWrite}
+        canEdit={canEditEncounter}
         onSaved={(updated) =>
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
             prev ? { ...prev, ...updated } : prev,
@@ -1607,7 +1609,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           isDm={isDm}
           viewerUserId={myUserId != null ? String(myUserId) : null}
-          canDmWrite={canDmWrite}
+          canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1617,9 +1619,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
-          onGenerateMap={canDmWrite ? generateAndAttachMap : undefined}
+          onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
-            canDmWrite
+            canEditEncounter
               ? (id) => {
                   setEncounterMap(id);
                   setShowMapGuidance(true);
