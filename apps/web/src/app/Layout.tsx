@@ -657,6 +657,8 @@ function LayoutContent() {
     <AiDmLiveActivityProvider value={liveActivity}>
     <LiveEncounterProvider value={liveEncounter}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
+      <div className="cf-ember-layer" aria-hidden />
+      <div className="cf-authed-shell min-h-screen flex flex-1 w-full min-w-0">
       <SkipToMainLink mainRef={mainRef} />
       {/* Desktop sidebar */}
       {(campaignId !== undefined || onAdminRoute) && (
@@ -966,6 +968,7 @@ function LayoutContent() {
 
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
       <NotificationsPanel />
+      </div>
     </div>
     </LiveEncounterProvider>
     </AiDmLiveActivityProvider>

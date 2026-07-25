@@ -26,7 +26,7 @@ import { entityTargetProps } from '../../lib/entityLinks';
 import { IconPicker } from '../../components/IconPicker';
 import { Markdown } from '../../components/Markdown';
 import { getIcon } from '../../lib/icons';
-import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
+import { defaultItemIconSlug, itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
 
@@ -796,6 +796,7 @@ function ItemRow({
       {pickingIcon && (
         <IconPicker
           value={committed.iconSlug ?? ''}
+          autoSlug={defaultItemIconSlug(committed.name)}
           onSelect={(slug) => {
             setPickingIcon(false);
             // '' clears the override, reverting the row to its name-derived default.
@@ -968,6 +969,7 @@ function AddItemForm({
       {pickingIcon && (
         <IconPicker
           value={iconSlug}
+          autoSlug={defaultItemIconSlug(name)}
           onSelect={(slug) => {
             setIconSlug(slug);
             setPickingIcon(false);

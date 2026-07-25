@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS characters (
   skills TEXT NOT NULL DEFAULT '{}',
   actions TEXT NOT NULL DEFAULT '[]',
   spell_slots TEXT NOT NULL DEFAULT '{}',
+  resources TEXT NOT NULL DEFAULT '{}',
   portrait_url TEXT,
   ddb_id TEXT,
   notes TEXT NOT NULL DEFAULT '',
@@ -989,7 +990,8 @@ CREATE TABLE IF NOT EXISTS combatants (
   -- concentration, delay/ready) as a JSON CombatantTurnState blob, and structured active
   -- effects with duration/save timing as a JSON ActiveEffect[] blob. Null = defaults.
   turn_state TEXT,
-  active_effects TEXT
+  active_effects TEXT,
+  condition_instances TEXT
 );
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain

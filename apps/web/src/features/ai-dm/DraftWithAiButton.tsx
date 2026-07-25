@@ -220,7 +220,7 @@ function DraftWithAiModal({
       <div
         id={id}
         ref={dialogRef}
-        className="cf-card w-full max-w-lg p-5 space-y-3.5"
+        className="cf-card cf-density-default w-full max-w-lg space-y-3.5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -378,7 +378,7 @@ function DraftResultCard({
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
           Close
         </Btn>
-        <Link to={`/c/${campaignId}/proposals`} className="cf-btn !min-h-0 !py-1.5 text-xs no-underline">
+        <Link to={`/c/${campaignId}/proposals`} className="cf-btn cf-density-compact text-xs no-underline">
           Review in proposals →
         </Link>
       </div>

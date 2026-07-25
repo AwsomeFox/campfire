@@ -468,7 +468,7 @@ export function ImageUpload({
             <div className="flex gap-1.5">
               <button
                 type="button"
-                className="cf-btn cf-btn-ghost !min-h-0 !py-1 !px-2 text-[10px]"
+                className="cf-btn cf-btn-ghost cf-density-compact !px-2 text-[10px]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onRetry();
@@ -478,7 +478,7 @@ export function ImageUpload({
               </button>
               <button
                 type="button"
-                className="cf-btn cf-btn-ghost !min-h-0 !py-1 !px-2 text-[10px]"
+                className="cf-btn cf-btn-ghost cf-density-compact !px-2 text-[10px]"
                 onClick={(e) => {
                   e.stopPropagation();
                   onDiscard();

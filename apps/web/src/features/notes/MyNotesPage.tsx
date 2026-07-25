@@ -411,7 +411,7 @@ export default function MyNotesPage() {
       {/* Quick capture */}
       {canMemberWrite && (
       <div id="note-quick-capture">
-        <Card className="!p-4 space-y-2">
+        <Card density="default" className="space-y-2">
           <form className="flex gap-2" onSubmit={quickCapture}>
             <TextInput
               value={draft}
@@ -631,7 +631,7 @@ function NoteCard({
   }
 
   return (
-    <div className="cf-card p-4 space-y-2" {...entityTargetProps('note', liveNote.id)} data-testid={`note-card-${liveNote.id}`}>
+    <Card density="default" className="space-y-2" {...entityTargetProps('note', liveNote.id)} data-testid={`note-card-${liveNote.id}`}>
       {editing && editable ? (
         <NoteEditor
           campaignId={campaignId}
@@ -703,7 +703,7 @@ function NoteCard({
           )}
         </>
       )}
-    </div>
+    </Card>
   );
 }
 

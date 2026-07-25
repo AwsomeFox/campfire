@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -24,6 +24,7 @@ import {
   advanceEncounterTurn,
   applyCombatantHp,
   buildEncounterRoster,
+  cascadeConcentrationLoss,
   crToXp,
   deriveEncounterRosterWarnings,
   deriveEndTurnPrompts,
@@ -36,6 +37,8 @@ import {
   resetTurnStateForStart,
   retreatEncounterTurn,
   sortCombatants,
+  tickConditionInstancesAtTurnEnd,
+  tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
@@ -164,12 +167,48 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
     tokenHiddenByFog: false,
-    // Issue #413: current-turn workspace state. Corrupt/legacy JSON degrades to the
-    // defaults (EMPTY_TURN_STATE / []) rather than failing the whole combatant read.
+    // Issue #413, #423: current-turn workspace state, active effects, and condition instances.
     turnState: parseTurnState(row.turnState),
     activeEffects: parseActiveEffects(row.activeEffects),
+    conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
   };
+}
+
+/** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
+function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
+  let instances: ConditionInstance[] = [];
+  if (text != null) {
+    const parsed = zod.array(ConditionInstance).safeParse(fromJsonText<unknown>(text, null));
+    if (parsed.success) instances = parsed.data;
+  }
+  if (stringConditions.length > 0) {
+    const existingNames = new Set(instances.map((i) => i.name.trim().toLowerCase()));
+    for (const rawName of stringConditions) {
+      const name = rawName.trim();
+      if (!name) continue;
+      if (!existingNames.has(name.toLowerCase())) {
+        instances.push({
+          id: `legacy_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+          name,
+          ruleEntryId: null,
+          source: null,
+          sourceCombatantId: null,
+          durationRounds: null,
+          roundsRemaining: null,
+          timing: 'none',
+          saveTiming: 'none',
+          saveDc: null,
+          saveAbility: null,
+          isConcentration: false,
+          stacks: 1,
+          notes: '',
+          custom: false,
+        });
+      }
+    }
+  }
+  return instances;
 }
 
 /**
@@ -2577,7 +2616,11 @@ export class EncountersService {
     // fresh row, so two concurrent condition changes (one adds while another
     // removes a different condition) compose instead of the loser's whole-array
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
-    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    const conditionsTouched =
+      patch.addConditions !== undefined ||
+      patch.removeConditions !== undefined ||
+      patch.removeConditionInstanceId !== undefined ||
+      patch.conditionInstances !== undefined;
 
     const spFieldsTouched =
       patch.spSet !== undefined ||
@@ -2639,22 +2682,37 @@ export class EncountersService {
       beforeDeath = fresh.deathState;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (conditionsTouched) {
-        // Rebase the add/remove deltas against the FRESH row's conditions (issue
-        // #747). A stale whole-array write — derived outside the tx from the
-        // pre-await read — let two concurrent callers clobber each other: caller A
-        // adds 'poisoned' while caller B removes 'prone', and whichever wrote
-        // second replaced the array entirely, dropping the other's change. By
-        // reading `fresh.conditions` inside the serialized transaction and applying
-        // both deltas as set union/difference, concurrent changes compose — the
-        // same read-from-fresh pattern the HP path uses. Retries (re-adding an
-        // already-present or re-removing an absent condition) are idempotent: the
-        // set ops are no-ops and `afterConditions` equals `beforeConditions`.
-        const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
-        beforeConditions = new Set(current);
-        for (const c of patch.removeConditions ?? []) current.delete(c);
-        for (const c of patch.addConditions ?? []) current.add(c);
-        afterConditions = new Set(current);
-        writeSet.conditions = toJsonText([...current]);
+        if (patch.removeConditionInstanceId !== undefined || patch.conditionInstances !== undefined) {
+          let instances = parseConditionInstances(fresh.conditionInstances, []);
+          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
+          if (patch.conditionInstances !== undefined) {
+            instances = patch.conditionInstances;
+          }
+          if (patch.removeConditionInstanceId !== undefined) {
+            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+          }
+          const derived = deriveConditionNames(instances);
+          afterConditions = new Set(derived);
+          writeSet.conditionInstances = toJsonText(instances);
+          writeSet.conditions = toJsonText(derived);
+        } else {
+          // Rebase the add/remove deltas against the FRESH row's conditions (issue
+          // #747). A stale whole-array write — derived outside the tx from the
+          // pre-await read — let two concurrent callers clobber each other: caller A
+          // adds 'poisoned' while caller B removes 'prone', and whichever wrote
+          // second replaced the array entirely, dropping the other's change. By
+          // reading `fresh.conditions` inside the serialized transaction and applying
+          // both deltas as set union/difference, concurrent changes compose — the
+          // same read-from-fresh pattern the HP path uses. Retries (re-adding an
+          // already-present or re-removing an absent condition) are idempotent: the
+          // set ops are no-ops and `afterConditions` equals `beforeConditions`.
+          const current = new Set(fromJsonText<string[]>(fresh.conditions, []));
+          beforeConditions = new Set(current);
+          for (const c of patch.removeConditions ?? []) current.delete(c);
+          for (const c of patch.addConditions ?? []) current.add(c);
+          afterConditions = new Set(current);
+          writeSet.conditions = toJsonText([...current]);
+        }
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -3289,6 +3347,7 @@ export class EncountersService {
     let endedName: string | null = null;
     let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
+    const expiredConditions: Array<{ combatantId: number; combatantName: string; conditionName: string }> = [];
 
     this.db.transaction((tx) => {
       const [fresh] = tx.select().from(encounters).where(eq(encounters.id, encounterId)).limit(1).all();
@@ -3355,6 +3414,22 @@ export class EncountersService {
           // Durations changed (decremented) even though nothing expired — persist the tick.
           tx.update(combatants).set({ activeEffects: toJsonText(kept) }).where(eq(combatants.id, ending.id)).run();
         }
+        const condTick = tickConditionInstancesAtTurnEnd(ending.conditionInstances ?? []);
+        if (
+          condTick.expired.length > 0 ||
+          condTick.kept.some((c, i) => c.roundsRemaining !== ending.conditionInstances?.[i]?.roundsRemaining)
+        ) {
+          for (const c of condTick.expired) {
+            expiredConditions.push({ combatantId: ending.id, combatantName: ending.name, conditionName: c.name });
+          }
+          tx.update(combatants)
+            .set({
+              conditionInstances: toJsonText(condTick.kept),
+              conditions: toJsonText(deriveConditionNames(condTick.kept)),
+            })
+            .where(eq(combatants.id, ending.id))
+            .run();
+        }
       } else if (freshPhase === 'lair') {
         endedName = 'Lair';
       }
@@ -3378,7 +3453,19 @@ export class EncountersService {
       if (starting) {
         newCurrentName = starting.name;
         const reset = resetTurnStateForStart(starting.turnState);
-        tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, starting.id)).run();
+        const condTick = tickConditionInstancesAtTurnStart(starting.conditionInstances ?? []);
+        const startSet: Partial<typeof combatants.$inferInsert> = { turnState: toJsonText(reset) };
+        if (
+          condTick.expired.length > 0 ||
+          condTick.kept.some((c, i) => c.roundsRemaining !== starting.conditionInstances?.[i]?.roundsRemaining)
+        ) {
+          for (const c of condTick.expired) {
+            expiredConditions.push({ combatantId: starting.id, combatantName: starting.name, conditionName: c.name });
+          }
+          startSet.conditionInstances = toJsonText(condTick.kept);
+          startSet.conditions = toJsonText(deriveConditionNames(condTick.kept));
+        }
+        tx.update(combatants).set(startSet).where(eq(combatants.id, starting.id)).run();
       } else if (phase === 'lair') {
         newCurrentName = 'Lair';
       }
@@ -3430,6 +3517,13 @@ export class EncountersService {
         actor: ex.combatantName,
         actorId: ex.combatantId,
         detail: `effect expired: ${ex.effectName}`,
+      });
+    }
+    for (const ex of expiredConditions) {
+      await this.appendEvent(encounterId, endedRound, 'condition', {
+        actor: ex.combatantName,
+        actorId: ex.combatantId,
+        detail: `condition expired: ${ex.conditionName}`,
       });
     }
 
@@ -3675,7 +3769,16 @@ export class EncountersService {
         .limit(1);
       ownerUserId = character?.ownerUserId ?? null;
     }
-    return { combatantId: c.id, name: c.name, kind: c.kind, characterId: c.characterId, ownerUserId };
+    return {
+      combatantId: c.id,
+      name: c.name,
+      kind: c.kind,
+      characterId: c.characterId,
+      ownerUserId,
+      deathState: c.deathState,
+      deathSaveSuccesses: c.deathSaveSuccesses,
+      deathSaveFailures: c.deathSaveFailures,
+    };
   }
 
   /**
@@ -3810,10 +3913,31 @@ export class EncountersService {
       if (patch.resetMovement) turnState.movementUsedFt = 0;
       if (patch.moveFt !== undefined) turnState.movementUsedFt = Math.max(0, turnState.movementUsedFt + patch.moveFt);
       if (patch.concentration !== undefined) {
+        const hadConcentration = turnState.concentration;
         if (patch.concentration !== turnState.concentration) {
           logs.push({ detail: patch.concentration ? `began concentrating on ${patch.concentration}` : 'concentration ended' });
         }
         turnState.concentration = patch.concentration;
+        if (hadConcentration && !patch.concentration) {
+          const allRows = tx.select().from(combatants).where(eq(combatants.encounterId, encounterId)).all();
+          const withInstances = allRows.map((r) => ({
+            id: r.id,
+            conditionInstances: parseConditionInstances(r.conditionInstances, fromJsonText<string[]>(r.conditions, [])),
+          }));
+          const { updatedCombatants, removed } = cascadeConcentrationLoss(withInstances, combatantId);
+          for (const [id, instances] of updatedCombatants) {
+            tx.update(combatants)
+              .set({
+                conditionInstances: toJsonText(instances),
+                conditions: toJsonText(deriveConditionNames(instances)),
+              })
+              .where(eq(combatants.id, id))
+              .run();
+          }
+          for (const r of removed) {
+            logs.push({ detail: `concentration link ended: ${r.condition.name}` });
+          }
+        }
       }
       if (patch.delaying !== undefined) {
         if (patch.delaying !== turnState.delaying) logs.push({ detail: patch.delaying ? 'is delaying their turn' : 'is no longer delaying' });

@@ -806,14 +806,14 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
         ? 'Withdrawn'
         : 'Approved';
   return (
-    <div className="cf-card p-3.5 flex items-center justify-between gap-2 opacity-70">
+    <Card density="compact" className="flex items-center justify-between gap-2 opacity-70">
       <p className="text-sm text-slate-400 m-0">
         <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>{' '}
         {isAiProposal(proposal) && <Chip variant="ai" className="mx-1"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> AI</span></Chip>}
         <span className="text-slate-600">· {proposal.proposer}</span>
       </p>
       <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>
-    </div>
+    </Card>
   );
 }
 

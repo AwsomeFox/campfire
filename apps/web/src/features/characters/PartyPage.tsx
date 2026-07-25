@@ -18,6 +18,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState, HpBar } from '../../components/ui';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { CampaignCover } from '../../components/CampaignCover';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -153,6 +154,7 @@ export default function PartyPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <CampaignCover campaignId={id} name={campaign?.name ?? 'Campaign'} variant="strip" showMonogram={false} />
       <PageHeader
         title="Party"
         secondaryActions={secondaryActions}
@@ -285,7 +287,7 @@ function CharacterCard({
   // and the kebab menu are siblings of the Link (not nested inside it) — nesting
   // <button> inside an <a> is invalid and would hijack the navigation click (#68).
   return (
-    <div className={`cf-card cf-card-hover p-3.5 space-y-2.5 ${isActive ? '' : 'opacity-60'}`}>
+    <Card density="compact" hover className={`space-y-2.5 ${isActive ? '' : 'opacity-60'}`}>
       <div className="relative">
         <ListDetailLink to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
           <div className="flex items-center gap-2.5">
@@ -337,7 +339,7 @@ function CharacterCard({
         )}
       </div>
       {canEditHp && <QuickHp character={character} onChange={onChange} />}
-    </div>
+    </Card>
   );
 }
 
