@@ -86,6 +86,13 @@ import {
   CampaignDmRepair,
   ParticipantSupportPreferenceUpsert,
   RevisionEntityType,
+  InviteCreate,
+  InvitePolicyUpdate,
+  SpellSlotPatch,
+  EncounterReopen,
+  ProposalRevise,
+  ProposalBatchResolve,
+  NotificationPreferencesUpdate,
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
@@ -126,6 +133,8 @@ import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
+import { InvitesService } from '../membership/invites.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -225,6 +234,11 @@ const ProposeArg = z
 const LimitArg = (max: number, fallback: number) =>
   z.number().int().positive().max(max).optional().describe(`Max rows to return (default ${fallback}, max ${max})`);
 const OffsetArg = z.number().int().nonnegative().optional().describe('Rows to skip, for paging (default 0)');
+const BulkNotificationArgs = {
+  ids: z.array(Id).optional().describe('Specific notification ids (from list_notifications)'),
+  campaignId: z.number().int().positive().optional().describe('All notifications in this campaign'),
+  all: z.boolean().optional().describe('Every notification owned by the caller'),
+};
 
 /**
  * Deep-clone a zod schema so every node gets a fresh `_def` object.
@@ -361,6 +375,8 @@ export class McpToolsService {
     private readonly users: UsersService,
     private readonly revisions: RevisionsService,
     private readonly actionResolver: ActionResolverService,
+    private readonly invites: InvitesService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   buildServer(user: RequestUser, collector?: Map<string, DriverTool>): McpServer {
@@ -605,6 +621,15 @@ export class McpToolsService {
   private registerReadTools(server: McpServer, user: RequestUser): void {
     this.tool(server, 'list_campaigns', 'List the campaigns this user (or token) can access. Start here.', {}, async () =>
       this.campaigns.listForUser(user),
+    );
+
+    this.tool(
+      server,
+      'list_trashed_campaigns',
+      'List campaigns currently in the trash (issue #116) — newest-trashed first. Same membership scoping as ' +
+        'list_campaigns. Restore with restore_campaign or permanently purge via REST DELETE /campaigns/:id/purge.',
+      {},
+      async () => this.campaigns.listTrashedForUser(user),
     );
 
     this.tool(
@@ -946,6 +971,48 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'list_notifications',
+      'List the caller\'s own notifications (newest first, cursor pagination). Optionally filter unread-only, by ' +
+        'campaign, type, or date range. Notifications from trashed campaigns are excluded.',
+      {
+        unread: z.boolean().optional().describe('If true, only unread notifications'),
+        limit: LimitArg(200, 50),
+        cursor: Id.optional().describe('Cursor notification id from a previous page'),
+        campaignId: z.number().int().positive().optional().describe('Filter by campaign id'),
+        type: z.string().max(80).optional().describe('Filter by notification type'),
+        startDate: z.string().max(40).optional().describe('Created on or after (ISO date or date-time)'),
+        endDate: z.string().max(40).optional().describe('Created on or before (ISO date or date-time)'),
+      },
+      async ({ unread, limit, cursor, campaignId, type, startDate, endDate }) =>
+        this.notifications.listForUser(user, {
+          unreadOnly: unread as boolean | undefined,
+          limit: limit as number | undefined,
+          cursor: cursor as number | undefined,
+          campaignId: campaignId as number | undefined,
+          type: type as string | undefined,
+          startDate: startDate as string | undefined,
+          endDate: endDate as string | undefined,
+        }),
+    );
+
+    this.tool(
+      server,
+      'get_unread_notification_count',
+      'Cheap poll target for the notification bell — returns { count } for the caller\'s unread notifications.',
+      {},
+      async () => ({ count: await this.notifications.unreadCount(user) }),
+    );
+
+    this.tool(
+      server,
+      'get_notification_preferences',
+      'Per-campaign notification delivery preferences and quiet hours for every campaign the caller belongs to.',
+      {},
+      async () => this.notifications.getPreferences(user),
+    );
+
+    this.tool(
+      server,
       'lookup_rule',
       'Search installed rule packs (spells, monsters, items, conditions, etc.) for a rules question. Returns up to 5 ' +
         'matches; the top match includes its full body text so the caller can quote/cite it directly. Pass `pack` ' +
@@ -1208,6 +1275,39 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'list_invites',
+      'DM only: list a campaign\'s live invite links (code, role, expiry, use counts). Expired/exhausted invites are ' +
+        'retained but not listed. Allowed on archived campaigns.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.invites.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
+      'preview_invite',
+      'Resolve a join code to the campaign name and role it grants. Unknown, expired, exhausted, revoked, or suspended ' +
+        'codes return 404 — same as REST GET /invites/:code.',
+      { code: z.string().min(1).max(200).describe('Invite join code — from list_invites') },
+      async ({ code }) => this.invites.preview(code as string),
+    );
+
+    this.tool(
+      server,
+      'list_campaign_trash',
+      'DM only: list soft-deleted entities in a campaign trash (sessions, characters, quests, npcs, locations) as ' +
+        '{type,id,name,deletedAt} rows, newest first. Restore with the matching restore_* tool.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.campaigns.listTrashedEntities(campaignId as number);
+      },
+    );
+
+    this.tool(
+      server,
       'get_membership_integrity',
       'Server admin only: inspect secret-free campaign authority metadata (usable/disabled DM counts and migration ' +
         'repair history). This never returns campaign entities or DM-secret content and grants no campaign role.',
@@ -1318,7 +1418,8 @@ export class McpToolsService {
       'List a campaign\'s attachments (maps, portraits, images) as metadata only — id, kind, filename, mime, byte ' +
         'size, hidden flag, uploader. Requires membership; hidden (DM-only, unrevealed) attachments are omitted ' +
         'WHOLESALE for non-DM callers, mirroring hidden quests/npcs. The raw file BYTES are not served over MCP ' +
-        '(JSON-RPC surface) — fetch them via the REST route GET /attachments/:id/file.',
+        '(JSON-RPC surface) — fetch them via the REST route GET /attachments/:id/file. Multipart UPLOAD is also ' +
+        'REST-only: POST /campaigns/:campaignId/attachments with field "file" + kind.',
       { campaignId: CampaignIdArg },
       async ({ campaignId }) => {
         const role = await this.access.requireMember(user, campaignId as number);
@@ -1615,6 +1716,19 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'restore_campaign',
+      'DM only: restore a trashed campaign (issue #116) — clears deletedAt so it returns to normal listings with every ' +
+        'child row intact. 404 if not actually in the trash.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.campaigns.restore(campaignId as number, user);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'create_quest',
       'Create a quest in a campaign (DM). With propose:true any member may submit it as a proposal instead. ' +
         'Supports subquests via parentId (another quest\'s id in the same campaign), an optional giverNpcId, a ' +
@@ -1671,6 +1785,19 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.quests.remove(questId as number, user, role);
         return { ok: true, questId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_quest',
+      'DM only: restore a trashed quest (issue #116) — clears deletedAt. 404 if not in the trash.',
+      { questId: Id.describe('Quest id — from list_campaign_trash') },
+      async ({ questId }) => {
+        const row = await this.quests.getRowOrThrow(questId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.quests.restore(questId as number, user, role);
       },
     );
 
@@ -1994,6 +2121,19 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'restore_npc',
+      'DM only: restore a trashed NPC (issue #116). 404 if not in the trash.',
+      { npcId: Id.describe('NPC id — from list_campaign_trash') },
+      async ({ npcId }) => {
+        const row = await this.npcs.getRowOrThrow(npcId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.npcs.restore(npcId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'set_npc_disposition',
       'Set an NPC\'s disposition (attitude/stance toward the party) in real time (DM). The live social-scene counterpart ' +
         'to upsert_npc\'s disposition field — allows the AI DM to flip attitude during dialogue without a full NPC proposal. ' +
@@ -2167,6 +2307,19 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'restore_location',
+      'DM only: restore a trashed location (issue #116). 404 if not in the trash.',
+      { locationId: Id.describe('Location id — from list_campaign_trash') },
+      async ({ locationId }) => {
+        const row = await this.locations.getRowOrThrow(locationId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.locations.restore(locationId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'set_location_discovery',
       'DM only: set a location\'s status (unexplored|explored|current). Setting "current" demotes any other ' +
         '"current" location in the campaign to "explored" and updates the campaign\'s currentLocationId.',
@@ -2269,6 +2422,19 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.sessions.remove(sessionId as number, user, role);
         return { ok: true, sessionId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_session',
+      'DM only: restore a trashed session recap (issue #116). 404 if not in the trash.',
+      { sessionId: Id.describe('Session id — from list_campaign_trash') },
+      async ({ sessionId }) => {
+        const row = await this.sessions.getRowOrThrow(sessionId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.sessions.restore(sessionId as number, user, role);
       },
     );
 
@@ -2445,6 +2611,38 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.characters.remove(characterId as number, user, role);
         return { ok: true, characterId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'restore_character',
+      'Restore a trashed character (issue #116) — dm or the owning player. 404 if not in the trash.',
+      { characterId: Id.describe('Character id — from list_campaign_trash') },
+      async ({ characterId }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number, true);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.characters.restore(characterId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'adjust_spell_slots',
+      'Spend (+delta) or restore (-delta) spell slots at one level for a character — dm or the owning player. `used` is ' +
+        'clamped to [0, max]. 400 if the character has no slots at that level.',
+      { characterId: Id.describe('Character id'), ...SpellSlotPatch.shape },
+      async ({ characterId, level, delta }) => {
+        const row = await this.characters.getRowOrThrow(characterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'player');
+        return this.characters.patchSpellSlots(
+          characterId as number,
+          { level: level as number, delta: delta as number },
+          user,
+          role,
+        );
       },
     );
 
@@ -2666,6 +2864,19 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'restore_note',
+      'Restore a trashed note (issue #116). Author only — dm may NOT restore another member\'s note. 404 if not in trash.',
+      { noteId: Id.describe('Note id') },
+      async ({ noteId }) => {
+        const row = await this.notes.getRowOrThrow(noteId as number, true);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.notes.restore(noteId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'submit_inbox_item',
       'Any member may send a message up to the DM (e.g. a player asking a rules question, flagging something out ' +
         'of character). Appears in read_inbox until a dm calls resolve_inbox_item.',
@@ -2802,6 +3013,126 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'revise_proposal',
+      'Revise YOUR OWN still-pending proposal\'s create/update payload before the DM acts (issue #124). Only the ' +
+        'original proposer may revise; 403 otherwise, 409 if already resolved. Delete proposals cannot be revised.',
+      { proposalId: Id.describe('Proposal id'), ...ProposalRevise.shape },
+      async ({ proposalId, payload }) => {
+        const row = await this.proposals.getRowOrThrow(proposalId as number);
+        const role = await this.access.requireMember(user, row.campaignId);
+        return this.proposals.revise(proposalId as number, { payload: payload as Record<string, unknown> }, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'batch_approve_proposals',
+      'DM only: approve up to 100 pending proposals in one call. Each id is resolved independently — one failure ' +
+        'does not abort the rest. Returns { results: [{ id, ok, ... }] }.',
+      { ...ProposalBatchResolve.shape },
+      async ({ ids, note }) => {
+        const results = await this.proposals.resolveBatch(
+          ids as number[],
+          'approve',
+          note as string | undefined,
+          user,
+          (campaignId) => this.access.requireRole(user, campaignId, 'dm'),
+        );
+        return { results };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'batch_reject_proposals',
+      'DM only: reject up to 100 pending proposals in one call. No entity writes are applied. Returns per-id results.',
+      { ...ProposalBatchResolve.shape },
+      async ({ ids, note }) => {
+        const results = await this.proposals.resolveBatch(
+          ids as number[],
+          'reject',
+          note as string | undefined,
+          user,
+          (campaignId) => this.access.requireRole(user, campaignId, 'dm'),
+        );
+        return { results };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_notification_preferences',
+      'Update the caller\'s notification preferences for one campaign (category delivery modes and/or quiet hours). ' +
+        'Critical access/security categories stay always-on. 404 when not a member.',
+      { campaignId: CampaignIdArg, ...NotificationPreferencesUpdate.shape },
+      async ({ campaignId, ...fields }) => {
+        const validated = NotificationPreferencesUpdate.parse(fields);
+        return this.notifications.setPreferences(user, campaignId as number, validated);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'mark_notification_read',
+      'Mark one of the caller\'s notifications read. Recipient only — 404 for anyone else. Idempotent.',
+      { notificationId: Id.describe('Notification id — from list_notifications') },
+      async ({ notificationId }) => this.notifications.markRead(notificationId as number, user),
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'mark_notification_unread',
+      'Mark one of the caller\'s notifications unread. Recipient only — 404 for anyone else. Idempotent.',
+      { notificationId: Id.describe('Notification id — from list_notifications') },
+      async ({ notificationId }) => this.notifications.markUnread(notificationId as number, user),
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'mark_notifications_read',
+      'Mark selected, campaign-scoped, or all of the caller\'s notifications read. At least one of ids, campaignId, ' +
+        'or all:true is required.',
+      BulkNotificationArgs,
+      async ({ ids, campaignId, all }) =>
+        this.notifications.markReadBulk(user, {
+          ids: ids as number[] | undefined,
+          campaignId: campaignId as number | undefined,
+          all: all as boolean | undefined,
+        }),
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'mark_notifications_unread',
+      'Mark selected, campaign-scoped, or all of the caller\'s notifications unread.',
+      BulkNotificationArgs,
+      async ({ ids, campaignId, all }) =>
+        this.notifications.markUnreadBulk(user, {
+          ids: ids as number[] | undefined,
+          campaignId: campaignId as number | undefined,
+          all: all as boolean | undefined,
+        }),
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'mark_all_notifications_read',
+      'Mark every notification owned by the caller read.',
+      {},
+      async () => this.notifications.markAllRead(user),
+    );
+
+    this.writeTool(
+      server,
+      user,
       'add_member',
       'DM only: add a campaign member by user id, with a role (dm|player|viewer) and optional linked characterId.',
       { campaignId: CampaignIdArg, ...MemberCreate.shape },
@@ -2810,6 +3141,68 @@ export class McpToolsService {
         const validated = MemberCreate.parse(fields);
         return this.members.create(campaignId as number, validated, user);
       },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'create_invite',
+      'DM only: create a shareable invite link. Role is capped to player/viewer; the code always expires (default 7 ' +
+        'days) and may be use-capped. Refused while public invites are suspended.',
+      { campaignId: CampaignIdArg, ...InviteCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm');
+        const validated = InviteCreate.parse(fields);
+        return this.invites.create(campaignId as number, validated, user);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'revoke_invite',
+      'DM only: revoke one invite link immediately. Existing members are unaffected. Allowed on archived campaigns.',
+      { campaignId: CampaignIdArg, inviteId: Id.describe('Invite id — from list_invites') },
+      async ({ campaignId, inviteId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        await this.invites.revoke(campaignId as number, inviteId as number, user);
+        return { ok: true, inviteId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'revoke_all_invites',
+      'DM only: permanently delete every invite row in a campaign (including expired history). Returns { revoked }.',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.invites.revokeAll(campaignId as number, user);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'set_invite_policy',
+      'DM only: enable or disable the campaign public-invite policy. Disabling suspends every outstanding code without ' +
+        'deleting rows; re-enabling is refused while archived or trashed.',
+      { campaignId: CampaignIdArg, ...InvitePolicyUpdate.shape },
+      async ({ campaignId, enabled }) => {
+        await this.access.requireRole(user, campaignId as number, 'dm', { allowArchived: true });
+        return this.invites.setPolicy(campaignId as number, enabled as boolean, user);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'join_invite',
+      'Accept an invite as the current authenticated user — adds membership at the invite\'s role. 404 when invalid, ' +
+        '409 when already a member.',
+      { code: z.string().min(1).max(200).describe('Invite join code — from preview_invite or list_invites') },
+      async ({ code }) => this.invites.join(code as string, user),
     );
 
     this.writeTool(
@@ -3574,6 +3967,21 @@ export class McpToolsService {
     this.writeTool(
       server,
       user,
+      'reopen_encounter',
+      'DM only: reopen an ended encounter back to running, preserving round/turn state. When character sheets advanced ' +
+        'after End, pass hpResync decisions for each conflict from GET (issue #466).',
+      { encounterId: Id.describe('Encounter id'), ...EncounterReopen.shape },
+      async ({ encounterId, hpResync }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        const body = EncounterReopen.parse(hpResync !== undefined ? { hpResync } : {});
+        return this.encounters.reopen(encounterId as number, user, role, body);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
       'delete_encounter',
       'DM only: permanently delete an encounter (combat tracker) and all of its combatants. Irreversible. Does NOT ' +
         'write combatant hp back to characters — use end_encounter first if you want the fight\'s damage to persist.',
@@ -4013,6 +4421,47 @@ export class McpToolsService {
         const campaignId = await this.revisions.campaignIdForEntityOrThrow(type, entityId as number);
         const role = await this.access.requireRole(user, campaignId, 'dm');
         return this.revisions.restore(type, entityId as number, revisionId as number, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'reveal_attachment',
+      'DM only: reveal a staged handout attachment to the party (issue #97) — sets hidden=false so every member can ' +
+        'fetch/list it. Binary bytes remain REST-only (GET /attachments/:id/file).',
+      { attachmentId: Id.describe('Attachment id — from list_attachments') },
+      async ({ attachmentId }) => {
+        const row = await this.attachments.getRowOrThrow(attachmentId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.attachments.setHidden(attachmentId as number, false, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'hide_attachment',
+      'DM only: re-hide an attachment from players — sets hidden=true (issue #97).',
+      { attachmentId: Id.describe('Attachment id') },
+      async ({ attachmentId }) => {
+        const row = await this.attachments.getRowOrThrow(attachmentId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.attachments.setHidden(attachmentId as number, true, user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_attachment',
+      'Delete an attachment\'s metadata (and queue filesystem erasure). Uploader or dm only. Uploading new files is ' +
+        'REST-only multipart POST /campaigns/:campaignId/attachments.',
+      { attachmentId: Id.describe('Attachment id') },
+      async ({ attachmentId }) => {
+        const row = await this.attachments.getRowOrThrow(attachmentId as number);
+        const role = await this.access.requireMember(user, row.campaignId, { write: true });
+        return this.attachments.remove(attachmentId as number, user, role);
       },
     );
   }
