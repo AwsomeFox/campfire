@@ -410,6 +410,8 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
   afterAll(async () => {
     await idp.close();
+    // Allow NODE_V8_COVERAGE blobs to flush after the last child exits.
+    await new Promise((r) => setTimeout(r, 100));
     await mergeChildV8Coverage();
     cleanupChildV8CoverageDir();
   });
