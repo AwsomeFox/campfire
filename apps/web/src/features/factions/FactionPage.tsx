@@ -18,6 +18,8 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
+import { buildFactionRevealPreview } from '../../components/entityRevealPreview';
 import { GameIcon } from '../../components/GameIcon';
 import {
   DmPrivacyGroup,
@@ -56,7 +58,6 @@ export default function FactionPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [togglingHidden, setTogglingHidden] = useState(false);
   const [bumping, setBumping] = useState(false);
   // Optimistic-concurrency guard (#157/#440): a stale save 409s instead of clobbering a
   // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
@@ -104,21 +105,6 @@ export default function FactionPage() {
     setEditing(true);
   }
 
-  // Entity-level secrecy (issue #42): reveal/hide the whole faction from players.
-  async function toggleHidden() {
-    if (!faction) return;
-    setTogglingHidden(true);
-    try {
-      const updated = await api.patch<Faction>(`${API}/factions/${id}`, { hidden: !faction.hidden });
-      setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't change visibility.");
-    } finally {
-      setTogglingHidden(false);
-    }
-  }
-
-  // Reputation control (issue #221): bump the numeric score and/or set the standing label.
   async function adjustReputation(patch: { delta?: number; standing?: FactionStanding }) {
     if (!faction) return;
     setBumping(true);
@@ -246,6 +232,14 @@ export default function FactionPage() {
 
   if (!faction) return null;
 
+  const revealPreview = buildFactionRevealPreview({
+    name: faction.name,
+    kind: faction.kind,
+    body: faction.body,
+    goals: faction.goals,
+    memberNames: faction.members.map((m) => m.name),
+  });
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('faction', faction.id)}>
       <DetailPageWayfinding
@@ -286,15 +280,20 @@ export default function FactionPage() {
             {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {canDmWrite && (
               <div className="flex gap-2 ml-auto">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  disabled={togglingHidden}
-                  onClick={toggleHidden}
-                  title={faction.hidden ? 'Make this faction visible to players' : 'Hide this faction from players'}
-                >
-                  {togglingHidden ? '…' : faction.hidden ? <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Reveal</> : <><GameIcon slug="sight-disabled" size={12} className="inline align-text-bottom" /> Hide</>}
-                </Btn>
+                <EntitySecrecyControls
+                  entityKind="faction"
+                  entityName={faction.name}
+                  hidden={faction.hidden}
+                  preview={revealPreview}
+                  onReveal={async () => {
+                    const updated = await api.patch<Faction>(`${API}/factions/${id}`, { hidden: false });
+                    setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
+                  }}
+                  onUndoReveal={async () => {
+                    const updated = await api.patch<Faction>(`${API}/factions/${id}`, { hidden: true });
+                    setFaction((prev) => (prev ? { ...updated, members: prev.members } : prev));
+                  }}
+                />
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>

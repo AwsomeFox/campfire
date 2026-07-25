@@ -32,6 +32,8 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
+import { buildQuestRevealPreview } from '../../components/entityRevealPreview';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { Toggle } from '../../components/Toggle';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
@@ -127,7 +129,6 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
-  const [togglingHidden, setTogglingHidden] = useState(false);
 
   // Objectives being toggled right now (keyed by objective id). Guards against the
   // optimistic-update race where a fast double-toggle could roll back to the wrong
@@ -362,20 +363,6 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
     }
   }
 
-  // Entity-level secrecy (issue #42): reveal/hide the whole quest from players.
-  async function toggleHidden() {
-    if (!quest) return;
-    setTogglingHidden(true);
-    try {
-      const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: !quest.hidden });
-      setQuest({ ...quest, ...updated });
-    } catch {
-      setError(quest.hidden ? t('quests.revealFailed') : t('quests.hideFailed'));
-    } finally {
-      setTogglingHidden(false);
-    }
-  }
-
   async function saveDmSecret() {
     if (!quest) return;
     setSavingDmSecret(true);
@@ -463,6 +450,14 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
 
   const hasSubs = subquests.length > 0;
   const showSecret = isDm && (quest.dmSecret || editingDmSecret);
+  const revealPreview = buildQuestRevealPreview({
+    title: quest.title,
+    body: quest.body,
+    reward: quest.reward,
+    objectives: quest.objectives,
+    giverName: giver?.name,
+    subquestTitles: subquests.map((sq) => sq.title),
+  });
 
   return (
     <div className="max-w-6xl mx-auto px-4 mt-5 pb-20 lg:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 14 }} {...entityTargetProps('quest', quest.id)}>
@@ -494,16 +489,21 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         {isDm && quest.hidden && <Chip variant="failed">{t('quests.hiddenChip')}</Chip>}
         {canDmWrite && (
           <>
+            <EntitySecrecyControls
+              entityKind="quest"
+              entityName={quest.title}
+              hidden={quest.hidden}
+              preview={revealPreview}
+              onReveal={async () => {
+                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: false });
+                setQuest({ ...quest, ...updated });
+              }}
+              onUndoReveal={async () => {
+                const updated = await api.patch<Quest>(`${API}/quests/${quest.id}`, { hidden: true });
+                setQuest({ ...quest, ...updated });
+              }}
+            />
             <div style={{ flex: 1 }} />
-            <Btn
-              ghost
-              className="!min-h-0 !py-1.5 text-xs"
-              disabled={togglingHidden}
-              onClick={toggleHidden}
-              title={quest.hidden ? t('quests.makeVisible') : t('quests.hideFromPlayers')}
-            >
-              {togglingHidden ? '…' : quest.hidden ? t('quests.reveal') : t('quests.hide')}
-            </Btn>
             <Btn
               ghost
               className="!min-h-0 !py-1.5 text-xs"

@@ -34,6 +34,8 @@ import { NotesRail } from '../../components/NotesRail';
 import { attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
+import { buildLocationRevealPreview } from '../../components/entityRevealPreview';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
@@ -471,6 +473,14 @@ export default function LocationPage() {
   const px = location.mapX ?? 50;
   const py = location.mapY ?? 50;
   const nextStatus = NEXT_STATUS[location.status];
+  const revealPreview = buildLocationRevealPreview({
+    name: location.name,
+    kind: location.kind,
+    body: location.body,
+    hereNpcNames: hereNpcs.map((n) => n.name),
+    connectedQuestTitles: connectedQuests.map((q) => q.title),
+    childLocationNames: children.map((c) => c.name),
+  });
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
@@ -508,12 +518,26 @@ export default function LocationPage() {
             {isDm && location.status === 'unexplored' && (
               <Chip variant="failed" className="!ml-0"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>
             )}
-            {canDmWrite && nextStatus && (
+            {canDmWrite && location.status === 'unexplored' && (
+              <EntitySecrecyControls
+                entityKind="location"
+                entityName={location.name}
+                hidden
+                preview={revealPreview}
+                onReveal={async () => {
+                  await setStatus('explored');
+                }}
+                onUndoReveal={async () => {
+                  await setStatus('unexplored');
+                }}
+              />
+            )}
+            {canDmWrite && nextStatus && location.status !== 'unexplored' && (
               <Btn
                 className="!min-h-0 !py-1.5 text-xs"
                 disabled={statusSaving}
                 onClick={() => setStatus(nextStatus)}
-                title={location.status === 'unexplored' ? 'Reveal to players (mark explored)' : NEXT_STATUS_LABEL[location.status]}
+                title={NEXT_STATUS_LABEL[location.status]}
               >
                 {NEXT_STATUS_LABEL[location.status]}
               </Btn>
