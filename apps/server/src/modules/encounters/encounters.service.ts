@@ -187,9 +187,12 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
     for (const rawName of stringConditions) {
       const name = rawName.trim();
       if (!name) continue;
-      if (!existingNames.has(name.toLowerCase())) {
+      const key = name.toLowerCase();
+      if (!existingNames.has(key)) {
+        existingNames.add(key);
+        const slug = key.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
         instances.push({
-          id: `legacy_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+          id: `legacy_${slug}`.slice(0, 40),
           name,
           ruleEntryId: null,
           source: null,
