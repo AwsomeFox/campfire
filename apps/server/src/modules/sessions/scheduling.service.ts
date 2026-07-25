@@ -1,11 +1,10 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, count } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   ScheduledSessionCreate,
   ScheduledSessionUpdate,
   RsvpSet,
-  partitionSchedules,
   diffScheduleNotificationFields,
   shouldNotifyScheduleUpdate,
   scheduleNotificationChangeType,
@@ -14,7 +13,9 @@ import {
   scheduleNotificationLabel,
   type ScheduleNotificationData,
 } from '@campfire/schema';
-import type { ScheduledSession, ScheduledSessionWithRsvps, SessionRsvp, CalendarFeed, Role } from '@campfire/schema';
+import type { ScheduledSession, ScheduledSessionWithRsvps, ScheduledSessionListPage, SessionRsvp, CalendarFeed, Role, PageParams } from '@campfire/schema';
+import { SCHEDULE_PAST_DEFAULT_LIMIT, SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
+import { applyPage } from '../../common/pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { scheduledSessions, sessionRsvps, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -29,6 +30,14 @@ import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { buildCampaignIcs } from './ics.util';
+import {
+  scheduleEndedSql,
+  scheduleInProgressSql,
+  scheduleNotEndedSql,
+  scheduleUpcomingOnlySql,
+} from './scheduling-queries';
+
+const PAST_LIST_MAX = SCHEDULE_PAST_MAX_LIMIT;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -145,23 +154,87 @@ export class SchedulingService {
 
   // ----- scheduled sessions -----
 
+  private groupRsvps(rows: Array<typeof sessionRsvps.$inferSelect>): Map<number, SessionRsvp[]> {
+    const map = new Map<number, SessionRsvp[]>();
+    for (const row of rows) {
+      const list = map.get(row.scheduledSessionId) ?? [];
+      list.push(rsvpToDomain(row));
+      map.set(row.scheduledSessionId, list);
+    }
+    return map;
+  }
+
+  private async attachRsvps(rows: Array<typeof scheduledSessions.$inferSelect>): Promise<ScheduledSessionWithRsvps[]> {
+    if (rows.length === 0) return [];
+    const rsvpRows = await this.db
+      .select()
+      .from(sessionRsvps)
+      .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id)));
+    const grouped = this.groupRsvps(rsvpRows);
+    return rows.map((row) => ({
+      ...toDomain(row),
+      rsvps: grouped.get(row.id) ?? [],
+    }));
+  }
+
+  /** Full schedule list — kept for export/MCP backward compatibility. Prefer upcoming/past splits (#612). */
   async listForCampaign(campaignId: number): Promise<ScheduledSessionWithRsvps[]> {
     const rows = await this.db
       .select()
       .from(scheduledSessions)
       .where(eq(scheduledSessions.campaignId, campaignId))
       .orderBy(asc(scheduledSessions.scheduledAt));
-    if (rows.length === 0) return [];
+    return this.attachRsvps(rows);
+  }
 
-    const rsvpRows = await this.db
+  /**
+   * Live schedule projection: in-progress + upcoming nights, soonest-first (#612).
+   * Queries only not-yet-ended rows instead of loading full history.
+   */
+  async listUpcomingForCampaign(campaignId: number, nowMs: number = Date.now()): Promise<ScheduledSessionWithRsvps[]> {
+    const nowIso = new Date(nowMs).toISOString();
+    const rows = await this.db
       .select()
-      .from(sessionRsvps)
-      .where(inArray(sessionRsvps.scheduledSessionId, rows.map((r) => r.id)));
+      .from(scheduledSessions)
+      .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleNotEndedSql(nowIso)))
+      .orderBy(asc(scheduledSessions.scheduledAt));
+    return this.attachRsvps(rows);
+  }
 
-    return rows.map((row) => ({
-      ...toDomain(row),
-      rsvps: rsvpRows.filter((r) => r.scheduledSessionId === row.id).map(rsvpToDomain),
-    }));
+  /**
+   * Ended scheduled nights, most-recent first, paginated (#612).
+   */
+  async listPastForCampaign(
+    campaignId: number,
+    page?: PageParams,
+    nowMs: number = Date.now(),
+  ): Promise<ScheduledSessionListPage> {
+    const limit =
+      page?.limit !== undefined
+        ? Math.min(Math.max(1, Math.floor(page.limit)), PAST_LIST_MAX)
+        : SCHEDULE_PAST_DEFAULT_LIMIT;
+    const offset = page?.offset !== undefined ? Math.max(0, Math.floor(page.offset)) : 0;
+    const nowIso = new Date(nowMs).toISOString();
+    const where = and(eq(scheduledSessions.campaignId, campaignId), scheduleEndedSql(nowIso));
+
+    const [{ value: total }] = await this.db.select({ value: count() }).from(scheduledSessions).where(where);
+
+    let q = this.db
+      .select()
+      .from(scheduledSessions)
+      .where(where)
+      .orderBy(desc(scheduledSessions.scheduledAt))
+      .$dynamic();
+    q = applyPage(q, { limit, offset });
+    const rows = await q;
+    const items = await this.attachRsvps(rows);
+    return {
+      items,
+      total,
+      hasMore: offset + items.length < total,
+      limit,
+      offset,
+    };
   }
 
   /**
@@ -207,16 +280,32 @@ export class SchedulingService {
    * next not-yet-started night. Overlapping in-progress rows prefer the earliest
    * start; list order from listForCampaign is soonest-first.
    */
-  async currentAndNextForCampaign(campaignId: number): Promise<{
+  async currentAndNextForCampaign(campaignId: number, nowMs: number = Date.now()): Promise<{
     inProgressSession: ScheduledSessionWithRsvps | null;
     nextSession: ScheduledSessionWithRsvps | null;
   }> {
-    const all = await this.listForCampaign(campaignId);
-    const now = Date.now();
-    const { inProgress, upcoming } = partitionSchedules(all, now);
+    const nowIso = new Date(nowMs).toISOString();
+    const [inProgressRows, upcomingRows] = await Promise.all([
+      this.db
+        .select()
+        .from(scheduledSessions)
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleInProgressSql(nowIso)))
+        .orderBy(asc(scheduledSessions.scheduledAt))
+        .limit(1),
+      this.db
+        .select()
+        .from(scheduledSessions)
+        .where(and(eq(scheduledSessions.campaignId, campaignId), scheduleUpcomingOnlySql(nowIso)))
+        .orderBy(asc(scheduledSessions.scheduledAt))
+        .limit(1),
+    ]);
+    const [inProgressAttached, nextAttached] = await Promise.all([
+      this.attachRsvps(inProgressRows),
+      this.attachRsvps(upcomingRows),
+    ]);
     return {
-      inProgressSession: inProgress[0] ?? null,
-      nextSession: upcoming[0] ?? null,
+      inProgressSession: inProgressAttached[0] ?? null,
+      nextSession: nextAttached[0] ?? null,
     };
   }
 
@@ -544,7 +633,7 @@ export class SchedulingService {
     // Issue #867: a trashed campaign's public calendar feed must look identical to
     // an unknown/rotated token — no schedule disclosure after Trash.
     if (campaign.deletedAt != null) throw new NotFoundException('Unknown calendar feed');
-    const schedules = await this.listForCampaign(campaign.id);
+    const schedules = await this.listUpcomingForCampaign(campaign.id);
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }
 }

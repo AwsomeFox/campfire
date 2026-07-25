@@ -81,6 +81,15 @@ export const PageParams = z.object({
 });
 export type PageParams = z.infer<typeof PageParams>;
 
+/** Default page size for session log lists (issue #612). */
+export const SESSIONS_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on session lists — clients page with offset, not a huge page. */
+export const SESSIONS_LIST_MAX_LIMIT = 200;
+/** Default page size for past scheduled-session history (issue #612). */
+export const SCHEDULE_PAST_DEFAULT_LIMIT = 20;
+/** Hard cap for `?limit=` on past schedule lists. */
+export const SCHEDULE_PAST_MAX_LIMIT = 100;
+
 // ---------- optimistic concurrency (issue #157) ----------
 // The `updatedAt` timestamp a client last read for an entity, echoed back on a
 // PATCH/update as a compare-and-swap guard. When provided and it no longer matches
@@ -892,6 +901,22 @@ export const SessionListItem = Session.omit({ recap: true }).extend({
 });
 export type SessionListItem = z.infer<typeof SessionListItem>;
 
+/**
+ * Paginated session-log list response (issue #612).
+ *
+ * Returned when the sessions list endpoint is called with `?limit` and/or `?offset`.
+ * Newest-first (`number` desc). Always includes `total` + `hasMore` so the UI never
+ * silently truncates a long campaign history.
+ */
+export const SessionListPage = z.object({
+  items: z.array(SessionListItem),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type SessionListPage = z.infer<typeof SessionListPage>;
+
 // The canonical recap scaffold — the structured headings a DM fills instead of
 // staring at a blank box. Shared by the web "Insert template" affordance and the
 // MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
@@ -1042,6 +1067,18 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Paginated past-schedule list (issue #612). Most-recent ended nights first.
+ */
+export const ScheduledSessionListPage = z.object({
+  items: z.array(ScheduledSessionWithRsvps),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
 
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';

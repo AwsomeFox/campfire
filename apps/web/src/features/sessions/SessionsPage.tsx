@@ -14,8 +14,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
-import { RECAP_TEMPLATE } from '@campfire/schema';
+import type { Session, SessionListItem, SessionListPage, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
+import { RECAP_TEMPLATE, SESSIONS_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
@@ -31,6 +31,7 @@ import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { VirtualList } from '../../components/VirtualList';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
@@ -148,6 +149,10 @@ export default function SessionsPage() {
   // List-shape sessions (issue #71): each carries a `recapExcerpt`, not the full
   // recap body — SessionDetail fetches the full recap for the opened session.
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [totalSessions, setTotalSessions] = useState(0);
+  const [hasMoreSessions, setHasMoreSessions] = useState(false);
+  const [sessionOffset, setSessionOffset] = useState(0);
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -196,9 +201,15 @@ export default function SessionsPage() {
     setError(null);
     setForbidden(false);
     setLoading(true);
+    setSessionOffset(0);
     try {
-      const list = await api.get<SessionListItem[]>(`${API}/campaigns/${cid}/sessions`);
-      setSessions(list);
+      const page = await api.get<SessionListPage>(
+        `${API}/campaigns/${cid}/sessions?limit=${SESSIONS_LIST_DEFAULT_LIMIT}&offset=0`,
+      );
+      setSessions(page.items);
+      setTotalSessions(page.total);
+      setHasMoreSessions(page.hasMore);
+      setSessionOffset(page.items.length);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
@@ -209,6 +220,28 @@ export default function SessionsPage() {
       setLoading(false);
     }
   }, [cid]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (!hasMoreSessions || loadingMoreSessions || loading) return;
+    setLoadingMoreSessions(true);
+    setError(null);
+    try {
+      const page = await api.get<SessionListPage>(
+        `${API}/campaigns/${cid}/sessions?limit=${SESSIONS_LIST_DEFAULT_LIMIT}&offset=${sessionOffset}`,
+      );
+      setSessions((prev) => {
+        const seen = new Set(prev.map((s) => s.id));
+        return [...prev, ...page.items.filter((s) => !seen.has(s.id))];
+      });
+      setTotalSessions(page.total);
+      setHasMoreSessions(page.hasMore);
+      setSessionOffset((prev) => prev + page.items.length);
+    } catch {
+      setError("Couldn't load more sessions.");
+    } finally {
+      setLoadingMoreSessions(false);
+    }
+  }, [cid, hasMoreSessions, loadingMoreSessions, loading, sessionOffset]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -279,6 +312,7 @@ export default function SessionsPage() {
   }
 
   function nextNumber() {
+    if (sessions.length === 0) return 1;
     return sessions.reduce((max, s) => Math.max(max, s.number), 0) + 1;
   }
 
@@ -450,60 +484,83 @@ export default function SessionsPage() {
               <EmptyState title="No sessions yet — add your first recap" />
             </Card>
           ) : (
-            <ul className="flex flex-col" role="list" aria-label="Session recaps">
-              {sessions.map((s) => {
-                const isActive = selected?.id === s.id;
-                const title = s.title || 'Untitled session';
-                return (
-                  <li key={s.id}>
-                    <button
-                      type="button"
-                      onClick={() => selectSession(s.id)}
-                      aria-current={isActive ? 'true' : undefined}
-                      aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
-                      className="text-left"
-                      style={{
-                        display: 'flex',
-                        gap: 14,
-                        border: 0,
-                        background: 'transparent',
-                        font: 'inherit',
-                        color: 'var(--color-text)',
-                        cursor: 'pointer',
-                        padding: '14px 0 14px 16px',
-                        borderLeft: `2px solid ${isActive ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
-                        position: 'relative',
-                      }}
-                    >
-                      <span
+            <div className="space-y-2">
+              <p className="text-muted text-xs m-0" role="status">
+                {totalSessions > 0
+                  ? `Showing ${sessions.length} of ${totalSessions} session${totalSessions === 1 ? '' : 's'}`
+                  : ''}
+              </p>
+              <div role="list" aria-label="Session recaps">
+              <VirtualList
+                items={sessions}
+                estimateHeight={96}
+                maxHeight="min(70vh, 640px)"
+                className="flex flex-col"
+              >
+                {(s) => {
+                  const isActive = selected?.id === s.id;
+                  const title = s.title || 'Untitled session';
+                  return (
+                    <div key={s.id} role="listitem">
+                      <button
+                        type="button"
+                        onClick={() => selectSession(s.id)}
+                        aria-current={isActive ? 'true' : undefined}
+                        aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
+                        className="text-left w-full"
                         style={{
-                          position: 'absolute',
-                          left: -5,
-                          top: 20,
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          background: isActive ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                          display: 'flex',
+                          gap: 14,
+                          border: 0,
+                          background: 'transparent',
+                          font: 'inherit',
+                          color: 'var(--color-text)',
+                          cursor: 'pointer',
+                          padding: '14px 0 14px 16px',
+                          borderLeft: `2px solid ${isActive ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
+                          position: 'relative',
                         }}
-                      />
-                      <span className="flex-1 min-w-0">
-                        <span className="flex gap-2.5 items-baseline flex-wrap">
-                          <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
-                            Session {s.number}
+                      >
+                        <span
+                          style={{
+                            position: 'absolute',
+                            left: -5,
+                            top: 20,
+                            width: 8,
+                            height: 8,
+                            borderRadius: '50%',
+                            background: isActive ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                          }}
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="flex gap-2.5 items-baseline flex-wrap">
+                            <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
+                              Session {s.number}
+                            </span>
+                            <span className="font-heading text-[16px]">{title}</span>
+                            <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
                           </span>
-                          <span className="font-heading text-[16px]">{title}</span>
-                          <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                          <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
-                        <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
-                      </span>
-                      {/* sr-only "Selected" flag mirrors aria-current so screen readers
-                          that don't voice aria-current on a <button> still get the state. */}
-                      {isActive && <span className="sr-only">Selected</span>}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                        {isActive && <span className="sr-only">Selected</span>}
+                      </button>
+                    </div>
+                  );
+                }}
+              </VirtualList>
+              </div>
+              {hasMoreSessions && (
+                <Btn
+                  ghost
+                  type="button"
+                  className="!min-h-0 !py-1.5 text-xs w-full"
+                  onClick={() => void loadMoreSessions()}
+                  disabled={loadingMoreSessions}
+                >
+                  {loadingMoreSessions ? 'Loading…' : 'Load older sessions'}
+                </Btn>
+              )}
+            </div>
           )}
         </aside>
 
