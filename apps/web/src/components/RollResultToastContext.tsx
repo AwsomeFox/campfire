@@ -84,13 +84,10 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     setOverlay(null);
   }, [clearSettleTimer]);
 
-  const applyToast = useCallback(
-    (r: DiceRoll, options?: ShowRollOptions) => {
-      setRoll(r);
-      setRollApplyHandler(options?.onApply ?? applyHandler);
-    },
-    [applyHandler],
-  );
+  const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
+    setRoll(r);
+    setRollApplyHandler(options?.onApply ?? applyHandlerRef.current);
+  }, []);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     if (prefersReducedMotion() || !overlayRef.current) {
@@ -126,6 +123,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   }, [applyToast]);
 
   const setApplyDamageHandler = useCallback((handler: ApplyDamageHandler | null) => {
+    applyHandlerRef.current = handler;
     setApplyHandler(handler);
   }, []);
 
