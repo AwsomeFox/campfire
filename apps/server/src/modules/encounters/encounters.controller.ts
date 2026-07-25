@@ -293,6 +293,36 @@ export class EncountersController {
     return this.encounters.getDifficulty(id, role);
   }
 
+  @Get(':id/aftermath')
+  @ApiOperation({
+    summary: 'Post-encounter aftermath workflow (issue #473)',
+    description:
+      'DM only. Read-only hand-off for an ended encounter: outcome review, recap draft seeded from ' +
+      'the combat log, adapter-aware XP guidance, and deep links to loot/treasury, quest, and recap surfaces.',
+  })
+  @ApiResponse({ status: 200, description: 'Aftermath read model with recap draft and hand-off links.' })
+  @ApiResponse({ status: 400, description: 'Encounter is not ended.' })
+  async aftermath(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.getAftermath(id, role);
+  }
+
+  @Post(':id/aftermath/dismiss')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Defer the aftermath panel (issue #473)',
+    description:
+      'DM only. Idempotent — records that the DM chose to skip/defer the post-encounter workflow. ' +
+      'Cleared automatically when the encounter is reopened.',
+  })
+  @ApiResponse({ status: 200, description: '{ dismissedAt } timestamp.' })
+  async dismissAftermath(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.dismissAftermath(id, user, role);
+  }
+
   @Patch(':id')
   @ApiOperation({
     summary: 'Update an encounter',

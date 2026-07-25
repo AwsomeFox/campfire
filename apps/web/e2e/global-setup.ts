@@ -482,6 +482,7 @@ export default async function globalSetup(config: FullConfig) {
   const linkedEndedEncounter = await okJson(dm, 'post', `/api/v1/campaigns/${campaignId}/encounters`, {
     name: 'Linked Aftermath at the Moon Gate',
     sessionId: navSession.id,
+    questId: navQuest.id,
     hidden: false,
   });
   const linkedEndedEncounterId: number = linkedEndedEncounter.id;

@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterAftermath, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -44,6 +44,11 @@ import {
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
 } from './encounters.logic';
+import {
+  aftermathOutcome,
+  buildEncounterAftermathRecapDraft,
+  suggestedXpFromDifficulty,
+} from './encounter-aftermath.logic';
 import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
@@ -1685,6 +1690,91 @@ export class EncountersService {
       partyLevels,
       monsterChallengeRatings: monsterCrs,
     });
+  }
+
+  /**
+   * Post-encounter aftermath read model (issue #473): outcome review, recap draft seeded
+   * from combat events, adapter-aware XP guidance, and deep-link hand-offs. DM-only;
+   * only meaningful for ended encounters.
+   */
+  async getAftermath(encounterId: number, role: Role): Promise<EncounterAftermath> {
+    const encounter = await this.getWithCombatantsOrThrow(encounterId, role);
+    if (encounter.status !== 'ended') {
+      throw new BadRequestException('Aftermath is only available for ended encounters');
+    }
+    const row = await this.getRowOrThrow(encounterId);
+    const events = await this.listEvents(encounterId, role);
+    const difficulty = await this.getDifficulty(encounterId, role);
+    const outcome = aftermathOutcome(encounter.combatants, encounter.round);
+    const { recapDraft, combatLogHighlights } = buildEncounterAftermathRecapDraft(encounter, events);
+    const characterCount = encounter.combatants.filter((c) => c.kind === 'character').length;
+    const xp = suggestedXpFromDifficulty(difficulty, characterCount);
+    const campaignId = encounter.campaignId;
+    const base = `/c/${campaignId}`;
+    const recapPath =
+      encounter.sessionId == null
+        ? `${base}/sessions?action=new-recap&fromEncounter=${encounterId}`
+        : `${base}/sessions?session=${encounter.sessionId}&action=edit-recap&fromEncounter=${encounterId}`;
+    const xpQuery = xp.suggestedPerCharacter != null ? `&amount=${xp.suggestedPerCharacter}` : '';
+    const handoffs = {
+      recapPath,
+      awardXpPath: `${base}/party?action=award-xp${xpQuery}`,
+      inventoryPath: `${base}/inventory?action=add-item&fromEncounter=${encounterId}`,
+      questPath: encounter.questId != null ? `${base}/quests/${encounter.questId}` : null,
+      sessionPath: encounter.sessionId != null ? `${base}/sessions?session=${encounter.sessionId}` : null,
+      encounterLogPath: `${base}/encounters/${encounterId}#combat-log`,
+    };
+    return {
+      encounterId,
+      campaignId,
+      outcome: {
+        rounds: outcome.rounds,
+        dead: outcome.dead.map((c) => ({ name: c.name, kind: c.kind })),
+        downed: outcome.downed.map((c) => ({ name: c.name, kind: c.kind })),
+        survivors: outcome.survivors.map((c) => ({ name: c.name, kind: c.kind })),
+      },
+      recapDraft,
+      combatLogHighlights,
+      xp: {
+        supported: xp.supported,
+        suggestedPartyTotal: xp.suggestedPartyTotal,
+        suggestedPerCharacter: xp.suggestedPerCharacter,
+        difficultyLabel: xp.difficultyLabel,
+        warnings: xp.warnings,
+      },
+      difficulty,
+      handoffs,
+      questId: encounter.questId,
+      sessionId: encounter.sessionId,
+      locationId: encounter.locationId,
+      dismissedAt: row.aftermathDismissedAt,
+    };
+  }
+
+  /**
+   * Defer the aftermath panel (issue #473). Idempotent — a second call is a no-op.
+   * Cleared automatically when the encounter is reopened.
+   */
+  async dismissAftermath(encounterId: number, user: RequestUser, role: Role): Promise<{ dismissedAt: string }> {
+    const row = await this.getRowOrThrow(encounterId);
+    if (row.status !== 'ended') {
+      throw new BadRequestException('Aftermath can only be dismissed for ended encounters');
+    }
+    if (row.aftermathDismissedAt) {
+      return { dismissedAt: row.aftermathDismissedAt };
+    }
+    const ts = nowIso();
+    await this.db.update(encounters).set({ aftermathDismissedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId));
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.aftermath_dismiss',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: row.campaignId,
+      detail: 'deferred post-encounter aftermath',
+    });
+    return { dismissedAt: ts };
   }
 
   /**
@@ -4645,6 +4735,7 @@ export class EncountersService {
         .set({
           status: 'running',
           endedAt: null,
+          aftermathDismissedAt: null,
           // Issue #489: persist the re-validated pointer with the status flip.
           currentCombatantId,
           turnIndex,

@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -33,6 +33,7 @@ type CoinKey = (typeof COIN_KEYS)[number]['key'];
 export default function InventoryPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const id = Number(campaignId);
   const { me } = useAuth();
   const { isDm, canPlayerWrite } = useCampaignAccess();
@@ -46,7 +47,26 @@ export default function InventoryPage() {
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState(() => searchParams.get('action') === 'add-item');
+
+  const closeAdding = useCallback(() => {
+    setAdding(false);
+    if (searchParams.get('action') === 'add-item') {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('action');
+          next.delete('fromEncounter');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (searchParams.get('action') === 'add-item') setAdding(true);
+  }, [searchParams]);
   // Bumped whenever a `treasury.updated` SSE tick arrives from ANOTHER user. The
   // TreasuryCard watches this to mark its open editor stale (issue #582) instead of
   // silently overwriting a concurrent change on save. Echoes of our own writes are
@@ -200,9 +220,9 @@ export default function InventoryPage() {
             <AddItemForm
               campaignId={id}
               owners={writableOwners}
-              onCancel={() => setAdding(false)}
+              onCancel={closeAdding}
               onCreated={() => {
-                setAdding(false);
+                closeAdding();
                 void load();
               }}
             />
