@@ -3946,6 +3946,17 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export const DiceTheme = z.enum([
+  'nocturne',
+  'obsidian_gold',
+  'arcane_amethyst',
+  'dragon_ruby',
+  'celestial_pearl',
+  'cyberpunk_neon',
+  'eldritch_void',
+  'mahogany_wood',
+]);
+export type DiceTheme = z.infer<typeof DiceTheme>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -3959,6 +3970,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Per-player custom 3D dice texture/skin theme. */
+  diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
   ...timestamps,
@@ -3983,6 +3996,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;

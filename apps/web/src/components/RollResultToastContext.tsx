@@ -12,6 +12,8 @@ import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRo
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
+import { useAuth } from '../app/AuthProvider';
+
 /** Publish tab-bar / keyboard chrome vars while the toast is visible (issue #1315). */
 function RollResultToastChrome() {
   useUndoSnackbarChrome();
@@ -157,13 +159,20 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
     : [];
 
+  const { me } = useAuth();
+
   return (
     <RollResultToastContext.Provider
       value={{ beginRollAnimation, cancelRollAnimation, showRoll, setApplyDamageHandler }}
     >
       {children}
       {overlay && overlayDice.length > 0 && (
-        <DiceRollOverlay dice={overlayDice} phase={overlay.phase} onSettled={handleOverlaySettled} />
+        <DiceRollOverlay
+          dice={overlayDice}
+          phase={overlay.phase}
+          theme={me?.user?.diceTheme}
+          onSettled={handleOverlaySettled}
+        />
       )}
       {roll && (
         <>
