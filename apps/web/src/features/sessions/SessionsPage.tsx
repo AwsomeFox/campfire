@@ -31,7 +31,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { CopyControl } from '../../components/CopyControl';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
-import { CommentsThread } from '../comments/CommentsThread';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { VirtualList } from '../../components/VirtualList';
@@ -1150,9 +1150,7 @@ function SessionDetail({
 
       {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
           surface: react to the recap, ask the DM, or post an in-character scene. */}
-      <Card>
-        <CommentsThread campaignId={campaignId} entityType="session" entityId={session.id} />
-      </Card>
+      <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
     </div>
   );
 }
