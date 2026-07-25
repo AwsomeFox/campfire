@@ -89,26 +89,26 @@ function compareThreshold(name, thresholds, actuals) {
 
 function applySpawnSnapshot(map, snapshot) {
   const spawnFiles = snapshot.files().filter(isOidcServiceCoverageKey);
-  if (spawnFiles.length === 0) return false;
+  if (spawnFiles.length === 0) return map;
 
-  for (const file of map.files()) {
+  const data = map.toJSON();
+  for (const file of Object.keys(data)) {
     if (isOidcServiceCoverageKey(file)) {
-      map.removeFileCoverage(file);
+      delete data[file];
     }
   }
-
   for (const file of spawnFiles) {
     const entry = snapshot.fileCoverageFor(file).toJSON();
     const { all: _all, ...sanitized } = entry;
-    map.addFileCoverage(sanitized);
+    data[file] = sanitized;
   }
-  return true;
+  return libCoverage.createCoverageMap(data);
 }
 
 function main() {
   const snapshot = loadSnapshot();
-  const map = loadCoverageFinal();
-  if (!applySpawnSnapshot(map, snapshot)) {
+  const map = applySpawnSnapshot(loadCoverageFinal(), snapshot);
+  if (snapshot.files().length === 0) {
     console.warn('[oidc-cov] no spawn snapshot found — skipping post-merge');
   } else {
     fs.writeFileSync(COVERAGE_FINAL, JSON.stringify(map.toJSON(), null, 2));
