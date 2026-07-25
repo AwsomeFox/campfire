@@ -5,7 +5,6 @@
  * describes each scope. Whisper notes use a static chip instead — they need a
  * chosen recipient and are not selectable here.
  */
-import type { Note } from '@campfire/schema';
 import { useTranslation } from 'react-i18next';
 import { Chip, type ChipVariant } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
