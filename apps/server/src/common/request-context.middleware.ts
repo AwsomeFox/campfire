@@ -22,7 +22,7 @@ function isSseRequest(req: Request): boolean {
  * response, bind an AsyncLocalStorage context, and emit structured REST access
  * logs when the response finishes. SSE streams and MCP tool calls are excluded
  * (MCP logs per-tool; SSE must not register finish handlers that interfere with
- * Nest's @Sse() lifecycle — issue #684 babysit).
+ * Nest's @Sse() lifecycle).
  */
 export function requestContextMiddleware(req: Request, res: Response, next: NextFunction): void {
   const ctx = createRequestContext({
