@@ -136,6 +136,7 @@ import {
   type MapViewportState,
   type PinchGesture,
 } from './mapViewport';
+import { tokenDiameterPx } from './tokenFootprint';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -1976,18 +1977,8 @@ export default function RunSessionPage() {
 // `tokenInitials` is the shared grapheme-aware helper (issue #631): two-letter
 // token labels from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1").
 
-// Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
-// rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
-const TOKEN_SIZE_SCALE: Record<TokenSize, number> = {
-  tiny: 0.6,
-  small: 0.8,
-  medium: 1,
-  large: 1.6,
-  huge: 2.2,
-  gargantuan: 3,
-};
+// Token footprint categories (issue #40 / #468) — diameters derive from calibrated grid cells.
 const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
-const BASE_TOKEN_PX = 32;
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
 function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: number; h: number } {
@@ -2028,7 +2019,7 @@ type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
-// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+// Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
@@ -3688,7 +3679,11 @@ function BattleMap({
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
                   const movable = tool === 'move' && canMoveToken(c);
                   const isCharacter = c.kind === 'character';
-                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  const sizePx = tokenDiameterPx({
+                    tokenSize: c.tokenSize,
+                    cellPx,
+                    gridType,
+                  });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
