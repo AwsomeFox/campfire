@@ -64,14 +64,17 @@ export function RosterImportCard() {
         </p>
       </div>
 
-      <div className="flex gap-2 text-xs">
-        <label className="flex items-center gap-1 text-slate-300">
-          <input type="radio" checked={format === 'csv'} onChange={() => setFormat('csv')} /> CSV
-        </label>
-        <label className="flex items-center gap-1 text-slate-300">
-          <input type="radio" checked={format === 'json'} onChange={() => setFormat('json')} /> JSON
-        </label>
-      </div>
+      <fieldset className="border-0 p-0 m-0 space-y-1" style={{ minWidth: 0 }}>
+        <legend className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Format</legend>
+        <div className="flex gap-2 text-xs">
+          <label className="flex items-center gap-1 text-slate-300">
+            <input type="radio" name="roster-import-format" value="csv" checked={format === 'csv'} onChange={() => setFormat('csv')} /> CSV
+          </label>
+          <label className="flex items-center gap-1 text-slate-300">
+            <input type="radio" name="roster-import-format" value="json" checked={format === 'json'} onChange={() => setFormat('json')} /> JSON
+          </label>
+        </div>
+      </fieldset>
 
       <textarea
         className="w-full min-h-28 rounded border border-slate-700 bg-slate-900 p-2 text-xs text-slate-100"

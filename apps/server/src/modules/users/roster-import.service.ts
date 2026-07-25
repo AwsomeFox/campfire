@@ -102,6 +102,14 @@ export class RosterImportService {
       throw new ConflictException('batchId does not match the reviewed rows — re-run dry-run after edits');
     }
 
+    const rowByIndex = new Map<number, RosterImportRow>();
+    for (const row of input.rows) {
+      if (rowByIndex.has(row.rowIndex)) {
+        throw new BadRequestException(`Duplicate rowIndex ${row.rowIndex} in commit batch`);
+      }
+      rowByIndex.set(row.rowIndex, row);
+    }
+
     const diagnostics = this.planRows(
       input.rows.map((row) => ({
         rowIndex: row.rowIndex,
@@ -128,7 +136,7 @@ export class RosterImportService {
 
     this.db.transaction((tx) => {
       for (const diag of diagnostics) {
-        const row = input.rows!.find((r) => r.rowIndex === diag.rowIndex);
+        const row = rowByIndex.get(diag.rowIndex);
         if (!row) throw new BadRequestException(`Missing reviewed row ${diag.rowIndex}`);
 
         if (diag.action === 'skip') {
@@ -164,7 +172,7 @@ export class RosterImportService {
               codeHash: hashResetCode(code),
               requestedAt: ts,
               approvedAt: ts,
-              approvedBy: auditActor(actor),
+              approvedBy: actor.name,
               expiresAt,
             })
             .run();
@@ -205,7 +213,7 @@ export class RosterImportService {
           campaignId: row.campaignId,
           userId,
           role,
-          characterId: row.characterId ?? null,
+          characterId: row.characterId,
           ts,
         });
         if (membership === 'added') membershipsAdded++;
@@ -495,7 +503,13 @@ export class RosterImportService {
 
   private applyMembershipTx(
     tx: SyncDb,
-    input: { campaignId: number; userId: number; role: 'dm' | 'player' | 'viewer'; characterId: number | null; ts: string },
+    input: {
+      campaignId: number;
+      userId: number;
+      role: 'dm' | 'player' | 'viewer';
+      characterId: number | null | undefined;
+      ts: string;
+    },
   ): 'added' | 'updated' | 'skipped' {
     const user = tx.select().from(users).where(eq(users.id, input.userId)).limit(1).get();
     if (!user) throw new NotFoundException(`User ${input.userId} not found`);
@@ -542,7 +556,7 @@ export class RosterImportService {
         campaignId: input.campaignId,
         userId: input.userId,
         role: input.role,
-        characterId: input.characterId,
+        characterId: input.characterId ?? null,
         createdAt: input.ts,
         updatedAt: input.ts,
       })

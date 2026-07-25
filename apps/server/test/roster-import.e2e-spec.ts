@@ -119,6 +119,42 @@ describe('admin roster import (issue #589)', () => {
     expect(rerun.body.activations).toHaveLength(0);
   });
 
+  it('activation codes from roster import can set the initial password', async () => {
+    const preview = await adminAgent.post('/api/v1/admin/roster-import').send({
+      dryRun: true,
+      format: 'json',
+      content: JSON.stringify([{ username: 'activate-me', displayName: 'Activate Me', campaignId, role: 'player' }]),
+      activationExpiresInDays: 3,
+    });
+    expect(preview.status).toBe(201);
+
+    const commit = await adminAgent.post('/api/v1/admin/roster-import').send({
+      dryRun: false,
+      format: 'json',
+      content: '[]',
+      batchId: preview.body.batchId,
+      rows: preview.body.commitRows,
+      activationExpiresInDays: 3,
+    });
+    expect(commit.status).toBe(201);
+    const { activationCode } = commit.body.activations[0] as { activationCode: string };
+
+    const beforeLogin = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ username: 'activate-me', password: 'any-password' });
+    expect(beforeLogin.status).toBe(401);
+
+    const activate = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/reset-confirm')
+      .send({ code: activationCode, newPassword: 'activate-password-1' });
+    expect(activate.status).toBe(204);
+
+    const afterLogin = await request(ctx.app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ username: 'activate-me', password: 'activate-password-1' });
+    expect(afterLogin.status).toBe(201);
+  });
+
   it('matches existing users by oidcSub and rejects conflicting identities', async () => {
     const db = ctx.app.get(DB);
     const second = await adminAgent
