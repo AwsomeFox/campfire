@@ -49,6 +49,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     tokenHiddenByFog: false,
     turnState: { ...EMPTY_TURN_STATE },
     activeEffects: [],
+    legendaryActions: null,
   };
 }
 
@@ -97,16 +98,16 @@ describe('retreatTurn (undo advance, issue #413)', () => {
 });
 
 describe('resetTurnStateForStart (issue #413)', () => {
-  it('clears action-economy usage + movement but keeps concentration', () => {
+  it('clears action-economy usage + movement but keeps concentration and round-scoped legendary', () => {
     const state: CombatantTurnState = {
-      used: { action: 1, bonus: 1, reaction: 1 },
+      used: { action: 1, bonus: 1, reaction: 1, legendary: 2 },
       movementUsedFt: 30,
       concentration: 'Bless',
       delaying: true,
       readied: 'Attack when they approach',
     };
     const reset = resetTurnStateForStart(state);
-    expect(reset.used).toEqual({});
+    expect(reset.used).toEqual({ legendary: 2 });
     expect(reset.movementUsedFt).toBe(0);
     expect(reset.concentration).toBe('Bless');
     expect(reset.delaying).toBe(false);
