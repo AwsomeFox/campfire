@@ -40,7 +40,7 @@ test.describe('shipped translation catalogs (#629)', () => {
     const expanded = pseudoLocalizeString('Save');
     expect(expanded).toContain('⟦');
     expect(expanded.length).toBeGreaterThan('Save'.length);
-    const catalog = pseudoLocalizeCatalog(commonEn);
+    const catalog = pseudoLocalizeCatalog(commonEn) as typeof commonEn;
     expect(catalog.common.save).toBe(expanded);
   });
 
