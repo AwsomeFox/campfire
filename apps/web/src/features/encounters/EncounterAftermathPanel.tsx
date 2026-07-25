@@ -103,7 +103,7 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
   const gridCols = handoffs.questPath && handoffs.sessionPath ? 'sm:grid-cols-2 lg:grid-cols-3' : handoffs.questPath || handoffs.sessionPath ? 'sm:grid-cols-2' : 'sm:grid-cols-2';
 
   return (
-    <Card density="comfortable" className="space-y-4" role="region" aria-label={t('encounters.aftermath.title')} aria-labelledby="encounter-aftermath-heading">
+    <Card density="comfortable" className="space-y-4" role="region" aria-labelledby="encounter-aftermath-heading">
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-2 flex-wrap">
           <h2 id="encounter-aftermath-heading" className="text-sm font-bold text-white m-0">
@@ -177,7 +177,7 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
         />
         <p className="text-[11px] text-muted m-0">
           {t('encounters.aftermath.recapHandoffHint')}{' '}
-          <Link to={handoffs.encounterLogPath} className="link-button">
+          <Link to={handoffs.encounterLogPath} className="link-button underline underline-offset-2 font-semibold">
             {t('encounters.aftermath.viewCombatLog')}
           </Link>
         </p>
