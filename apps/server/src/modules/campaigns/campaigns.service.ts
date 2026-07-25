@@ -1346,6 +1346,7 @@ export class CampaignsService {
               gridUnit: e.gridUnit,
               gridSnap: e.gridSnap,
               gridType: e.gridType,
+              hexOrientation: e.hexOrientation,
               aoe: e.aoe,
               gridOffsetX: e.gridOffsetX,
               gridOffsetY: e.gridOffsetY,

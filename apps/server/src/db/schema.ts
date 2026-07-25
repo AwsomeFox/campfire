@@ -929,6 +929,8 @@ export const encounters = sqliteTable('encounters', {
   // Grid geometry + shared AoE templates (issue #238). grid_type is 'square'|'hex' (added by
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
+  // Hex orientation (issue #467): 'pointy' | 'flat'. Default pointy matches legacy overlay.
+  hexOrientation: text('hex_orientation').notNull().default('pointy'),
   aoe: text('aoe'),
   // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
   // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.

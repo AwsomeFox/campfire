@@ -4,9 +4,11 @@
  * Mirrors the pixel-space geometry used when rendering AoE overlays in RunSessionPage
  * (`aoePolygonPoints` + circle radius). Token and template origins are map-percent;
  * sizes convert through gridScale (feet per cell) and gridSize (% of map width per cell).
+ * Hex grids use cube-distance circle hit tests (issue #467).
  */
-import type { AoeShape, AoeTemplate } from '@campfire/schema';
-import { cellSizePx, mapPercentToLayerPx, type MapPercent, type Rect } from './mapRenderedBounds';
+import type { AoeShape, AoeTemplate, GridDistanceRule, GridType, HexOrientation } from '@campfire/schema';
+import { cellSizePx, mapPercentToLayerPx, resolveGridCalibration, type GridCalibration, type MapPercent, type Rect } from './mapRenderedBounds';
+import { pointInHexCircleAoe } from './hexGeometry';
 
 /** Canonical reference map when viewport size is unknown (square, 1000px wide). */
 export const DEFAULT_AOE_MAP_RECT: Rect = { left: 0, top: 0, width: 1000, height: 1000 };
@@ -26,6 +28,14 @@ export type AoeHitTestContext = {
   mapRect?: Rect;
   /** When set, overrides gridSize-derived cell size (calibrated grid). */
   cellPx?: number;
+  /** Grid type — hex circles use cube distance (issue #467). */
+  gridType?: GridType;
+  /** Hex orientation when gridType is hex. */
+  hexOrientation?: HexOrientation;
+  /** Resolved calibration for hex hit tests. */
+  calibration?: GridCalibration | null;
+  /** Adapter distance rule (unused for hit tests; reserved for parity). */
+  distanceRule?: GridDistanceRule;
 };
 
 type Point = { x: number; y: number };
@@ -101,6 +111,21 @@ export function tokenInAoe(tokenPos: MapPercent, aoe: AoeTemplate, ctx: AoeHitTe
   if (!(lengthPx > 0)) return false;
 
   if (aoe.shape === 'circle') {
+    const radiusCells = aoe.sizeFt / ctx.gridScale;
+    if (ctx.gridType === 'hex') {
+      const cal =
+        ctx.calibration ??
+        resolveGridCalibration({ gridSize: ctx.gridSize });
+      if (!cal) return false;
+      return pointInHexCircleAoe(
+        tokenPos,
+        { x: aoe.x, y: aoe.y },
+        radiusCells,
+        cal,
+        mapRect,
+        ctx.hexOrientation ?? 'pointy',
+      );
+    }
     return Math.hypot(tx - ox, ty - oy) <= lengthPx;
   }
 
