@@ -414,7 +414,7 @@ export class EncountersService {
       const [row] = await this.db
         .select()
         .from(encounters)
-        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)))
         .limit(1);
       if (row && (row.status as EncounterStatus) === 'running') return row;
     }
@@ -423,7 +423,7 @@ export class EncountersService {
     const rows = await this.db
       .select()
       .from(encounters)
-      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')));
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     return rows[0];
   }
 
@@ -448,7 +448,7 @@ export class EncountersService {
       const [row] = tx
         .select()
         .from(encounters)
-        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)))
         .limit(1)
         .all();
       if (row && (row.status as EncounterStatus) === 'running') return row;
@@ -486,9 +486,9 @@ export class EncountersService {
     }
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Encounter ${id} not found`);
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
   }
 
@@ -841,7 +841,11 @@ export class EncountersService {
    * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
    */
   async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
-    const conditions = [eq(encounters.campaignId, campaignId), status ? eq(encounters.status, status) : undefined].filter(
+    const conditions = [
+      eq(encounters.campaignId, campaignId),
+      notDeleted(encounters.deletedAt),
+      status ? eq(encounters.status, status) : undefined,
+    ].filter(
       (c): c is NonNullable<typeof c> => c !== undefined,
     );
     const rows = await this.db
@@ -922,6 +926,7 @@ export class EncountersService {
       )
       .where(and(
         eq(encounters.campaignId, campaignId),
+        notDeleted(encounters.deletedAt),
         role === 'dm' ? undefined : eq(encounters.hidden, false),
       ))
       .orderBy(encounters.id);
@@ -4430,22 +4435,15 @@ export class EncountersService {
 
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    // Delete the combatants, combat-log events, and the encounter row in ONE
-    // synchronous better-sqlite3 transaction (issue #272) — mirrors factions.remove /
-    // encounters.end. On FK-less (pre-#69, migrated) DBs there's no ON DELETE cascade,
-    // so three separately-awaited deletes could half-fail and orphan combatants/events
-    // on a vanished encounter; the transaction makes it all-or-nothing.
-    //
-    // Also null the campaign's activeEncounterId if it pointed here (issue #744) — fresh
-    // DBs get this from the declared ON DELETE SET NULL, but pre-migration DBs reproduce
-    // the same effect here so the pointer never dangles at a deleted encounter.
+    const ts = nowIso();
+    // Soft-delete (issue #701): stamp deleted_at and clear a dangling activeEncounterId
+    // pointer in one transaction. Combatants, combat-log events, map/fog, and links
+    // survive for restore — unlike the old hard delete (issue #272).
     this.db.transaction((tx) => {
-      tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
-      tx.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).run();
-      tx.delete(encounters).where(eq(encounters.id, encounterId)).run();
+      tx.update(encounters).set({ deletedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
       if (camp?.activeEncounterId === encounterId) {
-        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: nowIso() }).where(eq(campaigns.id, encounterRow.campaignId)).run();
+        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: ts }).where(eq(campaigns.id, encounterRow.campaignId)).run();
       }
     });
 
@@ -4456,9 +4454,30 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
+      detail: 'soft-delete (trashed)',
     });
 
     this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId, encounterRow.hidden);
+  }
+
+  /** Restore a trashed encounter (issue #701) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(encounterId: number, user: RequestUser, role: Role): Promise<Encounter> {
+    const existing = await this.getRowOrThrow(encounterId, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Encounter ${encounterId} is not in the trash`);
+    const [row] = await this.db
+      .update(encounters)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(encounters.id, encounterId))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.restore',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: existing.campaignId,
+    });
+    return encounterToDomain(row);
   }
 
   /**

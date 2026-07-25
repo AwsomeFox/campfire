@@ -296,7 +296,17 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
 // and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
 // its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location']);
+export const TrashedEntityType = z.enum([
+  'session',
+  'character',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'encounter',
+  'story_arc',
+  'story_beat',
+]);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({

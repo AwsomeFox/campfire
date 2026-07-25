@@ -94,6 +94,7 @@ test.describe('storylines error surfaces (issue #688)', () => {
     await page.goto(`/c/${campaignId}/storylines`);
     const arcCard = page.locator(`#entity-arc-${arc.id}`);
     await arcCard.getByRole('button', { name: `Delete arc ${arc.title}` }).click();
+    await page.getByRole('button', { name: 'Delete arc' }).click();
 
     const retryNote = page.getByRole('alert').filter({ hasText: "Couldn't delete the arc" });
     await expect(retryNote).toBeVisible();
@@ -112,7 +113,6 @@ test.describe('storylines error surfaces (issue #688)', () => {
     const { beat } = await createArcWithBeat(page, campaignId, `Beat-del arc ${suffix}`, `Beat-del beat ${suffix}`);
 
     let failDelete = true;
-    page.on('dialog', (dialog) => dialog.accept().catch(() => undefined));
     await page.route(`**/api/v1/beats/${beat.id}`, async (route) => {
       if (failDelete && route.request().method() === 'DELETE') {
         failDelete = false;
@@ -125,6 +125,7 @@ test.describe('storylines error surfaces (issue #688)', () => {
     await page.goto(`/c/${campaignId}/storylines`);
     const beatRow = page.locator(`#entity-beat-${beat.id}`);
     await beatRow.getByRole('button', { name: `Delete beat ${beat.title}` }).click();
+    await page.getByRole('button', { name: 'Delete beat' }).click();
 
     const retryNote = page.getByRole('alert').filter({ hasText: "Couldn't delete the beat" });
     await expect(retryNote).toBeVisible();

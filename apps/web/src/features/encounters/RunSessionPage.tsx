@@ -666,6 +666,7 @@ export default function RunSessionPage() {
   /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
   const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
@@ -921,7 +922,10 @@ export default function RunSessionPage() {
     mutationFn: () => api.delete(`${API}/encounters/${eid}`),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSuccess: () => navigate(`/c/${cid}/encounters`),
+    onSuccess: () => {
+      setConfirmDelete(false);
+      setPendingTrashUndo(true);
+    },
   });
 
   // General per-combatant patch (conditions, death saves, initiative, rename, max/temp HP,
@@ -1079,6 +1083,11 @@ export default function RunSessionPage() {
     );
   };
   const deleteEncounter = () => deleteEncounterMut.mutate();
+  async function undoTrashEncounter() {
+    await api.post(`${API}/encounters/${eid}/restore`);
+    setPendingTrashUndo(false);
+    await invalidateEncounter(queryClient, eid);
+  }
   const reopenChoicesComplete =
     hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);
 
@@ -1880,6 +1889,13 @@ export default function RunSessionPage() {
           busy={deleteEncounterMut.isPending}
           onConfirm={deleteEncounter}
           onCancel={() => setConfirmDelete(false)}
+        />
+      )}
+      {pendingTrashUndo && (
+        <UndoSnackbar
+          message="Encounter moved to Trash."
+          onUndo={undoTrashEncounter}
+          onExpire={() => navigate(`/c/${cid}/encounters`)}
         />
       )}
       {confirmRemoveCombatantId != null && (

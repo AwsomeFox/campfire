@@ -226,7 +226,7 @@ export class CampaignsController {
     summary: "List a campaign's trashed (soft-deleted) entities",
     description:
       'dm role required. The per-campaign Trash (issue #269): this campaign\'s soft-deleted child entities (issue #116) — ' +
-      'sessions, characters, quests, npcs, locations — newest-trashed first, as {type,id,name,deletedAt} rows. Restore any ' +
+      'sessions, characters, quests, npcs, locations, factions, encounters, story arcs, and story beats — newest-trashed first, as {type,id,name,deletedAt} rows. Restore any ' +
       'of them with POST /<type>/:id/restore (e.g. POST /sessions/:id/restore). Notes are excluded (their restore is ' +
       "author-scoped, not DM-only). This is where the delete dialog/toast's \"restore from the campaign Trash\" leads.",
   })

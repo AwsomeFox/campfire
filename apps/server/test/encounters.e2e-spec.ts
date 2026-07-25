@@ -623,12 +623,10 @@ describe('encounters (e2e)', () => {
       expect(getRes.status).toBe(404);
     });
 
-    it('delete removes combatants AND events with the encounter — no orphans (atomic remove, issue #272)', async () => {
+    it('delete trashes the encounter but keeps combatants and events for restore (issue #701)', async () => {
       const server = ctx.app.getHttpServer();
       const db = ctx.app.get<DrizzleDb>(DB);
 
-      // Fresh, self-contained encounter: create (auto-adds the party), start it (which
-      // seeds a combat-log 'turn' event), so both child tables have rows to orphan.
       const encRes = await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Cleanup Test', hidden: false });
       expect(encRes.status).toBe(201);
       const encId = encRes.body.id;
@@ -636,7 +634,6 @@ describe('encounters (e2e)', () => {
       const startRes = await request(server).post(`/api/v1/encounters/${encId}/start`).set(dm);
       expect(startRes.status).toBe(201);
 
-      // Precondition: child rows exist before the delete.
       const combatantsBefore = await db.select().from(combatantsTable).where(eq(combatantsTable.encounterId, encId));
       const eventsBefore = await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encId));
       expect(combatantsBefore.length).toBeGreaterThan(0);
@@ -645,12 +642,14 @@ describe('encounters (e2e)', () => {
       const del = await request(server).delete(`/api/v1/encounters/${encId}`).set(dm);
       expect(del.status).toBe(200);
 
-      // The whole family is gone: no combatants and no events left dangling on the
-      // vanished encounter (the three deletes committed as one transaction).
       const combatantsAfter = await db.select().from(combatantsTable).where(eq(combatantsTable.encounterId, encId));
       const eventsAfter = await db.select().from(encounterEventsTable).where(eq(encounterEventsTable.encounterId, encId));
-      expect(combatantsAfter).toHaveLength(0);
-      expect(eventsAfter).toHaveLength(0);
+      expect(combatantsAfter).toHaveLength(combatantsBefore.length);
+      expect(eventsAfter).toHaveLength(eventsBefore.length);
+
+      const restore = await request(server).post(`/api/v1/encounters/${encId}/restore`).set(dm);
+      expect(restore.status).toBe(201);
+      expect((await request(server).get(`/api/v1/encounters/${encId}`).set(dm)).status).toBe(200);
     });
   });
 

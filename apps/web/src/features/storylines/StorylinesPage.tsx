@@ -28,6 +28,8 @@ import {
 } from '../../lib/compositionSafeSubmit';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Skeleton, ErrorNote, EmptyState, Btn, TextArea } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { entityDomId, entityTargetProps, entityHref } from '../../lib/entityLinks';
@@ -160,6 +162,8 @@ function ReorderButtons({
 }
 
 
+type PendingTrashUndo = { type: 'story_arc' | 'story_beat'; id: number; label: string };
+
 export default function StorylinesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
@@ -192,6 +196,7 @@ export default function StorylinesPage() {
   // per-list so a sessions outage doesn't disable the quest/encounter pickers.
   const [linkOptionsError, setLinkOptionsError] = useState<LinkOptionFailures>(NO_LINK_FAILURES);
   const [linkOptionsLoading, setLinkOptionsLoading] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState<PendingTrashUndo | null>(null);
 
   const load = useCallback(async (focusId?: string) => {
     setLoading(true);
@@ -262,6 +267,14 @@ export default function StorylinesPage() {
   useEffect(() => {
     void loadLinkOptions();
   }, [loadLinkOptions]);
+
+  async function undoTrash() {
+    if (!pendingUndo) return;
+    const route = pendingUndo.type === 'story_arc' ? 'arcs' : 'beats';
+    await api.post(`${API}/${route}/${pendingUndo.id}/restore`);
+    setPendingUndo(null);
+    await load();
+  }
 
   // Every beat across all arcs, so a branch's target (which may live in another arc)
   // can be shown by title and offered in the "link to beat" picker.
@@ -451,8 +464,16 @@ export default function StorylinesPage() {
             onChange={load}
             onMoveArc={(direction) => void moveArc(arcIndex, direction)}
             arcReorderBusy={busy}
+            onTrashed={(item) => setPendingUndo(item)}
           />
         ))
+      )}
+      {pendingUndo && (
+        <UndoSnackbar
+          message={`${pendingUndo.type === 'story_arc' ? 'Arc' : 'Beat'} moved to Trash.`}
+          onUndo={undoTrash}
+          onExpire={() => setPendingUndo(null)}
+        />
       )}
     </div>
   );
@@ -470,6 +491,7 @@ function ArcCard({
   onChange,
   onMoveArc,
   arcReorderBusy,
+  onTrashed,
 }: {
   arc: StoryArcWithBeats;
   arcIndex: number;
@@ -482,6 +504,7 @@ function ArcCard({
   onChange: RefreshStorylines;
   onMoveArc: (direction: -1 | 1) => void;
   arcReorderBusy: boolean;
+  onTrashed: (item: PendingTrashUndo) => void;
 }) {
   const [newBeatTitle, setNewBeatTitle] = useState('');
   const [newBeatBody, setNewBeatBody] = useState('');
@@ -518,6 +541,7 @@ function ArcCard({
   const newBeatErrorId = `storyline-new-beat-${arc.id}-error`;
   const arcStatusErrorId = `storyline-arc-${arc.id}-status-error`;
   const arcDeleteErrorId = `storyline-arc-${arc.id}-delete-error`;
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   useUnsavedWork(
     `storyline-arc-${arc.id}`,
@@ -636,20 +660,14 @@ function ArcCard({
   };
 
   const removeArc = async () => {
-    if (deleteError) {
-      // The arc is still here (the prior delete failed), so the confirm is moot on retry.
-      // Fall through to re-attempt the same idempotent DELETE.
-    } else if (!window.confirm(`Delete arc "${arc.title}" and all of its beats? This cannot be undone.`)) {
-      return;
-    }
     setDeleteError(null);
     setBusy(true);
     try {
       await api.delete(`${API}/arcs/${arc.id}`);
+      setConfirmingDelete(false);
+      onTrashed({ type: 'story_arc', id: arc.id, label: arc.title });
       await onChange();
     } catch {
-      // Issue #688: the arc wasn't deleted. Keep it on the page and surface a targeted
-      // retry so the author isn't left to guess whether the confirm "took."
       setDeleteError("Couldn't delete the arc. It's still here — try again.");
     } finally {
       setBusy(false);
@@ -762,7 +780,7 @@ function ArcCard({
             style={{ fontSize: 12 }}
             disabled={busy || contentSaving}
             aria-label={`Delete arc ${arc.title}`}
-            onClick={() => void removeArc()}
+            onClick={() => setConfirmingDelete(true)}
           >
             Delete
           </button>
@@ -846,6 +864,7 @@ function ArcCard({
               onChange={onChange}
               onMoveBeat={(direction) => void moveBeat(beatIndex, direction)}
               reorderBusy={busy || arcReorderBusy}
+              onTrashed={onTrashed}
             />
           ))}
         </div>
@@ -903,11 +922,23 @@ function ArcCard({
           )}
         </form>
       )}
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete arc "${arc.title}"?`}
+          body={
+            arc.beats.length === 0
+              ? 'Moves this arc to the Trash — you can undo it, or restore it from the campaign Trash.'
+              : `Moves this arc and its ${arc.beats.length} beat${arc.beats.length === 1 ? '' : 's'} to the Trash — branches and revisions are kept. You can undo it, or restore from the campaign Trash.`
+          }
+          confirmLabel="Delete arc"
+          busy={busy}
+          onConfirm={() => void removeArc()}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
     </section>
   );
 }
-
-function BeatRow({
   beat,
   beatIndex,
   beatCount,
@@ -919,6 +950,7 @@ function BeatRow({
   onChange,
   onMoveBeat,
   reorderBusy,
+  onTrashed,
 }: {
   beat: StoryBeatWithBranches;
   beatIndex: number;
@@ -931,6 +963,7 @@ function BeatRow({
   onChange: RefreshStorylines;
   onMoveBeat: (direction: -1 | 1) => void;
   reorderBusy: boolean;
+  onTrashed: (item: PendingTrashUndo) => void;
 }) {
   const [addingBranch, setAddingBranch] = useState(false);
   const [branchLabel, setBranchLabel] = useState('');
@@ -950,6 +983,7 @@ function BeatRow({
   // data intact and offers a targeted retry; nothing is silently discarded.
   const [statusError, setStatusError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
   // The pending link patch from a failed save — preserved so Retry re-sends exactly what
   // the author picked (the select snaps back to server truth, but the intent is held here).
@@ -1109,16 +1143,12 @@ function BeatRow({
   };
 
   const removeBeat = async () => {
-    if (deleteError) {
-      // Retry path: the beat is still on the page from the failed delete, so skip the
-      // confirm and re-attempt the idempotent DELETE.
-    } else if (!window.confirm(`Delete beat "${beat.title}"?`)) {
-      return;
-    }
     setDeleteError(null);
     setBusy(true);
     try {
       await api.delete(`${API}/beats/${beat.id}`);
+      setConfirmingDelete(false);
+      onTrashed({ type: 'story_beat', id: beat.id, label: beat.title });
       await onChange();
     } catch {
       setDeleteError("Couldn't delete the beat. It's still here — try again.");
@@ -1241,7 +1271,7 @@ function BeatRow({
             style={{ fontSize: 11 }}
             disabled={busy || contentSaving}
             aria-label={`Delete beat ${beat.title}`}
-            onClick={() => void removeBeat()}
+            onClick={() => setConfirmingDelete(true)}
           >
             ✕
           </button>
@@ -1536,6 +1566,16 @@ function BeatRow({
             + Branch
           </button>
         ))}
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete beat "${beat.title}"?`}
+          body="Moves this beat to the Trash — branches and revisions are kept. You can undo it, or restore from the campaign Trash."
+          confirmLabel="Delete beat"
+          busy={busy}
+          onConfirm={() => void removeBeat()}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
     </section>
   );
 }

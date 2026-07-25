@@ -7,7 +7,8 @@
  * after the toast has expired.
  *
  * Route: /c/:campaignId/trash. Covers the entity types with a DM-gated restore route
- * today: sessions, characters, quests, npcs, locations (see TrashedEntityType).
+ * today: sessions, characters, quests, npcs, locations, factions, encounters,
+ * story arcs, and story beats (see TrashedEntityType).
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
@@ -26,6 +27,10 @@ const TYPE_META: Record<TrashedEntityType, { label: string; route: string; icon:
   quest: { label: 'Quest', route: 'quests', icon: ENTITY_ICON.quest },
   npc: { label: 'NPC', route: 'npcs', icon: ENTITY_ICON.npc },
   location: { label: 'Location', route: 'locations', icon: ENTITY_ICON.location },
+  faction: { label: 'Faction', route: 'factions', icon: ENTITY_ICON.faction },
+  encounter: { label: 'Encounter', route: 'encounters', icon: ENTITY_ICON.encounter },
+  story_arc: { label: 'Story arc', route: 'arcs', icon: ENTITY_ICON.arc },
+  story_beat: { label: 'Story beat', route: 'beats', icon: ENTITY_ICON.beat },
 };
 
 export default function TrashPage() {
@@ -102,7 +107,7 @@ export default function TrashPage() {
       </div>
 
       <p className="text-[13px] text-muted m-0">
-        Deleted sessions, characters, quests, NPCs and locations land here — restore any of them to bring the entity back
+        Deleted sessions, characters, quests, NPCs, locations, factions, encounters, and storylines land here — restore any of them to bring the entity back
         exactly as it was. Nothing here is permanent yet.
       </p>
 
