@@ -967,12 +967,21 @@ export class McpToolsService {
         'propose/none writeScope token is refused (this spends the AI budget + files a proposal) — only a direct-write token ' +
         '(or a session) may trigger it. Idempotent: a re-run over unchanged material, or while a scribe recap proposal is ' +
         'still pending, is a no-op that returns the existing proposal. Pass dryRun:true to generate a preview without filing ' +
-        'anything. Returns the recorded job + any filed proposal ids.',
-      { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal'), narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)') },
-      async ({ campaignId, dryRun, narrationLanguage }) => {
+        'anything. Pass force:true to bypass idempotency for an explicit rerun (#499). Optionally pass scheduledSessionId to ' +
+        'scope assembly to one ended scheduled game night. Returns the recorded job + any filed proposal ids + sourcePreview.',
+      {
+        campaignId: CampaignIdArg,
+        dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal'),
+        force: z.boolean().optional().describe('Bypass idempotency and re-draft (#499)'),
+        scheduledSessionId: Id.optional().describe('Scope assembly to one scheduled session window (#499)'),
+        narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
+      },
+      async ({ campaignId, dryRun, force, scheduledSessionId, narrationLanguage }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
         return this.scribe.run(campaignId as number, 'on_demand', user, {
           dryRun: (dryRun as boolean | undefined) ?? false,
+          force: (force as boolean | undefined) ?? false,
+          ...(scheduledSessionId !== undefined ? { scheduledSessionId: scheduledSessionId as number } : {}),
           ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
         });
       },

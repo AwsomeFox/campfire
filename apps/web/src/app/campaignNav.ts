@@ -92,7 +92,12 @@ export function buildCampaignNavGroups(
         { key: 'members', label: t('nav.members'), to: `${base}/members` },
         { key: 'audit', label: 'Audit log', to: `${base}/audit` },
       ]
-    : [{ key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals` }];
+    : [
+        { key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals` },
+        // Issue #479 — player data rights: export/leave live on MembersPage but were
+        // only reachable by URL; surface them in Manage for every non-DM role.
+        { key: 'membership', label: t('nav.yourData'), to: `${base}/members` },
+      ];
 
   groups.push({
     key: 'manage',

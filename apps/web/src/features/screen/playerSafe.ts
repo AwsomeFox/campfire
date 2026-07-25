@@ -14,15 +14,19 @@
  * so a future field added to a canon schema cannot silently leak through.
  */
 import type {
+  AoeTemplate,
   Character,
   Combatant,
   CombatantKind,
+  EncounterWithCombatants,
+  FogState,
   HpBand,
   Location,
   Npc,
   Quest,
   QuestObjective,
 } from '@campfire/schema';
+import { filterAoeTemplatesForViewer, pointInRevealedRegion } from '@campfire/schema';
 
 // ---------------------------------------------------------------------------
 // Location — an `unexplored` location is un-revealed DM prep (issue #42) and is
@@ -220,4 +224,32 @@ export function safeCombatant(c: Combatant): SafeCombatant {
 
 export function safeCombatants(combatants: Combatant[]): SafeCombatant[] {
   return combatants.map(safeCombatant);
+}
+
+// ---------------------------------------------------------------------------
+// Battle map — re-derive the player VTT projection for the cast surface (issue
+// #484). The display is opened by an authenticated DM, so encounter payloads
+// still carry full coordinates; redact fog-hidden tokens and unrevealed AoE
+// before painting the table-facing map scene.
+
+/** Mirror of encounters.service.ts `redactTokenInFog` (issue #40 / #418). */
+function redactTokenInFog(c: Combatant, fog: FogState): Combatant {
+  if (c.tokenX == null || c.tokenY == null) return c;
+  if (pointInRevealedRegion(c.tokenX, c.tokenY, fog)) return c;
+  return { ...c, tokenX: null, tokenY: null, tokenHiddenByFog: true };
+}
+
+/**
+ * Player-safe encounter slice for the Cast map scene. Combatants and AoE are
+ * filtered; grid/fog fields are kept so the read-only BattleMap can render the
+ * same projection a player sees on the run-session page.
+ */
+export function safeEncounterForCast(encounter: EncounterWithCombatants): EncounterWithCombatants {
+  const fog = encounter.fog;
+  const combatants =
+    fog?.enabled === true
+      ? encounter.combatants.map((c) => redactTokenInFog(c, fog))
+      : encounter.combatants;
+  const aoe: AoeTemplate[] = filterAoeTemplatesForViewer(encounter.aoe ?? [], fog);
+  return { ...encounter, combatants, aoe };
 }

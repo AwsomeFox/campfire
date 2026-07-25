@@ -964,6 +964,7 @@ CREATE TABLE IF NOT EXISTS ai_scribe_configs (
   post_session INTEGER NOT NULL DEFAULT 0,
   cron INTEGER NOT NULL DEFAULT 0,
   budget_per_run INTEGER NOT NULL DEFAULT 2000,
+  source_cursor_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -978,10 +979,13 @@ CREATE TABLE IF NOT EXISTS ai_scribe_jobs (
   tokens_used INTEGER NOT NULL DEFAULT 0,
   provider TEXT NOT NULL DEFAULT '',
   detail TEXT NOT NULL DEFAULT '',
+  scheduled_session_id INTEGER,
+  source_stats TEXT,
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_campaign ON ai_scribe_jobs(campaign_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_session_trigger ON ai_scribe_jobs(campaign_id, scheduled_session_id, trigger);
 
 CREATE TABLE IF NOT EXISTS combatants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

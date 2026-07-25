@@ -5642,6 +5642,8 @@ export const ScribeConfig = z.object({
   postSession: z.boolean().default(false), // sweep + draft after a scheduled session ends
   cron: z.boolean().default(false), // include this campaign in the periodic cron sweep
   budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
+  // Durable cursor for cron/incremental runs — only material newer than this is assembled (#499).
+  sourceCursorAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type ScribeConfig = z.infer<typeof ScribeConfig>;
@@ -5652,6 +5654,24 @@ export const ScribeConfigUpdate = z.object({
   budgetPerRun: z.number().int().min(1).max(200_000).optional(),
 });
 export type ScribeConfigUpdate = z.infer<typeof ScribeConfigUpdate>;
+
+// Archived counts for what a run assembled — stored on the job row for audit (#499).
+export const ScribeSourceStats = z.object({
+  resolvedInbox: z.number().int().nonnegative().default(0),
+  encounters: z.number().int().nonnegative().default(0),
+  diceRolls: z.number().int().nonnegative().default(0),
+  scheduledSessionId: Id.optional(),
+  windowStart: IsoDate.optional(),
+  windowEnd: IsoDate.optional(),
+  sinceAt: IsoDate.optional(),
+});
+export type ScribeSourceStats = z.infer<typeof ScribeSourceStats>;
+
+// Dry-run / pre-flight preview of what would be assembled (#499).
+export const ScribeSourcePreview = ScribeSourceStats.extend({
+  estimatedPromptTokens: z.number().int().nonnegative().default(0),
+});
+export type ScribeSourcePreview = z.infer<typeof ScribeSourcePreview>;
 
 // A recorded scribe run (read via GET /campaigns/:id/scribe/jobs).
 export const ScribeJob = z.object({
@@ -5664,6 +5684,9 @@ export const ScribeJob = z.object({
   tokensUsed: z.number().int().nonnegative().default(0),
   provider: z.string().default(''), // which provider produced it (e.g. 'mock','anthropic','noop')
   detail: z.string().default(''), // human-readable note / skip reason / error
+  sourceHash: z.string().nullable().default(null), // sha256 of assembled source — idempotency archive
+  scheduledSessionId: Id.nullable().default(null), // post_session: exactly which game night (#499)
+  sourceStats: ScribeSourceStats.nullable().default(null), // archived assembly counts
   createdBy: z.string().default(''),
   createdAt: IsoDate,
 });
@@ -5674,6 +5697,10 @@ export type ScribeJob = z.infer<typeof ScribeJob>;
 export const ScribeRunRequest = z.object({
   dryRun: z.boolean().default(false),
   narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
+  // Bypass idempotency and re-draft even when source is unchanged or a proposal is pending (#499).
+  force: z.boolean().default(false),
+  // Target a specific ended scheduled session (post_session scope); on-demand only.
+  scheduledSessionId: Id.optional(),
 });
 export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
 
@@ -5684,6 +5711,7 @@ export const ScribeRunResult = z.object({
   proposalIds: z.array(Id).default([]),
   dryRun: z.boolean().default(false),
   preview: z.string().nullable().default(null), // drafted recap text (dry-run only)
+  sourcePreview: ScribeSourcePreview.nullable().default(null), // assembly counts + token estimate (#499)
 });
 export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
 

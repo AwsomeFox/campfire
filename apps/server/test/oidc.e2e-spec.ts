@@ -1,10 +1,16 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startFakeIdp, type FakeIdp } from './fake-idp';
+import {
+  childV8CoverageEnv,
+  cleanupChildV8CoverageDir,
+  mergeChildV8Coverage,
+  mergePendingChildV8Coverage,
+  oidcSpawnCoverageEnabled,
+} from './oidc-spawn-coverage';
 
 /**
  * This suite boots the REAL Nest app (`dist/main.js`) in a child process for
@@ -27,6 +33,11 @@ import { startFakeIdp, type FakeIdp } from './fake-idp';
  * All requests go through native fetch() against real HTTP, with a small
  * manual cookie jar (no supertest — supertest binds to an in-process Nest
  * HttpServer, which isn't available for a separate OS process).
+ *
+ * Coverage (#556): when `npm run test:cov` runs, each spawned child gets
+ * NODE_V8_COVERAGE forwarded (see test/oidc-spawn-coverage.ts) and the
+ * resulting V8 blobs are merged into jest's istanbul report after each
+ * child exits.
  */
 
 const SERVER_DIST_ENTRY = path.resolve(__dirname, '..', 'dist', 'main.js');
@@ -135,6 +146,7 @@ async function spawnAppOnce(
     PORT: String(port),
     DATA_DIR: dataDir,
     NODE_ENV: 'test',
+    ...childV8CoverageEnv(),
   };
   delete env.DEV_AUTH;
   for (const [key, value] of Object.entries(resolvedOverrides)) {
@@ -142,19 +154,47 @@ async function spawnAppOnce(
     else env[key] = value;
   }
 
-  const child: ChildProcessByStdio<null, Readable, Readable> = spawn('node', [SERVER_DIST_ENTRY], {
+  const collectSpawnCoverage = oidcSpawnCoverageEnabled();
+  const childLogPath = path.join(dataDir, 'child-process.log');
+  let childLogFd: number | undefined;
+  const stdio: ['ignore', number | 'pipe', number | 'pipe'] = collectSpawnCoverage
+    ? (() => {
+        childLogFd = fs.openSync(childLogPath, 'w');
+        return ['ignore', childLogFd, childLogFd];
+      })()
+    : ['ignore', 'pipe', 'pipe'];
+
+  const child: ChildProcess = spawn('node', [SERVER_DIST_ENTRY], {
     cwd: path.resolve(__dirname, '..'),
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio,
   });
 
   let output = '';
-  child.stdout.on('data', (chunk) => {
-    output += chunk.toString();
-  });
-  child.stderr.on('data', (chunk) => {
-    output += chunk.toString();
-  });
+  let outputOffset = 0;
+  if (!collectSpawnCoverage) {
+    child.stdout?.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+  }
+
+  const readOutput = (): string => {
+    if (collectSpawnCoverage && fs.existsSync(childLogPath)) {
+      try {
+        const buf = fs.readFileSync(childLogPath);
+        if (buf.length > outputOffset) {
+          output += buf.subarray(outputOffset).toString();
+          outputOffset = buf.length;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return output;
+  };
 
   type ExitInfo = { code: number | null; signal: NodeJS.Signals | null };
   const exitState: { current: ExitInfo | null } = { current: null };
@@ -163,7 +203,28 @@ async function spawnAppOnce(
   });
 
   const killChild = async (): Promise<void> => {
-    if (exitState.current || child.killed) return;
+    const releaseChild = (): void => {
+      if (childLogFd !== undefined) {
+        try {
+          fs.closeSync(childLogFd);
+        } catch {
+          /* ignore */
+        }
+        childLogFd = undefined;
+      }
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    };
+    const mergeSpawnCoverage = (): void => {
+      if (oidcSpawnCoverageEnabled()) {
+        mergePendingChildV8Coverage();
+      }
+    };
+    if (exitState.current || child.killed) {
+      releaseChild();
+      mergeSpawnCoverage();
+      return;
+    }
     child.kill('SIGTERM');
     const deadline = Date.now() + CHILD_KILL_GRACE_MS;
     while (!exitState.current && Date.now() < deadline) {
@@ -173,6 +234,8 @@ async function spawnAppOnce(
       child.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, 200));
     }
+    releaseChild();
+    mergeSpawnCoverage();
   };
 
   try {
@@ -181,7 +244,7 @@ async function spawnAppOnce(
     while (Date.now() < deadline) {
       if (exitState.current) {
         throw new Error(
-          `child process exited before becoming ready (code=${exitState.current.code}, signal=${exitState.current.signal}).\n--- captured output ---\n${output}`,
+          `child process exited before becoming ready (code=${exitState.current.code}, signal=${exitState.current.signal}).\n--- captured output ---\n${readOutput()}`,
         );
       }
       try {
@@ -198,7 +261,7 @@ async function spawnAppOnce(
     if (!ready) {
       await killChild();
       throw new Error(
-        `timed out after ${CHILD_BOOT_TIMEOUT_MS}ms waiting for ${baseUrl}/healthz to become ready.\n--- captured output ---\n${output}`,
+        `timed out after ${CHILD_BOOT_TIMEOUT_MS}ms waiting for ${baseUrl}/healthz to become ready.\n--- captured output ---\n${readOutput()}`,
       );
     }
   } catch (err) {
@@ -210,7 +273,7 @@ async function spawnAppOnce(
   return {
     baseUrl,
     dataDir,
-    output: () => output,
+    output: readOutput,
     kill: async () => {
       await killChild();
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -390,6 +453,9 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
   afterAll(async () => {
     await idp.close();
+    await new Promise((r) => setTimeout(r, 100));
+    await mergeChildV8Coverage();
+    cleanupChildV8CoverageDir();
   });
 
   /** Boots a fresh app on a fresh free port + fresh DATA_DIR, tracked for cleanup even on failure. */

@@ -17,12 +17,19 @@ export interface RequestLogFields {
   tool?: string;
 }
 
-/** Patterns that must never appear verbatim in structured request logs. */
-const SECRET_VALUE_PATTERNS: RegExp[] = [
+/** Patterns that replace the full match with a fixed redaction token. */
+const FULL_MATCH_SECRET_PATTERNS: RegExp[] = [
   /\bsk-[a-zA-Z0-9_-]{10,}\b/g,
   /\bcf_pat_[a-f0-9]{48}\b/gi,
   /\bBearer\s+\S+/gi,
   /\bapi[_-]?key[=:]\s*\S+/gi,
+];
+
+/** Patterns that keep a query-param prefix and redact only the value. */
+const PREFIX_SECRET_PATTERNS: RegExp[] = [
+  // OIDC callback query params can carry provider error text or auth codes.
+  /([?&]error_description=)[^&"]+/gi,
+  /([?&]code=)[^&"]+/gi,
 ];
 
 /**
@@ -31,8 +38,11 @@ const SECRET_VALUE_PATTERNS: RegExp[] = [
  */
 export function redactLogSecrets(value: string): string {
   let out = value;
-  for (const pattern of SECRET_VALUE_PATTERNS) {
+  for (const pattern of FULL_MATCH_SECRET_PATTERNS) {
     out = out.replace(pattern, '<redacted>');
+  }
+  for (const pattern of PREFIX_SECRET_PATTERNS) {
+    out = out.replace(pattern, (_match, prefix: string) => `${prefix}<redacted>`);
   }
   return out;
 }

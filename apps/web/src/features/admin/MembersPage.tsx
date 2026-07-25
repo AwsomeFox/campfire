@@ -152,7 +152,7 @@ export default function MembersPage() {
   if (!isDm) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-        <h1 className="text-xl font-extrabold text-white">Members</h1>
+        <h1 className="text-xl font-extrabold text-white">{t('nav.yourData')}</h1>
         {error && <ErrorNote message={error} onRetry={load} />}
         <Card className="space-y-3">
           <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Members</h2>
@@ -698,8 +698,8 @@ function YourMembershipCard({
   }
 
   return (
-    <Card className="space-y-2.5">
-      <p className="card-kicker mb-0">Your data</p>
+    <Card className="space-y-2.5" data-testid="your-membership-card">
+      <p className="card-kicker mb-0">{t('nav.yourData')}</p>
       <p className="text-muted text-[11.5px] m-0">
         Take a copy of what's yours, or leave the table. Your export includes only the characters you own, the
         notes you wrote and the proposals you submitted — not the DM's secrets or anyone else's private data.
