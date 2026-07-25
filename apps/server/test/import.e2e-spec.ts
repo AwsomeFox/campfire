@@ -626,9 +626,9 @@ describe('campaign import — issue #266 entity types round-trip (e2e)', () => {
 
     // Timeline: event + current in-world date carried over.
     const events = await dmAgent.get(`/api/v1/campaigns/${imported.id}/timeline`);
-    expect(events.body.length).toBe(1);
-    expect(events.body[0].title).toBe('The Sundering');
-    expect(events.body[0].dmSecret).toBe('It was the party’s fault');
+    expect(events.body.items.length).toBe(1);
+    expect(events.body.items[0].title).toBe('The Sundering');
+    expect(events.body.items[0].dmSecret).toBe('It was the party’s fault');
     const cal = await dmAgent.get(`/api/v1/campaigns/${imported.id}/timeline/calendar`);
     expect(cal.body.currentDate).toBe('5th of Flamerule, 1492 DR');
 

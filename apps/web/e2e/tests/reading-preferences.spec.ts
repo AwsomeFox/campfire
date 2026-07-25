@@ -124,7 +124,8 @@ test.describe('semantic reading preferences', () => {
     const characterReading = page.locator('.reading-surface').first();
     await expect(characterReading).toBeVisible();
     expect((await typography(characterReading)).fontSize).toBe(18);
-    // DetailPageWayfinding (#652) exposes the return control as `.btn`, not `.cf-btn`.
+    // Player fixture views a DM-owned nav character (read-only): edit Btn/cf-btn controls are
+    // hidden, but DetailPageWayfinding's back link still uses legacy `.btn`.
     const characterControl = page.locator('.btn').first();
     await expect(characterControl).toBeVisible();
     expect((await typography(characterControl)).fontSize).toBeLessThan(18);
