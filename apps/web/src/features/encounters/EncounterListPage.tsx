@@ -1,7 +1,7 @@
 /**
  * Encounter list — /c/:campaignId/encounters.
  */
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
@@ -72,6 +72,7 @@ export default function EncounterListPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const fetchGeneration = useRef(0);
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
 
   useEffect(() => {
@@ -107,15 +108,18 @@ export default function EncounterListPage() {
   });
 
   const load = useCallback(async () => {
+    const gen = ++fetchGeneration.current;
     setLoading(true);
     setError(null);
     try {
       const data = await api.get<Encounter[]>(encounterListUrl(id, statusFilter, debouncedSearch));
+      if (gen !== fetchGeneration.current) return;
       setEncounters(data);
     } catch (err) {
+      if (gen !== fetchGeneration.current) return;
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.load' }));
     } finally {
-      setLoading(false);
+      if (gen === fetchGeneration.current) setLoading(false);
     }
   }, [id, statusFilter, debouncedSearch, t]);
 
