@@ -20,7 +20,8 @@
  */
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { useParams } from 'react-router-dom';
-import type { TimelineEvent, TimelineCalendar } from '@campfire/schema';
+import type { TimelineEvent, TimelineCalendar, TimelineListPage } from '@campfire/schema';
+import { TIMELINE_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Markdown } from '../../components/Markdown';
@@ -119,7 +120,11 @@ export default function TimelinePage() {
 
   const [calendar, setCalendar] = useState<TimelineCalendar | null>(null);
   const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
 
@@ -155,19 +160,32 @@ export default function TimelinePage() {
   const restoreCalendarFocusRef = useRef(false);
   const loadSequence = useRef(0);
 
+  const buildTimelineQuery = useCallback(
+    (cursor?: string) => {
+      const params = new URLSearchParams();
+      params.set('limit', String(TIMELINE_LIST_DEFAULT_LIMIT));
+      if (cursor) params.set('cursor', cursor);
+      return `${API}/campaigns/${cid}/timeline?${params.toString()}`;
+    },
+    [cid],
+  );
+
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     setLoading(true);
     setError(null);
     setForbidden(false);
     try {
-      const [cal, list] = await Promise.all([
+      const [cal, page] = await Promise.all([
         api.get<TimelineCalendar>(`${API}/campaigns/${cid}/timeline/calendar`),
-        api.get<TimelineEvent[]>(`${API}/campaigns/${cid}/timeline`),
+        api.get<TimelineListPage>(buildTimelineQuery()),
       ]);
       if (sequence !== loadSequence.current) return;
       setCalendar(cal);
-      setEvents(list);
+      setEvents(page.items);
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor);
     } catch (e) {
       if (sequence === loadSequence.current) {
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
@@ -176,7 +194,29 @@ export default function TimelinePage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [cid]);
+  }, [cid, buildTimelineQuery]);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore || loading) return;
+    const sequence = loadSequence.current;
+    setLoadingMore(true);
+    setError(null);
+    try {
+      const page = await api.get<TimelineListPage>(buildTimelineQuery(nextCursor));
+      if (sequence !== loadSequence.current) return;
+      setEvents((prev) => {
+        const seen = new Set(prev.map((e) => e.id));
+        return [...prev, ...page.items.filter((e) => !seen.has(e.id))];
+      });
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      setNextCursor(page.nextCursor);
+    } catch {
+      if (sequence === loadSequence.current) setError("Couldn't load more events.");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore, loading, buildTimelineQuery]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -677,6 +717,30 @@ export default function TimelinePage() {
             </li>
           ))}
         </ol>
+      )}
+
+      {events.length > 0 && (
+        <p className="text-muted" style={{ margin: 0, fontSize: 11 }} aria-live="polite">
+          {loading
+            ? 'Loading…'
+            : hasMore || total > events.length
+              ? `Showing ${events.length} of ${total} events`
+              : `Showing all ${events.length} events`}
+        </p>
+      )}
+
+      {hasMore && (
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <Btn
+            type="button"
+            ghost
+            style={{ fontSize: 12 }}
+            disabled={loadingMore || loading}
+            onClick={() => void loadMore()}
+          >
+            {loadingMore ? 'Loading…' : 'Load more'}
+          </Btn>
+        </div>
       )}
     </div>
   );

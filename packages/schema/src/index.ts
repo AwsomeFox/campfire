@@ -81,6 +81,23 @@ export const PageParams = z.object({
 });
 export type PageParams = z.infer<typeof PageParams>;
 
+/**
+ * Shared cursor-paginated list envelope (issue #615).
+ *
+ * High-traffic lists return `{ items, total, hasMore, nextCursor, limit }` instead
+ * of unbounded arrays. `nextCursor` is always present and is `null` on the terminal
+ * page so REST/MCP consumers see a stable shape.
+ */
+export function CursorListPage<T extends z.ZodTypeAny>(itemSchema: T) {
+  return z.object({
+    items: z.array(itemSchema),
+    total: z.number().int().nonnegative(),
+    hasMore: z.boolean(),
+    nextCursor: z.string().max(512).nullable(),
+    limit: z.number().int().positive(),
+  });
+}
+
 // ---------- optimistic concurrency (issue #157) ----------
 // The `updatedAt` timestamp a client last read for an entity, echoed back on a
 // PATCH/update as a compare-and-swap guard. When provided and it no longer matches
@@ -1107,6 +1124,20 @@ export const TimelineEventCreate = TimelineEvent.omit({ id: true, campaignId: tr
 export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
 export const TimelineEventUpdate = TimelineEventCreate.partial();
 export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
+
+/** Default page size for timeline list endpoints (issue #615). */
+export const TIMELINE_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on timeline lists — clients page with `cursor`, not a huge page. */
+export const TIMELINE_LIST_MAX_LIMIT = 200;
+
+/**
+ * Paginated timeline list response (issue #615).
+ *
+ * Replaces the historical bare `TimelineEvent[]`. Ordered by DM-controlled
+ * `sortIndex` (ascending), then `id`. Continue with `nextCursor` when `hasMore`.
+ */
+export const TimelineListPage = CursorListPage(TimelineEvent);
+export type TimelineListPage = z.infer<typeof TimelineListPage>;
 
 // The "honest v0" from the issue: one free-text "current in-world date" per campaign
 // ("It is presently the 3rd of Flamerule, 1492 DR"), plus an optional calendar note
