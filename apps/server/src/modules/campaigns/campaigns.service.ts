@@ -722,7 +722,7 @@ export class CampaignsService {
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
-      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, id), notDeleted(inventoryItems.deletedAt))),
       this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
       this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
     ]);
@@ -977,7 +977,7 @@ export class CampaignsService {
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
-      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, id), notDeleted(inventoryItems.deletedAt))),
       this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
       this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
     ]);
