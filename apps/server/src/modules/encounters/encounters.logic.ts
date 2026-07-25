@@ -86,12 +86,27 @@ export function redactEncounterEventsForViewer(
       }
     }
 
-    if (!actorHidden && !targetHidden && detail === ev.detail) return ev;
+    let metadata = ev.metadata;
+    if (metadata && (actorHidden || targetHidden)) {
+      const next = { ...metadata };
+      if (next.dmText) next.dmText = undefined;
+      if (next.playerText && hiddenNames.size > 0) {
+        for (const name of hiddenNames) {
+          if (name && next.playerText.includes(name)) {
+            next.playerText = next.playerText.split(name).join(UNKNOWN_COMBATANT_LABEL);
+          }
+        }
+      }
+      metadata = next;
+    }
+
+    if (!actorHidden && !targetHidden && detail === ev.detail && metadata === ev.metadata) return ev;
     return {
       ...ev,
       actor: actorHidden ? UNKNOWN_COMBATANT_LABEL : ev.actor,
       target: targetHidden ? UNKNOWN_COMBATANT_LABEL : ev.target,
       detail,
+      metadata,
     };
   });
 }

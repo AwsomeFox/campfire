@@ -1,7 +1,28 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
-import type { EncounterEvent } from '@campfire/schema';
+import type { EncounterEvent, EncounterEventType } from '@campfire/schema';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
+
+function mockEvent(id: number, type: EncounterEventType, patch: Partial<EncounterEvent> = {}): EncounterEvent {
+  return {
+    id,
+    encounterId: patch.encounterId ?? 1,
+    round: 1,
+    type,
+    actor: null,
+    target: null,
+    actorId: null,
+    targetId: null,
+    detail: '',
+    chainId: null,
+    parentEventId: null,
+    phase: null,
+    performedBy: null,
+    metadata: {},
+    createdAt: '2026-07-22T12:00:00.000Z',
+    ...patch,
+  };
+}
 
 test.use({ storageState: stateFor('dm') });
 
@@ -252,18 +273,14 @@ test.describe('combat log accessibility — remote clients', () => {
     const { campaignId, encounterId } = seed();
     const viewerContext = await browser.newContext({ storageState: stateFor('viewer') });
     const viewerPage = await viewerContext.newPage();
-    const historicalEvents: EncounterEvent[] = Array.from({ length: 30 }, (_, index) => ({
-      id: 900_000 + index,
-      encounterId,
-      round: 1,
-      type: 'note',
-      actor: 'Historian',
-      target: null,
-      actorId: null,
-      targetId: null,
-      detail: `Earlier combat note ${index + 1} with enough detail to keep the history independently scrollable`,
-      createdAt: `2026-07-22T10:${String(index).padStart(2, '0')}:00.000Z`,
-    }));
+    const historicalEvents: EncounterEvent[] = Array.from({ length: 30 }, (_, index) =>
+      mockEvent(900_000 + index, 'note', {
+        encounterId,
+        actor: 'Historian',
+        detail: `Earlier combat note ${index + 1} with enough detail to keep the history independently scrollable`,
+        createdAt: `2026-07-22T10:${String(index).padStart(2, '0')}:00.000Z`,
+      }),
+    );
     let remoteEvents: EncounterEvent[] = [];
 
     await viewerPage.route(`**/api/v1/encounters/${encounterId}/events`, async (route) => {
@@ -291,42 +308,9 @@ test.describe('combat log accessibility — remote clients', () => {
       await watchAnnouncements(viewerPage);
 
       remoteEvents = [
-        {
-          id: 900_100,
-          encounterId,
-          round: 2,
-          type: 'note',
-          actor: 'Mira',
-          target: null,
-          actorId: null,
-          targetId: null,
-          detail: 'The bridge is unstable',
-          createdAt: '2026-07-22T12:01:00.000Z',
-        },
-        {
-          id: 900_101,
-          encounterId,
-          round: 2,
-          type: 'override',
-          actor: 'Game Master',
-          target: 'Goblin Boss',
-          actorId: null,
-          targetId: null,
-          detail: 'set initiative to 12',
-          createdAt: '2026-07-22T12:02:00.000Z',
-        },
-        {
-          id: 900_102,
-          encounterId,
-          round: 2,
-          type: 'correction',
-          actor: 'Game Master',
-          target: 'Goblin Boss',
-          actorId: null,
-          targetId: null,
-          detail: 'corrected damage to 4',
-          createdAt: '2026-07-22T12:03:00.000Z',
-        },
+        mockEvent(900_100, 'note', { encounterId, round: 2, actor: 'Mira', detail: 'The bridge is unstable', createdAt: '2026-07-22T12:01:00.000Z' }),
+        mockEvent(900_101, 'override', { encounterId, round: 2, actor: 'Game Master', target: 'Goblin Boss', detail: 'set initiative to 12', createdAt: '2026-07-22T12:02:00.000Z' }),
+        mockEvent(900_102, 'correction', { encounterId, round: 2, actor: 'Game Master', target: 'Goblin Boss', detail: 'corrected damage to 4', createdAt: '2026-07-22T12:03:00.000Z' }),
       ];
 
       // The second authenticated browser emits a real encounter SSE invalidation; its

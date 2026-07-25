@@ -13,8 +13,8 @@ import { useTranslation } from 'react-i18next';
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAnnounce } from '../../components/Announcer';
-import { useNavigate, useParams } from 'react-router-dom';
-import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry } from '@campfire/schema';
 import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
@@ -25,6 +25,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
+import { AuditEntryRow } from './campaignAuditDisplay';
 import { firstGrapheme } from '../../lib/avatarText';
 import {
   INVITE_COPY_FAILURE,
@@ -183,12 +184,17 @@ export default function MembersPage() {
       />
 
       <Card className="space-y-3">
-        <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Audit log</h2>
+        <div className="flex items-center justify-between border-b border-slate-700 pb-2">
+          <h2 className="font-bold text-white text-sm m-0">Audit log</h2>
+          <Link to={`/c/${id}/audit`} className="text-[11px] text-secondary hover:text-white">
+            View full log →
+          </Link>
+        </div>
         {auditPanel.loading && !auditPanel.data && <Skeleton lines={3} />}
         {auditPanel.error && !auditPanel.data ? (
           <ErrorNote message={auditPanel.error} onRetry={auditPanel.retry} />
         ) : (
-          <AuditList entries={auditPanel.data ?? []} members={members ?? []} />
+          <AuditList entries={auditPanel.data ?? []} members={members ?? []} campaignId={id} />
         )}
       </Card>
     </div>
@@ -1240,64 +1246,30 @@ function AddMemberForm({
   );
 }
 
-function timeAgo(iso: string): string {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return 'now';
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
-}
-
-// Issue #526: actorRole is now AuditActorRole (dm/player/viewer + the 'admin'
-// sentinel). This per-campaign audit list only ever sees campaign-scoped rows,
-// so 'admin' won't legitimately appear here (admin actions are server-scoped
-// and live on /admin/audit) — but key the full widened type and give 'admin' a
-// distinct icon so a stray value renders gracefully instead of `undefined`.
-const ACTOR_ICON: Record<AuditActorRole, string> = { dm: 'top-hat', player: 'person', viewer: 'person', admin: 'crown' };
-
-/**
- * Resolve an AuditEntry.actor (see auditActor() in apps/server/src/common/user.types.ts)
- * to something human-readable:
- *  - `token:<name>` → PAT actor, rendered as-is with a subtle "token" tag
- *  - a plain user id string that matches a campaign member's userId → that member's
- *    displayName || username
- *  - anything else (e.g. a user id no longer in this campaign) → falls back to `#id`
- */
-function resolveActorLabel(actor: string, members: CampaignMember[]): { label: string; isToken: boolean } {
-  if (actor.startsWith('token:')) {
-    return { label: actor.slice('token:'.length), isToken: true };
-  }
-  const member = members.find((m) => String(m.userId) === actor);
-  if (member) {
-    return { label: member.displayName || member.username || `#${actor}`, isToken: false };
-  }
-  return { label: `#${actor}`, isToken: false };
-}
-
-function AuditList({ entries, members }: { entries: AuditEntry[]; members: CampaignMember[] }) {
+function AuditList({
+  entries,
+  members,
+  campaignId,
+}: {
+  entries: AuditEntry[];
+  members: CampaignMember[];
+  campaignId: number;
+}) {
   const { t } = useTranslation();
+  const preview = entries.slice(0, 10);
   if (entries.length === 0) return <EmptyState icon="scroll-unfurled" title={t('admin.empty.noActivity')} />;
   return (
-    <ul className="text-xs space-y-2 text-slate-400">
-      {entries.slice(0, 20).map((e) => {
-        const { label, isToken } = resolveActorLabel(e.actor, members);
-        return (
-          <li key={e.id}>
-            <span className="text-secondary">{timeAgo(e.createdAt)}</span> <GameIcon slug={ACTOR_ICON[e.actorRole]} size={12} className="inline align-text-bottom" />{' '}
-            <b className="text-slate-300">{label}</b>{' '}
-            {isToken && (
-              <span className="tag tag-neutral" style={{ fontSize: 9 }}>
-                token
-              </span>
-            )}{' '}
-            {e.action}
-            {e.detail && <span className="text-secondary"> — {e.detail}</span>}
-          </li>
-        );
-      })}
-    </ul>
+    <div className="text-xs space-y-2 text-slate-400" role="list">
+      {preview.map((e) => (
+        <AuditEntryRow key={e.id} entry={e} members={members} />
+      ))}
+      {entries.length > preview.length && (
+        <div className="text-[11px] text-secondary pt-1">
+          <Link to={`/c/${campaignId}/audit`} className="hover:text-white">
+            {entries.length - preview.length} more entries — open full audit log
+          </Link>
+        </div>
+      )}
+    </div>
   );
 }

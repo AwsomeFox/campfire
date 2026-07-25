@@ -1323,5 +1323,10 @@ export const encounterEvents = sqliteTable('encounter_events', {
   actorId: integer('actor_id'),
   targetId: integer('target_id'),
   detail: text('detail').notNull().default(''),
+  chainId: text('chain_id'),
+  parentEventId: integer('parent_event_id'),
+  phase: text('phase'),
+  performedByJson: text('performed_by_json'),
+  metadataJson: text('metadata_json'),
   createdAt: text('created_at').notNull(),
 });

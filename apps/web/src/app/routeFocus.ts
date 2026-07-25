@@ -96,6 +96,7 @@ const PATH_SEGMENT_TITLES: Record<string, string> = {
   inbox: 'Scribe inbox',
   trash: 'Trash',
   members: 'Members',
+  audit: 'Audit log',
   search: 'Search',
   preferences: 'Preferences',
   tokens: 'API tokens',
@@ -106,7 +107,6 @@ const PATH_SEGMENT_TITLES: Record<string, string> = {
   ai: 'AI console',
   auth: 'Auth',
   storage: 'Storage',
-  audit: 'Audit log',
   new: 'New',
 };
 
