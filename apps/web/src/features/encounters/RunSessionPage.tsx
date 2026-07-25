@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -71,6 +72,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
+import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
@@ -871,6 +873,8 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
+  useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
+
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
       setPendingApply(null);
@@ -1243,6 +1247,21 @@ export default function RunSessionPage() {
 
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
+  const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
+
+  useKeyboardGuardedAction(
+    'encounterNextTurn',
+    canDmWrite && encounter
+      ? {
+          canExecute: () => {
+            if (!encounter || headerBusy) return false;
+            if (confirmEnd || confirmReopen || confirmDelete) return false;
+            return dmLifecycleActions(encounter.status).nextTurn;
+          },
+          execute: nextTurn,
+        }
+      : null,
+  );
 
   // Issue #636: scroll the active combatant row into view when the turn advances.
   const currentCombatantId = useMemo(
@@ -1446,7 +1465,12 @@ export default function RunSessionPage() {
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
-                <Btn disabled={headerBusy} onClick={nextTurn}>
+                <Btn
+                  disabled={headerBusy}
+                  onClick={nextTurn}
+                  aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
+                  title={`Next turn${nextTurnShortcut.titleSuffix}`}
+                >
                   Next turn →
                 </Btn>
               </>

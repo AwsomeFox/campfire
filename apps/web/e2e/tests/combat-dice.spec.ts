@@ -58,15 +58,34 @@ test.describe('encounter dice — apply rolled damage', () => {
       }
       const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
       encounterId = enc.id;
+      const brixiCombatant = (enc.combatants as Array<{ id: number; characterId: number | null }>).find(
+        (c) => c.characterId === characterId,
+      );
+      if (!brixiCombatant) {
+        const addRes = await dm.post(`/api/v1/encounters/${enc.id}/combatants`, {
+          data: { kind: 'character', characterId },
+        });
+        expect(addRes.ok(), `add Brixi combatant: ${await addRes.text()}`).toBeTruthy();
+      }
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
-      await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
+      expect(rollInitRes.ok(), `roll initiative: ${await rollInitRes.text()}`).toBeTruthy();
+      const startRes = await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
-      // The player's own card auto-expands, so the attack is visible without expanding.
-      await expect(page.getByText('Brixi Applybar', { exact: false }).first()).toBeVisible();
+      await expect(page.getByText('Running', { exact: true })).toBeVisible();
+      // Owned card auto-expands; scope the damage control to Brixi's sheet.
+      const brixiCard = page.getByRole('region', { name: /Brixi Applybar character sheet/i });
+      await expect(brixiCard).toBeVisible();
 
       // Roll the Greatsword damage from the owned (interactive) card.
-      await page.getByRole('button', { name: '2d6+4 slashing' }).click();
+      await brixiCard.getByRole('button', { name: '2d6+4 slashing' }).click();
+      const rollToast = page.getByTestId('roll-result-toast');
+      await expect(rollToast).toBeVisible();
+      await expect(rollToast.getByTestId('roll-result-apply')).toBeVisible();
+      await rollToast.getByTestId('roll-result-apply').click();
+
       const applyBar = page.getByRole('group', { name: /rolled/i });
       await expect(applyBar).toBeVisible();
 

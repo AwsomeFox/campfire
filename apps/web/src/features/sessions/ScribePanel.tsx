@@ -19,7 +19,8 @@ import { Link } from 'react-router-dom';
 import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeTrigger } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
-import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Btn, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
+import { conditionalRegionPhase } from '../../components/loadingSkeletonState';
 import { Markdown } from '../../components/Markdown';
 import { useDialog } from '../../components/useDialog';
 import { useDisclosure } from '../../components/useDisclosure';
@@ -118,11 +119,14 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
     if (seat && seat.enabled && seat.mode !== 'off') void load();
   }, [seatQuery.data, load]);
 
-  // Gate: hidden entirely until we know the seat is on. Avoids a flash of scribe UI on
-  // campaigns that never enabled the AI DM seat, and matches the other AI surfaces.
-  if (seatQuery.isLoading) return null;
+  // Gate: hidden entirely once we know the seat is off. While the seat query is
+  // still loading, reserve the collapsed card footprint so the timeline column
+  // does not jump (#677).
   const seat = seatQuery.data;
-  if (!seat || !seat.enabled || seat.mode === 'off') return null;
+  const seatVisible = Boolean(seat && seat.enabled && seat.mode !== 'off');
+  const seatPhase = conditionalRegionPhase(seatQuery.isLoading, seatVisible);
+  if (seatPhase === 'loading') return <SkeletonConditionalRegion preset="scribe" />;
+  if (seatPhase === 'ready-hidden') return null;
 
   async function run(dryRun: boolean) {
     setBusy(dryRun ? 'preview' : preview ? 'filing' : 'run');

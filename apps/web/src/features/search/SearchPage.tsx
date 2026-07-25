@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
+import { useKeyboardCommandHint } from '../../components/KeyboardCommandProvider';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { SearchResponse, SearchResult } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -69,6 +70,7 @@ const typeOrder: SearchResult['type'][] = [
 export default function SearchPage() {
   const { campaignId: campaignIdParam } = useParams<{ campaignId: string }>();
   const campaignId = Number(campaignIdParam);
+  const { ariaKeyshortcuts, titleSuffix } = useKeyboardCommandHint('globalSearch');
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const q = searchParams.get('q') ?? '';
@@ -154,6 +156,8 @@ export default function SearchPage() {
           onChange={(e) => setInput(e.target.value)}
           placeholder="Search encounters, scheduled sessions, quests, NPCs, notes…"
           aria-label="Search this campaign"
+          aria-keyshortcuts={ariaKeyshortcuts}
+          title={`Search this campaign${titleSuffix}`}
           onKeyDown={(event) => {
             if (event.key === 'ArrowDown' && orderedResults.length > 0) {
               event.preventDefault();
