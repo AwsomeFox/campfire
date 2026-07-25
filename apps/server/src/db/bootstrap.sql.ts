@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS story_arcs (
   summary TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned',
   sort_order INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS story_beats (
   session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
   quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
   encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -173,6 +175,7 @@ CREATE TABLE IF NOT EXISTS timeline_events (
   sort_index INTEGER NOT NULL DEFAULT 0,
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -237,6 +240,7 @@ CREATE TABLE IF NOT EXISTS factions (
   hidden INTEGER NOT NULL DEFAULT 0,
   reputation INTEGER NOT NULL DEFAULT 0,
   standing TEXT NOT NULL DEFAULT 'neutral',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -413,6 +417,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entity_type TEXT,
   entity_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  request_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -427,6 +432,7 @@ CREATE TABLE IF NOT EXISTS users (
   accent_color TEXT,
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
+  dice_theme TEXT NOT NULL DEFAULT 'nocturne',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -719,6 +725,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_opacity REAL NOT NULL DEFAULT 0.35,
   hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -734,6 +741,10 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   total INTEGER NOT NULL,
   label TEXT,
   dc INTEGER,
+  -- Issue #673: honest provenance for paper-table / physical rolls.
+  source TEXT NOT NULL DEFAULT 'rolled',
+  actor TEXT,
+  natural20 INTEGER,
   -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
   -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
   terms TEXT,
@@ -1057,6 +1068,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_campaign_id_desc ON audit_log(campaign_id, 
 -- #74: retention prune deletes by created_at across all campaigns; index it so the
 -- periodic sweep is a range scan rather than a full-table scan.
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_log(request_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);

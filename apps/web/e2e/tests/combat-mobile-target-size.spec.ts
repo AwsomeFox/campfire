@@ -101,10 +101,14 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
         await expect(page.getByRole('heading', { name: `Touch size ${viewport.name}` })).toBeVisible();
 
-        // Death-save pips + Roll (primary combat).
-        const pip = page.getByTestId('death-save-success-pips').getByRole('button').first();
+        const charName = `Touch Target ${viewport.name}`;
+        const charRow = page.locator('[data-testid^="combatant-row-"]').filter({ hasText: charName });
+
+        // Death-save pips + Roll (primary combat) — scope to this test's PC so parallel
+        // shard pollution (other unconscious combatants) cannot trip strict mode.
+        const pip = charRow.getByTestId('death-save-success-pips').getByRole('button').first();
         await assertMinTarget(pip, 'death-save pip');
-        await assertMinTarget(page.getByRole('button', { name: 'Roll a death save' }), 'death-save Roll');
+        await assertMinTarget(charRow.getByRole('button', { name: 'Roll a death save' }), 'death-save Roll');
 
         // HP steppers + spacing between adjacent +/-.
         const hpBtn = page.getByRole('button', { name: new RegExp(`Increase Touch Target ${viewport.name}'s HP by 1`) });
@@ -112,15 +116,15 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertStepperSpacing(page);
 
         // Attack / damage roll controls — DM cards stay collapsed until expanded.
-        const charName = `Touch Target ${viewport.name}`;
         await page.getByRole('button', { name: new RegExp(`Expand ${charName}'s character sheet`) }).click();
         await assertMinTarget(page.getByTestId('attack-roll-control').first(), 'attack roll');
         await assertMinTarget(page.getByTestId('damage-roll-control').first(), 'damage roll');
 
-        // Apply-bar dismiss (the ~11px ✕ the audit measured).
+        // Roll-result toast dismiss (replaces the old inline apply-bar dismiss).
         await page.getByTestId('damage-roll-control').first().click();
-        const dismiss = page.getByTestId('apply-damage-dismiss');
-        await assertMinTarget(dismiss, 'apply-damage dismiss');
+        const rollToast = page.getByTestId('roll-result-toast');
+        await expect(rollToast).toBeVisible();
+        await assertMinTarget(rollToast.getByTestId('roll-result-toast-dismiss'), 'roll-result toast dismiss');
 
         // Map tools (were ~21px chips).
         await assertMinTarget(page.getByTestId('map-tool-move'), 'map Move tool');

@@ -8,7 +8,7 @@ import { createBrowserRouter } from 'react-router-dom';
 import { Layout } from './Layout';
 import { AuthedLayout } from './AuthedLayout';
 import { RouteErrorBoundary } from './RouteErrorBoundary';
-import { Skeleton } from '../components/ui';
+import { SkeletonRoute } from '../components/ui';
 import { SetupPage } from '../features/auth/SetupPage';
 import { LoginPage } from '../features/auth/LoginPage';
 import { OidcRecoveryPage } from '../features/auth/OidcRecoveryPage';
@@ -24,11 +24,7 @@ function lazyPage(loader: Parameters<typeof lazy>[0]) {
   return (
     <RouteErrorBoundary>
       <Suspense
-        fallback={
-          <div className="max-w-4xl mx-auto px-4 mt-8">
-            <Skeleton lines={5} />
-          </div>
-        }
+        fallback={<SkeletonRoute lines={5} />}
       >
         <LazyComponent />
       </Suspense>

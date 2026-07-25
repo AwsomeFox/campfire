@@ -1,5 +1,5 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, inArray, max } from 'drizzle-orm';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { and, asc, eq, max } from 'drizzle-orm';
 import type { z } from 'zod';
 import {
   StoryArcCreate,
@@ -14,6 +14,7 @@ import type { StoryArc, StoryBeat, StoryBranch, StoryBeatWithBranches, StoryArcW
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { storyArcs, storyBeats, storyBranches, sessions, quests, encounters } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -91,7 +92,7 @@ export class StorylinesService {
     const rows = await this.db
       .select()
       .from(storyArcs)
-      .where(eq(storyArcs.campaignId, campaignId))
+      .where(and(eq(storyArcs.campaignId, campaignId), notDeleted(storyArcs.deletedAt)))
       .orderBy(asc(storyArcs.sortOrder), asc(storyArcs.id));
     return rows.map(arcToDomain);
   }
@@ -105,9 +106,9 @@ export class StorylinesService {
     return result;
   }
 
-  async getArcRowOrThrow(id: number) {
+  async getArcRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(storyArcs).where(eq(storyArcs.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Story arc ${id} not found`);
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Story arc ${id} not found`);
     return row;
   }
 
@@ -195,18 +196,13 @@ export class StorylinesService {
 
   async removeArc(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getArcRowOrThrow(id);
-    // Deleting an arc removes its beats and every branch touching those beats — in
-    // one transaction so nothing dangles. A branch is deleted when EITHER endpoint
-    // (its source beat OR its target beat) is one of this arc's beats.
+    const ts = nowIso();
+    // Soft-delete (issue #701): stamp the arc and every beat in one transaction so
+    // topology (branches) and prose revisions survive for restore. Beats hidden by an
+    // arc cascade are restored together when the arc is restored.
     this.db.transaction((tx) => {
-      const beatRows = tx.select({ id: storyBeats.id }).from(storyBeats).where(eq(storyBeats.arcId, id)).all();
-      const beatIds = beatRows.map((b) => b.id);
-      if (beatIds.length > 0) {
-        tx.delete(storyBranches).where(inArray(storyBranches.beatId, beatIds)).run();
-        tx.delete(storyBranches).where(inArray(storyBranches.toBeatId, beatIds)).run();
-      }
-      tx.delete(storyBeats).where(eq(storyBeats.arcId, id)).run();
-      tx.delete(storyArcs).where(eq(storyArcs.id, id)).run();
+      tx.update(storyBeats).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+      tx.update(storyArcs).set({ deletedAt: ts, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
     });
     await this.audit.log({
       actor: auditActor(user),
@@ -215,7 +211,28 @@ export class StorylinesService {
       entityType: 'story_arc',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed arc and every beat soft-deleted with it (issue #701). */
+  async restoreArc(id: number, user: RequestUser, role: Role): Promise<StoryArcWithBeats> {
+    const existing = await this.getArcRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Story arc ${id} is not in the trash`);
+    const ts = nowIso();
+    this.db.transaction((tx) => {
+      tx.update(storyArcs).set({ deletedAt: null, updatedAt: ts }).where(eq(storyArcs.id, id)).run();
+      tx.update(storyBeats).set({ deletedAt: null, updatedAt: ts }).where(eq(storyBeats.arcId, id)).run();
+    });
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'storyline.arc.restore',
+      entityType: 'story_arc',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return this.getArcWithBeatsOrThrow(id);
   }
 
   // ---------- beats ----------
@@ -228,17 +245,26 @@ export class StorylinesService {
    */
   private async assertEntityInCampaign(kind: 'session' | 'quest' | 'encounter', id: number, campaignId: number): Promise<void> {
     const table = kind === 'session' ? sessions : kind === 'quest' ? quests : encounters;
-    const [row] = await this.db.select({ campaignId: table.campaignId }).from(table).where(eq(table.id, id)).limit(1);
+    const deletedCol = kind === 'encounter' ? encounters.deletedAt : kind === 'session' ? sessions.deletedAt : quests.deletedAt;
+    const [row] = await this.db
+      .select({ campaignId: table.campaignId, deletedAt: deletedCol })
+      .from(table)
+      .where(and(eq(table.id, id), notDeleted(deletedCol)))
+      .limit(1);
     if (!row || row.campaignId !== campaignId) {
       throw new BadRequestException(`${kind} ${id} does not exist in this campaign`);
     }
   }
 
-  private async beatsForArc(arcId: number): Promise<StoryBeatWithBranches[]> {
+  private async beatsForArc(arcId: number, includeDeleted = false): Promise<StoryBeatWithBranches[]> {
     const rows = await this.db
       .select()
       .from(storyBeats)
-      .where(eq(storyBeats.arcId, arcId))
+      .where(
+        includeDeleted
+          ? eq(storyBeats.arcId, arcId)
+          : and(eq(storyBeats.arcId, arcId), notDeleted(storyBeats.deletedAt)),
+      )
       .orderBy(asc(storyBeats.sortOrder), asc(storyBeats.id));
     const result: StoryBeatWithBranches[] = [];
     for (const row of rows) {
@@ -247,9 +273,9 @@ export class StorylinesService {
     return result;
   }
 
-  async getBeatRowOrThrow(id: number) {
+  async getBeatRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(storyBeats).where(eq(storyBeats.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Story beat ${id} not found`);
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Story beat ${id} not found`);
     return row;
   }
 
@@ -371,12 +397,7 @@ export class StorylinesService {
 
   async removeBeat(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getBeatRowOrThrow(id);
-    // Remove the beat and any branch pointing at OR out of it, so no branch dangles.
-    this.db.transaction((tx) => {
-      tx.delete(storyBranches).where(eq(storyBranches.beatId, id)).run();
-      tx.delete(storyBranches).where(eq(storyBranches.toBeatId, id)).run();
-      tx.delete(storyBeats).where(eq(storyBeats.id, id)).run();
-    });
+    await this.db.update(storyBeats).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(storyBeats.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -384,7 +405,32 @@ export class StorylinesService {
       entityType: 'story_beat',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed beat (issue #701). Refused while its parent arc is still trashed. */
+  async restoreBeat(id: number, user: RequestUser, role: Role): Promise<StoryBeat> {
+    const existing = await this.getBeatRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Story beat ${id} is not in the trash`);
+    const arc = await this.getArcRowOrThrow(existing.arcId, true);
+    if (arc.deletedAt != null) {
+      throw new ConflictException('Restore the parent arc first — its beats are trashed together.');
+    }
+    const [row] = await this.db
+      .update(storyBeats)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(storyBeats.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'storyline.beat.restore',
+      entityType: 'story_beat',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return beatToDomain(row);
   }
 
   // ---------- branches ----------
@@ -410,7 +456,7 @@ export class StorylinesService {
       const [target] = await this.db
         .select({ id: storyBeats.id })
         .from(storyBeats)
-        .where(and(eq(storyBeats.id, input.toBeatId), eq(storyBeats.campaignId, beat.campaignId)))
+        .where(and(eq(storyBeats.id, input.toBeatId), eq(storyBeats.campaignId, beat.campaignId), notDeleted(storyBeats.deletedAt)))
         .limit(1);
       if (!target) {
         throw new BadRequestException(`toBeatId ${input.toBeatId} does not exist in this campaign`);

@@ -8,7 +8,7 @@
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -36,6 +36,8 @@ import {
 } from '../features/notifications/NotificationsBell';
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
+import { BrandMark } from '../components/BrandMark';
+import { UIIcon } from '../components/UIIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
 import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
@@ -43,6 +45,7 @@ import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 import { LiveEncounterProvider } from './LiveEncounterContext';
 import { useLiveEncounterState } from '../lib/useLiveEncounterState';
+import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -51,16 +54,14 @@ import {
   type NavItem,
 } from './campaignNav';
 
-function FlameMark({ size = 20 }: { size?: number }) {
+function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
+  if (campaignId === undefined) return <>{children}</>;
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0">
-      <path
-        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
-        stroke="var(--color-accent)"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-    </svg>
+    <CampaignAccessProvider campaignId={campaignId}>
+      <KeyboardCommandProvider campaignId={campaignId}>
+        {children}
+      </KeyboardCommandProvider>
+    </CampaignAccessProvider>
   );
 }
 
@@ -166,6 +167,7 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
   const [q, setQ] = useState('');
   const navigate = useNavigate();
+  const { ariaKeyshortcuts, titleSuffix } = useKeyboardCommandHint('globalSearch');
   return (
     <form
       className="px-0.5 mb-1"
@@ -181,6 +183,8 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
         onChange={(e) => setQ(e.target.value)}
         placeholder={t('nav.searchPlaceholder')}
         aria-label={t('nav.searchAria')}
+        aria-keyshortcuts={ariaKeyshortcuts}
+        title={`${t('nav.searchAria')}${titleSuffix}`}
         className="w-full text-sm"
         style={{
           background: 'var(--color-surface, rgba(255,255,255,0.03))',
@@ -192,6 +196,22 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
         }}
       />
     </form>
+  );
+}
+
+function SidebarKeyboardShortcutsButton() {
+  const { t } = useTranslation();
+  const commands = useKeyboardCommands();
+  const { ariaKeyshortcuts, titleSuffix } = useKeyboardCommandHint('shortcutHelp');
+  if (!commands) return null;
+  return (
+    <SidebarNavButton
+      item={{ key: 'keyboard-shortcuts', label: t('keyboard.openHelp'), to: undefined }}
+      active={false}
+      onClick={() => commands.openHelp()}
+      ariaKeyshortcuts={ariaKeyshortcuts}
+      title={`${t('keyboard.openHelp')}${titleSuffix}`}
+    />
   );
 }
 
@@ -264,7 +284,19 @@ function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   );
 }
 
-function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
+function SidebarNavButton({
+  item,
+  active,
+  onClick,
+  ariaKeyshortcuts,
+  title,
+}: {
+  item: NavItem;
+  active: boolean;
+  onClick?: () => void;
+  ariaKeyshortcuts?: string;
+  title?: string;
+}) {
   const inner = (
     <>
       <span
@@ -309,6 +341,8 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
         onClick={onClick}
         className="flex items-center gap-2 px-2.5 text-sm text-left w-full"
         style={{ ...sharedStyle, ...activeStyle }}
+        aria-keyshortcuts={ariaKeyshortcuts}
+        title={title}
       >
         {inner}
       </button>
@@ -656,6 +690,7 @@ function LayoutContent() {
   return (
     <AiDmLiveActivityProvider value={liveActivity}>
     <LiveEncounterProvider value={liveEncounter}>
+    <MaybeCampaignCommands campaignId={campaignId}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
       <div className="cf-ember-layer" aria-hidden />
       <div className="cf-authed-shell min-h-screen flex flex-1 w-full min-w-0">
@@ -675,7 +710,7 @@ function LayoutContent() {
               style={{ borderRadius: 'var(--radius-md)' }}
               aria-label={t('nav.switchCampaign')}
             >
-              <FlameMark size={22} />
+              <BrandMark size={22} variant="mark" className="shrink-0" />
               <span className="min-w-0 leading-tight">
                 <span
                   className="block truncate text-[15px]"
@@ -744,6 +779,7 @@ function LayoutContent() {
               item={{ key: 'preferences', label: t('nav.preferences'), to: '/preferences' }}
               active={location.pathname === '/preferences'}
             />
+            <SidebarKeyboardShortcutsButton />
             <SidebarNavButton
               item={{ key: 'change-password', label: t('nav.changePassword'), to: undefined }}
               active={false}
@@ -774,7 +810,7 @@ function LayoutContent() {
             className="flex items-center gap-2"
             aria-label={campaignId !== undefined ? t('nav.switchCampaign') : t('nav.home')}
           >
-            <FlameMark />
+            <BrandMark variant="mark" className="shrink-0" />
           </Link>
           <div className="leading-tight min-w-0">
             <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 14 }}>
@@ -835,7 +871,7 @@ function LayoutContent() {
             style={{ borderColor: 'var(--color-divider)' }}
           >
             <Link to="/" className="flex items-center gap-2.5">
-              <FlameMark />
+              <BrandMark variant="mark" className="shrink-0" />
               <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 15 }}>Campfire</span>
             </Link>
             <span className="tag tag-outline" style={{ fontSize: 10 }}>{t('nav.selfHosted')}</span>
@@ -900,13 +936,7 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
-            {campaignId !== undefined ? (
-              <CampaignAccessProvider campaignId={campaignId}>
-                <Outlet />
-              </CampaignAccessProvider>
-            ) : (
-              <Outlet />
-            )}
+            <Outlet />
           </MentionsProvider>
         </main>
       </div>
@@ -940,7 +970,7 @@ function LayoutContent() {
             </NavLink>
           ) : (
             <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
-              <span className="ico">⋯</span>{t('nav.more')}
+              <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
             </button>
           )}
         </nav>
@@ -970,6 +1000,7 @@ function LayoutContent() {
       <NotificationsPanel />
       </div>
     </div>
+    </MaybeCampaignCommands>
     </LiveEncounterProvider>
     </AiDmLiveActivityProvider>
   );
@@ -1044,9 +1075,9 @@ function MoreSheet({
             aria-label={t('nav.closeMenu')}
             onClick={onClose}
             className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
-            style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
+            style={{ width: 32, height: 32, color: 'var(--color-text)' }}
           >
-            ✕
+            <UIIcon name="close" size="md" />
           </button>
         </div>
         <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>

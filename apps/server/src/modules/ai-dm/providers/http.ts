@@ -9,6 +9,7 @@
  */
 
 import { Logger } from '@nestjs/common';
+import { getRequestId } from '../../../common/request-context';
 import { AiProviderError, classifyHttpStatus, getHttpStatusText, parseRetryAfterMs } from './errors';
 
 const httpLogger = new Logger('AiHttpProvider');
@@ -152,7 +153,9 @@ export async function postJson(
     const kind = classifyHttpStatus(res.status, bodyText);
     const statusText = getHttpStatusText(res.status);
     const sanitizedMessage = `AI provider returned HTTP ${res.status}${statusText ? ` ${statusText}` : ''}`;
-    httpLogger.warn(`AI provider (${opts.provider}) returned HTTP ${res.status} (${kind}). Raw body: ${truncate(bodyText, 1000)}`);
+    httpLogger.warn(
+      `requestId=${getRequestId() ?? 'none'} AI provider (${opts.provider}) returned HTTP ${res.status} (${kind}). Raw body: ${truncate(bodyText, 1000)}`,
+    );
     lastErr = new AiProviderError(kind, sanitizedMessage, {
       provider: opts.provider,
       status: res.status,

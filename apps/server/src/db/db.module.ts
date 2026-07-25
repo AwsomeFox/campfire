@@ -218,6 +218,23 @@ function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user dice overlay skins (issue #1315):
+ * `users.dice_theme` didn't exist. Plain NOT NULL DEFAULT 'nocturne' ADD COLUMN.
+ */
+function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
+  if (hasDiceTheme) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -353,6 +370,7 @@ function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
   if (!has('skills')) sqlite.exec("ALTER TABLE characters ADD COLUMN skills TEXT NOT NULL DEFAULT '{}'");
   if (!has('actions')) sqlite.exec("ALTER TABLE characters ADD COLUMN actions TEXT NOT NULL DEFAULT '[]'");
   if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
+  if (!has('resources')) sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
 }
 
 /**
@@ -806,6 +824,44 @@ function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before physical/manual roll provenance (issue #673):
+ * `dice_rolls` gained `source` (rolled|manual), optional `actor`, and optional `natural20`.
+ * Existing rows default to `rolled` — their meaning is unchanged.
+ */
+function migrateDiceRollsTableForManualProvenance(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('source')) sqlite.exec("ALTER TABLE dice_rolls ADD COLUMN source TEXT NOT NULL DEFAULT 'rolled'");
+  if (!has('actor')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN actor TEXT');
+  if (!has('natural20')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN natural20 INTEGER');
+}
+
+/**
+ * Migration for DBs created before trash consistency (issue #701): factions,
+ * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
+ * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
+ */
+function migrateTrashSoftDeleteColumns701(sqlite: Database.Database): void {
+  const addDeletedAt = (table: string): void => {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) return;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((c) => c.name === 'deleted_at')) return;
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+  };
+  for (const table of ['factions', 'story_arcs', 'story_beats', 'encounters']) {
+    addDeletedAt(table);
+  }
+}
+
+/**
  * Migration for DBs created before soft-delete / trash (issue #116): the trashable
  * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
  * means the row is in the trash (excluded from normal reads, restorable). Idempotent
@@ -821,7 +877,7 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
     if (columns.some((c) => c.name === 'deleted_at')) return;
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
   };
-  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters']) {
+  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters', 'timeline_events']) {
     addDeletedAt(table);
   }
 }
@@ -2020,6 +2076,17 @@ function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): vo
   }
 }
 
+function migrateCharactersTableForResources(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'resources')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
+  }
+}
+
 /**
  * Issue #423: `combatants.condition_instances` stores structured condition instances
  * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
@@ -2384,6 +2451,16 @@ function migrateHotHistoryCompositeIndexes(sqlite: Database.Database): void {
   }
 }
 
+function migrateAuditLogForRequestId(sqlite: Database.Database): void {
+  const hasTable = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'").get();
+  if (!hasTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(audit_log)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'request_id')) {
+    sqlite.exec('ALTER TABLE audit_log ADD COLUMN request_id TEXT');
+  }
+  sqlite.exec('CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_log(request_id)');
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2471,6 +2548,11 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
   { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
   { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
+  { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
+  { name: '0089_characters_resources', run: migrateCharactersTableForResources },
+  { name: '0090_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
+  { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
 ];
 
 /**

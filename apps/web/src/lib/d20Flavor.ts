@@ -44,7 +44,8 @@ function isPooledMultiD20Expr(expr: string): boolean {
   return /^[+-]?([2-9]|\d{2,})d20(?!\d)(?:[+-]|$)/i.test(expr.trim());
 }
 
-export function d20Flavor(r: Pick<DiceRoll, 'expr' | 'rolls' | 'kept' | 'terms'>): D20Flavor | null {
+export function d20Flavor(r: Pick<DiceRoll, 'expr' | 'rolls' | 'kept' | 'terms' | 'source'>): D20Flavor | null {
+  if (r.source === 'manual') return null;
   if (!/d20(?!\d)/i.test(r.expr)) return null;
   let dice: number[];
   if (r.terms && r.terms.length > 0) {

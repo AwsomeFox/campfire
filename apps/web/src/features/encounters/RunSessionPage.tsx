@@ -15,6 +15,7 @@ import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -71,6 +72,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
+import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
@@ -110,6 +112,23 @@ import {
   MAP_PING_KEYBOARD_POINT,
   type MapPingTapArm,
 } from './mapPingTap';
+import {
+  applyPinch,
+  applyWheelZoom,
+  clampPan,
+  DEFAULT_MAP_VIEWPORT,
+  fitViewport,
+  formatViewportZoomPercent,
+  MAP_VIEWPORT_PAN_STEP_PX,
+  MAP_VIEWPORT_ZOOM_STEP,
+  panBy,
+  resetViewport,
+  surfaceToContentPoint,
+  viewportTransformStyle,
+  zoomByFactor,
+  type MapViewportState,
+  type PinchGesture,
+} from './mapViewport';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -666,6 +685,7 @@ export default function RunSessionPage() {
   /** Issue #466: per-conflict resync direction chosen in the Reopen dialog. */
   const [hpResyncChoices, setHpResyncChoices] = useState<Record<number, HpResyncDirection>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
@@ -871,6 +891,8 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
+  useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
+
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
       setPendingApply(null);
@@ -921,7 +943,10 @@ export default function RunSessionPage() {
     mutationFn: () => api.delete(`${API}/encounters/${eid}`),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSuccess: () => navigate(`/c/${cid}/encounters`),
+    onSuccess: () => {
+      setConfirmDelete(false);
+      setPendingTrashUndo(true);
+    },
   });
 
   // General per-combatant patch (conditions, death saves, initiative, rename, max/temp HP,
@@ -1079,6 +1104,11 @@ export default function RunSessionPage() {
     );
   };
   const deleteEncounter = () => deleteEncounterMut.mutate();
+  async function undoTrashEncounter() {
+    await api.post(`${API}/encounters/${eid}/restore`);
+    setPendingTrashUndo(false);
+    await invalidateEncounter(queryClient, eid);
+  }
   const reopenChoicesComplete =
     hpSyncConflicts.length === 0 || hpSyncConflicts.every((c) => hpResyncChoices[c.combatantId] != null);
 
@@ -1243,6 +1273,21 @@ export default function RunSessionPage() {
 
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
+  const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
+
+  useKeyboardGuardedAction(
+    'encounterNextTurn',
+    canDmWrite && encounter
+      ? {
+          canExecute: () => {
+            if (!encounter || headerBusy) return false;
+            if (confirmEnd || confirmReopen || confirmDelete) return false;
+            return dmLifecycleActions(encounter.status).nextTurn;
+          },
+          execute: nextTurn,
+        }
+      : null,
+  );
 
   // Issue #636: scroll the active combatant row into view when the turn advances.
   const currentCombatantId = useMemo(
@@ -1446,7 +1491,12 @@ export default function RunSessionPage() {
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
-                <Btn disabled={headerBusy} onClick={nextTurn}>
+                <Btn
+                  disabled={headerBusy}
+                  onClick={nextTurn}
+                  aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
+                  title={`Next turn${nextTurnShortcut.titleSuffix}`}
+                >
                   Next turn →
                 </Btn>
               </>
@@ -1882,6 +1932,13 @@ export default function RunSessionPage() {
           onCancel={() => setConfirmDelete(false)}
         />
       )}
+      {pendingTrashUndo && (
+        <UndoSnackbar
+          message="Encounter moved to Trash."
+          onUndo={undoTrashEncounter}
+          onExpire={() => navigate(`/c/${cid}/encounters`)}
+        />
+      )}
       {confirmRemoveCombatantId != null && (
         <ConfirmDialog
           title="Remove this combatant from the encounter?"
@@ -2109,7 +2166,8 @@ function BattleMap({
     | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'calibrate'; pointerId: number; captureTarget: Element; anchor: CalibrateAnchor; point: MapPoint }
-    | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm };
+    | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm }
+    | { kind: 'viewport-pan'; pointerId: number; captureTarget: Element; lastX: number; lastY: number };
 
   const [uploading, setUploading] = useState(false);
   const [draggingId, setDraggingId] = useState<number | null>(null);
@@ -2133,8 +2191,19 @@ function BattleMap({
   // Natural pixel size of the loaded map image, used to compute its letterboxed
   // (object-contain) rendered rect so the grid overlay can be clipped to it (issue #273b).
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
+  // Local viewport navigation (issue #712) — never synced to the server.
+  const [viewport, setViewport] = useState<MapViewportState>(DEFAULT_MAP_VIEWPORT);
+  const [viewportPan, setViewportPan] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const activeGestureRef = useRef<ActiveMapGesture | null>(null);
+  const pinchRef = useRef<{ pointers: Map<number, { x: number; y: number }>; gesture: PinchGesture | null }>({
+    pointers: new Map(),
+    gesture: null,
+  });
+  const viewportRef = useRef(viewport);
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
   // A successful pointerup normally causes lostpointercapture immediately afterwards. Keep the
   // released id long enough to identify that expected notification; any earlier capture loss is
   // an interruption and must roll the gesture back without persisting it.
@@ -2219,7 +2288,35 @@ function BattleMap({
   // A new map starts with unknown natural size until its <img> fires onLoad.
   useEffect(() => {
     setImgNatural(null);
+    setViewport(DEFAULT_MAP_VIEWPORT);
+    setViewportPan(false);
+    pinchRef.current.pointers.clear();
+    pinchRef.current.gesture = null;
   }, [mapImageUrl]);
+
+  const surfaceSize = useMemo(() => ({ w: surfaceW, h: surfaceH }), [surfaceW, surfaceH]);
+
+  // Wheel / trackpad zoom toward the cursor (passive: false so we can prevent page scroll).
+  useEffect(() => {
+    const el = surfaceRef.current;
+    if (!el || !mapImageUrl) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      if (!(rect.width > 0) || !(rect.height > 0)) return;
+      const localX = e.clientX - rect.left;
+      const localY = e.clientY - rect.top;
+      setViewport((v) => applyWheelZoom(v, e.deltaY, localX, localY, { w: rect.width, h: rect.height }));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [mapImageUrl]);
+
+  // Re-clamp pan when the surface resizes (narrow/wide breakpoints).
+  useEffect(() => {
+    if (!(surfaceW > 0) || !(surfaceH > 0)) return;
+    setViewport((v) => clampPan(v, surfaceSize));
+  }, [surfaceW, surfaceH, surfaceSize]);
 
   // Rendered rect of the map image inside the 16:9 surface (issue #464 / #273b).
   // object-contain letterboxes non-16:9 images; every tool shares this transform.
@@ -2298,13 +2395,93 @@ function BattleMap({
 
   /**
    * Pointer → map-image percent (issue #464). Letterbox hits return null unless
-   * `clamp` is set (in-progress drags stay pinned to the map edge).
+   * `clamp` is set (in-progress drags stay pinned to the map edge). Inverse-applies
+   * the local viewport transform first (issue #712).
    */
   function pointerToPercent(e: ReactPointerEvent, clamp = false): MapPoint | null {
     if (!mapRect) return null;
     const rect = surfaceRef.current?.getBoundingClientRect();
     if (!rect) return null;
-    return pointerToMapPercent(e.clientX, e.clientY, rect, mapRect, { clamp });
+    const localX = e.clientX - rect.left;
+    const localY = e.clientY - rect.top;
+    const content = surfaceToContentPoint(localX, localY, viewport);
+    return pointerToMapPercent(rect.left + content.x, rect.top + content.y, rect, mapRect, { clamp });
+  }
+
+  function surfaceLocalFromEvent(e: { clientX: number; clientY: number }): { x: number; y: number } | null {
+    const rect = surfaceRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  function trackPinchPointer(
+    e: ReactPointerEvent<HTMLDivElement>,
+    phase: 'down' | 'move' | 'up' | 'cancel',
+  ): boolean {
+    if (e.pointerType !== 'touch') return false;
+    const track = pinchRef.current;
+    if (phase === 'down') {
+      track.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    } else if (phase === 'move') {
+      if (!track.pointers.has(e.pointerId)) return false;
+      track.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    } else {
+      track.pointers.delete(e.pointerId);
+      if (track.pointers.size < 2) track.gesture = null;
+    }
+
+    if (track.pointers.size < 2) return false;
+
+    const pts = [...track.pointers.values()];
+    const local = surfaceLocalFromEvent({ clientX: (pts[0].x + pts[1].x) / 2, clientY: (pts[0].y + pts[1].y) / 2 });
+    if (!local || !(surfaceW > 0) || !(surfaceH > 0)) return true;
+    const cx = local.x;
+    const cy = local.y;
+    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (!track.gesture) {
+      cancelActiveGesture();
+      track.gesture = {
+        startViewport: viewportRef.current,
+        startDistance: dist,
+        startCenterX: cx,
+        startCenterY: cy,
+      };
+    }
+    setViewport(applyPinch(track.gesture, cx, cy, dist, surfaceSize));
+    return true;
+  }
+
+  function zoomViewportAt(factor: number, focalX: number, focalY: number) {
+    setViewport((v) => zoomByFactor(v, factor, focalX, focalY, surfaceSize));
+  }
+
+  function onViewportKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (tool === 'ping' && isMapPingKeyboardActivation(e)) {
+      onPingKeyDown(e);
+      return;
+    }
+    if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      zoomViewportAt(MAP_VIEWPORT_ZOOM_STEP, surfaceW / 2, surfaceH / 2);
+      return;
+    }
+    if (e.key === '-') {
+      e.preventDefault();
+      zoomViewportAt(1 / MAP_VIEWPORT_ZOOM_STEP, surfaceW / 2, surfaceH / 2);
+      return;
+    }
+    if (e.key === '0') {
+      e.preventDefault();
+      setViewport(resetViewport());
+      return;
+    }
+    if (viewport.scale > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault();
+      const step = MAP_VIEWPORT_PAN_STEP_PX;
+      const dx = e.key === 'ArrowLeft' ? step : e.key === 'ArrowRight' ? -step : 0;
+      const dy = e.key === 'ArrowUp' ? step : e.key === 'ArrowDown' ? -step : 0;
+      setViewport((v) => panBy(v, dx, dy, surfaceSize));
+    }
   }
 
   /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
@@ -2329,6 +2506,7 @@ function BattleMap({
   }
 
   function onSurfacePointerDown(e: ReactPointerEvent<HTMLDivElement>) {
+    if (trackPinchPointer(e, 'down')) return;
     // A palm / secondary contact cannot arm a ping, and if a ping is already armed it cancels
     // that gesture so the interrupted primary never publishes (issue #809).
     if (!e.isPrimary) {
@@ -2337,6 +2515,19 @@ function BattleMap({
       return;
     }
     if (activeGestureRef.current) return;
+    const local = surfaceLocalFromEvent(e);
+    if (viewportPan && local) {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = {
+        kind: 'viewport-pan',
+        pointerId: e.pointerId,
+        captureTarget: e.currentTarget,
+        lastX: local.x,
+        lastY: local.y,
+      };
+      return;
+    }
     // Letterbox bands are inert — do not start ping/measure/reveal/deselect there (#464).
     const pct = pointerToPercent(e);
     if (!pct) return;
@@ -2376,8 +2567,19 @@ function BattleMap({
   }
 
   function onSurfacePointerMove(e: ReactPointerEvent<HTMLDivElement>) {
+    if (trackPinchPointer(e, 'move')) return;
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+    if (gesture.kind === 'viewport-pan') {
+      const local = surfaceLocalFromEvent(e);
+      if (!local) return;
+      const dx = local.x - gesture.lastX;
+      const dy = local.y - gesture.lastY;
+      gesture.lastX = local.x;
+      gesture.lastY = local.y;
+      setViewport((v) => panBy(v, dx, dy, surfaceSize));
+      return;
+    }
     if (gesture.kind === 'ping') {
       // Drag-away past tap slop cancels immediately — no publish on the eventual release.
       if (mapPingTapExceededSlop(gesture.arm, e.clientX, e.clientY)) {
@@ -2423,8 +2625,14 @@ function BattleMap({
   }
 
   function onSurfacePointerUp(e: ReactPointerEvent<HTMLDivElement>) {
+    if (trackPinchPointer(e, 'up')) return;
     const gesture = activeGestureRef.current;
     if (!e.isPrimary || !gesture || gesture.pointerId !== e.pointerId) return;
+
+    if (gesture.kind === 'viewport-pan') {
+      releasePointerOwnership(gesture);
+      return;
+    }
 
     // Ping: decide publish/cancel first, then always clear ownership + release capture so a
     // completed (or cancelled) tap never leaves `kind: 'ping'` armed for a later pointerup.
@@ -2513,6 +2721,7 @@ function BattleMap({
   }
 
   function onSurfacePointerCancel(e: ReactPointerEvent<HTMLDivElement>) {
+    trackPinchPointer(e, 'cancel');
     cancelActiveGesture(e.pointerId);
   }
 
@@ -2957,26 +3166,123 @@ function BattleMap({
             </div>
           )}
 
+          {/* Viewport navigation (issue #712) — separate from token/map play tools. */}
+          <div
+            className="flex flex-wrap gap-2 items-center"
+            style={{ padding: '8px 14px 0' }}
+            data-testid="map-viewport-toolbar"
+            role="toolbar"
+            aria-label="Map viewport navigation"
+          >
+            <button
+              type="button"
+              className="cf-map-tool"
+              data-testid="map-viewport-pan"
+              aria-pressed={viewportPan}
+              title="Drag to pan the map (touch: one finger when Pan is on; two fingers to pinch-zoom)"
+              onClick={() => setViewportPan((on) => !on)}
+              style={{
+                borderColor: viewportPan ? 'var(--color-accent)' : 'var(--color-divider)',
+                color: viewportPan ? 'var(--color-accent)' : undefined,
+              }}
+            >
+              Pan
+            </button>
+            <button
+              type="button"
+              className="cf-map-tool"
+              data-testid="map-viewport-zoom-in"
+              aria-label="Zoom in"
+              title="Zoom in (+)"
+              onClick={() => zoomViewportAt(MAP_VIEWPORT_ZOOM_STEP, surfaceW / 2, surfaceH / 2)}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              className="cf-map-tool"
+              data-testid="map-viewport-zoom-out"
+              aria-label="Zoom out"
+              title="Zoom out (−)"
+              onClick={() => zoomViewportAt(1 / MAP_VIEWPORT_ZOOM_STEP, surfaceW / 2, surfaceH / 2)}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="cf-map-tool"
+              data-testid="map-viewport-fit"
+              aria-label="Fit map to view"
+              title="Fit map to view"
+              onClick={() => setViewport(fitViewport())}
+            >
+              Fit
+            </button>
+            <button
+              type="button"
+              className="cf-map-tool"
+              data-testid="map-viewport-reset"
+              aria-label="Reset viewport"
+              title="Reset zoom and pan (0)"
+              onClick={() => setViewport(resetViewport())}
+            >
+              Reset
+            </button>
+            <span
+              className="text-muted"
+              data-testid="map-viewport-zoom-label"
+              aria-live="polite"
+              style={{ fontSize: 11, minWidth: 40 }}
+            >
+              {formatViewportZoomPercent(viewport.scale)}
+            </span>
+          </div>
+
           <div
             ref={surfaceRef}
             data-testid="battle-map-surface"
             className="relative overflow-hidden"
             role={tool === 'ping' ? 'button' : undefined}
-            tabIndex={tool === 'ping' ? 0 : undefined}
-            aria-label={tool === 'ping' ? 'Ping the map center for everyone' : undefined}
+            tabIndex={0}
+            aria-label={
+              tool === 'ping'
+                ? 'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
+                : 'Battle map viewport. +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
+            }
             style={{
               margin: '8px 14px',
               aspectRatio: '16 / 9',
-              touchAction: tool !== 'move' || draggingId != null || aoeDrag != null ? 'none' : undefined,
-              cursor: tool === 'measure' ? 'crosshair' : tool === 'reveal' ? 'cell' : tool === 'ping' ? 'pointer' : undefined,
+              touchAction:
+                viewportPan || viewport.scale > 1
+                  ? 'none'
+                  : tool !== 'move' || draggingId != null || aoeDrag != null
+                    ? 'none'
+                    : undefined,
+              cursor: viewportPan
+                ? 'grab'
+                : tool === 'measure'
+                  ? 'crosshair'
+                  : tool === 'reveal'
+                    ? 'cell'
+                    : tool === 'ping'
+                      ? 'pointer'
+                      : undefined,
             }}
             onPointerDown={onSurfacePointerDown}
             onPointerMove={onSurfacePointerMove}
             onPointerUp={onSurfacePointerUp}
             onPointerCancel={onSurfacePointerCancel}
             onLostPointerCapture={onSurfaceLostPointerCapture}
-            onKeyDown={tool === 'ping' ? onPingKeyDown : undefined}
+            onKeyDown={onViewportKeyDown}
           >
+            <div
+              data-testid="battle-map-viewport"
+              className="absolute inset-0"
+              style={{
+                transform: viewportTransformStyle(viewport),
+                transformOrigin: '0 0',
+              }}
+            >
             <img
               src={mapImageUrl}
               alt="Battle map"
@@ -3330,6 +3636,7 @@ function BattleMap({
                 ))}
               </div>
             )}
+            </div>
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
@@ -3386,9 +3693,11 @@ function BattleMap({
                 ? 'Click-drag to reveal a region of the map to players.'
                 : tool === 'ping'
                   ? 'Tap a spot on the map to ping it for everyone. Keyboard: focus the map and press Enter or Space to ping the center.'
-                  : isDm
-                    ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit.'
-                    : 'Drag your own token to move it.'}
+                  : viewportPan
+                    ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
+                    : isDm
+                      ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit. Use the viewport toolbar to zoom and pan.'
+                      : 'Drag your own token to move it. Use the viewport toolbar to zoom and pan.'}
           </div>
         </>
       )}

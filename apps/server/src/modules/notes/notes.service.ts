@@ -565,13 +565,13 @@ export class NotesService {
         return this.db
           .select({ id: encounters.id, name: encounters.name })
           .from(encounters)
-          .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, ids)));
+          .where(and(eq(encounters.campaignId, campaignId), inArray(encounters.id, ids), notDeleted(encounters.deletedAt)));
       case 'faction':
         // Factions can be pinned by a note (issue #221) — resolve their display names.
         return this.db
           .select({ id: factions.id, name: factions.name })
           .from(factions)
-          .where(and(eq(factions.campaignId, campaignId), inArray(factions.id, ids)));
+          .where(and(eq(factions.campaignId, campaignId), inArray(factions.id, ids), notDeleted(factions.deletedAt)));
     }
   }
 

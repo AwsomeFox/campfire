@@ -153,6 +153,31 @@ describe('shared dice log (e2e)', () => {
     expect(after.body.length).toBe(before.body.length);
   });
 
+  it('POST /campaigns/:id/roll/manual persists an honest physical roll (issue #673)', async () => {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/roll/manual`)
+      .set(player)
+      .send({ total: 18, label: 'DEX save', actor: 'Rogue', natural20: 14, dc: 15 });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
+      expr: 'physical',
+      rolls: [],
+      total: 18,
+      source: 'manual',
+      label: 'DEX save',
+      actor: 'Rogue',
+      natural20: 14,
+      dc: 15,
+      success: true,
+    });
+    expect(res.body.kept).toBeUndefined();
+    expect(res.body.terms).toBeUndefined();
+
+    const feed = await request(server).get(`/api/v1/campaigns/${campaignId}/rolls?limit=5`).set(player);
+    expect(feed.body.some((r: { id: number }) => r.id === res.body.id)).toBe(true);
+  });
+
   it('rolls are scoped per campaign — another campaign has its own empty feed', async () => {
     const server = ctx.app.getHttpServer();
     const otherRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other Campaign' });

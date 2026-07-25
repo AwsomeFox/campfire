@@ -156,6 +156,8 @@ export const storyArcs = sqliteTable('story_arcs', {
   summary: text('summary').notNull().default(''),
   status: text('status').notNull().default('planned'),
   sortOrder: integer('sort_order').notNull().default(0),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -174,6 +176,8 @@ export const storyBeats = sqliteTable('story_beats', {
   sessionId: integer('session_id'),
   questId: integer('quest_id'),
   encounterId: integer('encounter_id'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -189,6 +193,8 @@ export const timelineEvents = sqliteTable('timeline_events', {
   sortIndex: integer('sort_index').notNull().default(0),
   dmSecret: text('dm_secret').notNull().default(''),
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Soft-delete / trash timestamp (issue #116 / #693).
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -287,6 +293,8 @@ export const factions = sqliteTable('factions', {
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   reputation: integer('reputation').notNull().default(0),
   standing: text('standing').notNull().default('neutral'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -499,6 +507,7 @@ export const auditLog = sqliteTable('audit_log', {
   entityType: text('entity_type'),
   entityId: integer('entity_id'),
   detail: text('detail').notNull().default(''),
+  requestId: text('request_id'),
   createdAt: text('created_at').notNull(),
 });
 
@@ -524,6 +533,8 @@ export const users = sqliteTable('users', {
   textSize: text('text_size').notNull().default('default'),
   // Clock rendering preference: 'system' | '12h' | '24h' (issue #634).
   timeFormat: text('time_format').notNull().default('system'),
+  // Per-player dice overlay skin (issue #1315).
+  diceTheme: text('dice_theme').notNull().default('nocturne'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -910,6 +921,8 @@ export const encounters = sqliteTable('encounters', {
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
+  // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -934,6 +947,10 @@ export const diceRolls = sqliteTable('dice_rolls', {
   // Optional check context (issue #130): label + difficulty class. success is derived.
   label: text('label'),
   dc: integer('dc'),
+  // Issue #673: honest provenance for paper-table / physical rolls logged by a DM.
+  source: text('source').notNull().default('rolled'),
+  actor: text('actor'),
+  natural20: integer('natural20'),
   createdAt: text('created_at').notNull(),
 });
 

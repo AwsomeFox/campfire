@@ -298,7 +298,7 @@ export function rollDice(expr: string): RollResult {
     breakdown.push({ term: termText, value: sum, rolls, kept });
   }
 
-  const result: RollResult = { expr, rolls: allRolls, total };
+  const result: RollResult = { expr, rolls: allRolls, total, source: 'rolled' };
   // kept: the subset of `rolls` that counted. RolledDice resolves kept by positional
   // multiset match against `rolls`, which is only unambiguous when ALL kept dice come
   // from a single die term (a dropped die in one term could otherwise match a kept die in

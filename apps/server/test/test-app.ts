@@ -1,11 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import express from 'express';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
-import { resolveRequestIdFromHeader } from '../src/common/api-error.envelope';
+import { requestContextMiddleware } from '../src/common/request-context.middleware';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module';
 
@@ -79,15 +78,8 @@ export async function createTestApp(options: CreateTestAppOptions = {}): Promise
       'api/openapi.json',
     ],
   });
-  // Issue #682 — same per-request id middleware as main.ts: stamps X-Request-Id
-  // on every response so e2e suites that assert on the header see the production
-  // shape, and the AllExceptionsFilter can reuse the same id on error envelopes.
-  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
-    (req as { requestId?: string }).requestId = requestId;
-    res.setHeader('X-Request-Id', requestId);
-    next();
-  });
+  // Issue #682 / #684 — same request-context middleware as main.ts.
+  app.use(requestContextMiddleware);
   // Mirror main.ts configureApp() — same global exception filter so every e2e
   // suite sees the published Problem Details-style envelope on the wire (issue #682).
   app.useGlobalFilters(new AllExceptionsFilter());
@@ -135,14 +127,8 @@ export async function createTestAppNoDevAuth(): Promise<TestAppContext> {
       'api/openapi.json',
     ],
   });
-  // Issue #682 — same per-request id middleware + global exception filter as
-  // the production wiring (mirrors createTestApp above).
-  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
-    (req as { requestId?: string }).requestId = requestId;
-    res.setHeader('X-Request-Id', requestId);
-    next();
-  });
+  // Issue #682 / #684 — same request-context middleware as main.ts.
+  app.use(requestContextMiddleware);
   app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();
 

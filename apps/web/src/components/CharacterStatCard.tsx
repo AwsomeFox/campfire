@@ -35,7 +35,6 @@ import {
   advFromEvent,
 } from '../lib/characterStats';
 import { useRoller, type CheckRollMode } from '../lib/useRoller';
-import { RollResultBanner } from './RollResultBanner';
 import { useDisclosure } from './useDisclosure';
 
 /** Map a modifier-key click to a catalog roll mode (shift = advantage, alt/ctrl/⌘ = disadvantage). */
@@ -223,14 +222,12 @@ export function CharacterStatCard({
             )}
           </div>
 
-          {interactive && roller.last && <RollResultBanner roll={roller.last} onDismiss={roller.dismiss} />}
-
           {/* Ability scores — click for an ability check when interactive (server-resolved) */}
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {ABILITY_KEYS.map((k) => {
               const score = abilityScore(character, k);
-              const mod = adapter.abilityModifier(score);
-              const value = `${score} (${signed(mod)})`;
+              const mod = score === null ? null : adapter.abilityModifier(score);
+              const value = score === null ? '—' : `${score} (${signed(mod!)})`;
               const def = catalog.find((c) => c.id === `ability:${k}`);
               if (!interactive || !def) return <StatChip key={k} label={k} value={value} />;
               return (
@@ -241,7 +238,7 @@ export function CharacterStatCard({
                   data-testid={`check-roll-ability:${k}`}
                   // No aria-label: the accessible name stays the chip's own text ("STR 10 (+0)")
                   // so existing name-based locators keep working; the breakdown rides in the title.
-                  title={`Roll ${k} check (${signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
+                  title={`Roll ${k} check (${mod === null ? '—' : signed(mod)})${def.supportsAdvantage ? ROLL_HINT : ''}`}
                   onClick={(e) => rollCheck(def, e)}
                   style={{ background: 'transparent', border: 0, padding: 0, cursor: 'pointer' }}
                 >
@@ -330,13 +327,12 @@ export function CharacterStatCard({
                             type="button"
                             className="cf-roll-control"
                             disabled={roller.rolling}
-                            title={`Roll ${a.name} damage${onApplyDamage ? ' — then apply to a target' : ''}`}
-                            onClick={async () => {
-                              const res = await roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`);
-                              // Normalize to a non-negative amount — a damage expr
-                              // like 1d4-1 can net 0/negative; damage is never < 0.
-                              if (res && onApplyDamage) onApplyDamage(Math.max(0, res.total), `${a.name} (${character.name})`);
-                            }}
+                            title={`Roll ${a.name} damage${onApplyDamage ? ' — apply from the roll toast in combat' : ''}`}
+                            onClick={() =>
+                              void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
+                                onApply: onApplyDamage,
+                              })
+                            }
                             data-testid="damage-roll-control"
                           >
                             {a.damage}

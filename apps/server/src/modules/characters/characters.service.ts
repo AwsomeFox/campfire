@@ -13,6 +13,7 @@ import {
   normalizeStats,
   ruleSystemAdapter,
   ddbImportSupported,
+  resolveCharacterCreateStatus,
   // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
   checkCatalogForAdapter,
   findCheckInCatalog,
@@ -21,7 +22,7 @@ import {
   sortCheckCatalog,
   pf2eDegreeOfSuccess,
 } from '@campfire/schema';
-import type { Character, CharacterAction, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
+import type { Character, CharacterAction, CharacterResource, Role, SkillRank, SpellSlotLevel, RollCheckDefinition, CheckRollRequest, CheckRollResponse, CheckRequest, CheckRequestCreate, CheckRequestResolution } from '@campfire/schema';
 import { rollDice } from '../../common/dice';
 import { RollsService } from '../rolls/rolls.service';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -104,6 +105,7 @@ export function toDomain(row: typeof characters.$inferSelect): Character {
     skills: fromJsonText<Record<string, SkillRank>>(row.skills, {}),
     actions: fromJsonText<CharacterAction[]>(row.actions, []),
     spellSlots: fromJsonText<Record<string, SpellSlotLevel>>(row.spellSlots, {}),
+    resources: fromJsonText<Record<string, CharacterResource>>(row.resources, {}),
     portraitUrl: row.portraitUrl,
     ddbId: row.ddbId,
     notes: row.notes,
@@ -157,7 +159,7 @@ export class CharactersService {
   /** dm or owner may write; others 403 */
   assertCanWrite(row: { ownerUserId: string | null }, user: RequestUser, role: Role): void {
     if (role === 'dm') return;
-    if (row.ownerUserId && row.ownerUserId === user.id) return;
+    if (row.ownerUserId && String(row.ownerUserId) === String(user.id)) return;
     throw new ForbiddenException('Only dm or the owning player may modify this character');
   }
 
@@ -629,10 +631,16 @@ export class CharactersService {
     // player creates own -> ownerUserId=user.id; dm may set ownerUserId explicitly
     const ownerUserId = role === 'dm' ? (input.ownerUserId ?? null) : user.id;
 
+    const adapter = await this.adapterForCampaign(campaignId);
+    const status = resolveCharacterCreateStatus(input, adapter);
+    const isDraft = status === 'draft';
+
     // Clamp hpCurrent/ac at create time too — mirrors update/patchHp/combatant HP so an
     // out-of-range create (hpCurrent:99999, ac:-50) can't persist verbatim (issue #112).
-    const hpMax = input.hpMax ?? 10;
-    const hpCurrent = clampHpCurrent(input.hpCurrent ?? 10, hpMax);
+    // Draft sheets start at 0 HP until the player fills them in (issue #719); non-drafts
+    // without explicit HP keep the legacy 10/10 default for API back-compat.
+    const hpMax = input.hpMax ?? (isDraft ? 0 : 10);
+    const hpCurrent = clampHpCurrent(input.hpCurrent ?? (isDraft ? 0 : hpMax), Math.max(0, hpMax));
 
     const [row] = await this.db
       .insert(characters)
@@ -645,7 +653,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        status: input.status ?? 'active',
+        status,
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),
@@ -1205,6 +1213,107 @@ export class CharactersService {
       entityId: id,
       campaignId: existing.campaignId,
       detail: JSON.stringify(patch),
+    });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
+    return toDomain(row);
+  }
+
+  /** Spend, restore, or configure a bounded character resource (issue #422). */
+  async adjustResource(
+    id: number,
+    patch: { key: string; delta?: number; used?: number; max?: number; name?: string; recharge?: 'short-rest' | 'long-rest' | 'refocus' | 'dawn' | 'turn-start' | 'special' },
+    user: RequestUser,
+    role: Role,
+  ): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(existing.resources, {});
+    const current = resources[patch.key] ?? { max: patch.max ?? 1, used: 0, name: patch.name || patch.key, recharge: patch.recharge || 'long-rest' };
+
+    const max = patch.max !== undefined ? Math.min(100, Math.max(0, patch.max)) : current.max;
+    let used = patch.used !== undefined ? patch.used : current.used;
+    if (patch.delta !== undefined) {
+      used += patch.delta;
+    }
+    if (used < 0 || used > max) {
+      throw new BadRequestException(`Resource '${patch.key}' overspend/overrestore: resulting used (${used}) must be in [0, max (${max})]`);
+    }
+
+    resources[patch.key] = {
+      max,
+      used,
+      name: patch.name ?? current.name ?? patch.key,
+      recharge: patch.recharge ?? current.recharge ?? 'long-rest',
+    };
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ resources: toJsonText(resources), updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.resource',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify(patch),
+    });
+    this.emitCharacterUpdated(existing.campaignId, id, user.id);
+    return toDomain(row);
+  }
+
+  /** Execute a short rest, long rest, or refocus on a character sheet (issue #422). */
+  async restCharacter(id: number, restType: 'short-rest' | 'long-rest' | 'refocus', user: RequestUser, role: Role): Promise<Character> {
+    const existing = await this.getRowOrThrow(id);
+    this.assertCanWrite(existing, user, role);
+
+    const slots = fromJsonText<Record<string, SpellSlotLevel>>(existing.spellSlots, {});
+    const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(existing.resources, {});
+
+    if (restType === 'long-rest') {
+      for (const key of Object.keys(slots)) {
+        slots[key] = { max: slots[key].max, used: 0 };
+      }
+      for (const key of Object.keys(resources)) {
+        const r = resources[key];
+        if (!r.recharge || r.recharge === 'long-rest' || r.recharge === 'short-rest' || r.recharge === 'refocus' || r.recharge === 'dawn') {
+          r.used = 0;
+        }
+      }
+    } else if (restType === 'short-rest') {
+      for (const key of Object.keys(resources)) {
+        const r = resources[key];
+        if (r.recharge === 'short-rest' || r.recharge === 'refocus') {
+          r.used = 0;
+        }
+      }
+    } else if (restType === 'refocus') {
+      for (const key of Object.keys(resources)) {
+        const r = resources[key];
+        if (r.recharge === 'refocus') {
+          r.used = 0;
+        }
+      }
+    }
+
+    const [row] = await this.db
+      .update(characters)
+      .set({ spellSlots: toJsonText(slots), resources: toJsonText(resources), updatedAt: nowIso() })
+      .where(eq(characters.id, id))
+      .returning();
+
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'character.rest',
+      entityType: 'character',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify({ restType }),
     });
     this.emitCharacterUpdated(existing.campaignId, id, user.id);
     return toDomain(row);

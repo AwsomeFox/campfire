@@ -6,7 +6,7 @@ import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { contentDispositionHeader } from '../attachments/filename';
 import { EncountersService } from './encounters.service';
-import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
+import { EncounterCreateDto, EncounterGenerateDto, EncounterPreviewDto, EncounterCommitDto, EncounterUpdateDto, EncounterReopenDto, CombatantCreateDto, CombatantUpdateDto, CombatantTurnStatePatchDto, EncounterEndTurnDto, RollRequestDto, ManualRollRequestDto, MapPingDto, ActionResolveRequestDto, ActionResolutionDto, ActionUndoTokenDto } from './encounters.dto';
 import { EncounterMapService } from './encounter-map.service';
 import { ActionResolverService } from './action-resolver.service';
 import type { Request, Response } from 'express';
@@ -154,6 +154,24 @@ export class CampaignRollController {
     // write: rolls are audited activity — an archived (read-only) campaign takes no new rolls.
     const role = await this.access.requireMember(user, campaignId, { write: true });
     return this.encounters.rollDiceForCampaign(campaignId, body, user, role);
+  }
+
+  /** Log a paper-table / physical roll without Campfire generating dice (issue #673). */
+  @Post('manual')
+  @ApiOperation({
+    summary: 'Log a physical roll',
+    description:
+      'Any campaign member. Records the total (and optional label, actor, natural d20, DC) a player reported from off-screen dice. ' +
+      'The entry is marked manual — no fabricated dice, keep/drop, or crit/fumble — and appears in the shared dice log, export, and recap source material.',
+  })
+  @ApiResponse({ status: 201, description: 'Persisted manual roll with honest provenance.' })
+  async logPhysicalRoll(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: ManualRollRequestDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, campaignId, { write: true });
+    return this.encounters.logPhysicalRollForCampaign(campaignId, body, user, role);
   }
 }
 
@@ -324,13 +342,22 @@ export class EncountersController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete an encounter', description: 'dm role required.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) an encounter', description: 'dm role required. Soft-delete (issue #701) — combatants, logs, map, and links survive for restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     await this.encounters.remove(id, user, role);
     return { ok: true };
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed encounter', description: 'dm role required. Undo a soft-delete (issue #701) — the encounter returns with its roster and log intact.' })
+  @ApiResponse({ status: 201, description: 'Restored encounter.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.restore(id, user, role);
   }
 
   @Post(':id/combatants')

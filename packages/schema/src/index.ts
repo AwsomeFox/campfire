@@ -37,6 +37,7 @@ import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './character-creation';
 export * from './narration-language';
 
 export {
@@ -290,13 +291,26 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 
 // ---------- per-campaign trash (issue #269) ----------
 // The soft-delete/undo feature (#116) gave every trashable entity a `deleted_at`
-// column + a POST /<type>/:id/restore endpoint, but the only Trash UI was for whole
+// column + a POST /<route>/:id/restore endpoint, but the only Trash UI was for whole
 // trashed *campaigns* on the home page — a soft-deleted entity was unrecoverable once
 // its Undo toast expired. GET /campaigns/:id/trash lists a campaign's soft-deleted
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
-// and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
-// its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location']);
+// and drive Restore. `type` is the entity kind; restore routes are mapped (usually
+// the plural resource name — session -> /sessions/:id/restore — with exceptions such
+// as story_arc -> /arcs, story_beat -> /beats, timeline_event -> /timeline/:id/restore).
+// See TrashPage TYPE_META.
+export const TrashedEntityType = z.enum([
+  'session',
+  'character',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'encounter',
+  'story_arc',
+  'story_beat',
+  'timeline_event',
+]);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({
@@ -363,14 +377,15 @@ export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
 export type DeathState = z.infer<typeof DeathState>;
 
 /**
- * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
- * new encounter's combatant list; dead/retired/inactive characters stay on the
- * roster (viewable, full sheet + history intact) but are skipped by the auto-add
+ * Character lifecycle (issue #115, #719). Only `active` PCs are auto-conscripted into a
+ * new encounter's combatant list; `draft` (incomplete sheets), dead, retired, and
+ * inactive characters stay on the roster (viewable, full sheet + history intact) but
+ * are skipped by the auto-add
  * so a long campaign's graveyard of fallen and replaced PCs stops being force-added
  * to every fight. Deleting a character remains the destructive alternative — this
  * is the non-destructive shelf.
  */
-export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
+export const CharacterStatus = z.enum(['active', 'draft', 'dead', 'retired', 'inactive']);
 export type CharacterStatus = z.infer<typeof CharacterStatus>;
 
 /**
@@ -423,18 +438,18 @@ export const Character = z.object({
   level: z.number().int().min(1).max(20).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
-  // Lifecycle state (issue #115). `active` is the only status auto-added as a combatant
-  // on encounter create; dead/retired/inactive PCs are kept but skipped. Editable by the
-  // owning player or DM through the normal update path (and upsert_character over MCP).
+  // Lifecycle state (issue #115, #719). `active` is the only status auto-added as a combatant
+  // on encounter create; draft/dead/retired/inactive PCs are kept but skipped. Editable by
+  // the owning player or DM through the normal update path (and upsert_character over MCP).
   status: CharacterStatus.default('active').describe(
-    "Lifecycle status: 'active' (default; auto-added to new encounters), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
+    "Lifecycle status: 'active' (default; auto-added to new encounters), 'draft' (incomplete sheet), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
   ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
-  hpMax: z.number().int().min(1).default(10),
+  hpMax: z.number().int().min(0).default(10),
   spCurrent: z.number().int().min(0).default(0),
   spMax: z.number().int().min(0).default(0),
   rpCurrent: z.number().int().min(0).default(0),
@@ -454,6 +469,7 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
+  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -4089,6 +4105,17 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export const DiceTheme = z.enum([
+  'nocturne',
+  'obsidian_gold',
+  'arcane_amethyst',
+  'dragon_ruby',
+  'celestial_pearl',
+  'cyberpunk_neon',
+  'eldritch_void',
+  'mahogany_wood',
+]);
+export type DiceTheme = z.infer<typeof DiceTheme>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -4102,6 +4129,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Per-player custom 3D dice texture/skin theme. */
+  diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
   ...timestamps,
@@ -4126,6 +4155,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
@@ -6364,7 +6394,7 @@ export type ActiveEffect = z.infer<typeof ActiveEffect>;
 /**
  * One structured condition instance on a combatant (issue #423). Carries source/rule-entry provenance,
  * duration/expiry timing, repeat saves, concentration link, stack count, notes, and custom condition flag.
- * Kept in dual-sync with combatant.conditions (string[]) for complete backward compatibility.
+ * The legacy `combatant.conditions` string array is derived from instances via `deriveConditionNames()`.
  */
 export const ConditionInstance = z.object({
   id: z.string().min(1).max(40),
@@ -6939,6 +6969,23 @@ export const RollRequest = z.object({
   dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
+
+/** Honest provenance for a dice-log entry (issue #673). */
+export const DiceRollSource = z.enum(['rolled', 'manual']);
+export type DiceRollSource = z.infer<typeof DiceRollSource>;
+
+/** Sentinel `expr` stored for a paper-table / physical roll — not a dice expression. */
+export const PHYSICAL_ROLL_EXPR = 'physical';
+
+/** DM input for logging a roll that happened off-screen (issue #673). */
+export const ManualRollRequest = z.object({
+  total: z.number().int().min(-999).max(9999).describe('Final result the player reported'),
+  label: z.string().max(120).optional().describe('Optional check label, e.g. "DEX save"'),
+  actor: z.string().max(120).optional().describe('Who rolled at the table (character/NPC name); defaults to the logger'),
+  natural20: z.number().int().min(1).max(20).optional().describe('Optional natural d20 face before modifiers — recorded, not re-rolled'),
+  dc: z.number().int().min(1).max(99).optional().describe('Optional difficulty class; success is computed server-side (total >= dc)'),
+});
+export type ManualRollRequest = z.infer<typeof ManualRollRequest>;
 // Per-term breakdown entry for a compound dice expression (issue #536). Named so the
 // roller, the persistence layer, and the web UI all share one shape. A die term carries
 // its rolls + the kept subset; a modifier term carries only its signed value.
@@ -6971,6 +7018,12 @@ export const RollResult = z.object({
   label: z.string().max(120).optional(),
   dc: z.number().int().optional(),
   success: z.boolean().optional(),
+  // Issue #673: manual/physical rolls carry honest provenance — no fabricated dice math.
+  source: DiceRollSource.optional(),
+  /** Who rolled at the table when `source` is `manual` (character/NPC name). */
+  actor: z.string().max(120).optional(),
+  /** Optional natural d20 face the DM recorded — informational only, not re-rolled. */
+  natural20: z.number().int().min(1).max(20).optional(),
 });
 export type RollResult = z.infer<typeof RollResult>;
 
@@ -7283,6 +7336,7 @@ export const AuditEntry = z.object({
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),
   detail: z.string().max(2000).default(''),
+  requestId: z.string().max(128).nullable().optional(),
   createdAt: IsoDate,
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;

@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -57,6 +57,7 @@ type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
+type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -414,7 +415,7 @@ export class EncountersService {
       const [row] = await this.db
         .select()
         .from(encounters)
-        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)))
         .limit(1);
       if (row && (row.status as EncounterStatus) === 'running') return row;
     }
@@ -423,7 +424,7 @@ export class EncountersService {
     const rows = await this.db
       .select()
       .from(encounters)
-      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')));
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)));
     return rows[0];
   }
 
@@ -448,7 +449,7 @@ export class EncountersService {
       const [row] = tx
         .select()
         .from(encounters)
-        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId)))
+        .where(and(eq(encounters.id, campaign.activeEncounterId), eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)))
         .limit(1)
         .all();
       if (row && (row.status as EncounterStatus) === 'running') return row;
@@ -456,7 +457,7 @@ export class EncountersService {
     const rows = tx
       .select()
       .from(encounters)
-      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')))
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)))
       .all();
     return rows[0];
   }
@@ -486,9 +487,9 @@ export class EncountersService {
     }
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(encounters).where(eq(encounters.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Encounter ${id} not found`);
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Encounter ${id} not found`);
     return row;
   }
 
@@ -841,7 +842,11 @@ export class EncountersService {
    * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
    */
   async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
-    const conditions = [eq(encounters.campaignId, campaignId), status ? eq(encounters.status, status) : undefined].filter(
+    const conditions = [
+      eq(encounters.campaignId, campaignId),
+      notDeleted(encounters.deletedAt),
+      status ? eq(encounters.status, status) : undefined,
+    ].filter(
       (c): c is NonNullable<typeof c> => c !== undefined,
     );
     const rows = await this.db
@@ -922,6 +927,7 @@ export class EncountersService {
       )
       .where(and(
         eq(encounters.campaignId, campaignId),
+        notDeleted(encounters.deletedAt),
         role === 'dm' ? undefined : eq(encounters.hidden, false),
       ))
       .orderBy(encounters.id);
@@ -1350,9 +1356,9 @@ export class EncountersService {
 
     const ts = nowIso();
 
-    // Auto-add only ACTIVE characters (issue #115). Dead/retired/inactive PCs stay on
-    // the roster but are skipped here, so a long campaign's fallen and replaced
-    // characters stop being force-conscripted into every new fight. The DM can still
+    // Auto-add only ACTIVE characters (issue #115, #719). Draft/dead/retired/inactive PCs
+    // stay on the roster but are skipped here, so incomplete sheets and a long
+    // campaign's fallen and replaced characters stop being force-conscripted into
     // add any of them manually via addCombatant. Legacy pre-migration rows all default
     // to 'active', preserving prior behavior.
     const partyRows = await this.db
@@ -2615,10 +2621,11 @@ export class EncountersService {
     // fresh row, so two concurrent condition changes (one adds while another
     // removes a different condition) compose instead of the loser's whole-array
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
-    const conditionsTouched =
-      patch.addConditions !== undefined ||
-      patch.removeConditions !== undefined ||
+    let conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    const conditionInstancesTouched =
+      patch.addConditionInstance !== undefined ||
       patch.removeConditionInstanceId !== undefined ||
+      patch.updateConditionInstance !== undefined ||
       patch.conditionInstances !== undefined;
 
     const spFieldsTouched =
@@ -2628,7 +2635,14 @@ export class EncountersService {
       patch.rpDelta !== undefined;
     const deathStateTouched = patch.deathState !== undefined;
 
-    if (Object.keys(staticUpdate).length === 0 && !recomputeHp && !conditionsTouched && !spFieldsTouched && !deathStateTouched) {
+    if (
+      Object.keys(staticUpdate).length === 0 &&
+      !recomputeHp &&
+      !conditionsTouched &&
+      !conditionInstancesTouched &&
+      !spFieldsTouched &&
+      !deathStateTouched
+    ) {
       return combatantToDomain(existing);
     }
 
@@ -2658,7 +2672,7 @@ export class EncountersService {
       existing.kind === 'character' &&
       existing.characterId !== null &&
       encounterRow.status !== 'ended' &&
-      (recomputeHp || conditionsTouched || spFieldsTouched || deathStateTouched);
+      (recomputeHp || conditionsTouched || conditionInstancesTouched || spFieldsTouched || deathStateTouched);
     let row!: typeof combatants.$inferSelect;
     // Captured inside the transaction (off the fresh committed read + the write result)
     // so the combat-log events appended after commit reflect the real before/after HP
@@ -2681,21 +2695,7 @@ export class EncountersService {
       beforeDeath = fresh.deathState;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (conditionsTouched) {
-        if (patch.removeConditionInstanceId !== undefined || patch.conditionInstances !== undefined) {
-          let instances = parseConditionInstances(fresh.conditionInstances, []);
-          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
-          if (patch.conditionInstances !== undefined) {
-            instances = patch.conditionInstances;
-          }
-          if (patch.removeConditionInstanceId !== undefined) {
-            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
-          }
-          const derived = deriveConditionNames(instances);
-          afterConditions = new Set(derived);
-          writeSet.conditionInstances = toJsonText(instances);
-          writeSet.conditions = toJsonText(derived);
-        } else {
-          // Rebase the add/remove deltas against the FRESH row's conditions (issue
+        // Rebase the add/remove deltas against the FRESH row's conditions (issue
           // #747). A stale whole-array write — derived outside the tx from the
           // pre-await read — let two concurrent callers clobber each other: caller A
           // adds 'poisoned' while caller B removes 'prone', and whichever wrote
@@ -2711,7 +2711,25 @@ export class EncountersService {
           for (const c of patch.addConditions ?? []) current.add(c);
           afterConditions = new Set(current);
           writeSet.conditions = toJsonText([...current]);
+      }
+      if (conditionInstancesTouched) {
+        let instances = parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, []));
+        if (patch.conditionInstances !== undefined) {
+          instances = patch.conditionInstances;
+        } else {
+          if (patch.addConditionInstance) instances = [...instances, patch.addConditionInstance];
+          if (patch.removeConditionInstanceId) {
+            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+          }
+          if (patch.updateConditionInstance) {
+            instances = instances.map((i) => (i.id === patch.updateConditionInstance!.id ? patch.updateConditionInstance! : i));
+          }
         }
+        writeSet.conditionInstances = toJsonText(instances);
+        writeSet.conditions = toJsonText(deriveConditionNames(instances));
+        conditionsTouched = true;
+        beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
+        afterConditions = new Set(deriveConditionNames(instances));
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -4430,22 +4448,15 @@ export class EncountersService {
 
   async remove(encounterId: number, user: RequestUser, role: Role): Promise<void> {
     const encounterRow = await this.getRowOrThrow(encounterId);
-    // Delete the combatants, combat-log events, and the encounter row in ONE
-    // synchronous better-sqlite3 transaction (issue #272) — mirrors factions.remove /
-    // encounters.end. On FK-less (pre-#69, migrated) DBs there's no ON DELETE cascade,
-    // so three separately-awaited deletes could half-fail and orphan combatants/events
-    // on a vanished encounter; the transaction makes it all-or-nothing.
-    //
-    // Also null the campaign's activeEncounterId if it pointed here (issue #744) — fresh
-    // DBs get this from the declared ON DELETE SET NULL, but pre-migration DBs reproduce
-    // the same effect here so the pointer never dangles at a deleted encounter.
+    const ts = nowIso();
+    // Soft-delete (issue #701): stamp deleted_at and clear a dangling activeEncounterId
+    // pointer in one transaction. Combatants, combat-log events, map/fog, and links
+    // survive for restore — unlike the old hard delete (issue #272).
     this.db.transaction((tx) => {
-      tx.delete(combatants).where(eq(combatants.encounterId, encounterId)).run();
-      tx.delete(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).run();
-      tx.delete(encounters).where(eq(encounters.id, encounterId)).run();
+      tx.update(encounters).set({ deletedAt: ts, updatedAt: ts }).where(eq(encounters.id, encounterId)).run();
       const [camp] = tx.select({ activeEncounterId: campaigns.activeEncounterId }).from(campaigns).where(eq(campaigns.id, encounterRow.campaignId)).limit(1).all();
       if (camp?.activeEncounterId === encounterId) {
-        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: nowIso() }).where(eq(campaigns.id, encounterRow.campaignId)).run();
+        tx.update(campaigns).set({ activeEncounterId: null, updatedAt: ts }).where(eq(campaigns.id, encounterRow.campaignId)).run();
       }
     });
 
@@ -4456,9 +4467,30 @@ export class EncountersService {
       entityType: 'encounter',
       entityId: encounterId,
       campaignId: encounterRow.campaignId,
+      detail: 'soft-delete (trashed)',
     });
 
     this.emitEncounterEvent('encounter.deleted', encounterRow.campaignId, encounterId, encounterRow.hidden);
+  }
+
+  /** Restore a trashed encounter (issue #701) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(encounterId: number, user: RequestUser, role: Role): Promise<Encounter> {
+    const existing = await this.getRowOrThrow(encounterId, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Encounter ${encounterId} is not in the trash`);
+    const [row] = await this.db
+      .update(encounters)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(encounters.id, encounterId))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'encounter.restore',
+      entityType: 'encounter',
+      entityId: encounterId,
+      campaignId: existing.campaignId,
+    });
+    return encounterToDomain(row);
   }
 
   /**
@@ -4493,5 +4525,136 @@ export class EncountersService {
     });
 
     return persisted;
+  }
+
+  /**
+   * Records a paper-table / physical roll honestly (issue #673): the DM (or any member)
+   * logs the total a player reported without Campfire fabricating dice, keep/drop, or
+   * crit/fumble flavor. Optional label, actor attribution, natural d20, and DC travel
+   * with the entry into the shared feed, export, and recap source material.
+   */
+  async logPhysicalRollForCampaign(
+    campaignId: number,
+    input: ManualRollRequestInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<DiceRoll> {
+    const label = input.label?.trim();
+    const actor = input.actor?.trim();
+    const result: RollResult = {
+      expr: PHYSICAL_ROLL_EXPR,
+      rolls: [],
+      total: input.total,
+      source: 'manual',
+    };
+    if (label) result.label = label;
+    if (actor) result.actor = actor;
+    if (typeof input.natural20 === 'number') result.natural20 = input.natural20;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = input.total >= input.dc;
+    }
+    const persisted = await this.rolls.record(campaignId, result, user);
+
+    const who = actor || user.name;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: null,
+      entityId: null,
+      campaignId,
+      detail:
+        `physical roll logged for ${who}: ` +
+        `${label ? `${label} ` : ''}= ${input.total}` +
+        (input.natural20 != null ? ` (nat ${input.natural20})` : '') +
+        (input.dc != null ? ` vs DC ${input.dc} (${result.success === true ? 'success' : 'fail'})` : ''),
+    });
+
+    return persisted;
+  }
+
+  /** Inline spend or restore of spell slots or character resources during combat (issue #422). */
+  async adjustCombatantResource(
+    encounterId: number,
+    combatantId: number,
+    patch: { key?: string; spellLevel?: number; delta?: number },
+    user: RequestUser,
+    role: Role,
+  ) {
+    const encounter = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounter);
+    const combatant = this.db.select().from(combatants).where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId))).limit(1).all()[0];
+    if (!combatant) throw new NotFoundException(`No such combatant ${combatantId} in encounter ${encounterId}`);
+
+    if (combatant.characterId === null) {
+      throw new BadRequestException('Only character combatants have sheet resources');
+    }
+
+    const isDm = role === 'dm';
+    if (!isDm) {
+      const [character] = await this.db.select().from(characters).where(eq(characters.id, combatant.characterId)).limit(1);
+      if (!character || character.ownerUserId !== user.id) {
+        throw new ForbiddenException('Only dm or the owning player may adjust this combatant\'s resources');
+      }
+    }
+
+    const delta = patch.delta ?? 1;
+    const characterId = combatant.characterId;
+
+    let eventDetail = '';
+
+    this.db.transaction((tx) => {
+      const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
+      if (!character) throw new NotFoundException(`No such character ${characterId}`);
+
+      if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+        const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
+        const levelKey = String(patch.spellLevel);
+        const slot = slots[levelKey];
+        if (!slot || slot.max <= 0) {
+          throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+        }
+        const nextUsed = slot.used + delta;
+        if (nextUsed < 0 || nextUsed > slot.max) {
+          throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+        }
+        slot.used = nextUsed;
+        slots[levelKey] = slot;
+        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+      } else if (patch.key) {
+        const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
+        const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
+        const nextUsed = res.used + delta;
+        if (nextUsed < 0 || nextUsed > res.max) {
+          throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+        }
+        res.used = nextUsed;
+        resources[patch.key] = res;
+        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+      } else {
+        throw new BadRequestException('Must supply either spellLevel or key to adjust');
+      }
+
+      tx.insert(encounterEvents)
+        .values({
+          encounterId,
+          round: encounter.round,
+          type: 'resource_changed',
+          actor: combatant.name,
+          actorId: combatant.id,
+          target: null,
+          targetId: null,
+          detail: eventDetail,
+          createdAt: nowIso(),
+        })
+        .run();
+    });
+
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+
+    return this.getRowOrThrow(encounterId);
   }
 }
