@@ -70,7 +70,9 @@ function StatChip({ label, value, title }: { label: string; value: string; title
       <span className="text-muted" style={{ fontSize: 9.5, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
         {label}
       </span>
-      <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text)' }}>{value}</span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text)' }}>
+        <bdi>{value}</bdi>
+      </span>
     </div>
   );
 }

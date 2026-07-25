@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Character } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
@@ -37,7 +38,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
           // Mute dead/retired/inactive PCs so the live party stands out (issue #115).
           const isActive = c.status === 'active';
           return (
-            <Link
+            <ListDetailLink
               key={c.id}
               to={`/c/${campaignId}/characters/${c.id}`}
               style={{
@@ -108,7 +109,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                   </span>
                 )}
               </span>
-            </Link>
+            </ListDetailLink>
           );
         })
       )}

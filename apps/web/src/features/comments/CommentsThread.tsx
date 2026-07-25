@@ -5,8 +5,9 @@
  * every campaign member; author-or-DM may edit/delete. One level of threading:
  * top-level comments, with replies nested one deep.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { Character, Comment, EntityType } from '@campfire/schema';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import type { Character, Comment, CommentReplyPage, CommentThread, CommentThreadPage, EntityType } from '@campfire/schema';
+import { COMMENTS_THREAD_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, isStaleWrite } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -46,6 +47,56 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+type LoadedThread = CommentThread & {
+  /** Replies merged from preview + any load-more pages (deduped by id). */
+  loadedReplies: Comment[];
+  replyNextCursor: string | null;
+  replyHasMore: boolean;
+  loadingMoreReplies: boolean;
+};
+
+function mergeReplies(existing: Comment[], incoming: Comment[]): Comment[] {
+  const seen = new Set(existing.map((c) => c.id));
+  const merged = [...existing];
+  for (const reply of incoming) {
+    if (!seen.has(reply.id)) {
+      seen.add(reply.id);
+      merged.push(reply);
+    }
+  }
+  return merged;
+}
+
+function threadQuery(
+  campaignId: number,
+  entityType: EntityType,
+  entityId: number,
+  cursor?: string,
+): string {
+  const params = new URLSearchParams({
+    entityType,
+    entityId: String(entityId),
+    limit: String(COMMENTS_THREAD_DEFAULT_LIMIT),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return `${API}/campaigns/${campaignId}/comments?${params.toString()}`;
+}
+
+function repliesQuery(
+  campaignId: number,
+  entityType: EntityType,
+  entityId: number,
+  rootId: number,
+  cursor?: string,
+): string {
+  const params = new URLSearchParams({
+    entityType,
+    entityId: String(entityId),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return `${API}/campaigns/${campaignId}/comments/${rootId}/replies?${params.toString()}`;
+}
+
 export function CommentsThread({
   campaignId,
   entityType,
@@ -59,13 +110,25 @@ export function CommentsThread({
   const myUserId = me ? String(me.user.id) : null;
   const { isDm, canMemberWrite } = useCampaignAccess();
 
-  const [comments, setComments] = useState<Comment[]>([]);
+  const [threads, setThreads] = useState<LoadedThread[]>([]);
+  const [totalComments, setTotalComments] = useState(0);
+  const [hasMoreThreads, setHasMoreThreads] = useState(false);
+  const [nextThreadCursor, setNextThreadCursor] = useState<string | null>(null);
+  const [loadingMoreThreads, setLoadingMoreThreads] = useState(false);
   const [ownedCharacters, setOwnedCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<number | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
   const loadSequence = useRef(0);
+
+  const toLoadedThread = useCallback((thread: CommentThread): LoadedThread => ({
+    ...thread,
+    loadedReplies: thread.replies,
+    replyNextCursor: thread.replyNextCursor,
+    replyHasMore: thread.replyHasMore,
+    loadingMoreReplies: false,
+  }), []);
 
   // Roster is fetched once per campaign/user — not on every comment reload.
   useEffect(() => {
@@ -90,20 +153,81 @@ export function CommentsThread({
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
+    setLoadingMoreThreads(false);
     setError(null);
     try {
-      const list = await api.get<Comment[]>(
-        `${API}/campaigns/${campaignId}/comments?entityType=${entityType}&entityId=${entityId}`,
+      const page = await api.get<CommentThreadPage>(
+        threadQuery(campaignId, entityType, entityId),
       );
       if (sequence !== loadSequence.current) return;
-      setComments(list);
+      setThreads(page.items.map(toLoadedThread));
+      setTotalComments(page.totalComments);
+      setHasMoreThreads(page.hasMore);
+      setNextThreadCursor(page.nextCursor);
     } catch {
       if (sequence !== loadSequence.current) return;
       setError("Couldn't load the discussion.");
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [campaignId, entityType, entityId]);
+  }, [campaignId, entityType, entityId, toLoadedThread]);
+
+  const loadMoreThreads = useCallback(async () => {
+    if (!nextThreadCursor || loadingMoreThreads || loading) return;
+    const sequence = loadSequence.current;
+    setLoadingMoreThreads(true);
+    setError(null);
+    try {
+      const page = await api.get<CommentThreadPage>(
+        threadQuery(campaignId, entityType, entityId, nextThreadCursor),
+      );
+      if (sequence !== loadSequence.current) return;
+      setThreads((prev) => {
+        const seen = new Set(prev.map((t) => t.root.id));
+        return [...prev, ...page.items.filter((t) => !seen.has(t.root.id)).map(toLoadedThread)];
+      });
+      setTotalComments(page.totalComments);
+      setHasMoreThreads(page.hasMore);
+      setNextThreadCursor(page.nextCursor);
+    } catch {
+      if (sequence !== loadSequence.current) return;
+      setError("Couldn't load more discussion.");
+    } finally {
+      setLoadingMoreThreads(false);
+    }
+  }, [campaignId, entityType, entityId, nextThreadCursor, loadingMoreThreads, loading, toLoadedThread]);
+
+  const loadMoreReplies = useCallback(async (rootId: number) => {
+    const thread = threads.find((t) => t.root.id === rootId);
+    if (!thread?.replyHasMore || !thread.replyNextCursor || thread.loadingMoreReplies) return;
+    setThreads((prev) =>
+      prev.map((t) => (t.root.id === rootId ? { ...t, loadingMoreReplies: true } : t)),
+    );
+    try {
+      const page = await api.get<CommentReplyPage>(
+        repliesQuery(campaignId, entityType, entityId, rootId, thread.replyNextCursor),
+      );
+      setThreads((prev) =>
+        prev.map((t) =>
+          t.root.id === rootId
+            ? {
+                ...t,
+                loadedReplies: mergeReplies(t.loadedReplies, page.items),
+                replyCount: page.replyCount,
+                replyHasMore: page.hasMore,
+                replyNextCursor: page.nextCursor,
+                loadingMoreReplies: false,
+              }
+            : t,
+        ),
+      );
+    } catch {
+      setError("Couldn't load more replies.");
+      setThreads((prev) =>
+        prev.map((t) => (t.root.id === rootId ? { ...t, loadingMoreReplies: false } : t)),
+      );
+    }
+  }, [campaignId, entityType, entityId, threads]);
 
   useEffect(() => {
     setLoading(true);
@@ -117,20 +241,6 @@ export function CommentsThread({
     document.addEventListener('visibilitychange', refreshAfterResume);
     return () => document.removeEventListener('visibilitychange', refreshAfterResume);
   }, [load]);
-
-  // Group into top-level comments + their direct replies (one level deep).
-  const threads = useMemo(() => {
-    const roots = comments.filter((c) => c.parentId === null);
-    const repliesByParent = new Map<number, Comment[]>();
-    for (const c of comments) {
-      if (c.parentId !== null) {
-        const arr = repliesByParent.get(c.parentId) ?? [];
-        arr.push(c);
-        repliesByParent.set(c.parentId, arr);
-      }
-    }
-    return roots.map((root) => ({ root, replies: repliesByParent.get(root.id) ?? [] }));
-  }, [comments]);
 
   function canModerate(c: Comment): boolean {
     return canMemberWrite && (isDm || (myUserId !== null && c.authorUserId === myUserId));
@@ -150,7 +260,7 @@ export function CommentsThread({
     <section className="space-y-3" aria-labelledby={`discussion-${entityType}-${entityId}`}>
       <h3 id={`discussion-${entityType}-${entityId}`} className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
         Discussion
-        {comments.length > 0 && <span className="tag">{comments.length}</span>}
+        {totalComments > 0 && <span className="tag">{totalComments}</span>}
       </h3>
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -159,8 +269,9 @@ export function CommentsThread({
       ) : threads.length === 0 ? (
         <p className="text-sm text-slate-600">No comments yet — start the conversation.</p>
       ) : (
+        <>
         <ul className="space-y-3 list-none p-0 m-0">
-          {threads.map(({ root, replies }) => (
+          {threads.map(({ root, loadedReplies, replyCount, replyHasMore, loadingMoreReplies }) => (
             <li key={root.id} className="space-y-2">
               <CommentCard
                 comment={root}
@@ -169,9 +280,9 @@ export function CommentsThread({
                 onDelete={() => setConfirmingDelete(root.id)}
                 onChanged={load}
               />
-              {replies.length > 0 && (
+              {loadedReplies.length > 0 && (
                 <ul className="space-y-2 list-none p-0 m-0 ml-5 border-l border-slate-800 pl-4">
-                  {replies.map((reply) => (
+                  {loadedReplies.map((reply) => (
                     <li key={reply.id}>
                       <CommentCard
                         comment={reply}
@@ -182,6 +293,20 @@ export function CommentsThread({
                     </li>
                   ))}
                 </ul>
+              )}
+              {replyHasMore && (
+                <div className="ml-5 pl-4">
+                  <Btn
+                    ghost
+                    className="!min-h-0 !py-1 text-xs"
+                    onClick={() => void loadMoreReplies(root.id)}
+                    disabled={loadingMoreReplies}
+                  >
+                    {loadingMoreReplies
+                      ? 'Loading replies…'
+                      : `Show ${replyCount - loadedReplies.length} more ${replyCount - loadedReplies.length === 1 ? 'reply' : 'replies'}`}
+                  </Btn>
+                </div>
               )}
               {replyTo === root.id && canMemberWrite && (
                 <div className="ml-5 pl-4">
@@ -203,6 +328,19 @@ export function CommentsThread({
             </li>
           ))}
         </ul>
+        {hasMoreThreads && (
+          <div className="pt-1">
+            <Btn
+              ghost
+              className="!min-h-0 !py-1 text-xs"
+              onClick={() => void loadMoreThreads()}
+              disabled={loadingMoreThreads}
+            >
+              {loadingMoreThreads ? 'Loading more…' : 'Load older threads'}
+            </Btn>
+          </div>
+        )}
+        </>
       )}
 
       {canMemberWrite && (
