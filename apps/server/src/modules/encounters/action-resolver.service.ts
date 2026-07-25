@@ -15,9 +15,12 @@ import {
   applyDamageModifiers,
   classifyAttackOutcome,
   classifySaveOutcome,
+  combatantActionsFromStatblock,
   computeAttackModifier,
   computeSaveDc,
+  CombatantStatblock,
   dnd5eProficiencyBonus,
+  expandStatblockActions,
   isResolvableSpec,
   normalizeStats,
   pickOutcomeBranch,
@@ -26,6 +29,7 @@ import {
   ruleSystemAdapter,
   signedModifier,
   type ActionRollFn,
+  type CharacterAction,
   type OutcomeKey,
   type ResolverAdapter,
   type RuleSystemAdapter,
@@ -207,8 +211,63 @@ export class ActionResolverService {
     return 0;
   }
 
-  /** Actor ability stats + level for the modifier/DC math (character combatants only). */
+  /** Parse inline homebrew statblock JSON from a combatant row (issue #425). */
+  private inlineStatblock(row: typeof combatants.$inferSelect): CombatantStatblock | null {
+    if (!row.statblockJson) return null;
+    const parsed = CombatantStatblock.safeParse(fromJsonText(row.statblockJson, null));
+    return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * All structured actions for a combatant: inline statblock first, else expanded
+   * compendium statblock actions (issue #425).
+   */
+  combatantActions(actor: typeof combatants.$inferSelect, campaignId: number): CharacterAction[] {
+    const inline = this.inlineStatblock(actor);
+    if (inline) return combatantActionsFromStatblock(inline);
+    const data = this.statblockData(actor);
+    if (!data) return [];
+    const adapter = this.adapterForCampaign(campaignId);
+    const c = this.db.select({ ruleSystem: campaigns.ruleSystem }).from(campaigns).where(eq(campaigns.id, campaignId)).get();
+    return expandStatblockActions(data, adapter, c?.ruleSystem ?? '');
+  }
+
+  private actionToUsable(a: CharacterAction, index: number): UsableAction {
+    const spec = a.spec ?? null;
+    return UsableAction.parse({
+      index,
+      name: a.name,
+      kind: a.kind ?? '',
+      mode: spec?.mode ?? 'none',
+      toHit: a.toHit ?? '',
+      damage: a.damage ?? '',
+      notes: a.notes ?? '',
+      resolvable: isResolvableSpec(spec),
+      spec,
+    });
+  }
+
+  /** Actor ability stats + level for the modifier/DC math (character or monster statblock). */
   private actorStats(row: typeof combatants.$inferSelect): { stats: Record<string, number>; level: number } {
+    const inline = this.inlineStatblock(row);
+    if (inline?.abilityScores) {
+      return { stats: normalizeStats(inline.abilityScores), level: 1 };
+    }
+    const data = this.statblockData(row);
+    if (data) {
+      const encounter = this.db.select({ campaignId: encounters.campaignId }).from(encounters).where(eq(encounters.id, row.encounterId)).get();
+      if (encounter) {
+        const adapter = this.adapterForCampaign(encounter.campaignId);
+        const mapped = adapter.mapStatblock(data);
+        if (mapped.abilityScores && typeof mapped.abilityScores === 'object') {
+          const scores: Record<string, number> = {};
+          for (const [k, v] of Object.entries(mapped.abilityScores)) {
+            if (typeof v === 'number') scores[k.toUpperCase()] = v;
+          }
+          return { stats: normalizeStats(scores), level: 1 };
+        }
+      }
+    }
     const character = this.linkedCharacter(row);
     if (character) {
       return { stats: normalizeStats(fromJsonText<Record<string, number>>(character.stats, {})), level: character.level };
@@ -221,8 +280,8 @@ export class ActionResolverService {
     return character !== null && character.ownerUserId === user.id;
   }
 
-  /** Resolve the structured spec for an action request: inline spec, or the actor sheet's action. */
-  private resolveSpec(actor: typeof combatants.$inferSelect, req: ActionResolveRequest): { spec: ActionSpec; name: string } {
+  /** Resolve the structured spec for an action request: inline spec, sheet action, or statblock action. */
+  private resolveSpec(actor: typeof combatants.$inferSelect, req: ActionResolveRequest, campaignId: number): { spec: ActionSpec; name: string } {
     if (req.spec) {
       const spec = ActionSpec.parse(req.spec);
       if (!isResolvableSpec(spec)) {
@@ -231,24 +290,37 @@ export class ActionResolverService {
       return { spec, name: req.actionName ?? 'Action' };
     }
     const character = this.linkedCharacter(actor);
-    if (!character) {
+    if (character) {
+      const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
+      let idx = req.actionIndex ?? -1;
+      if (idx < 0 && req.actionName) idx = actions.findIndex((a) => String(a?.name ?? '') === req.actionName);
+      if (idx < 0 || idx >= actions.length) {
+        throw new NotFoundException(`Action ${req.actionName ?? req.actionIndex} not found on this character.`);
+      }
+      const raw = actions[idx];
+      const name = String(raw?.name ?? 'Action');
+      const parsed = ActionSpec.safeParse(raw?.spec);
+      if (!parsed.success || !isResolvableSpec(parsed.data)) {
+        throw new BadRequestException(
+          `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
+        );
+      }
+      return { spec: parsed.data, name };
+    }
+    const statActions = this.combatantActions(actor, campaignId);
+    let idx = req.actionIndex ?? -1;
+    if (idx < 0 && req.actionName) idx = statActions.findIndex((a) => a.name === req.actionName);
+    if (idx < 0 || idx >= statActions.length) {
       throw new BadRequestException('This combatant has no sheet actions; pass an inline `spec` to resolve an ad-hoc action.');
     }
-    const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    let idx = req.actionIndex ?? -1;
-    if (idx < 0 && req.actionName) idx = actions.findIndex((a) => String(a?.name ?? '') === req.actionName);
-    if (idx < 0 || idx >= actions.length) {
-      throw new NotFoundException(`Action ${req.actionName ?? req.actionIndex} not found on this character.`);
-    }
-    const raw = actions[idx];
-    const name = String(raw?.name ?? 'Action');
-    const parsed = ActionSpec.safeParse(raw?.spec);
+    const action = statActions[idx];
+    const parsed = ActionSpec.safeParse(action.spec);
     if (!parsed.success || !isResolvableSpec(parsed.data)) {
       throw new BadRequestException(
-        `"${name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
+        `"${action.name}" has no resolvable structured spec — fall back to its statblock (toHit/damage/notes) rather than inventing numbers.`,
       );
     }
-    return { spec: parsed.data, name };
+    return { spec: parsed.data, name: action.name };
   }
 
   // -------------------------------------------------------------------------
@@ -256,37 +328,37 @@ export class ActionResolverService {
   // -------------------------------------------------------------------------
 
   /**
-   * List a combatant's usable actions (issue #414). For a character combatant these are the
-   * sheet's actions, each carrying its structured spec + a `resolvable` flag (false ⇒ the UI
-   * shows the inline statblock instead of the guided flow). A player may list only their own
-   * character's actions; the DM may list any. Monster/NPC combatants have no structured sheet
-   * actions here (their statblock actions surface through the turn workspace instead).
+   * List a combatant's usable actions (issue #414, #425). Characters use sheet actions;
+   * monsters/NPCs use inline statblocks or expanded compendium actions. A player may list
+   * only their own character's actions; the DM may list any.
    */
   listUsableActions(encounterId: number, combatantId: number, user: RequestUser, role: Role): UsableAction[] {
-    this.encounterRowOrThrow(encounterId);
+    const encounter = this.encounterRowOrThrow(encounterId);
     const combatant = this.combatantRowOrThrow(encounterId, combatantId);
     const isDm = role === 'dm';
     if (!isDm && !this.isCharacterOwnedBy(combatant, user)) {
       throw new ForbiddenException('You may only list actions for your own character.');
     }
     const character = this.linkedCharacter(combatant);
-    if (!character) return [];
-    const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
-    return actions.map((a, index) => {
-      const parsed = ActionSpec.safeParse(a?.spec);
-      const spec = parsed.success ? parsed.data : null;
-      return UsableAction.parse({
-        index,
-        name: String(a?.name ?? ''),
-        kind: typeof a?.kind === 'string' ? a.kind : '',
-        mode: spec?.mode ?? 'none',
-        toHit: typeof a?.toHit === 'string' ? a.toHit : '',
-        damage: typeof a?.damage === 'string' ? a.damage : '',
-        notes: typeof a?.notes === 'string' ? a.notes : '',
-        resolvable: isResolvableSpec(spec),
-        spec,
+    if (character) {
+      const actions = fromJsonText<Array<Record<string, unknown>>>(character.actions, []);
+      return actions.map((a, index) => {
+        const parsed = ActionSpec.safeParse(a?.spec);
+        const spec = parsed.success ? parsed.data : null;
+        return UsableAction.parse({
+          index,
+          name: String(a?.name ?? ''),
+          kind: typeof a?.kind === 'string' ? a.kind : '',
+          mode: spec?.mode ?? 'none',
+          toHit: typeof a?.toHit === 'string' ? a.toHit : '',
+          damage: typeof a?.damage === 'string' ? a.damage : '',
+          notes: typeof a?.notes === 'string' ? a.notes : '',
+          resolvable: isResolvableSpec(spec),
+          spec,
+        });
       });
-    });
+    }
+    return this.combatantActions(combatant, encounter.campaignId).map((a, index) => this.actionToUsable(a, index));
   }
 
   // -------------------------------------------------------------------------
@@ -325,7 +397,7 @@ export class ActionResolverService {
     }
 
     const adapter = this.adapterForCampaign(encounter.campaignId);
-    const { spec, name } = this.resolveSpec(actor, req);
+    const { spec, name } = this.resolveSpec(actor, req, encounter.campaignId);
     const { policy, canApply } = this.policyFor(encounter.campaignId, actor, user, role);
 
     // Validate target legality (count + at least one when the action needs a target).
@@ -511,7 +583,7 @@ export class ActionResolverService {
       actionName: resolution.actionName,
       targetIds: [],
       commit: false,
-    });
+    }, encounter.campaignId);
     for (const t of resolution.targets) {
       const target = this.combatantRowOrThrow(encounterId, t.combatantId);
       this.assertTargetAllowed(spec.targets.allow, actor, target, resolution.actionName);

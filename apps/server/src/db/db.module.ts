@@ -2143,6 +2143,34 @@ function migrateCombatantsTableForConditionInstances(sqlite: Database.Database):
   }
 }
 
+/** Issue #425: inline homebrew statblock JSON on manual monster combatants. */
+function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_json')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_json TEXT');
+  }
+}
+
+/** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
+function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_library_monsters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      statblock_json TEXT NOT NULL,
+      source_rule_entry_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
+  `);
+}
+
 /**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
@@ -2617,6 +2645,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
   { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
+  { name: '0096_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
+  { name: '0097_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
 ];
 
 /**

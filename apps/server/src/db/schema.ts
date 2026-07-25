@@ -1286,6 +1286,19 @@ export const combatants = sqliteTable('combatants', {
   activeEffects: text('active_effects'),
   // Issue #423: structured condition instances as a JSON ConditionInstance[] blob.
   conditionInstances: text('condition_instances'),
+  // Issue #425: inline homebrew statblock JSON (CombatantStatblock) for manual monsters.
+  statblockJson: text('statblock_json'),
+});
+
+/** Campaign-scoped homebrew monster library (issue #425). */
+export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(),
+  statblockJson: text('statblock_json').notNull(),
+  sourceRuleEntryId: integer('source_rule_entry_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

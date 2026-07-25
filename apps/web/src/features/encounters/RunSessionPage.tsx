@@ -22,9 +22,11 @@ import type {
   AoeShape,
   AoeTemplate,
   Attachment,
+  CampaignLibraryMonster,
   Character,
   Combatant,
   CombatantKind,
+  CombatantStatblock as CombatantStatblockData,
   DifficultyBand,
   EncounterDifficulty,
   EncounterEvent,
@@ -41,7 +43,7 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
+import { COMBATANT_STATBLOCK_HELP, defaultCombatantStatblock, LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -62,6 +64,8 @@ import { useCampaign } from '../../app/CampaignContext';
 import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
+import { CombatantActionsList } from './CombatantActionsList';
+import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -1666,6 +1670,15 @@ export default function RunSessionPage() {
           ruleSystem={campaign?.ruleSystem}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
+          onUseSuggestedAction={
+            isDm && currentCombatantId != null
+              ? (actionIndex, actionName, spec) => {
+                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
+                  if (!actor || !spec) return;
+                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                }
+              : undefined
+          }
         />
       )}
 
@@ -1765,6 +1778,7 @@ export default function RunSessionPage() {
             <CombatantRow
               key={c.id}
               rowRef={(el) => setCombatantRowRef(c.id, el)}
+              encounterId={eid}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
@@ -1787,6 +1801,11 @@ export default function RunSessionPage() {
                       if (!act?.spec) return;
                       onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
                     }
+                  : undefined
+              }
+              onUseMonsterAction={
+                canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                  ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                   : undefined
               }
               busy={pendingCombatantIds.has(c.id)}
@@ -4160,6 +4179,7 @@ function ApplyDamageBar({
 
 function CombatantRow({
   rowRef,
+  encounterId,
   combatant,
   isCurrentTurn,
   canEdit,
@@ -4174,6 +4194,7 @@ function CombatantRow({
   onRollError,
   onApplyDamage,
   onUseAction,
+  onUseMonsterAction,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -4195,6 +4216,7 @@ function CombatantRow({
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
+  encounterId: number;
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
@@ -4216,8 +4238,9 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
-  /** Issue #414: open the structured action Use flow for a resolvable action index. */
+  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
+  onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -4733,6 +4756,23 @@ function CombatantRow({
         {canViewStatblock && combatant.ruleEntryId != null && (
           <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
         )}
+        {onUseMonsterAction && (
+          <CombatantActionsList
+            encounterId={encounterId}
+            combatantId={combatant.id}
+            enabled
+            onUseAction={onUseMonsterAction}
+          />
+        )}
+        {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
+          <details className="mt-2">
+            <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
+            <CombatantStatblockEditor
+              value={combatant.statblock}
+              onChange={(next) => onPatchCombatant?.({ statblock: next })}
+            />
+          </details>
+        )}
         {/* Character card (in-encounter sheet): a player sees their own combat stats —
             abilities, saves, skills, actions, spell slots — without leaving the tracker,
             and the DM sees the whole party's. Character data is party-visible (dmSecret is
@@ -5127,7 +5167,7 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
 
 // ---------------------------------------------------------------------------
 
-type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
+type AddTab = 'manual' | 'compendium' | 'library' | 'party' | 'npc';
 
 function AddCombatantPanel({
   encounterId,
@@ -5154,6 +5194,10 @@ function AddCombatantPanel({
   const [hpMax, setHpMax] = useState('');
   const [initMod, setInitMod] = useState('');
   const [manualCount, setManualCount] = useState('1');
+  const [manualStatblock, setManualStatblock] = useState<CombatantStatblockData>(() => defaultCombatantStatblock());
+
+  // Campaign library (issue #425)
+  const [library, setLibrary] = useState<CampaignLibraryMonster[]>([]);
 
   // Compendium
   const [query, setQuery] = useState('');
@@ -5193,6 +5237,21 @@ function AddCombatantPanel({
       cancelled = true;
     };
   }, [cid]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+        if (!cancelled) setLibrary(list);
+      } catch {
+        if (!cancelled) setLibrary([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid, tab]);
 
   useEffect(() => {
     if ((tab !== 'compendium' && tab !== 'npc') || !debouncedQuery.trim()) {
@@ -5253,12 +5312,55 @@ function AddCombatantPanel({
         hpMax: hpMax ? Math.max(1, Number(hpMax)) : undefined,
         initMod: initMod ? Number(initMod) : undefined,
         count: parseCount(manualCount),
+        statblock: manualStatblock,
       });
       setName('');
       setHpMax('');
       setInitMod('');
       setManualCount('1');
+      setManualStatblock(defaultCombatantStatblock());
       await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addFromLibrary(entry: CampaignLibraryMonster) {
+    setSaving(true);
+    setError(null);
+    try {
+      const resolvedHp = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : 10;
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'monster' as CombatantKind,
+        name: entry.name,
+        libraryMonsterId: entry.id,
+        hpMax: resolvedHp,
+        count: parseCount(manualCount),
+      });
+      await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveManualToLibrary() {
+    if (!name.trim()) {
+      setError('Enter a name before saving to the campaign library.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${cid}/library/monsters`, {
+        name: name.trim(),
+        statblock: manualStatblock,
+      });
+      const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+      setLibrary(list);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
@@ -5392,7 +5494,7 @@ function AddCombatantPanel({
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
       <div className="seg self-start inline-flex">
-        {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
+        {(['manual', 'compendium', 'library', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
             key={t}
             style={{
@@ -5408,7 +5510,15 @@ function AddCombatantPanel({
             }}
             onClick={() => setTab(t)}
           >
-            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : t === 'party' ? 'Party' : 'NPC'}
+            {t === 'manual'
+              ? 'Manual'
+              : t === 'compendium'
+                ? 'Compendium'
+                : t === 'library'
+                  ? 'Library'
+                  : t === 'party'
+                    ? 'Party'
+                    : 'NPC'}
           </button>
         ))}
       </div>
@@ -5416,27 +5526,62 @@ function AddCombatantPanel({
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
       {tab === 'manual' && (
-        <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
-          <div className="field" style={{ flex: 1, minWidth: 140 }}>
-            <label htmlFor="add-combatant-name">Name</label>
-            <TextInput id="add-combatant-name" placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
-          </div>
-          <div className="field" style={{ width: 80 }}>
-            <label htmlFor="add-combatant-hp">HP</label>
-            <TextInput id="add-combatant-hp" aria-label="Max HP" placeholder="22" value={hpMax} onChange={(e) => setHpMax(e.target.value)} />
-          </div>
-          <div className="field" style={{ width: 80 }}>
-            <label htmlFor="add-combatant-init">Init mod</label>
-            <TextInput id="add-combatant-init" aria-label="Initiative modifier" placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
-          </div>
-          <div className="field" style={{ width: 70 }}>
-            <label htmlFor="add-combatant-count">Qty</label>
-            <TextInput id="add-combatant-count" type="number" min={1} max={50} aria-label="Quantity — adds this many, auto-numbered" value={manualCount} onChange={(e) => setManualCount(e.target.value)} />
-          </div>
-          <Btn type="submit" disabled={saving || !name.trim()}>
-            {saving ? 'Adding…' : 'Add'}
-          </Btn>
-        </form>
+        <div className="space-y-3">
+          <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
+            <div className="field" style={{ flex: 1, minWidth: 140 }}>
+              <label htmlFor="add-combatant-name">Name</label>
+              <TextInput id="add-combatant-name" placeholder="Ashen cultist" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} />
+            </div>
+            <div className="field" style={{ width: 80 }}>
+              <label htmlFor="add-combatant-hp">HP</label>
+              <TextInput id="add-combatant-hp" aria-label="Max HP" placeholder="22" value={hpMax} onChange={(e) => setHpMax(e.target.value)} />
+            </div>
+            <div className="field" style={{ width: 80 }}>
+              <label htmlFor="add-combatant-init">Init mod</label>
+              <TextInput id="add-combatant-init" aria-label="Initiative modifier" placeholder="2" value={initMod} onChange={(e) => setInitMod(e.target.value)} />
+            </div>
+            <div className="field" style={{ width: 70 }}>
+              <label htmlFor="add-combatant-count">Qty</label>
+              <TextInput id="add-combatant-count" type="number" min={1} max={50} aria-label="Quantity — adds this many, auto-numbered" value={manualCount} onChange={(e) => setManualCount(e.target.value)} />
+            </div>
+            <Btn type="submit" disabled={saving || !name.trim()}>
+              {saving ? 'Adding…' : 'Add'}
+            </Btn>
+            <Btn type="button" ghost disabled={saving || !name.trim()} onClick={() => void saveManualToLibrary()}>
+              Save to library
+            </Btn>
+          </form>
+          <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
+            {COMBATANT_STATBLOCK_HELP.library}
+          </p>
+          <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} />
+        </div>
+      )}
+
+      {tab === 'library' && (
+        <div className="space-y-2">
+          {library.length === 0 ? (
+            <p className="text-muted text-sm">No saved homebrew monsters yet. Build one on the Manual tab and save it to the library.</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {library.map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  className="card elev-sm text-left"
+                  style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
+                  disabled={saving}
+                  onClick={() => void addFromLibrary(entry)}
+                >
+                  <span className="font-medium">{entry.name}</span>
+                  <span className="text-muted text-xs block">
+                    {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {tab === 'compendium' && (

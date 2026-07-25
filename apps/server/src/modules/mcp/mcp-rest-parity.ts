@@ -48,6 +48,12 @@ export const MCP_REST_PARITY_ISSUE_683: readonly McpRestParityEntry[] = [
   { rest: 'POST /notes/:id/restore', mcpTool: 'restore_note' },
   // encounters
   { rest: 'POST /encounters/:id/reopen', mcpTool: 'reopen_encounter' },
+  // campaign library monsters (issue #425)
+  { rest: 'GET /campaigns/:campaignId/library/monsters', mcpTool: 'list_campaign_library_monsters' },
+  { rest: 'POST /campaigns/:campaignId/library/monsters', mcpTool: 'create_campaign_library_monster' },
+  { rest: 'PATCH /library/monsters/:id', mcpTool: 'update_campaign_library_monster' },
+  { rest: 'DELETE /library/monsters/:id', mcpTool: 'delete_campaign_library_monster' },
+  { rest: 'POST /campaigns/:campaignId/library/monsters/:id/clone', mcpTool: 'clone_campaign_library_monster' },
   // spell slots
   { rest: 'POST /characters/:id/spell-slots', mcpTool: 'adjust_spell_slots' },
   // attachments — metadata reads already exist; manage + binary gap

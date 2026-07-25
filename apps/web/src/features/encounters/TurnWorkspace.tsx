@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
+import type { TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
@@ -34,6 +34,8 @@ interface TurnWorkspaceProps {
   ruleSystem?: string | null;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
+  /** Issue #425: DM uses a suggested monster action from the turn workspace. */
+  onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -85,6 +87,7 @@ export function TurnWorkspace({
   ruleSystem,
   onRollDeathSave,
   onPatchCombatant,
+  onUseSuggestedAction,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -318,10 +321,21 @@ export function TurnWorkspace({
           />
           <ul className="list-none p-0 m-0 space-y-1 max-h-48 overflow-auto">
             {filteredActions.map((a, i) => (
-              <li key={`${a.name}-${i}`} className="text-sm">
-                <span className="text-white font-medium">{a.name}</span>
-                <span className="text-muted"> · {a.source}</span>
-                {a.summary && <span className="text-muted"> — {a.summary}</span>}
+              <li key={`${a.name}-${i}`} className="text-sm flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-white font-medium">{a.name}</span>
+                  <span className="text-muted"> · {a.source}</span>
+                  {a.summary && <span className="text-muted"> — {a.summary}</span>}
+                </div>
+                {a.resolvable && onUseSuggestedAction && a.actionIndex != null && a.spec && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary !min-h-8 text-xs shrink-0"
+                    onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
+                  >
+                    Use
+                  </button>
+                )}
               </li>
             ))}
             {filteredActions.length === 0 && <li className="text-sm text-muted">No matching actions.</li>}
