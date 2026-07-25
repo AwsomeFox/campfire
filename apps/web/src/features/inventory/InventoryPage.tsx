@@ -15,6 +15,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn, TextInput, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { PageHeader } from '../../components/PageHeader';
 import { Field } from '../../components/Field';
 import {
@@ -55,6 +56,8 @@ export default function InventoryPage() {
   const myUserId = me?.user.id != null ? String(me.user.id) : null;
 
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [trashItems, setTrashItems] = useState<InventoryItem[] | null>(null);
+  const [showTrash, setShowTrash] = useState(false);
   const [treasury, setTreasury] = useState<Treasury | null>(null);
   const [characters, setCharacters] = useState<Character[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,6 +84,15 @@ export default function InventoryPage() {
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     } finally {
       setLoading(false);
+    }
+  }, [id]);
+
+  const loadTrash = useCallback(async () => {
+    try {
+      const trashed = await api.get<InventoryItem[]>(`${API}/campaigns/${id}/inventory/trash`);
+      setTrashItems(trashed);
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     }
   }, [id]);
 
@@ -240,6 +252,32 @@ export default function InventoryPage() {
                   partyStashTitle={t('inventory.partyStash')}
                 />
               ))}
+
+              {canEdit && (
+                <div className="pt-2">
+                  <Btn
+                    ghost
+                    className="text-xs"
+                    onClick={() => {
+                      if (!showTrash) void loadTrash();
+                      setShowTrash((s) => !s);
+                    }}
+                  >
+                    {showTrash ? t('inventory.hideTrash') : t('inventory.showTrash')}
+                  </Btn>
+                </div>
+              )}
+
+              {showTrash && (
+                <TrashSection
+                  items={trashItems}
+                  characters={characters}
+                  onChanged={() => {
+                    void load();
+                    void loadTrash();
+                  }}
+                />
+              )}
             </>
           )}
         </>
@@ -643,6 +681,7 @@ function newIdempotencyKey(): string {
 function ItemRow({
   item,
   editable,
+  characters,
   writableOwners,
   onChanged,
 }: {
@@ -657,6 +696,7 @@ function ItemRow({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickingIcon, setPickingIcon] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   // Issue #782: render from the last committed server item so +/- announce and
   // display the applied quantity rather than a stale optimistic absolute.
   const [committed, setCommitted] = useState(item);
@@ -689,6 +729,7 @@ function ItemRow({
   }
 
   async function remove() {
+    setConfirmingDelete(false);
     setBusy(true);
     setError(null);
     try {
@@ -786,13 +827,50 @@ function ItemRow({
             danger
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy}
-            onClick={() => void remove()}
+            onClick={() => setConfirmingDelete(true)}
             aria-label={t('inventory.deleteAria', { name: committed.name })}
           >
             ✕
           </Btn>
         </div>
       )}
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={t('inventory.deleteConfirmTitle', { defaultValue: 'Delete item?' })}
+          body={
+            <div className="space-y-2 text-sm">
+              <p>
+                {t('inventory.deleteConfirmBody', {
+                  defaultValue:
+                    'This will move {{name}} (×{{qty}}) to the Trash. It can be restored from there until it is purged.',
+                  name: committed.name,
+                  qty: committed.qty,
+                  owner:
+                    committed.ownerType === 'party'
+                      ? t('inventory.partyStash')
+                      : characters.find((c) => c.id === committed.characterId)?.name ?? t('inventory.currentOwner'),
+                })}
+              </p>
+              <p className="text-slate-400">
+                {t('inventory.deleteConfirmConsequence', {
+                  defaultValue: 'Owner: {{owner}}',
+                  owner:
+                    committed.ownerType === 'party'
+                      ? t('inventory.partyStash')
+                      : characters.find((c) => c.id === committed.characterId)?.name ?? t('inventory.currentOwner'),
+                })}
+              </p>
+            </div>
+          }
+          confirmLabel={t('common.delete', { defaultValue: 'Delete' })}
+          pendingLabel={t('common.deleting', { defaultValue: 'Deleting…' })}
+          cancelLabel={t('common.cancel', { defaultValue: 'Cancel' })}
+          busy={busy}
+          onConfirm={() => void remove()}
+          onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+
       {pickingIcon && (
         <IconPicker
           value={committed.iconSlug ?? ''}
@@ -978,5 +1056,104 @@ function AddItemForm({
         />
       )}
     </Card>
+  );
+}
+
+function TrashSection({
+  items,
+  characters,
+  onChanged,
+}: {
+  items: InventoryItem[] | null;
+  characters: Character[];
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+
+  if (items === null) {
+    return (
+      <Card className="py-6">
+        <Skeleton lines={2} />
+      </Card>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <Card className="py-4 text-sm text-slate-500">
+        {t('inventory.trashEmpty', { defaultValue: 'Trash is empty.' })}
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="space-y-3">
+      <h2 className="font-bold text-white text-sm">{t('inventory.trashTitle', { defaultValue: 'Trash' })}</h2>
+      <ul className="space-y-2">
+        {items.map((item) => (
+          <TrashedItemRow key={item.id} item={item} characters={characters} onChanged={onChanged} />
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+function TrashedItemRow({
+  item,
+  characters,
+  onChanged,
+}: {
+  item: InventoryItem;
+  characters: Character[];
+  onChanged: () => void;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function restore() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post<InventoryItem>(`${API}/inventory/${item.id}/restore`);
+      onChanged();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.restoreItem' }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const ownerName =
+    item.ownerType === 'party'
+      ? t('inventory.partyStash')
+      : characters.find((c) => c.id === item.characterId)?.name ?? t('inventory.currentOwner');
+  const iconSlug = itemIconSlug(item);
+
+  return (
+    <li className="py-2 flex flex-wrap items-center gap-x-3 gap-y-2">
+      <span className="shrink-0 mt-0.5 text-[var(--color-accent)]">
+        <GameIcon slug={iconSlug} size={22} title={item.name} />
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold text-white truncate">
+          {item.name}
+          {item.qty !== 1 && <span className="text-slate-500 font-normal"> ×{item.qty}</span>}
+        </p>
+        <p className="text-[12px] text-slate-500">
+          {t('inventory.trashedOwner', { defaultValue: 'Owner: {{owner}}', owner: ownerName })}
+        </p>
+        {error && <p className="text-[12px] text-rose-400">{error}</p>}
+      </div>
+      <Btn
+        ghost
+        className="!min-h-0 !py-0.5 !px-2 text-xs"
+        disabled={busy}
+        onClick={() => void restore()}
+        aria-label={t('inventory.restoreAria', { defaultValue: 'Restore {{name}}', name: item.name })}
+      >
+        {t('inventory.restore', { defaultValue: 'Restore' })}
+      </Btn>
+    </li>
   );
 }

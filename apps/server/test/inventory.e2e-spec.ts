@@ -481,6 +481,142 @@ describe('inventory & treasury (e2e)', () => {
       expect(res.body.characterId).toBe(ownCharacterId);
       expect(res.body.qty).toBe(2);
     });
+
+    // ---- issue #551: soft-delete, restore, and audit snapshot ----
+
+    it('soft-deletes an item to trash and excludes it from live lists (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Glass bauble', qty: 7 });
+      expect(created.status).toBe(201);
+      const itemId = created.body.id;
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${itemId}`).set(player);
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body.deletedAt).toMatch(/^\d{4}-/);
+      expect(deleteRes.body.deletedBy).toMatch(/p-1$/);
+      expect(deleteRes.body.name).toBe('Glass bauble');
+
+      const getRes = await request(server).get(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(getRes.status).toBe(404);
+
+      const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+      expect(listRes.body.some((i: { id: number }) => i.id === itemId)).toBe(false);
+
+      const trashRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory/trash`).set(dm);
+      expect(trashRes.status).toBe(200);
+      expect(trashRes.body.some((i: { id: number }) => i.id === itemId)).toBe(true);
+    });
+
+    it('restores a soft-deleted item to its original owner and clears the tombstone (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Lucky coin', ownerType: 'character', characterId: ownCharacterId, qty: 1 });
+      expect(created.status).toBe(201);
+      const itemId = created.body.id;
+
+      await request(server).delete(`/api/v1/inventory/${itemId}`).set(player);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.deletedAt).toBeNull();
+      expect(restoreRes.body.deletedBy).toBeNull();
+      expect(restoreRes.body.ownerType).toBe('character');
+      expect(restoreRes.body.characterId).toBe(ownCharacterId);
+
+      const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
+      expect(listRes.body.some((i: { id: number }) => i.id === itemId)).toBe(true);
+    });
+
+    it('restore falls back to party stash when the original character is gone (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const tempChar = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(dm)
+        .send({ name: 'Temp PC' });
+      expect(tempChar.status).toBe(201);
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Borrowed shield', ownerType: 'character', characterId: tempChar.body.id });
+      expect(created.status).toBe(201);
+      const itemId = created.body.id;
+
+      const deleteRes = await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+      expect(deleteRes.status).toBe(200);
+
+      const charDelete = await request(server).delete(`/api/v1/characters/${tempChar.body.id}`).set(dm);
+      expect(charDelete.status).toBe(200);
+
+      const restoreRes = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm);
+      expect(restoreRes.status).toBe(200);
+      expect(restoreRes.body.ownerType).toBe('party');
+      expect(restoreRes.body.characterId).toBeNull();
+    });
+
+    it('records an immutable deletion snapshot in the audit log (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Signed contract', qty: 3, notes: 'Do not lose' });
+      const itemId = created.body.id;
+
+      await request(server).delete(`/api/v1/inventory/${itemId}`).set(player);
+
+      const auditRes = await request(server).get(`/api/v1/campaigns/${campaignId}/audit`).set(dm);
+      const deleteAudit = auditRes.body.find((e: { action: string; entityId: number }) => e.action === 'item.delete' && e.entityId === itemId);
+      expect(deleteAudit).toBeDefined();
+      const detail = JSON.parse(deleteAudit.detail);
+      expect(detail.snapshot).toMatchObject({ name: 'Signed contract', qty: 3, notes: 'Do not lose' });
+    });
+
+    it('only dm, the deleting player, or the owning player may restore an item (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(player)
+        .send({ name: 'Private journal', ownerType: 'character', characterId: ownCharacterId });
+      const itemId = created.body.id;
+
+      await request(server).delete(`/api/v1/inventory/${itemId}`).set(player);
+
+      // another player cannot restore
+      const otherRestore = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(otherPlayer);
+      expect(otherRestore.status).toBe(403);
+
+      // the owner may restore
+      const ownerRestore = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(player);
+      expect(ownerRestore.status).toBe(200);
+    });
+
+    it('idempotent restore: repeated restores still return the restored item (#551)', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const created = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/inventory`)
+        .set(dm)
+        .send({ name: 'Pebble', qty: 1 });
+      const itemId = created.body.id;
+
+      await request(server).delete(`/api/v1/inventory/${itemId}`).set(dm);
+
+      const first = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm);
+      expect(first.status).toBe(200);
+
+      const second = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm);
+      expect(second.status).toBe(400);
+    });
   });
 
   describe('treasury', () => {
