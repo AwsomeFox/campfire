@@ -65,7 +65,7 @@ export class CampaignAttachmentsController {
    */
   @Post()
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: 'Upload an attachment', description: "Multipart upload. `kind` in the form body selects the bucket and minimum role: player+ for 'portrait', dm-only for 'map'/'image'. Allowed mime types: image/png, image/jpeg, image/webp." })
+  @ApiOperation({ summary: 'Upload an attachment', description: "Multipart upload. `kind` in the form body selects the bucket and minimum role: player+ for 'portrait', dm-only for 'map'/'image'. Allowed mime types: image/png, image/jpeg, image/webp, application/pdf." })
   @ApiResponse({ status: 201, description: 'Attachment created.' })
   @ApiResponse({ status: 400, description: 'Missing file, unsupported mime type, or file content that does not match the declared type.' })
   @ApiResponse({ status: 413, description: 'File exceeds the max upload size.' })
@@ -148,8 +148,9 @@ export class AttachmentsController {
    * AttachmentsService.resolveFile / thumbnail.ts).
    */
   @Get(':id/file')
-  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses carry a strong ETag but must revalidate authorization and visibility before reuse; a matching authorized If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview.' })
+  @ApiOperation({ summary: 'Stream attachment bytes', description: 'Requires campaign membership — attachment files are never served from a public URL. Responses carry a strong ETag but must revalidate authorization and visibility before reuse; a matching authorized If-None-Match returns 304. `?size=thumb` serves a downscaled PNG preview. `?download=1` sends Content-Disposition: attachment for a download.' })
   @ApiQuery({ name: 'size', required: false, enum: ['thumb'], description: 'Omit for the full-size original; `thumb` for a downscaled PNG preview.' })
+  @ApiQuery({ name: 'download', required: false, enum: ['1'], description: 'Set to 1 to force a download with Content-Disposition: attachment.' })
   @ApiQuery({ name: 'v', required: false, type: String, description: 'Authorization-aware version token (see AttachmentsService.versionToken). Optional but recommended — clients should append it so a content/hidden change produces a new URL.' })
   @ApiResponse({ status: 200, description: 'Raw file bytes, with Content-Type/Content-Disposition/ETag set from the stored attachment.' })
   @ApiResponse({ status: 304, description: 'Client cache is current (If-None-Match matched the ETag).' })
@@ -161,9 +162,13 @@ export class AttachmentsController {
     @Req() req: Request,
     @Res() res: Response,
     @Query('size') size?: string,
+    @Query('download') download?: string,
   ) {
     if (size !== undefined && size !== 'thumb') {
       throw new BadRequestException("Unsupported size — allowed: 'thumb' (or omit for the original)");
+    }
+    if (download !== undefined && download !== '1') {
+      throw new BadRequestException("Unsupported download — allowed: '1' (or omit for inline)");
     }
     const row = await this.attachmentsService.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
@@ -217,7 +222,7 @@ export class AttachmentsController {
       'Content-Length': String(file.size),
       // Issue #630: ASCII fallback + RFC 5987 filename* (not percent-encoding
       // the Unicode name into the legacy filename= slot).
-      'Content-Disposition': contentDispositionHeader(row.filename, 'inline'),
+      'Content-Disposition': contentDispositionHeader(row.filename, download === '1' ? 'attachment' : 'inline'),
     });
 
     const stream = fs.createReadStream(file.path);
