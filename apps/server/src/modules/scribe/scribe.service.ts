@@ -45,7 +45,6 @@ import {
   filterSourceByScope,
   isSessionScope,
   postSessionScope,
-  scheduledSessionWindow,
   sourceStatsFrom,
   estimatePromptTokens,
   type ScribeCursorScope,
