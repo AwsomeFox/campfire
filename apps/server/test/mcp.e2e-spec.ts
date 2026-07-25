@@ -15,9 +15,17 @@ function parseResult(result: unknown): unknown {
   return JSON.parse(content[0].text);
 }
 
+// Minimal valid 1x1 PNG for REST-only attachment upload in MCP parity tests (#683).
+const TINY_PNG = Buffer.from(
+  '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+    '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+  'hex',
+);
+
 const ALL_TOOLS = [
   // read
   'list_campaigns',
+  'list_trashed_campaigns',
   'get_campaign_summary',
   'get_session_zero',
   'get_ai_support_preferences',
@@ -45,6 +53,9 @@ const ALL_TOOLS = [
   'run_scribe',
   'read_inbox',
   'list_proposals',
+  'list_notifications',
+  'get_unread_notification_count',
+  'get_notification_preferences',
   'list_revisions',
   'lookup_rule',
   'list_rule_packs',
@@ -56,6 +67,9 @@ const ALL_TOOLS = [
   'preview_encounter',
   'list_encounters',
   'list_members',
+  'list_invites',
+  'preview_invite',
+  'list_campaign_trash',
   'get_membership_integrity',
   'list_notes',
   'read_audit_log',
@@ -81,9 +95,11 @@ const ALL_TOOLS = [
   'delete_my_support_preference',
   'create_campaign',
   'delete_campaign',
+  'restore_campaign',
   'create_quest',
   'update_quest',
   'delete_quest',
+  'restore_quest',
   'set_quest_status',
   'add_objective',
   'update_objective',
@@ -101,17 +117,20 @@ const ALL_TOOLS = [
   'remove_branch',
   'upsert_npc',
   'delete_npc',
+  'restore_npc',
   'set_npc_disposition',
   'upsert_faction',
   'set_faction_reputation',
   'delete_faction',
   'upsert_location',
   'delete_location',
+  'restore_location',
   'set_location_discovery',
   'add_session_recap',
   'update_session',
   'update_session_zero',
   'delete_session',
+  'restore_session',
   'create_session_share',
   'update_session_share',
   'revoke_session_share',
@@ -119,6 +138,8 @@ const ALL_TOOLS = [
   'set_recap_share_policy',
   'upsert_character',
   'delete_character',
+  'restore_character',
+  'adjust_spell_slots',
   'update_character_hp',
   'award_xp',
   'level_up_character',
@@ -127,6 +148,7 @@ const ALL_TOOLS = [
   'whisper_to_player',
   'update_note',
   'delete_note',
+  'restore_note',
   'submit_inbox_item',
   'resolve_inbox_item',
   'update_campaign_status',
@@ -134,6 +156,20 @@ const ALL_TOOLS = [
   'approve_proposal',
   'reject_proposal',
   'withdraw_proposal',
+  'revise_proposal',
+  'batch_approve_proposals',
+  'batch_reject_proposals',
+  'set_notification_preferences',
+  'mark_notification_read',
+  'mark_notification_unread',
+  'mark_notifications_read',
+  'mark_notifications_unread',
+  'mark_all_notifications_read',
+  'create_invite',
+  'revoke_invite',
+  'revoke_all_invites',
+  'set_invite_policy',
+  'join_invite',
   'add_member',
   'update_member',
   'remove_member',
@@ -169,6 +205,7 @@ const ALL_TOOLS = [
   'apply_action',
   'undo_action',
   'end_encounter',
+  'reopen_encounter',
   'delete_encounter',
   'ai_dm_narrate',
   'draft_content',
@@ -194,6 +231,9 @@ const ALL_TOOLS = [
   'disable_calendar_feed',
   'import_ddb_character',
   'restore_entity_revision',
+  'reveal_attachment',
+  'hide_attachment',
+  'delete_attachment',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -283,7 +323,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(174);
+    expect(tools).toHaveLength(207);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool
@@ -3349,6 +3389,174 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
         const res = await client.callTool({ name, arguments: {} });
         expect((res as { isError?: boolean }).isError).toBe(true);
       }
+    });
+  });
+
+  describe('issue #683 — MCP parity for invites, notifications, proposals, trash, reopen, spell slots, attachments', () => {
+    it('invite lifecycle: create, list, preview, revoke', async () => {
+      const client = await mcpClient(dmToken);
+      const created = await client.callTool({
+        name: 'create_invite',
+        arguments: { campaignId, role: 'viewer', expiresInDays: 3 },
+      });
+      expect(created.isError).toBeFalsy();
+      const invite = parseResult(created) as { id: number; code: string; role: string };
+      expect(invite.role).toBe('viewer');
+      expect(invite.code.length).toBeGreaterThan(10);
+
+      const listed = parseResult(
+        await client.callTool({ name: 'list_invites', arguments: { campaignId } }),
+      ) as { id: number; code: string }[];
+      expect(listed.some((i) => i.id === invite.id && i.code === invite.code)).toBe(true);
+
+      const preview = parseResult(
+        await client.callTool({ name: 'preview_invite', arguments: { code: invite.code } }),
+      ) as { campaignId: number; role: string };
+      expect(preview.campaignId).toBe(campaignId);
+      expect(preview.role).toBe('viewer');
+
+      const revoked = await client.callTool({
+        name: 'revoke_invite',
+        arguments: { campaignId, inviteId: invite.id },
+      });
+      expect(revoked.isError).toBeFalsy();
+    });
+
+    it('notifications: list, unread count, mark read', async () => {
+      const client = await mcpClient(dmToken);
+      const listed = parseResult(await client.callTool({ name: 'list_notifications', arguments: { limit: 5 } })) as {
+        items: { id: number }[];
+      };
+      expect(Array.isArray(listed.items)).toBe(true);
+
+      const count = parseResult(await client.callTool({ name: 'get_unread_notification_count', arguments: {} })) as {
+        count: number;
+      };
+      expect(typeof count.count).toBe('number');
+
+      const prefs = parseResult(await client.callTool({ name: 'get_notification_preferences', arguments: {} })) as {
+        campaigns: unknown[];
+      };
+      expect(Array.isArray(prefs.campaigns)).toBe(true);
+
+      if (listed.items.length > 0) {
+        const marked = await client.callTool({
+          name: 'mark_notification_read',
+          arguments: { notificationId: listed.items[0].id },
+        });
+        expect(marked.isError).toBeFalsy();
+      } else {
+        const allRead = await client.callTool({ name: 'mark_all_notifications_read', arguments: {} });
+        expect(allRead.isError).toBeFalsy();
+      }
+    });
+
+    it('proposal revise and batch approve', async () => {
+      const viewerClient = await mcpClient(viewerToken);
+      const submitted = await viewerClient.callTool({
+        name: 'create_quest',
+        arguments: { campaignId, title: '683 revise me', propose: true },
+      });
+      expect(submitted.isError).toBeFalsy();
+      const { proposal } = parseResult(submitted) as { proposal: { id: number; status: string } };
+      expect(proposal.status).toBe('pending');
+
+      const revised = await viewerClient.callTool({
+        name: 'revise_proposal',
+        arguments: { proposalId: proposal.id, payload: { title: '683 revised title' } },
+      });
+      expect(revised.isError).toBeFalsy();
+
+      const dmClient = await mcpClient(dmToken);
+      const batch = parseResult(
+        await dmClient.callTool({
+          name: 'batch_approve_proposals',
+          arguments: { ids: [proposal.id], note: '683 batch' },
+        }),
+      ) as { results: { id: number; ok: boolean }[] };
+      expect(batch.results[0]?.ok).toBe(true);
+    });
+
+    it('campaign trash lists and restores a soft-deleted quest', async () => {
+      const client = await mcpClient(dmToken);
+      const questRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/quests`).send({ title: '683 trash quest' });
+      const questId = questRes.body.id as number;
+      expect((await dmAgent.delete(`/api/v1/quests/${questId}`)).status).toBe(200);
+
+      const trash = parseResult(
+        await client.callTool({ name: 'list_campaign_trash', arguments: { campaignId } }),
+      ) as { type: string; id: number }[];
+      expect(trash.some((row) => row.type === 'quest' && row.id === questId)).toBe(true);
+
+      const restored = await client.callTool({ name: 'restore_quest', arguments: { questId } });
+      expect(restored.isError).toBeFalsy();
+      expect((parseResult(restored) as { id: number }).id).toBe(questId);
+    });
+
+    it('reopen_encounter flips an ended encounter back to running', async () => {
+      const client = await mcpClient(dmToken);
+      const created = parseResult(
+        await client.callTool({ name: 'create_encounter', arguments: { campaignId, name: '683 reopen' } }),
+      ) as { id: number };
+      const encounterId = created.id;
+      await client.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId, kind: 'monster', name: '683 goblin', hpMax: 5 },
+      });
+      await client.callTool({ name: 'roll_initiative', arguments: { encounterId } });
+      await client.callTool({ name: 'begin_encounter', arguments: { encounterId } });
+      const ended = await client.callTool({ name: 'end_encounter', arguments: { encounterId } });
+      expect(ended.isError).toBeFalsy();
+
+      const reopened = await client.callTool({ name: 'reopen_encounter', arguments: { encounterId } });
+      expect(reopened.isError).toBeFalsy();
+      expect((parseResult(reopened) as { status: string }).status).toBe('running');
+    });
+
+    it('adjust_spell_slots spends and restores a slot', async () => {
+      const client = await mcpClient(dmToken);
+      const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({ name: '683 caster' });
+      const characterId = charRes.body.id as number;
+      await dmAgent.patch(`/api/v1/characters/${characterId}`).send({ spellSlots: { '1': { max: 2, used: 0 } } });
+
+      const spent = parseResult(
+        await client.callTool({
+          name: 'adjust_spell_slots',
+          arguments: { characterId, level: 1, delta: 1 },
+        }),
+      ) as { spellSlots: Record<string, { used: number }> };
+      expect(spent.spellSlots['1'].used).toBe(1);
+
+      const restored = parseResult(
+        await client.callTool({
+          name: 'adjust_spell_slots',
+          arguments: { characterId, level: 1, delta: -1 },
+        }),
+      ) as { spellSlots: Record<string, { used: number }> };
+      expect(restored.spellSlots['1'].used).toBe(0);
+    });
+
+    it('reveal_attachment, hide_attachment, delete_attachment manage metadata only', async () => {
+      const client = await mcpClient(dmToken);
+      const upload = await dmAgent
+        .post(`/api/v1/campaigns/${campaignId}/attachments`)
+        .attach('file', TINY_PNG, { filename: '683.png', contentType: 'image/png' })
+        .field('kind', 'image');
+      expect(upload.status).toBe(201);
+      const attachmentId = upload.body.id as number;
+
+      const revealed = parseResult(
+        await client.callTool({ name: 'reveal_attachment', arguments: { attachmentId } }),
+      ) as { hidden: boolean };
+      expect(revealed.hidden).toBe(false);
+
+      const hidden = parseResult(
+        await client.callTool({ name: 'hide_attachment', arguments: { attachmentId } }),
+      ) as { hidden: boolean };
+      expect(hidden.hidden).toBe(true);
+
+      const deleted = await client.callTool({ name: 'delete_attachment', arguments: { attachmentId } });
+      expect(deleted.isError).toBeFalsy();
     });
   });
 });
