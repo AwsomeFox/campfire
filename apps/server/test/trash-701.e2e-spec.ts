@@ -4,6 +4,7 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 import { DB, type DrizzleDb } from '../src/db/db.module';
 import { combatants, encounterEvents, storyBranches } from '../src/db/schema';
 
+// Covers soft-delete/restore for factions, story arcs/beats, and encounters (issue #701).
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'trash-701-dm' };
 
 describe('trash consistency — factions, storylines, encounters (e2e, issue #701)', () => {
