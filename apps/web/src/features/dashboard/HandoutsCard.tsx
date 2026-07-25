@@ -106,17 +106,71 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 className="cf-inset"
                 style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 8, borderRadius: 10 }}
               >
-                <img
-                  src={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { size: 'thumb' })}
-                  alt=""
-                  style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
-                />
+                {a.mime === 'application/pdf' ? (
+                  <div
+                    style={{
+                      width: 44,
+                      height: 44,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      borderRadius: 6,
+                      flexShrink: 0,
+                      background: 'var(--color-surface-raised)',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      color: 'var(--color-neutral-500)',
+                    }}
+                  >
+                    PDF
+                  </div>
+                ) : (
+                  <img
+                    src={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { size: 'thumb' })}
+                    alt=""
+                    style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+                  />
+                )}
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="text-[12px] truncate" title={a.filename}>
                     {a.filename}
                   </div>
                   <div style={{ marginTop: 2 }}>
                     <Chip variant={a.hidden ? 'dm' : 'party'}>{a.hidden ? <><GameIcon slug="padlock" size={12} className="inline align-text-bottom" /> DM only</> : <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Revealed</>}</Chip>
+                  </div>
+                  <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <a
+                      className="text-[11px] hover:underline"
+                      href={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ color: 'var(--color-accent)' }}
+                    >
+                      View
+                    </a>
+                    <a
+                      className="text-[11px] hover:underline"
+                      href={attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }, { download: '1' })}
+                      download={a.filename}
+                      style={{ color: 'var(--color-accent)' }}
+                    >
+                      Download
+                    </a>
+                    {a.mime !== 'application/pdf' && (
+                      <button
+                        className="text-[11px] hover:underline"
+                        onClick={() => {
+                          const win = window.open(attachmentFileUrl(a.id, { hidden: a.hidden, updatedAt: a.updatedAt }), '_blank');
+                          if (win) {
+                            win.opener = null;
+                            win.addEventListener('load', () => win.print(), { once: true });
+                          }
+                        }}
+                        style={{ color: 'var(--color-accent)' }}
+                      >
+                        Print
+                      </button>
+                    )}
                   </div>
                 </div>
                 {canDmWrite && (
@@ -139,7 +193,7 @@ export function HandoutsCard({ campaignId }: { campaignId: number }) {
                 campaignId={campaignId}
                 kind="image"
                 shape="rect"
-                label="Drop a handout image, or click to choose (stays hidden until you reveal it)"
+                label="Drop a handout image, or click to choose (PDFs also accepted; stays hidden until you reveal it)"
                 onUploaded={() => void load()}
                 onError={setError}
               />

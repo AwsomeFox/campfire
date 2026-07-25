@@ -36,11 +36,12 @@ import {
   ATTACHMENT_STATE_RESERVED,
 } from './attachment.constants';
 
-/** image/png|jpeg|webp only — matches the multer fileFilter in attachments.controller.ts. */
+/** image/png|jpeg|webp and application/pdf — matches the multer fileFilter in attachments.controller.ts. */
 export const ALLOWED_MIME_TO_EXT: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
+  'application/pdf': 'pdf',
 };
 export const MAX_UPLOAD_BYTES = 32 * 1024 * 1024; // 32MB
 
@@ -81,6 +82,22 @@ export function sniffImageMime(buffer: Buffer): string | null {
   ) {
     return 'image/webp';
   }
+  return null;
+}
+
+/**
+ * Content sniffing for multipart uploads: the three allowed image types plus PDF.
+ * Returns the detected mime, or null when the bytes match none of them.
+ *
+ *  - PNG:  89 50 4E 47 0D 0A 1A 0A
+ *  - JPEG: FF D8 FF
+ *  - WebP: "RIFF" <4-byte size> "WEBP"
+ *  - PDF:  "%PDF"
+ */
+function sniffUploadMime(buffer: Buffer): string | null {
+  const image = sniffImageMime(buffer);
+  if (image) return image;
+  if (buffer.length >= 4 && buffer.subarray(0, 4).toString('latin1') === '%PDF') return 'application/pdf';
   return null;
 }
 
@@ -263,7 +280,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
   ): { path: string; mime: string; size: number; etag: string } {
     const originalPath = this.filePath(row);
 
-    if (variant === 'thumb') {
+    if (variant === 'thumb' && row.mime.startsWith('image/')) {
       const thumb = this.thumbPath(row);
       if (!fs.existsSync(thumb)) {
         const generated = generatePngThumbnail(fs.readFileSync(originalPath));
@@ -458,11 +475,14 @@ export class AttachmentsService implements OnApplicationBootstrap {
     user: RequestUser,
     role: Role,
   ): Promise<Attachment> {
-    const sniffed = sniffImageMime(file.buffer);
+    const sniffed = sniffUploadMime(file.buffer);
     if (sniffed !== file.mimetype) {
       throw new BadRequestException(
-        `File content does not match the declared type ${file.mimetype} — allowed: image/png, image/jpeg, image/webp`,
+        `File content does not match the declared type ${file.mimetype} — allowed: image/png, image/jpeg, image/webp, application/pdf`,
       );
+    }
+    if (sniffed === 'application/pdf' && kind !== 'image') {
+      throw new BadRequestException('PDF uploads are only allowed for handout attachments (kind=image)');
     }
 
     return this.createAndPublish(

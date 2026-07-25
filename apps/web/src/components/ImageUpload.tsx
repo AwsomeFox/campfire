@@ -287,10 +287,11 @@ export function ImageUpload({
   const isUploading = state.status === 'uploading' || state.status === 'saving';
   const isFailed = state.status === 'failed';
 
+  const acceptedMime = kind === 'image' ? [...ACCEPTED_MIME, 'application/pdf'] : ACCEPTED_MIME;
   const doUpload = useCallback(
     async (file: File) => {
-      if (!ACCEPTED_MIME.includes(file.type)) {
-        onError?.('Unsupported file type — use PNG, JPEG, or WebP.');
+      if (!acceptedMime.includes(file.type)) {
+        onError?.(`Unsupported file type — use ${acceptedMime.join(', ')}.`);
         return;
       }
       if (file.size > MAX_BYTES) {
@@ -421,7 +422,7 @@ export function ImageUpload({
         <input
           ref={inputRef}
           type="file"
-          accept={ACCEPTED_MIME.join(',')}
+          accept={acceptedMime.join(',')}
           className="hidden"
           onChange={onPick}
         />
