@@ -89,8 +89,10 @@ import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement'
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
   calibrationToPx,
+  clampPercent,
   computeContainedRect,
   DEFAULT_GRID_OPACITY,
+  layerPxToMapPercent,
   mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
@@ -98,6 +100,7 @@ import {
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
@@ -1606,6 +1609,7 @@ export default function RunSessionPage() {
           onSetMap={setEncounterMap}
           onMoveToken={moveToken}
           onUnplaceToken={unplaceToken}
+          onSetTokenSize={setTokenSize}
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
@@ -2123,6 +2127,7 @@ function BattleMap({
   onSetMap,
   onMoveToken,
   onUnplaceToken,
+  onSetTokenSize,
   onSetGrid,
   onSetFog,
   onSetAoe,
@@ -2144,6 +2149,7 @@ function BattleMap({
   onSetMap: (attachmentId: number | null) => void;
   onMoveToken: (combatantId: number, x: number, y: number) => void;
   onUnplaceToken: (combatantId: number) => void;
+  onSetTokenSize?: (combatantId: number, size: TokenSize) => void;
   onSetGrid: (patch: EncounterGridPatch) => void;
   onSetFog: (fog: FogState | null) => void;
   onSetAoe: (aoe: AoeTemplate[]) => void;
@@ -2161,6 +2167,7 @@ function BattleMap({
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
   const { t } = useTranslation();
+  const announce = useAnnounce();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
@@ -2186,6 +2193,9 @@ function BattleMap({
   // editing selection and `aoeDrag` a live drag override (committed to the encounter on release).
   const [selectedAoeId, setSelectedAoeId] = useState<string | null>(null);
   const [aoeDrag, setAoeDrag] = useState<{ id: string; x: number; y: number } | null>(null);
+  // Keyboard-accessible token selection and numeric editing state (issue #419).
+  const [selectedTokenId, setSelectedTokenId] = useState<number | null>(null);
+  const [tokenEdit, setTokenEdit] = useState<{ x: string; y: string } | null>(null);
   // Live calibration-anchor drag (issue #417): a local map-percent override for the anchor
   // being dragged, committed to the encounter (a grid PATCH) on release so the overlay,
   // snapping, and ruler preview in real time without a server round-trip per pointermove.
@@ -2477,7 +2487,75 @@ function BattleMap({
       setViewport(resetViewport());
       return;
     }
-    if (viewport.scale > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+
+    const arrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown';
+
+    // Number keys switch tools when the surface is focused (no modifier chords).
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      if (e.key === '1') { changeTool('move'); return; }
+      if (e.key === '2') { changeTool('measure'); return; }
+      if (e.key === '3') { changeTool('ping'); return; }
+      if (e.key === '4') { changeTool('reveal'); return; }
+      if (e.key === '5') { changeTool('calibrate'); return; }
+    }
+
+    // Keyboard measurement: Enter to start at the map center, arrows to aim, Enter to finish, Escape to clear.
+    if (tool === 'measure') {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (!ruler) {
+          setRuler({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
+          announce('Measurement started at map center. Arrow keys adjust the endpoint. Enter to finish, Escape to cancel.');
+        } else if (ruler && canMeasure && mapRect) {
+          const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+          const feet = Math.round(cells) * (gridScale ?? 0);
+          announce(`${cells.toFixed(1)} squares · ${feet} ${gridUnit}`);
+        }
+        return;
+      }
+      if (ruler && arrow) {
+        e.preventDefault();
+        setRuler((prev) => prev && { ...prev, end: nudgeMapPoint(prev.end, e) });
+        return;
+      }
+      if (ruler && e.key === 'Escape') {
+        e.preventDefault();
+        setRuler(null);
+        return;
+      }
+    }
+
+    // Keyboard fog reveal: Enter to start a rectangle at the map center, arrows to resize, Enter to reveal, Escape to cancel.
+    if (tool === 'reveal') {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (!revealCorners) {
+          setRevealCorners({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
+          announce('Reveal rectangle started at map center. Arrow keys to resize, Enter to reveal, Escape to cancel.');
+        } else {
+          const rect = rectFromCorners(revealCorners.start, revealCorners.end);
+          if (rect.w >= 1 && rect.h >= 1) {
+            const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
+            onSetFog(next);
+            announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
+          }
+          setRevealCorners(null);
+        }
+        return;
+      }
+      if (revealCorners && arrow) {
+        e.preventDefault();
+        setRevealCorners((prev) => prev && { ...prev, end: nudgeMapPoint(prev.end, e) });
+        return;
+      }
+      if (revealCorners && e.key === 'Escape') {
+        e.preventDefault();
+        setRevealCorners(null);
+        return;
+      }
+    }
+
+    if (viewport.scale > 1 && arrow) {
       e.preventDefault();
       const step = MAP_VIEWPORT_PAN_STEP_PX;
       const dx = e.key === 'ArrowLeft' ? step : e.key === 'ArrowRight' ? -step : 0;
@@ -2492,8 +2570,31 @@ function BattleMap({
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
   }
 
-  function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
+  /** Keyboard nudge step in layer pixels: one calibrated cell, or 1% of map width if the grid is off. */
+  function keyboardStepPx(): { x: number; y: number } {
+    if (calibrationPx) return { x: calibrationPx.cellWpx, y: calibrationPx.cellHpx };
+    if (!mapRect) return { x: 0, y: 0 };
+    return { x: mapRect.width * 0.01, y: mapRect.width * 0.01 };
+  }
+
+  /** Nudge a map-percent point by one grid cell (Shift = five) and snap to the nearest cell centre. */
+  function nudgeMapPoint(pt: MapPoint, e: ReactKeyboardEvent): MapPoint {
+    const step = keyboardStepPx();
+    const mult = e.shiftKey ? 5 : 1;
+    const px = mapPercentToLayerPx(pt, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const nextPx = {
+      x: px.x + (e.key === 'ArrowRight' ? step.x * mult : e.key === 'ArrowLeft' ? -step.x * mult : 0),
+      y: px.y + (e.key === 'ArrowDown' ? step.y * mult : e.key === 'ArrowUp' ? -step.y * mult : 0),
+    };
+    const raw = layerPxToMapPercent(nextPx, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    if (!mapRect) return raw;
+    return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
+  }
+
+  function onTokenPointerDown(e: ReactPointerEvent<HTMLSpanElement>, c: Combatant) {
     if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
+    e.currentTarget.focus();
+    setSelectedTokenId(c.id);
     e.preventDefault();
     e.stopPropagation();
     // Token handles live on the map layer; clamp so a press on the token edge still binds.
@@ -2563,8 +2664,9 @@ function BattleMap({
       activeGestureRef.current = { kind: 'fog', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRevealCorners({ start: pct, end: pct });
     } else if (tool === 'move') {
-      // Click on empty map in move mode clears any AoE selection (deselect).
+      // Click on empty map in move mode clears any AoE or token selection (deselect).
       setSelectedAoeId(null);
+      setSelectedTokenId(null);
     }
   }
 
@@ -2750,6 +2852,8 @@ function BattleMap({
 
   function onAoeHandlePointerDown(e: ReactPointerEvent<HTMLDivElement>, t: AoeTemplate) {
     if (!e.isPrimary || activeGestureRef.current || !canDmWrite) return;
+    e.currentTarget.focus();
+    setSelectedAoeId(t.id);
     e.preventDefault();
     e.stopPropagation();
     const pct = pointerToPercent(e, true);
@@ -2758,8 +2862,44 @@ function BattleMap({
     captureTarget.setPointerCapture?.(e.pointerId);
     successfulPointerUpRef.current = null;
     activeGestureRef.current = { kind: 'aoe', pointerId: e.pointerId, captureTarget, templateId: t.id, point };
-    setSelectedAoeId(t.id);
     setAoeDrag({ id: t.id, ...point });
+  }
+
+  function onTokenKeyDown(e: ReactKeyboardEvent<HTMLSpanElement>, c: Combatant) {
+    e.stopPropagation();
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = nudgeMapPoint({ x: c.tokenX ?? 0, y: c.tokenY ?? 0 }, e);
+      onMoveToken(c.id, next.x, next.y);
+      announce(`${c.name} moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
+      return;
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedTokenId(null);
+      onUnplaceToken(c.id);
+      announce(`${c.name} removed from map`);
+    }
+  }
+
+  function onAoeHandleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, t: AoeTemplate) {
+    e.stopPropagation();
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = nudgeMapPoint({ x: t.x, y: t.y }, e);
+      onSetAoe(aoeTemplates.map((item) => (item.id === t.id ? { ...item, x: next.x, y: next.y } : item)));
+      announce(`${t.shape} template moved to ${Math.round(next.x)} percent across, ${Math.round(next.y)} percent down`);
+      return;
+    }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation();
+      removeAoe(t.id);
+      announce(`${t.shape} template removed`);
+    }
   }
 
   // AoE template CRUD (issue #238) — all DM-only PATCHes of the whole template list.
@@ -2788,6 +2928,15 @@ function BattleMap({
 
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
+  const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
+
+  useEffect(() => {
+    setTokenEdit(
+      selectedToken
+        ? { x: String(selectedToken.tokenX ?? 0), y: String(selectedToken.tokenY ?? 0) }
+        : null,
+    );
+  }, [selectedToken]);
 
   // Hex overlay polygons (issue #238). Tiled in map-layer space so letterboxing never
   // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
@@ -2806,6 +2955,8 @@ function BattleMap({
     setRuler(null);
     setRevealCorners(null);
     setCalibrateDrag(null);
+    setSelectedAoeId(null);
+    setSelectedTokenId(null);
   }
 
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
@@ -2929,10 +3080,106 @@ function BattleMap({
             )}
           </div>
 
+          {/* Selected token editor — numeric position/size controls for switch and voice users (issue #419). */}
+          {selectedToken && tool === 'move' && (
+            <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }} data-testid="selected-token-panel">
+              <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedToken.name}</span>
+              <label className="flex items-center gap-1 text-muted">
+                x%
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  value={tokenEdit?.x ?? (selectedToken.tokenX ?? 0)}
+                  onChange={(e) =>
+                    setTokenEdit((prev) =>
+                      prev ? { ...prev, x: e.target.value } : { x: e.target.value, y: String(selectedToken.tokenY ?? 0) },
+                    )
+                  }
+                  onBlur={(e) => {
+                    const x = clampPercent(Number(e.target.value) || 0);
+                    onMoveToken(selectedToken.id, x, selectedToken.tokenY ?? 0);
+                    setTokenEdit({ x: String(x), y: String(selectedToken.tokenY ?? 0) });
+                  }}
+                  style={{ width: 56 }}
+                />
+              </label>
+              <label className="flex items-center gap-1 text-muted">
+                y%
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  value={tokenEdit?.y ?? (selectedToken.tokenY ?? 0)}
+                  onChange={(e) =>
+                    setTokenEdit((prev) =>
+                      prev ? { ...prev, y: e.target.value } : { y: e.target.value, x: String(selectedToken.tokenX ?? 0) },
+                    )
+                  }
+                  onBlur={(e) => {
+                    const y = clampPercent(Number(e.target.value) || 0);
+                    onMoveToken(selectedToken.id, selectedToken.tokenX ?? 0, y);
+                    setTokenEdit({ x: String(selectedToken.tokenX ?? 0), y: String(y) });
+                  }}
+                  style={{ width: 56 }}
+                />
+              </label>
+              {onSetTokenSize && (
+                <select
+                  aria-label={`Token size for ${selectedToken.name}`}
+                  value={selectedToken.tokenSize}
+                  onChange={(e) => onSetTokenSize(selectedToken.id, e.target.value as TokenSize)}
+                  style={{ height: 24, borderRadius: 'var(--radius-md)', border: '1px solid var(--color-divider)', background: 'transparent', color: 'var(--color-text)', fontSize: 12, padding: '0 6px' }}
+                >
+                  {TOKEN_SIZE_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                className="cf-map-tool"
+                style={{ color: 'var(--color-danger, #ef4444)' }}
+                onClick={() => {
+                  setSelectedTokenId(null);
+                  onUnplaceToken(selectedToken.id);
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          )}
+
           {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
           {canDmWrite && selectedAoe && canAoe && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
+              <label className="flex items-center gap-1 text-muted">
+                x%
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  value={selectedAoe.x}
+                  onChange={(e) => updateAoe(selectedAoe.id, { x: clampPercent(Number(e.target.value) || 0) })}
+                  style={{ width: 56 }}
+                />
+              </label>
+              <label className="flex items-center gap-1 text-muted">
+                y%
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.5}
+                  value={selectedAoe.y}
+                  onChange={(e) => updateAoe(selectedAoe.id, { y: clampPercent(Number(e.target.value) || 0) })}
+                  style={{ width: 56 }}
+                />
+              </label>
               <label className="flex items-center gap-1 text-muted">
                 {selectedAoe.shape === 'circle' ? 'radius' : 'length'}
                 <input
@@ -3251,6 +3498,7 @@ function BattleMap({
                 ? 'Ping the map center for everyone. Viewport: +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
                 : 'Battle map viewport. +/− to zoom, 0 to reset, arrow keys to pan when zoomed.'
             }
+            aria-describedby="map-keyboard-help"
             style={{
               margin: '8px 14px',
               aspectRatio: '16 / 9',
@@ -3411,25 +3659,28 @@ function BattleMap({
                   const movable = tool === 'move' && canMoveToken(c);
                   const isCharacter = c.kind === 'character';
                   const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
                       key={c.id}
-                      data-testid={`map-token-${c.id}`}
                       className="absolute -translate-x-1/2 -translate-y-1/2"
                       style={{
                         left: `${left}%`,
                         top: `${top}%`,
-                        // In measure/reveal mode tokens must not eat the surface drag.
-                        pointerEvents: tool === 'move' ? 'auto' : 'none',
-                        touchAction: 'none',
-                        cursor: movable ? 'grab' : 'default',
                         opacity: isDragging ? 0.85 : 1,
                         zIndex: isDragging ? 10 : 2,
                       }}
-                      onPointerDown={(e) => onTokenPointerDown(e, c)}
-                      title={`${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}`}
+                      role="group"
+                      aria-label={tokenLabel}
                     >
                       <span
+                        data-testid={`map-token-${c.id}`}
+                        role="button"
+                        tabIndex={movable ? 0 : -1}
+                        aria-label={tokenLabel}
+                        aria-describedby="map-keyboard-help"
+                        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"
+                        className="cf-map-focusable"
                         style={{
                           display: 'grid',
                           placeItems: 'center',
@@ -3442,6 +3693,16 @@ function BattleMap({
                           background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
                           border: '2px solid rgba(15,23,42,.85)',
                           boxShadow: '0 1px 3px rgba(0,0,0,.5)',
+                          // In measure/reveal mode tokens must not eat the surface drag.
+                          pointerEvents: movable ? 'auto' : 'none',
+                          touchAction: 'none',
+                          cursor: movable ? 'grab' : 'default',
+                        }}
+                        onPointerDown={(e) => onTokenPointerDown(e, c)}
+                        onKeyDown={(e) => onTokenKeyDown(e, c)}
+                        onFocus={(e) => {
+                          setSelectedTokenId(c.id);
+                          e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
                         }}
                       >
                         {tokenInitials(c.name)}
@@ -3455,12 +3716,15 @@ function BattleMap({
                           type="button"
                           aria-label={`Remove ${c.name} from the map`}
                           title="Remove from map"
+                          tabIndex={0}
                           disabled={busy}
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
                             e.stopPropagation();
+                            setSelectedTokenId(null);
                             onUnplaceToken(c.id);
                           }}
+                          onFocus={() => setSelectedTokenId(c.id)}
                           style={{
                             position: 'absolute',
                             top: -6,
@@ -3519,11 +3783,17 @@ function BattleMap({
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;
                     const y = drag ? drag.y : t.y;
+                    const aoeLabel = `${t.shape} template · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''}`;
                     return (
                       <div
                         key={t.id}
                         data-testid={`map-aoe-${t.id}`}
-                        className="absolute -translate-x-1/2 -translate-y-1/2"
+                        role="button"
+                        tabIndex={tool === 'move' ? 0 : -1}
+                        aria-label={aoeLabel}
+                        aria-describedby="map-keyboard-help"
+                        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"
+                        className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                         style={{
                           left: `${x}%`,
                           top: `${y}%`,
@@ -3539,7 +3809,9 @@ function BattleMap({
                           zIndex: 7,
                         }}
                         onPointerDown={(e) => onAoeHandlePointerDown(e, t)}
-                        title={`${t.shape} · ${t.sizeFt} ${gridUnit}${t.shape !== 'circle' ? ` · ${t.angleDeg}°` : ''} — drag to move, click to edit`}
+                        onKeyDown={(e) => onAoeHandleKeyDown(e, t)}
+                        onFocus={() => setSelectedAoeId(t.id)}
+                        title={`${aoeLabel} — drag to move, click to edit`}
                       />
                     );
                   })}
@@ -3685,21 +3957,25 @@ function BattleMap({
             </div>
           )}
 
+          <div id="map-keyboard-help" className="sr-only">
+            Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
+          </div>
           <div
             className="text-muted"
             style={{ padding: '8px 14px', borderTop: '1px solid var(--color-divider)', fontSize: 11 }}
+            aria-hidden="true"
           >
             {tool === 'measure'
-              ? 'Click-drag on the map to measure distance.'
+              ? 'Click-drag or press Enter to start measuring at the map center, then arrow keys to aim and Enter to finish. Escape cancels.'
               : tool === 'reveal'
-                ? 'Click-drag to reveal a region of the map to players.'
+                ? 'Click-drag or press Enter to start a reveal rectangle at the map center, then arrow keys to resize and Enter to reveal. Escape cancels.'
                 : tool === 'ping'
-                  ? 'Tap a spot on the map to ping it for everyone. Keyboard: focus the map and press Enter or Space to ping the center.'
+                  ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
                     : isDm
-                      ? 'Drag a token to move it. Drag an AoE handle to move a template, click it to edit. Use the viewport toolbar to zoom and pan.'
-                      : 'Drag your own token to move it. Use the viewport toolbar to zoom and pan.'}
+                      ? 'Drag a token to move it, or Tab to focus it and use arrow keys. Drag an AoE handle to move a template, or Tab to focus it. Use the viewport toolbar to zoom and pan.'
+                      : 'Drag your own token to move it, or Tab to focus it and use arrow keys. Use the viewport toolbar to zoom and pan.'}
           </div>
         </>
       )}
