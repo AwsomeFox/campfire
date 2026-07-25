@@ -106,6 +106,7 @@ import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
+import { CharacterCompletionBanner } from './CharacterCompletionBanner';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import {
   XP_AWARD_HELP,
@@ -140,6 +141,7 @@ export default function CharacterPage() {
   // to the roster once that snackbar expires (or is dismissed).
   const [trashing, setTrashing] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
+  const [markingActive, setMarkingActive] = useState(false);
   // Shared dice-log roller for click-to-roll saves/skills/attacks (issue #258).
   const roller = useRoller(cid, setActionError);
   const { liveEncounter } = useLiveEncounterState(Number.isFinite(cid) ? cid : undefined);
@@ -270,6 +272,19 @@ export default function CharacterPage() {
     await load();
   }
 
+  async function markActive() {
+    setMarkingActive(true);
+    setActionError(null);
+    try {
+      await api.patch(`${API}/characters/${id}`, { status: 'active' });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't mark this character active.");
+    } finally {
+      setMarkingActive(false);
+    }
+  }
+
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
       <DetailPageWayfinding
@@ -308,6 +323,14 @@ export default function CharacterPage() {
           )}
         </div>
       </div>
+
+      <CharacterCompletionBanner
+        character={character}
+        adapter={adapter}
+        canEdit={canEdit}
+        onMarkActive={() => void markActive()}
+        markingActive={markingActive}
+      />
 
       {editingSheet && (
         <Card className="space-y-3">
@@ -356,12 +379,13 @@ export default function CharacterPage() {
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
               {ABILITY_KEYS.map((k) => {
                 const score = abilityScore(character, k);
+                const mod = score === null ? null : adapter.abilityModifier(score);
                 return (
                   <div key={k} className="cf-inset text-center py-2.5 px-1.5">
                     <p className="text-[length:var(--type-label)] tracking-wide text-slate-500">{k}</p>
-                    <p className="text-xl font-heading my-0.5">{score}</p>
+                    <p className="text-xl font-heading my-0.5">{score ?? '—'}</p>
                     <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
-                      {signed(adapter.abilityModifier(score))}
+                      {mod === null ? '—' : signed(mod)}
                     </p>
                   </div>
                 );
@@ -388,12 +412,20 @@ export default function CharacterPage() {
             </div>
             <div className="flex items-center gap-3.5 flex-wrap">
               <span className="font-heading text-[34px] leading-none">
-                {character.hpCurrent}
-                <span className="text-base text-slate-500"> / {character.hpMax} HP</span>
+                {character.hpMax > 0 ? (
+                  <>
+                    {character.hpCurrent}
+                    <span className="text-base text-slate-500"> / {character.hpMax} HP</span>
+                  </>
+                ) : (
+                  <span className="text-base text-slate-500">HP not set</span>
+                )}
               </span>
-              <div className="flex-1 min-w-[120px]">
-                <HpBar current={character.hpCurrent} max={character.hpMax} />
-              </div>
+              {character.hpMax > 0 && (
+                <div className="flex-1 min-w-[120px]">
+                  <HpBar current={character.hpCurrent} max={character.hpMax} />
+                </div>
+              )}
             </div>
             {(character.spMax > 0 || character.rpMax > 0) && (
               <div className="space-y-2 pt-2 border-t border-slate-800">
@@ -1219,7 +1251,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
       <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
         {ABILITY_KEYS.map((k) => {
           const proficient = profs.has(k);
-          const mod = modOf(adapter, character, k) + (proficient ? pb : 0);
+          const mod = (modOf(adapter, character, k) ?? 0) + (proficient ? pb : 0);
           return (
             <div key={k} className="cf-inset text-center py-2 px-1.5 relative">
               <button
@@ -1311,7 +1343,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
       <div className="grid gap-x-4 gap-y-0.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))' }}>
         {SKILLS.map(({ name, ability }) => {
           const rank = character.skills[name];
-          const mod = modOf(adapter, character, ability) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
+          const mod = (modOf(adapter, character, ability) ?? 0) + (rank === 'expertise' ? pb * 2 : rank === 'proficient' ? pb : 0);
           const marker = rank === 'expertise' ? '★' : rank === 'proficient' ? '●' : '○';
           return (
             <div key={name} className="flex items-center gap-1.5 text-[13px] py-0.5">

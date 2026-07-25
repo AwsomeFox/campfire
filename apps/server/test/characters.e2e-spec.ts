@@ -562,6 +562,42 @@ describe('characters (e2e)', () => {
       expect(charBack.status).toBe(200);
     });
   });
+
+  describe('draft character creation (issue #719)', () => {
+    it('minimal name-only create becomes a draft with unset combat numbers', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({ name: 'Sketch PC' });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('draft');
+      expect(res.body.hpMax).toBe(0);
+      expect(res.body.hpCurrent).toBe(0);
+      expect(res.body.ac).toBeNull();
+      expect(res.body.stats).toEqual({});
+    });
+
+    it('explicit template payload stays draft until marked active', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(owner)
+        .send({
+          name: 'Template Hero',
+          status: 'draft',
+          className: 'Fighter',
+          level: 1,
+          stats: { STR: 16, DEX: 14, CON: 14, INT: 10, WIS: 12, CHA: 8 },
+          ac: 18,
+          hpMax: 12,
+          hpCurrent: 12,
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('draft');
+      expect(res.body.ac).toBe(18);
+    });
+  });
 });
 
 describe('dmControlsProgression flag gates XP/level-up (issue #270)', () => {

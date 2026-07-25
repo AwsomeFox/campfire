@@ -13,6 +13,7 @@ import {
   normalizeStats,
   ruleSystemAdapter,
   ddbImportSupported,
+  resolveCharacterCreateStatus,
   // Issue #415: adapter-owned roll catalog — the single authoritative source for check math.
   checkCatalogForAdapter,
   findCheckInCatalog,
@@ -629,10 +630,16 @@ export class CharactersService {
     // player creates own -> ownerUserId=user.id; dm may set ownerUserId explicitly
     const ownerUserId = role === 'dm' ? (input.ownerUserId ?? null) : user.id;
 
+    const adapter = await this.adapterForCampaign(campaignId);
+    const status = resolveCharacterCreateStatus(input, adapter);
+    const isDraft = status === 'draft';
+
     // Clamp hpCurrent/ac at create time too — mirrors update/patchHp/combatant HP so an
     // out-of-range create (hpCurrent:99999, ac:-50) can't persist verbatim (issue #112).
-    const hpMax = input.hpMax ?? 10;
-    const hpCurrent = clampHpCurrent(input.hpCurrent ?? 10, hpMax);
+    // Draft sheets start at 0 HP until the player fills them in (issue #719); non-drafts
+    // without explicit HP keep the legacy 10/10 default for API back-compat.
+    const hpMax = input.hpMax ?? (isDraft ? 0 : 10);
+    const hpCurrent = clampHpCurrent(input.hpCurrent ?? (isDraft ? 0 : hpMax), Math.max(0, hpMax));
 
     const [row] = await this.db
       .insert(characters)
@@ -645,7 +652,7 @@ export class CharactersService {
         level: input.level ?? 1,
         xp: input.xp ?? 0,
         background: input.background ?? '',
-        status: input.status ?? 'active',
+        status,
         stats: toJsonText(normalizeStats(input.stats ?? {})),
         ac: clampAc(input.ac ?? null),
         eac: clampAc(input.eac ?? null),

@@ -42,7 +42,7 @@ export const CHARACTER_AC_LABEL = 'Armor class';
 export const CHARACTER_HP_MAX_LABEL = 'Max HP';
 export const CHARACTER_STATUS_LABEL = 'Status';
 export const CHARACTER_STATUS_HELP =
-  'Only active characters are auto-added to new encounters. Dead, retired, or inactive PCs stay on the roster.';
+  'Only active characters are auto-added to new encounters. Draft, dead, retired, or inactive PCs stay on the roster until you mark them Active.';
 export const CHARACTER_HP_MAX_HELP = 'Current HP is clamped to the new max automatically.';
 export const CHARACTER_STORY_LABEL = 'Story notes';
 export const CHARACTER_STORY_HELP = 'Optional markdown backstory and roleplay notes for this character.';
