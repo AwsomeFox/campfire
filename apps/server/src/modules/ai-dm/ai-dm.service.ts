@@ -158,9 +158,13 @@ export class AiDmService {
   }
 
   /** 403 unless the server-wide experimental flag is on. The single choke point for the whole feature. */
-  private async assertExperimentalEnabled(): Promise<void> {
+  async isExperimentalEnabled(): Promise<boolean> {
     const all = await this.settings.getAll();
-    if (!all.experimentalAiDm) {
+    return !!all.experimentalAiDm;
+  }
+
+  private async assertExperimentalEnabled(): Promise<void> {
+    if (!(await this.isExperimentalEnabled())) {
       throw new ForbiddenException(
         'Server-side AI Dungeon Master is experimental and disabled. A server admin must enable it via PATCH /settings {experimentalAiDm:true}.',
       );

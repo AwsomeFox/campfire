@@ -16,6 +16,7 @@ import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
 import { SettingsService } from '../settings/settings.service';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
+import { AiDriverService } from '../ai-driver/ai-driver.service';
 
 type AiCapsUpdateInput = z.infer<typeof AiCapsUpdate>;
 
@@ -75,6 +76,7 @@ export class AiConsoleService {
     private readonly settings: SettingsService,
     private readonly providers: AiProviderConfigService,
     private readonly audit: AuditService,
+    private readonly driver: AiDriverService,
   ) {}
 
   // ── usage rollup (aggregated from the per-seat metering) ─────────────────────
@@ -165,11 +167,14 @@ export class AiConsoleService {
   /**
    * The global opt-in / kill switch. `false` pauses ALL AI immediately: it flips
    * ServerSettings.experimentalAiDm, which AiDmService gates every configure/turn on
-   * (assertExperimentalEnabled → 403), so in-flight-after-check turns are the only
-   * ones that complete and no NEW turn can start. Audited server-wide.
+   * (assertExperimentalEnabled → 403), and aborts every in-flight driver generation
+   * (#558) so provider streams and pending tool calls stop without waiting for completion.
    */
   async setKillSwitch(enabled: boolean, user: RequestUser): Promise<AiConsoleOverview> {
     await this.settings.update({ experimentalAiDm: enabled });
+    if (!enabled) {
+      this.driver.cancelAllGenerations();
+    }
     await this.audit.log({
       actor: auditActor(user),
       actorRole: 'dm',

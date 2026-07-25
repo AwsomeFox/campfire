@@ -39,6 +39,14 @@ export type AiDmStreamEvent =
       at: string;
     }
   | {
+      /** Terminal stop signal emitted before `turn.end` when a stop control aborts mid-generation (#558). */
+      type: 'turn.cancelled';
+      campaignId: number;
+      narration: string;
+      stopReason: string;
+      at: string;
+    }
+  | {
       type: 'turn.end';
       campaignId: number;
       stopReason: string;
