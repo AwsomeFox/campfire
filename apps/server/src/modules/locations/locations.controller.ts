@@ -10,6 +10,7 @@ import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { LocationsService } from './locations.service';
 import { LocationCreateDto, LocationUpdateDto, LocationDiscoverDto } from './locations.dto';
+import { EncountersService } from '../encounters/encounters.service';
 
 @ApiTags('locations')
 @Controller('campaigns/:campaignId/locations')
@@ -61,6 +62,7 @@ export class LocationsController {
     private readonly locations: LocationsService,
     private readonly access: CampaignAccessService,
     private readonly proposals: ProposalRecordsService,
+    private readonly encounters: EncountersService,
   ) {}
 
   @Get(':id')
@@ -69,7 +71,9 @@ export class LocationsController {
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.locations.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
-    return this.locations.getOrThrow(id, role);
+    const location = await this.locations.getOrThrow(id, role);
+    const linkedEncounters = await this.encounters.listBacklinks(row.campaignId, { locationId: id }, role);
+    return { ...location, linkedEncounters };
   }
 
   @Patch(':id')

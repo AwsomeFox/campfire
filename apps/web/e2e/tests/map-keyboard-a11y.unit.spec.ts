@@ -56,7 +56,10 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
 
   test('visible focus ring class is defined and applied to map controls', () => {
     expect(css).toMatch(/\.cf-map-focusable:focus-visible/);
+    expect(css).toMatch(/\.cf-map-tool:focus-visible/);
     expect(src).toMatch(/cf-map-focusable/);
+    expect(src).toMatch(/data-testid="map-toolbar"[\s\S]*role="toolbar"/);
+    expect(src).toMatch(/aria-label="Map tools"/);
   });
 
   test('reduced-motion-aware scrolling is wired for focused tokens', () => {
