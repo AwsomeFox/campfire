@@ -2554,6 +2554,30 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
   return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
 }
 
+// ---------- adapter-defined grid distance rules (issue #467) ----------
+// Square grids default to Euclidean straight-line ruler distance; hex grids use
+// cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
+
+/** Square-grid distance mode for the measurement ruler. */
+export type SquareDistanceMode = 'euclidean' | 'alternating-diagonal';
+
+/** Hex-grid distance mode — cube/axial steps between hex centres. */
+export type HexDistanceMode = 'hex';
+
+/** Per-system ruler distance configuration (issue #467). */
+export interface GridDistanceRule {
+  readonly square: SquareDistanceMode;
+  readonly hex: HexDistanceMode;
+}
+
+/** Default ruler distance: Euclidean squares, hex steps on hex grids. */
+export const DEFAULT_GRID_DISTANCE_RULE: GridDistanceRule = { square: 'euclidean', hex: 'hex' };
+
+/** Resolve the grid distance rule for an adapter (issue #467). */
+export function gridDistanceForAdapter(adapter: Pick<RuleSystemAdapter, 'gridDistanceRule'>): GridDistanceRule {
+  return adapter.gridDistanceRule ?? DEFAULT_GRID_DISTANCE_RULE;
+}
+
 export interface RuleSystemAdapter {
   /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
@@ -2576,6 +2600,12 @@ export interface RuleSystemAdapter {
    * Encounter rollers and the UI read this via {@link initiativeModelForAdapter}.
    */
   readonly initiativeModel?: InitiativeModel;
+  /**
+   * OPTIONAL — how the VTT measurement ruler counts grid cells (issue #467). Square grids
+   * default to Euclidean straight-line distance; hex grids use cube/axial hex steps. 5e may
+   * opt into alternating-diagonal counting on square grids. Read via {@link gridDistanceForAdapter}.
+   */
+  readonly gridDistanceRule?: GridDistanceRule;
   /**
    * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
    * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
@@ -2828,6 +2858,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   conditions: CONDITIONS,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
+  // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
+  gridDistanceRule: { square: 'euclidean', hex: 'hex' },
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
@@ -5718,12 +5750,15 @@ export const FogState = z.object({
 export type FogState = z.infer<typeof FogState>;
 
 /**
- * Battle-map grid geometry (issue #40 / #238). 'square' is the classic Battlemat grid; 'hex'
- * renders a pointy-top hexagonal overlay for hex-crawl / wilderness maps. Purely a display
- * choice for the overlay — the measurement ruler still reads cell size off gridSize/gridScale.
+ * Battle-map grid geometry (issue #40 / #238 / #467). 'square' is the classic Battlemat grid;
+ * 'hex' uses hex-center snapping, hex-aware distance, footprints, and AoE geometry.
  */
 export const GridType = z.enum(['square', 'hex']);
 export type GridType = z.infer<typeof GridType>;
+
+/** Pointy-top vs flat-top hex orientation (issue #467). Default pointy matches legacy overlay. */
+export const HexOrientation = z.enum(['pointy', 'flat']);
+export type HexOrientation = z.infer<typeof HexOrientation>;
 
 /**
  * Area-of-effect template shape (issue #238). 'circle' is a radius burst; 'cone' is a 5e
@@ -5814,9 +5849,11 @@ export const Encounter = z.object({
   gridScale: z.number().positive().nullable().default(null),
   gridUnit: z.string().max(12).nullable().default(null),
   gridSnap: z.boolean().default(false),
-  // Grid geometry (issue #238). 'square' (default) or 'hex' — a pointy-top hex overlay. Older
-  // DBs backfill to 'square' via migration, preserving the original square-only behaviour.
+  // Grid geometry (issue #238 / #467). 'square' (default) or 'hex' with hex-center snapping.
+  // Older DBs backfill to 'square' via migration, preserving the original square-only behaviour.
   gridType: GridType.default('square'),
+  // Hex orientation (issue #467): pointy-top (default, matches legacy overlay) or flat-top.
+  hexOrientation: HexOrientation.default('pointy'),
   // Grid CALIBRATION for aligning the overlay to a map's own printed grid (issue #417).
   // Every field is expressed in the same isotropic unit — percent of the rendered map's
   // WIDTH — so the overlay, snapping, and the ruler share ONE transform (see the web
@@ -5879,8 +5916,10 @@ export const EncounterUpdate = z.object({
   gridScale: z.number().positive().nullable().optional(),
   gridUnit: z.string().max(12).nullable().optional(),
   gridSnap: z.boolean().optional(),
-  // Grid geometry (issue #238) — dm only. 'square' | 'hex'.
+  // Grid geometry (issue #238 / #467) — dm only. 'square' | 'hex'.
   gridType: GridType.optional(),
+  // Hex orientation (issue #467) — dm only. 'pointy' | 'flat'.
+  hexOrientation: HexOrientation.optional(),
   // Grid calibration (issue #417) — dm only. Align the overlay to a map's printed grid:
   // origin offset, independent cell height, rotation, and overlay opacity. Each field is
   // independently settable; gridCellHeight: null restores square cells. Omitting a field
