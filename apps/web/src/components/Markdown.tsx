@@ -166,6 +166,7 @@ export function Markdown({ children, className = '' }: { children: string; class
   return (
     <div
       ref={ref}
+      dir="auto"
       onClick={onClick}
       className={`cf-prose reading-text text-slate-300 space-y-2 ${className}`}
       dangerouslySetInnerHTML={{ __html: html }}

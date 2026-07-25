@@ -93,7 +93,7 @@ describe('retreatTurn (undo advance, issue #413)', () => {
   });
 
   it('empty roster clears the pointer', () => {
-    expect(retreatTurn([], 1, 3)).toEqual({ turnIndex: 0, round: 3, currentCombatantId: null });
+    expect(retreatTurn([], 1, 3)).toEqual({ turnIndex: 0, round: 3, currentCombatantId: null, skipped: [] });
   });
 });
 

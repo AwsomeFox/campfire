@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type { Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
@@ -314,11 +315,11 @@ export default function NpcPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
-      <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/npcs`)}>
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/npcs`}
+        defaultLabel="← Back to NPCs"
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

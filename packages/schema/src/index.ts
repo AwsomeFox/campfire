@@ -81,6 +81,15 @@ export const PageParams = z.object({
 });
 export type PageParams = z.infer<typeof PageParams>;
 
+/** Default page size for session log lists (issue #612). */
+export const SESSIONS_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on session lists — clients page with offset, not a huge page. */
+export const SESSIONS_LIST_MAX_LIMIT = 200;
+/** Default page size for past scheduled-session history (issue #612). */
+export const SCHEDULE_PAST_DEFAULT_LIMIT = 20;
+/** Hard cap for `?limit=` on past schedule lists. */
+export const SCHEDULE_PAST_MAX_LIMIT = 100;
+
 // ---------- optimistic concurrency (issue #157) ----------
 // The `updatedAt` timestamp a client last read for an entity, echoed back on a
 // PATCH/update as a compare-and-swap guard. When provided and it no longer matches
@@ -896,6 +905,22 @@ export const SessionListItem = Session.omit({ recap: true }).extend({
 });
 export type SessionListItem = z.infer<typeof SessionListItem>;
 
+/**
+ * Paginated session-log list response (issue #612).
+ *
+ * Returned when the sessions list endpoint is called with `?limit` and/or `?offset`.
+ * Newest-first (`number` desc). Always includes `total` + `hasMore` so the UI never
+ * silently truncates a long campaign history.
+ */
+export const SessionListPage = z.object({
+  items: z.array(SessionListItem),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type SessionListPage = z.infer<typeof SessionListPage>;
+
 // The canonical recap scaffold — the structured headings a DM fills instead of
 // staring at a blank box. Shared by the web "Insert template" affordance and the
 // MCP `draft_session_recap` tool so a hand-written recap and an AI-drafted one
@@ -1046,6 +1071,18 @@ export type RsvpSet = z.infer<typeof RsvpSet>;
 
 export const ScheduledSessionWithRsvps = ScheduledSession.extend({ rsvps: z.array(SessionRsvp) });
 export type ScheduledSessionWithRsvps = z.infer<typeof ScheduledSessionWithRsvps>;
+
+/**
+ * Paginated past-schedule list (issue #612). Most-recent ended nights first.
+ */
+export const ScheduledSessionListPage = z.object({
+  items: z.array(ScheduledSessionWithRsvps),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  limit: z.number().int().positive(),
+  offset: z.number().int().nonnegative(),
+});
+export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
 
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
@@ -1452,6 +1489,55 @@ export const CommentUpdate = z.object({
   // the service because persona attribution is immutable historical provenance.
   inCharacter: z.boolean().optional(),
 });
+
+/** Default page size for discussion root-thread lists (issue #609). */
+export const COMMENTS_THREAD_DEFAULT_LIMIT = 20;
+/** Hard cap for `?limit=` on root-thread pages. */
+export const COMMENTS_THREAD_MAX_LIMIT = 100;
+/** How many replies to inline-preview per root on the first page (issue #609). */
+export const COMMENTS_REPLY_PREVIEW_LIMIT = 3;
+/** Hard cap for `?limit=` when loading additional replies for one root. */
+export const COMMENTS_REPLY_MAX_LIMIT = 50;
+
+/**
+ * One discussion root with a bounded reply preview (issue #609). Pagination is by
+ * root thread — flat row paging cannot split a root from its replies. When
+ * `replyHasMore` is true, continue with `replyNextCursor` on the replies endpoint.
+ */
+export const CommentThread = z.object({
+  root: Comment,
+  replies: z.array(Comment),
+  replyCount: z.number().int().nonnegative(),
+  replyHasMore: z.boolean(),
+  replyNextCursor: z.string().max(512).nullable(),
+});
+export type CommentThread = z.infer<typeof CommentThread>;
+
+/**
+ * Paginated discussion list for one anchored entity (issue #609). `total` is the
+ * root-thread count; `totalComments` includes every reply. Order is oldest-first
+ * (root id asc) so the thread reads naturally top-to-bottom.
+ */
+export const CommentThreadPage = z.object({
+  items: z.array(CommentThread),
+  total: z.number().int().nonnegative(),
+  totalComments: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type CommentThreadPage = z.infer<typeof CommentThreadPage>;
+
+/** Additional replies for one root thread (issue #609). */
+export const CommentReplyPage = z.object({
+  rootId: Id,
+  items: z.array(Comment),
+  replyCount: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
 
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares

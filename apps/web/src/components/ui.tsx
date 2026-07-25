@@ -51,14 +51,14 @@ export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
 );
 
 export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
-  function TextInput({ className = '', ...props }, ref) {
-    return <input ref={ref} className={`cf-input ${className}`} {...props} />;
+  function TextInput({ className = '', dir = 'auto', ...props }, ref) {
+    return <input ref={ref} dir={dir} className={`cf-input ${className}`} {...props} />;
   },
 );
 
 export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  function TextArea({ className = '', ...props }, ref) {
-    return <textarea ref={ref} className={`cf-textarea ${className}`} {...props} />;
+  function TextArea({ className = '', dir = 'auto', ...props }, ref) {
+    return <textarea ref={ref} dir={dir} className={`cf-textarea ${className}`} {...props} />;
   },
 );
 

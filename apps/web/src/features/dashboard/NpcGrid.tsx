@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Npc } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
@@ -31,7 +32,7 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
         />
       ) : (
         npcs.map((npc) => (
-          <Link
+          <ListDetailLink
             key={npc.id}
             to={`/c/${campaignId}/npcs/${npc.id}`}
             style={{
@@ -54,7 +55,7 @@ export function NpcGrid({ campaignId, npcs }: { campaignId: number; npcs: Npc[] 
               </span>
             </span>
             <NpcDispositionBadge disposition={npc.disposition} className="flex-none" />
-          </Link>
+          </ListDetailLink>
         ))
       )}
     </div>

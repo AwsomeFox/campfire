@@ -3286,6 +3286,7 @@ export class EncountersService {
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
     let endedName: string | null = null;
+    let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
 
     this.db.transaction((tx) => {
@@ -3334,9 +3335,10 @@ export class EncountersService {
         hasLairSlot,
         fresh.lairResumeCombatantId ?? null,
       );
-      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped } = advanced;
+      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped, skipped } = advanced;
       newRound = round;
       newCurrentId = currentCombatantId;
+      skippedTurns = skipped;
 
       // Resolve effects on the ENDING combatant (the one whose turn we're leaving): tick
       // timed effects down, drop the expired. Only meaningful on a genuine combatant advance.
@@ -3393,6 +3395,16 @@ export class EncountersService {
         .run();
     });
 
+    // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
+    for (const skipped of skippedTurns) {
+      await this.appendEvent(encounterId, skipped.round, 'turn', {
+        actor: skipped.name,
+        target: skipped.name,
+        actorId: skipped.id,
+        targetId: skipped.id,
+        detail: 'skipped (down)',
+      });
+    }
     // Combat-log turn marker (issue #61). Names live on actor/target (+ ids); detail stays
     // name-free so #869 redaction cannot be bypassed by prose.
     await this.appendEvent(encounterId, newRound, 'turn', {

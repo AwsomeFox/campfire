@@ -19,7 +19,14 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
+import { useProtectedForm } from '../../lib/useProtectedForm';
+import {
+  isSessionZeroCharterDirty,
+  sessionZeroCharterDraftsEqual,
+  type SessionZeroCharterDraft,
+} from './sessionZeroFormState';
 import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
 import {
@@ -43,19 +50,21 @@ import { PageTitle } from '../../components/PageTitle';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 
-interface Draft {
-  lines: string[];
-  veils: string[];
-  safetyTools: string[];
-  houseRules: string;
-  toneAndExpectations: string;
-}
+type Draft = SessionZeroCharterDraft;
 
 interface SupportDraft {
   supportText: string;
   visibility: SupportPreferenceVisibility;
   aiUseConsent: boolean;
 }
+
+const EMPTY_CHARTER_DRAFT: Draft = {
+  lines: [],
+  veils: [],
+  safetyTools: [],
+  houseRules: '',
+  toneAndExpectations: '',
+};
 
 const EMPTY_SUPPORT_DRAFT: SupportDraft = {
   supportText: '',
@@ -100,6 +109,7 @@ function isEmptyCharter(c: SessionZero): boolean {
 export default function SessionZeroPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
+  const { me } = useAuth();
   const { isDm, canDmWrite } = useCampaignAccess();
 
   const [charter, setCharter] = useState<SessionZero | null>(null);
@@ -122,6 +132,7 @@ export default function SessionZeroPage() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const loadSequence = useRef(0);
+  const clearPersistedDraftRef = useRef<() => void>(() => {});
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -175,8 +186,8 @@ export default function SessionZeroPage() {
     setActionError(null);
   };
 
-  const save = async () => {
-    if (!draft) return;
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!draft) return false;
     setBusy(true);
     setActionError(null);
     try {
@@ -194,6 +205,8 @@ export default function SessionZeroPage() {
       setBaseDraft(null);
       setConflict(null);
       setHistoryNonce((value) => value + 1);
+      clearPersistedDraftRef.current();
+      return true;
     } catch (err) {
       if (isStaleWrite(err)) {
         try {
@@ -209,10 +222,36 @@ export default function SessionZeroPage() {
       } else {
         setActionError("Couldn't save the charter.");
       }
+      return false;
     } finally {
       setBusy(false);
     }
-  };
+  }, [baseDraft, cid, draft, expectedUpdatedAt]);
+
+  const charterBaseline = baseDraft ?? (charter ? draftFrom(charter) : EMPTY_CHARTER_DRAFT);
+  const charterDraft = draft ?? charterBaseline;
+  const charterDirty = editing && draft != null && baseDraft != null && isSessionZeroCharterDirty(draft, baseDraft);
+
+  const protectedCharter = useProtectedForm({
+    formId: 'session-zero-charter',
+    userId: me?.user.id,
+    campaignId: cid,
+    active: editing && draft != null,
+    dirty: charterDirty,
+    draft: charterDraft,
+    baseline: charterBaseline,
+    serverUpdatedAt: expectedUpdatedAt ?? charter?.updatedAt ?? null,
+    isDraftEqual: sessionZeroCharterDraftsEqual,
+    onRestoreDraft: (restored) => setDraft(restored),
+    onDiscard: () => {
+      setEditing(false);
+      setDraft(null);
+      setBaseDraft(null);
+      setConflict(null);
+    },
+    onSave: save,
+  });
+  clearPersistedDraftRef.current = protectedCharter.clearPersistedDraft;
 
   const saveSupport = async () => {
     setSupportBusy(true);
@@ -290,6 +329,8 @@ export default function SessionZeroPage() {
 
       {actionError && <ErrorNote message={actionError} />}
       {error && <ErrorNote message={error} onRetry={load} />}
+      {protectedCharter.restorePrompt}
+      {protectedCharter.leavePrompt}
 
       {loading && !charter ? (
         <div className="card elev-sm">
@@ -323,9 +364,27 @@ export default function SessionZeroPage() {
               }}
             />
           )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Btn onClick={save} disabled={busy}>{conflict ? 'Save resolution' : 'Save charter'}</Btn>
-            <Btn ghost onClick={() => { setEditing(false); setDraft(null); setConflict(null); }} disabled={busy}>Cancel</Btn>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {protectedCharter.saveStatusLabel ? (
+              <span className="text-xs text-slate-400" role="status" aria-live="polite">
+                {protectedCharter.saveStatusLabel}
+              </span>
+            ) : null}
+            <div style={{ flex: 1 }} />
+            <Btn onClick={() => void save()} disabled={busy}>{conflict ? 'Save resolution' : 'Save charter'}</Btn>
+            <Btn
+              ghost
+              onClick={() => {
+                protectedCharter.clearPersistedDraft();
+                setEditing(false);
+                setDraft(null);
+                setBaseDraft(null);
+                setConflict(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </Btn>
           </div>
         </>
       )}
