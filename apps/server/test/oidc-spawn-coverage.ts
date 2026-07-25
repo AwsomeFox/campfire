@@ -4,20 +4,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CoverageMapData, FileCoverageData } from 'istanbul-lib-coverage';
+import libCoverage from 'istanbul-lib-coverage';
 
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const MERGE_WORKER = path.join(__dirname, 'oidc-v8-merge-worker.cjs');
+/** Post-jest merge target — see test/finalize-oidc-spawn-coverage.cjs (#556). */
+const SPAWN_COVERAGE_SNAPSHOT = path.join(os.tmpdir(), 'campfire-oidc-spawn-cov-snapshot.json');
+
 /** Absolute path to oidc.service.ts — used by coverage-threshold guard (#556). */
 export const OIDC_SERVICE_SOURCE = path.join(SERVER_ROOT, 'src', 'modules', 'auth', 'oidc.service.ts');
 
 /** Temp dir where spawned `node dist/main.js` children write NODE_V8_COVERAGE JSON. */
 let coverageDir: string | undefined;
-/** Child V8 blob basenames already merged into global.__coverage__. */
+/** Child V8 blob basenames already merged into the spawn snapshot. */
 const mergedBlobBasenames = new Set<string>();
 
 function jestCollectingCoverage(): boolean {
-  // Jest workers do not receive `--coverage` in process.argv; npm lifecycle is reliable
-  // for `npm run test:cov` (CI coverage job). Fall back to argv for direct invocations.
   return (
     process.env.npm_lifecycle_event === 'test:cov' ||
     process.argv.some((arg) => arg === '--coverage' || arg.startsWith('--coverage='))
@@ -33,16 +35,12 @@ export function oidcSpawnCoverageEnabled(): boolean {
 export function childV8CoverageEnv(): Record<string, string | undefined> {
   if (!jestCollectingCoverage()) return {};
   if (!coverageDir) {
+    if (fs.existsSync(SPAWN_COVERAGE_SNAPSHOT)) {
+      fs.rmSync(SPAWN_COVERAGE_SNAPSHOT, { force: true });
+    }
     coverageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'campfire-oidc-v8cov-'));
   }
   return { NODE_V8_COVERAGE: coverageDir };
-}
-
-function coverageGlobal(): typeof global {
-  // Match babel-plugin-istanbul's default coverageGlobalScope (`this` via
-  // `new Function('return this')()`), which may differ from the jest vm's
-  // `global` binding in ESM/transformed modules.
-  return Function('return this')() as typeof global;
 }
 
 function isOidcServiceCoverageKey(file: string): boolean {
@@ -65,26 +63,23 @@ function selectOidcServiceCoverage(incoming: CoverageMapData): CoverageMapData {
   return selected;
 }
 
-function applyMergedCoverage(incoming: CoverageMapData): void {
-  const globalObject = coverageGlobal() as typeof global & {
-    __coverage__?: CoverageMapData;
-  };
-  if (!globalObject.__coverage__) {
-    globalObject.__coverage__ = {};
-  }
-  // Replace per-file entries wholesale — merging v8-to-istanbul into babel-istanbul
-  // produces incompatible structures that break source-map replay (column -1).
-  for (const [file, entry] of Object.entries(incoming)) {
-    globalObject.__coverage__[file] = entry;
-  }
-}
-
 function mergeCoverageDirInSubprocess(dir: string): CoverageMapData {
   const stdout = execFileSync(process.execPath, [MERGE_WORKER, dir], {
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   });
   return JSON.parse(stdout.toString() || '{}') as CoverageMapData;
+}
+
+function writeSpawnSnapshot(incoming: CoverageMapData): void {
+  let snapshot = libCoverage.createCoverageMap({});
+  if (fs.existsSync(SPAWN_COVERAGE_SNAPSHOT)) {
+    snapshot = libCoverage.createCoverageMap(
+      JSON.parse(fs.readFileSync(SPAWN_COVERAGE_SNAPSHOT, 'utf8')) as CoverageMapData,
+    );
+  }
+  snapshot.merge(incoming);
+  fs.writeFileSync(SPAWN_COVERAGE_SNAPSHOT, JSON.stringify(snapshot.toJSON()));
 }
 
 function pendingBlobBasenames(): string[] {
@@ -95,9 +90,8 @@ function pendingBlobBasenames(): string[] {
 }
 
 /**
- * Merges any new child V8 blobs via a subprocess (keeps v8-to-istanbul off the
- * Jest worker heap) and applies the result to global.__coverage__ in-place.
- * Call after each spawned child exits so Jest sees the data before finalizing.
+ * Merges new child V8 blobs into the on-disk spawn snapshot. Applied post-jest
+ * (finalize-oidc-spawn-coverage.cjs) so v8 maps do not break report generation.
  */
 export function mergePendingChildV8Coverage(): void {
   if (!coverageDir || !fs.existsSync(coverageDir)) return;
@@ -106,7 +100,7 @@ export function mergePendingChildV8Coverage(): void {
 
   const incoming = selectOidcServiceCoverage(mergeCoverageDirInSubprocess(coverageDir));
   if (Object.keys(incoming).length > 0) {
-    applyMergedCoverage(incoming);
+    writeSpawnSnapshot(incoming);
   }
   for (const name of pending) {
     mergedBlobBasenames.add(name);
@@ -118,7 +112,7 @@ export async function mergeChildV8Coverage(): Promise<void> {
   mergePendingChildV8Coverage();
 }
 
-/** Removes the temp coverage dir — call from suite afterAll. */
+/** Removes the temp V8 blob dir — call from suite afterAll. */
 export function cleanupChildV8CoverageDir(): void {
   if (coverageDir && fs.existsSync(coverageDir)) {
     fs.rmSync(coverageDir, { recursive: true, force: true });

@@ -39,6 +39,12 @@ function scriptPathFromUrl(url) {
   return undefined;
 }
 
+function distToSourcePath(scriptPath) {
+  const rel = path.relative(DIST_ROOT, scriptPath);
+  if (!rel.endsWith('.js')) return undefined;
+  return path.join(SERVER_ROOT, 'src', rel.replace(/\.js$/, '.ts'));
+}
+
 async function mergeDir(dir) {
   const coverageMap = libCoverage.createCoverageMap({});
   if (!dir || !fs.existsSync(dir)) {
@@ -61,9 +67,12 @@ async function mergeDir(dir) {
       if (!isOidcRelatedDistFile(scriptPath)) continue;
       if (!fs.existsSync(scriptPath)) continue;
 
+      const sourcePath = distToSourcePath(scriptPath);
+      if (!sourcePath || !fs.existsSync(sourcePath)) continue;
+
       try {
-        const converter = v8toIstanbul(scriptPath, 0, {
-          source: fs.readFileSync(scriptPath, 'utf8'),
+        const converter = v8toIstanbul(sourcePath, 0, {
+          source: fs.readFileSync(sourcePath, 'utf8'),
         });
         await converter.load();
         converter.applyCoverage(script.functions);
