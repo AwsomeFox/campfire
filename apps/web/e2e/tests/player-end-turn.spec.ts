@@ -57,13 +57,17 @@ test.describe('player end turn (issue #487)', () => {
         })
       ).json();
 
+      // Create auto-adds every active party PC; /start rejects any null initiative.
+      const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
+      expect(rollInitRes.ok(), `roll initiative: ${await rollInitRes.text()}`).toBeTruthy();
       await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${heroCombatant.id}`, {
-        data: { initiative: 25 },
+        data: { initiative: 99 },
       });
       await dm.patch(`/api/v1/encounters/${enc.id}/combatants/${dummy.id}`, {
-        data: { initiative: 5 },
+        data: { initiative: 1 },
       });
-      await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      const startRes = await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       await expect(page.getByText('Running', { exact: true })).toBeVisible();

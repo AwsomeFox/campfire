@@ -10,7 +10,11 @@ interface TestWindow extends Window {
 
 async function watchAnnouncements(page: Page) {
   await page.evaluate(() => {
-    const live = document.querySelector<HTMLElement>('.sr-only[aria-live="polite"]');
+    // Prefer the app-root announcer test id — other polite sr-only regions (dialogs,
+    // pickers) can otherwise steal the first querySelector match.
+    const live =
+      document.querySelector<HTMLElement>('[data-testid="app-announcer-polite"]')
+      ?? document.querySelector<HTMLElement>('.sr-only[aria-live="polite"][aria-atomic="true"]');
     if (!live) throw new Error('Polite app announcer was not found');
     const target = window as TestWindow;
     target.__diceObserver?.disconnect();

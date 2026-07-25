@@ -102,11 +102,11 @@ test.describe('encounter dice — apply rolled damage', () => {
       // Issue #620/#494: the damage may be attributed to the current-turn combatant (rendered
       // as "X to Brixi Applybar: took N damage") when Brixi didn't win initiative, or
       // unattributed ("Brixi Applybar took N damage") when she did. Accept either form.
-      // Scope to the combat log so the sr-only live region ("Target: Brixi Applybar.
-      // Outcome: took N damage.") does not create a strict-mode double match.
+      // Read the whole log textContent so chained/expandable rows still match.
       const combatLog = page.getByRole('log', { name: 'Combat log' });
+      await expect(combatLog).toBeVisible();
       await expect
-        .poll(async () => (await combatLog.getByText(/Brixi Applybar.*took \d+ damage/i).count()) > 0)
+        .poll(async () => /Brixi Applybar[\s\S]*took \d+ damage/i.test((await combatLog.textContent()) ?? ''))
         .toBe(true);
     } finally {
       // End before delete so a failed DELETE cannot leave a RUNNING fight that
