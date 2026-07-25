@@ -230,7 +230,9 @@ test.describe('shared notification controller', () => {
     await page.route('**/api/v1/notifications/mark-read', async (route) => {
       const body = route.request().postDataJSON() as { all?: boolean };
       if (body.all) {
-        await route.fulfill({ json: { updated: 35, updatedIds: items30.map((item) => item.id) } });
+        const undisplayedIds = [9770, 9771, 9772, 9773, 9774];
+        const updatedIds = [...items30.map((item) => item.id), ...undisplayedIds];
+        await route.fulfill({ json: { updated: updatedIds.length, updatedIds } });
         return;
       }
       await route.continue();

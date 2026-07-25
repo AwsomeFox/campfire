@@ -559,6 +559,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     if (notification.readAt) {
       try {
         await api.post(`${API}/notifications/${notification.id}/unread`);
+        allReadAtRef.current = null;
         cancelCountRequest();
         syncReadMessage({ type: 'unread', id: notification.id });
         channelRef.current?.postMessage({ type: 'unread', id: notification.id } satisfies NotificationSyncMessage);
@@ -594,6 +595,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const markUnreadBulk = useCallback(async (opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult> => {
     try {
       const res = await api.post<BulkMarkResult>(`${API}/notifications/mark-unread`, opts);
+      allReadAtRef.current = null;
       cancelCountRequest();
       syncReadMessage({ type: 'unread-bulk', ids: res.updatedIds });
       channelRef.current?.postMessage({ type: 'unread-bulk', ids: res.updatedIds } satisfies NotificationSyncMessage);
@@ -787,13 +789,13 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
 
   const recordMarkRead = useCallback(async (
     opts: { ids?: number[]; campaignId?: number; all?: boolean },
-    successMessage: string,
+    successMessage: string | ((res: BulkMarkResult) => string),
     failureMessage: string,
   ) => {
     const res = await markReadBulk(opts);
     if (!panelMountedRef.current) return;
     if (res.updated > 0) {
-      setMarkAllAnnouncement(successMessage);
+      setMarkAllAnnouncement(typeof successMessage === 'function' ? successMessage(res) : successMessage);
       setPendingUndo({
         message: `Marked ${res.updated} notification${res.updated === 1 ? '' : 's'} as read.`,
         ids: res.updatedIds,
@@ -808,7 +810,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     if (unreadIds.length === 0) return;
     await recordMarkRead(
       { ids: unreadIds },
-      `Marked ${unreadIds.length} displayed notification${unreadIds.length === 1 ? '' : 's'} as read.`,
+      (res) => `Marked ${res.updated} displayed notification${res.updated === 1 ? '' : 's'} as read.`,
       "Couldn't mark displayed notifications as read.",
     );
   }, [displayedUnreadItems, recordMarkRead]);
@@ -883,10 +885,12 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   const handleUndo = useCallback(async () => {
     if (!pendingUndo) return;
     const { ids } = pendingUndo;
-    setPendingUndo(null);
-    await markUnreadBulk({ ids });
-    if (panelMountedRef.current) {
-      setMarkAllAnnouncement('Restored unread status.');
+    const res = await markUnreadBulk({ ids });
+    if (!panelMountedRef.current) return;
+    if (res.updated > 0) {
+      setPendingUndo(null);
+    } else {
+      throw new Error('Restore failed');
     }
   }, [markUnreadBulk, pendingUndo]);
 
@@ -1083,12 +1087,14 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
         />
       )}
       {pendingUndo && (
-        <UndoSnackbar
-          message={pendingUndo.message}
-          onUndo={handleUndo}
-          onExpire={() => setPendingUndo(null)}
-          successMessage="Restored notifications as unread."
-        />
+        <div onClick={(event) => event.stopPropagation()}>
+          <UndoSnackbar
+            message={pendingUndo.message}
+            onUndo={handleUndo}
+            onExpire={() => setPendingUndo(null)}
+            successMessage="Restored notifications as unread."
+          />
+        </div>
       )}
     </div>
   );
