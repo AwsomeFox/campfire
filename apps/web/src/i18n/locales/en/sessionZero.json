@@ -19,21 +19,36 @@
     "charter": {
       "lines": {
         "title": "Lines",
-        "hint": "Hard limits — content that never appears at the table."
+        "hint": "Hard limits — content that never appears at the table.",
+        "formLabel": "Lines (hard limits)",
+        "formHelp": "Content that never appears at the table. One entry per line.",
+        "placeholder": "Harm to children\nSexual violence\nSpiders"
       },
       "veils": {
         "title": "Veils",
-        "hint": "Soft limits — content that stays off-screen (fade to black)."
+        "hint": "Soft limits — content that stays off-screen (fade to black).",
+        "formLabel": "Veils (soft limits)",
+        "formHelp": "Content that may exist but stays off-screen. One entry per line.",
+        "placeholder": "On-screen torture\nGraphic gore"
       },
       "safetyTools": {
         "title": "Safety tools",
-        "hint": "Tools the table has agreed to use (X-Card, Open Door, Script Change…)."
+        "hint": "Tools the table has agreed to use (X-Card, Open Door, Script Change…).",
+        "formLabel": "Safety tools",
+        "formHelp": "Tools the table agreed to use. One entry per line.",
+        "placeholder": "X-Card\nOpen Door\nScript Change"
       },
       "houseRules": {
-        "title": "House rules"
+        "title": "House rules",
+        "formLabel": "House rules",
+        "formHelp": "Optional markdown for table conventions and rules-as-written deviations.",
+        "placeholder": "Table conventions, rules-as-written deviations…"
       },
       "tone": {
-        "title": "Tone & content expectations"
+        "title": "Tone & content expectations",
+        "formLabel": "Tone & content expectations",
+        "formHelp": "Optional markdown for grit vs. heroism, comedy vs. seriousness, spotlight and PvP norms.",
+        "placeholder": "Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
       }
     }
   }

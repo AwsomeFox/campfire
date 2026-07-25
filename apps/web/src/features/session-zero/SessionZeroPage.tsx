@@ -32,19 +32,9 @@ import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
 import {
   SESSION_ZERO_FIELD,
-  SESSION_ZERO_HOUSE_RULES_HELP,
-  SESSION_ZERO_HOUSE_RULES_LABEL,
-  SESSION_ZERO_LINES_HELP,
-  SESSION_ZERO_LINES_LABEL,
   SESSION_ZERO_PREFIX,
   SESSION_ZERO_SUPPORT_HELP,
   SESSION_ZERO_SUPPORT_LABEL,
-  SESSION_ZERO_TONE_HELP,
-  SESSION_ZERO_TONE_LABEL,
-  SESSION_ZERO_TOOLS_HELP,
-  SESSION_ZERO_TOOLS_LABEL,
-  SESSION_ZERO_VEILS_HELP,
-  SESSION_ZERO_VEILS_LABEL,
 } from '../../components/formFieldLabels';
 import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
@@ -627,6 +617,7 @@ function ListEditor({
 }
 
 function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | null) => void }) {
+  const { t } = useTranslation();
   return (
     <div
       className="card elev-sm"
@@ -635,25 +626,25 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
     >
       <ListEditor
         name={SESSION_ZERO_FIELD.lines}
-        label={SESSION_ZERO_LINES_LABEL}
-        help={SESSION_ZERO_LINES_HELP}
-        placeholder={'Harm to children\nSexual violence\nSpiders'}
+        label={t('sessionZero.charter.lines.formLabel')}
+        help={t('sessionZero.charter.lines.formHelp')}
+        placeholder={t('sessionZero.charter.lines.placeholder')}
         items={draft.lines}
         onChange={(lines) => setDraft({ ...draft, lines })}
       />
       <ListEditor
         name={SESSION_ZERO_FIELD.veils}
-        label={SESSION_ZERO_VEILS_LABEL}
-        help={SESSION_ZERO_VEILS_HELP}
-        placeholder={'On-screen torture\nGraphic gore'}
+        label={t('sessionZero.charter.veils.formLabel')}
+        help={t('sessionZero.charter.veils.formHelp')}
+        placeholder={t('sessionZero.charter.veils.placeholder')}
         items={draft.veils}
         onChange={(veils) => setDraft({ ...draft, veils })}
       />
       <ListEditor
         name={SESSION_ZERO_FIELD.safetyTools}
-        label={SESSION_ZERO_TOOLS_LABEL}
-        help={SESSION_ZERO_TOOLS_HELP}
-        placeholder={'X-Card\nOpen Door\nScript Change'}
+        label={t('sessionZero.charter.safetyTools.formLabel')}
+        help={t('sessionZero.charter.safetyTools.formHelp')}
+        placeholder={t('sessionZero.charter.safetyTools.placeholder')}
         items={draft.safetyTools}
         onChange={(safetyTools) => setDraft({ ...draft, safetyTools })}
       />
@@ -661,10 +652,10 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
         idPrefix={SESSION_ZERO_PREFIX}
         name={SESSION_ZERO_FIELD.houseRules}
         as="textarea"
-        label={SESSION_ZERO_HOUSE_RULES_LABEL}
-        help={SESSION_ZERO_HOUSE_RULES_HELP}
+        label={t('sessionZero.charter.houseRules.formLabel')}
+        help={t('sessionZero.charter.houseRules.formHelp')}
         value={draft.houseRules}
-        placeholder="Table conventions, rules-as-written deviations…"
+        placeholder={t('sessionZero.charter.houseRules.placeholder')}
         onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
         rows={4}
         minHeight={96}
@@ -674,10 +665,10 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
         idPrefix={SESSION_ZERO_PREFIX}
         name={SESSION_ZERO_FIELD.tone}
         as="textarea"
-        label={SESSION_ZERO_TONE_LABEL}
-        help={SESSION_ZERO_TONE_HELP}
+        label={t('sessionZero.charter.tone.formLabel')}
+        help={t('sessionZero.charter.tone.formHelp')}
         value={draft.toneAndExpectations}
-        placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
+        placeholder={t('sessionZero.charter.tone.placeholder')}
         onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
         rows={4}
         minHeight={96}
