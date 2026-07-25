@@ -385,9 +385,18 @@ function LayoutContent() {
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
 
+  const { liveEncounter, refresh: refreshLiveEncounter } = useLiveEncounterState(
+    Number.isFinite(campaignId) ? campaignId : undefined,
+  );
+
   // Issue #437: live promote/demote — refresh /me when this user's campaign role
   // changes over SSE (and fan out to other tabs). Keeps the current route.
-  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined);
+  // Issue #637: reuse the same stream for live-encounter chrome refresh.
+  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined, {
+    onEncounterChange: () => void refreshLiveEncounter(),
+    onReconnect: () => void refreshLiveEncounter(),
+    onStreamRecovery: () => void refreshLiveEncounter(),
+  });
 
   // Issue #760: remember the last safe in-campaign route per user/campaign so
   // the chooser can restore task context after a switch (namespaced by userId
@@ -574,7 +583,6 @@ function LayoutContent() {
   }
 
   const displayName = me?.user.displayName || me?.user.username || '';
-  const liveEncounter = useLiveEncounterState(campaignId);
 
   // Nav items that actually resolve to a route. Design's Encounters/World/
   // Compendium/Settings(player-facing) items render greyed with a "soon" tag.

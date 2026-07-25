@@ -1,14 +1,18 @@
 /**
  * Campaign-scoped running encounter lookup for chrome surfaces (dashboard chip,
  * mobile tab bar — issue #637). Best-effort: empty/failed fetch means no live
- * fight, not a page error. SSE encounter events keep the pointer fresh.
+ * fight, not a page error. Callers should wire {@link refresh} to the Layout's
+ * shared campaign SSE stream (useMembershipLiveSync) so encounter events keep
+ * the pointer fresh without opening a second /campaigns/:id/events connection.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Encounter } from '@campfire/schema';
 import { api, API } from './api';
-import { useCampaignEvents } from './useCampaignEvents';
 
-export function useLiveEncounterState(campaignId: number | undefined): Encounter | null {
+export function useLiveEncounterState(campaignId: number | undefined): {
+  liveEncounter: Encounter | null;
+  refresh: () => Promise<void>;
+} {
   const [projection, setProjection] = useState<{ campaignId: number; data: Encounter | null } | null>(null);
   const requestSequence = useRef(0);
   const activeCampaignId = useRef(campaignId);
@@ -35,22 +39,11 @@ export function useLiveEncounterState(campaignId: number | undefined): Encounter
       setProjection(null);
       return;
     }
-    void refresh();
+    // Defer the first fetch so campaign chrome (notifications polling, etc.) can
+    // finish its own bootstrap before we add concurrent REST work on mount.
+    const timer = window.setTimeout(() => void refresh(), 0);
+    return () => window.clearTimeout(timer);
   }, [campaignId, refresh]);
 
-  useCampaignEvents(campaignId, {
-    onEvent: useCallback((event) => {
-      if (event.type === 'encounter.updated' || event.type === 'encounter.deleted') {
-        void refresh();
-      }
-    }, [refresh]),
-    onReconnect: useCallback(() => {
-      void refresh();
-    }, [refresh]),
-    onStreamRecovery: useCallback(() => {
-      void refresh();
-    }, [refresh]),
-  });
-
-  return liveEncounter;
+  return { liveEncounter, refresh };
 }
