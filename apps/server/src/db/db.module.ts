@@ -2612,6 +2612,36 @@ function migrateCampaignCatchUpCursorsTable(sqlite: Database.Database): void {
   `);
 }
 
+function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
+  const hasConfigs = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_configs'")
+    .get();
+  if (hasConfigs) {
+    const configCols = sqlite.prepare('PRAGMA table_info(ai_scribe_configs)').all() as Array<{ name: string }>;
+    if (!configCols.some((c) => c.name === 'source_cursor_at')) {
+      sqlite.exec('ALTER TABLE ai_scribe_configs ADD COLUMN source_cursor_at TEXT');
+    }
+  }
+
+  const hasJobs = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_jobs'")
+    .get();
+  if (hasJobs) {
+    const jobCols = sqlite.prepare('PRAGMA table_info(ai_scribe_jobs)').all() as Array<{ name: string }>;
+    if (!jobCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN scheduled_session_id INTEGER');
+    }
+    if (!jobCols.some((c) => c.name === 'source_stats')) {
+      sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN source_stats TEXT');
+    }
+  }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_session_trigger
+      ON ai_scribe_jobs(campaign_id, scheduled_session_id, trigger);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2712,6 +2742,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0098_encounters_hex_orientation', run: migrateEncountersTableForHexOrientation },
   { name: '0099_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
   { name: '0100_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
+  { name: '0101_ai_scribe_session_scope_499', run: migrateAiScribeSessionScope499 },
 ];
 
 /**
