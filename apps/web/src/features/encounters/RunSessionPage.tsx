@@ -52,6 +52,7 @@ import {
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
@@ -1229,6 +1230,26 @@ export default function RunSessionPage() {
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
 
+  // Issue #636: scroll the active combatant row into view when the turn advances.
+  const currentCombatantId = useMemo(
+    () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
+    [encounter],
+  );
+  const combatantRowRefs = useRef(new Map<number, HTMLElement>());
+  const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
+    if (el) combatantRowRefs.current.set(combatantId, el);
+    else combatantRowRefs.current.delete(combatantId);
+  }, []);
+  useLayoutEffect(() => {
+    if (encounter?.status !== 'running' || currentCombatantId == null) return;
+    const el = combatantRowRefs.current.get(currentCombatantId);
+    if (!el) return;
+    const frame = requestAnimationFrame(() => {
+      el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [encounter?.status, currentCombatantId]);
+
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
@@ -1270,7 +1291,6 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
-  const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
@@ -1644,6 +1664,7 @@ export default function RunSessionPage() {
           orderedCombatants.map((c) => (
             <CombatantRow
               key={c.id}
+              rowRef={(el) => setCombatantRowRef(c.id, el)}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
@@ -3485,6 +3506,7 @@ function ApplyDamageBar({
 }
 
 function CombatantRow({
+  rowRef,
   combatant,
   isCurrentTurn,
   canEdit,
@@ -3516,6 +3538,7 @@ function CombatantRow({
   onPatchCombatant,
   onRemove,
 }: {
+  rowRef?: (el: HTMLDivElement | null) => void;
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
@@ -3630,6 +3653,9 @@ function CombatantRow({
 
   return (
     <div
+      ref={rowRef}
+      data-testid={`combatant-row-${combatant.id}`}
+      data-current-turn={isCurrentTurn ? 'true' : undefined}
       style={{
         display: 'flex',
         flexWrap: 'wrap',
