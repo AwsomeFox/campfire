@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import type { AuditActorRole, AuditEntry, CampaignMember } from '@campfire/schema';
 import { GameIcon } from '../../components/GameIcon';
 
@@ -65,6 +66,7 @@ export function AuditEntryRow({
   members: CampaignMember[];
   highlighted?: boolean;
 }) {
+  const { t } = useTranslation();
   const { label, isToken } = resolveActorLabel(entry.actor, members);
   return (
     <div
@@ -77,7 +79,7 @@ export function AuditEntryRow({
       <b className="text-slate-300">{label}</b>{' '}
       {isToken && (
         <span className="tag tag-neutral" style={{ fontSize: 9 }}>
-          token
+          {t('admin.audit.tokenTag', { defaultValue: 'token' })}
         </span>
       )}{' '}
       <code className="text-[10px] text-amber-400">{entry.action}</code>
