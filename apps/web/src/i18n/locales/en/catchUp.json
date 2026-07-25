@@ -7,7 +7,7 @@
     "marking": "Marking…",
     "markFailed": "Couldn't update catch-up.",
     "loadFailed": "Couldn't load catch-up.",
-    "truncated": "Showing the first {{limit}} in each category — open the section for the full list.",
+    "truncated": "Showing the first {{limit}} in each category — visit the module pages for the full list.",
     "sinceLastVisit": "Since your last visit",
     "sinceLastSession": "Since last session",
     "kindNew": "New",

@@ -1286,7 +1286,7 @@ export type CatchUpCursor = z.infer<typeof CatchUpCursor>;
 /** Classify a catch-up row relative to the reference instant. */
 export function catchUpChangeKind(
   createdAt: string,
-  updatedAt: string,
+  _updatedAt: string,
   since: string,
   resolved = false,
 ): CatchUpChangeKind {

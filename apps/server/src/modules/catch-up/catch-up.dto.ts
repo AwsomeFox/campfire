@@ -1,4 +1,4 @@
 import { createZodDto } from 'nestjs-zod';
 import { CatchUpMark } from '@campfire/schema';
 
-export class CatchUpMarkDto extends createZodDto(CatchUpMark) {}
+export class CatchUpMarkDto extends createZodDto(CatchUpMark.strict()) {}

@@ -133,7 +133,7 @@ export function CatchUpPanel({ campaignId }: { campaignId: number }) {
         </div>
         <button
           type="button"
-          className={`btn btn-primary ${marking ? '' : ''}`.trim()}
+          className="btn btn-primary"
           style={{ minHeight: 44, flexShrink: 0 }}
           onClick={() => void markCaughtUp()}
           disabled={marking}

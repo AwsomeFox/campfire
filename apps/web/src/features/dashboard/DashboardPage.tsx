@@ -193,7 +193,7 @@ export default function DashboardPage() {
       <InstallHintBanner />
       <OfflinePackBanner campaignId={id} />
 
-      <CatchUpPanel campaignId={id} />
+      <CatchUpPanel key={id} campaignId={id} />
 
       {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
           See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}
