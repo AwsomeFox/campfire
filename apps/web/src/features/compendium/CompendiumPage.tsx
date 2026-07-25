@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Compendium — /c/:campaignId/compendium.
  * Mirrors design/claude-design/Campfire.dc.html "Compendium" (~1276-1337):
@@ -11,7 +12,7 @@
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api, ApiError, API } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import type { RuleEntry, RulePack, RuleSearchPage } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -58,6 +59,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function CompendiumPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -184,7 +186,7 @@ export default function CompendiumPage() {
         setNextCursor(page.nextCursor);
       } catch (err) {
         if (cancelled || gen !== fetchGeneration.current) return;
-        setError(err instanceof ApiError ? err.message : "Couldn't search the compendium.");
+        setError(translateApiError(err, t, { fallbackKey: 'compendium.errors.search' }));
         // Keep prior results visible when a refetch fails (stale + recovery).
         setResults((prev) => prev ?? []);
       } finally {
@@ -227,7 +229,7 @@ export default function CompendiumPage() {
       setNextCursor(page.nextCursor);
     } catch (err) {
       if (gen !== fetchGeneration.current) return;
-      setError(err instanceof ApiError ? err.message : "Couldn't load more results.");
+      setError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadMore' }));
     } finally {
       setLoadingMore(false);
     }
@@ -299,7 +301,7 @@ export default function CompendiumPage() {
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -382,7 +384,7 @@ export default function CompendiumPage() {
       <div className="flex flex-col gap-2">
         {campaignUnresolved ? (
           campaignsError ? (
-            <ErrorNote message="Couldn't load this campaign. Check your connection and retry." onRetry={refreshCampaigns} />
+            <ErrorNote message={t('compendium.errors.loadCampaign')} onRetry={refreshCampaigns} />
           ) : (
             <Card>
               <Skeleton lines={4} />

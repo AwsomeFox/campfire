@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Server admin overview — /admin (no campaignId; server-wide).
  *
@@ -17,7 +18,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AuditEntry, StorageStats } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { MetricsCard } from './MetricsCard';
 import { RequireServerAdmin } from './RequireServerAdmin';
@@ -57,6 +58,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function StorageSummaryCard() {
+  const { t } = useTranslation();
   const [stats, setStats] = useState<StorageStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -65,9 +67,9 @@ function StorageSummaryCard() {
     try {
       setStats(await api.get<StorageStats>(`${API}/admin/storage`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load storage stats.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -96,6 +98,7 @@ function StorageSummaryCard() {
 }
 
 function RecentAuditCard() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,9 +108,9 @@ function RecentAuditCard() {
       const all = await api.get<AuditEntry[]>(`${API}/admin/audit`);
       setEntries(all.slice(0, 10));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the audit log.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -184,6 +187,7 @@ function AdminOverview() {
 }
 
 export default function AdminPage() {
+  useTranslation();
   return (
     <RequireServerAdmin>
       <AdminOverview />

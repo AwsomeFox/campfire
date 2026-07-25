@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { MembershipIntegrityReport, User } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Btn, Card, EmptyState } from '../../components/ui';
 
 export function MembershipIntegrityCard({ users }: { users: User[] }) {
+  const { t } = useTranslation();
   const [report, setReport] = useState<MembershipIntegrityReport | null>(null);
   const [targets, setTargets] = useState<Record<number, number>>({});
   const [busyCampaignId, setBusyCampaignId] = useState<number | null>(null);
@@ -14,7 +16,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
       setReport(await api.get<MembershipIntegrityReport>(`${API}/admin/membership-integrity`));
       setError(null);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load membership integrity diagnostics.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 
@@ -33,7 +35,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
       await api.post(`${API}/admin/membership-integrity/repair-dm`, { campaignId, userId });
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't assign the recovery DM.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusyCampaignId(null);
     }
@@ -53,7 +55,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
       {!report ? (
         <p className="text-xs text-slate-400">Loading diagnostics…</p>
       ) : report.campaigns.length === 0 ? (
-        <EmptyState icon="shield" title="All campaigns have usable DM authority" />
+        <EmptyState icon="shield" title={t('admin.empty.noIntegrityIssues')} />
       ) : (
         <div className="space-y-2">
           {report.campaigns.map((campaign) => (

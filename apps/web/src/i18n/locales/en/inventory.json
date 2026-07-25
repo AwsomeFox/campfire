@@ -1,0 +1,71 @@
+{
+  "inventory": {
+    "title": "Inventory",
+    "noCampaign": "No campaign selected.",
+    "addItem": "+ Add item",
+    "noLootTitle": "No loot yet",
+    "noLootHintDm": "Add the party's first item with \"+ Add item\".",
+    "noLootHintPlayer": "Nothing has been logged by the party yet.",
+    "partyStash": "Party stash",
+    "partyTreasury": "Party treasury",
+    "unassigned": "Unassigned",
+    "empty": "Empty.",
+    "addItemTitle": "Add item",
+    "quantity": "Quantity",
+    "quantityHelp": "Whole number from {{min}} to {{max}}, step {{step}}.",
+    "notesPlaceholder": "Notes",
+    "chooseIcon": "Choose icon",
+    "changeIcon": "Change icon",
+    "autoIcon": "Auto",
+    "autoFromName": "Auto from name",
+    "adding": "Adding…",
+    "add": "Add",
+    "reapply": "Reapply",
+    "reload": "Reload",
+    "staleTreasury": "Another player changed the treasury since you opened this editor. Reload fresh values before saving to avoid overwriting their change.",
+    "conflictTitle": "Another player changed the treasury since you loaded.",
+    "conflictHint": "Fresh values shown below — reapply your change against them?",
+    "coins": {
+      "pp": "Platinum",
+      "gp": "Gold",
+      "ep": "Electrum",
+      "sp": "Silver",
+      "cp": "Copper"
+    },
+    "coinCoinsAria": "{{label}} coins",
+    "spendOne": "Spend one {{label}}",
+    "addOne": "Add one {{label}}",
+    "currentOwner": "(current owner)",
+    "qtyAnnouncement": "{{name}} quantity is now {{qty}}.",
+    "iconTitleOverride": "Icon: {{name}} — click to change",
+    "iconTitleAuto": "Auto icon — click to override",
+    "iconAriaChange": "Change icon for {{name}}",
+    "decreaseQtyAria": "Decrease {{name}} quantity",
+    "increaseQtyAria": "Increase {{name}} quantity",
+    "moveAria": "Move {{name}}",
+    "deleteAria": "Delete {{name}}",
+    "errors": {
+      "load": "Couldn't load the inventory.",
+      "updateTreasury": "Couldn't update the treasury.",
+      "adjustTreasury": "Couldn't adjust the treasury.",
+      "updateItem": "Couldn't update the item.",
+      "deleteItem": "Couldn't delete the item.",
+      "addItem": "Couldn't add the item."
+    },
+    "fields": {
+      "name": {
+        "label": "Item name",
+        "help": "Required. Shown on the party stash and character sheets.",
+        "placeholder": "Torch, rope, healing potion…"
+      },
+      "owner": {
+        "label": "Owner",
+        "help": "Party stash or a specific character."
+      },
+      "notes": {
+        "label": "Notes",
+        "help": "Optional short description or usage notes."
+      }
+    }
+  }
+}
