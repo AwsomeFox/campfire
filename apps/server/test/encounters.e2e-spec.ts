@@ -3360,9 +3360,9 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.status).toBe(201);
     }
 
-    const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Thornbridge' });
+    const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Thornbridge', status: 'explored' });
     locationId = loc.body.id;
-    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'The Everflame' });
+    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'The Everflame', hidden: false });
     questId = quest.body.id;
     const session = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Session One' });
     sessionId = session.body.id;
@@ -3544,6 +3544,110 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(note.body.entityType).toBe('encounter');
     expect(note.body.entityId).toBe(enc.body.id);
     expect(note.body.entityName).toBe('Noted fight');
+  });
+
+  // Issue #480: encounter links resolve role-safe display metadata; related records
+  // surface backlinks; hidden/deleted targets are handled safely.
+  describe('encounter link metadata & backlinks (issue #480)', () => {
+    it('GET encounter returns resolved link labels for every role', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Bridge fight', locationId, questId, sessionId, hidden: false });
+
+      for (const headers of [dm, player, viewer]) {
+        const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(headers);
+        expect(got.status).toBe(200);
+        expect(got.body.locationLink).toEqual({ id: locationId, label: 'Thornbridge' });
+        expect(got.body.questLink).toEqual({ id: questId, label: 'The Everflame' });
+        expect(got.body.sessionLink).toEqual({ id: sessionId, label: 'Session One' });
+      }
+    });
+
+    it('redacts hidden linked entities for non-DM and omits their labels', async () => {
+      const server = ctx.app.getHttpServer();
+      const secretQuest = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Hidden Plot', hidden: true });
+      const secretLoc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Secret Cave', status: 'unexplored' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret ambush', questId: secretQuest.body.id, locationId: secretLoc.body.id, hidden: false });
+
+      const dmGot = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+      expect(dmGot.body.questLink).toEqual({ id: secretQuest.body.id, label: 'Hidden Plot' });
+      expect(dmGot.body.locationLink).toEqual({ id: secretLoc.body.id, label: 'Secret Cave' });
+
+      for (const headers of [player, viewer]) {
+        const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(headers);
+        expect(got.body.questId).toBeNull();
+        expect(got.body.locationId).toBeNull();
+        expect(got.body.questLink).toBeUndefined();
+        expect(got.body.locationLink).toBeUndefined();
+      }
+    });
+
+    it('broken links stay unavailable for the DM without leaking a label', async () => {
+      const server = ctx.app.getHttpServer();
+      const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Gone Place', status: 'explored' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Orphan link', locationId: loc.body.id, hidden: false });
+      const removed = await request(server).delete(`/api/v1/locations/${loc.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+
+      const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+      expect(got.body.locationId).toBe(loc.body.id);
+      expect(got.body.locationLink).toBeNull();
+    });
+
+    it('location/quest/session GET surfaces linked encounter backlinks', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Backlink fight', locationId, questId, sessionId, hidden: false });
+      const hiddenEnc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Prep ambush', locationId, hidden: true });
+
+      const loc = await request(server).get(`/api/v1/locations/${locationId}`).set(player);
+      expect(loc.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+      expect(loc.body.linkedEncounters.some((e: { id: number }) => e.id === hiddenEnc.body.id)).toBe(false);
+
+      const quest = await request(server).get(`/api/v1/quests/${questId}`).set(player);
+      expect(quest.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+
+      const session = await request(server).get(`/api/v1/sessions/${sessionId}`).set(player);
+      expect(session.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+    });
+
+    it('campaign summary digests include resolved link metadata', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Summary links', locationId, questId, hidden: false });
+      const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+      const digest = summary.body.encounters.find((e: { id: number }) => e.id === enc.body.id);
+      expect(digest).toBeDefined();
+      expect(digest.locationLink).toEqual({ id: locationId, label: 'Thornbridge' });
+      expect(digest.questLink).toEqual({ id: questId, label: 'The Everflame' });
+    });
   });
 
   it('difficulty band computes correctly for a known party + monster set', async () => {

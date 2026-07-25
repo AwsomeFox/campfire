@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -856,6 +856,95 @@ export class EncountersService {
     });
   }
 
+  private sessionDisplayLabel(row: { title: string | null; number: number; id: number }): string {
+    const title = row.title?.trim();
+    return title && title.length > 0 ? title : `Session ${row.number}`;
+  }
+
+  /**
+   * Attach role-safe display metadata for location/quest/session links (issue #480).
+   * Call after {@link redactHiddenLinkedEntities} so hidden targets are already nulled
+   * for non-DM viewers.
+   */
+  private async attachEncounterLinkMeta<T extends { locationId: number | null; questId: number | null; sessionId: number | null }>(
+    items: T[],
+    campaignId: number,
+  ): Promise<Array<T & { locationLink?: EncounterLinkMeta | null; questLink?: EncounterLinkMeta | null; sessionLink?: EncounterLinkMeta | null }>> {
+    if (items.length === 0) return items;
+
+    const locationIds = Array.from(new Set(items.map((i) => i.locationId).filter((id): id is number => id !== null)));
+    const questIds = Array.from(new Set(items.map((i) => i.questId).filter((id): id is number => id !== null)));
+    const sessionIds = Array.from(new Set(items.map((i) => i.sessionId).filter((id): id is number => id !== null)));
+
+    const locationById = new Map<number, EncounterLinkMeta>();
+    if (locationIds.length > 0) {
+      const rows = await this.db
+        .select({ id: locations.id, name: locations.name })
+        .from(locations)
+        .where(and(inArray(locations.id, locationIds), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)));
+      for (const row of rows) {
+        locationById.set(row.id, { id: row.id, label: row.name });
+      }
+    }
+
+    const questById = new Map<number, EncounterLinkMeta>();
+    if (questIds.length > 0) {
+      const rows = await this.db
+        .select({ id: quests.id, title: quests.title })
+        .from(quests)
+        .where(and(inArray(quests.id, questIds), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)));
+      for (const row of rows) {
+        questById.set(row.id, { id: row.id, label: row.title });
+      }
+    }
+
+    const sessionById = new Map<number, EncounterLinkMeta>();
+    if (sessionIds.length > 0) {
+      const rows = await this.db
+        .select({ id: sessions.id, title: sessions.title, number: sessions.number })
+        .from(sessions)
+        .where(and(inArray(sessions.id, sessionIds), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
+      for (const row of rows) {
+        sessionById.set(row.id, { id: row.id, label: this.sessionDisplayLabel(row) });
+      }
+    }
+
+    return items.map((item) => ({
+      ...item,
+      ...(item.locationId !== null ? { locationLink: locationById.get(item.locationId) ?? null } : {}),
+      ...(item.questId !== null ? { questLink: questById.get(item.questId) ?? null } : {}),
+      ...(item.sessionId !== null ? { sessionLink: sessionById.get(item.sessionId) ?? null } : {}),
+    }));
+  }
+
+  /**
+   * Encounters linked to a location, quest, or session (issue #480 backlinks).
+   * Hidden encounters are dropped for non-DM callers, mirroring listForCampaign.
+   */
+  async listBacklinks(
+    campaignId: number,
+    filter: { locationId?: number; questId?: number; sessionId?: number },
+    viewerRole?: Role,
+  ): Promise<EncounterBacklink[]> {
+    const conditions = [eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)];
+    if (filter.locationId !== undefined) conditions.push(eq(encounters.locationId, filter.locationId));
+    if (filter.questId !== undefined) conditions.push(eq(encounters.questId, filter.questId));
+    if (filter.sessionId !== undefined) conditions.push(eq(encounters.sessionId, filter.sessionId));
+
+    const rows = await this.db
+      .select({ id: encounters.id, name: encounters.name, status: encounters.status, hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(...conditions))
+      .orderBy(encounters.id);
+
+    const visible = viewerRole === undefined || viewerRole === 'dm' ? rows : rows.filter((r) => !r.hidden);
+    return visible.map((r) => ({
+      id: r.id,
+      name: r.name,
+      status: r.status as EncounterStatus,
+    }));
+  }
+
   /**
    * `viewerRole` drives entity-level secrecy (issue #262): a hidden encounter is a DM's
    * prepared, not-yet-sprung fight and is dropped WHOLESALE for a non-DM viewer — mirroring
@@ -898,7 +987,8 @@ export class EncountersService {
     } else {
       list = visible;
     }
-    return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
+    const redacted = await this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
+    return this.attachEncounterLinkMeta(redacted, campaignId);
   }
 
   async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
@@ -1045,11 +1135,12 @@ export class EncountersService {
     list = enrichCombatantsWithLegendaryPools(list, statblocks);
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
+    const [withLinks] = await this.attachEncounterLinkMeta([redactedDomain], row.campaignId);
     // Issue #465: AoE templates in unrevealed fog leak origin/shape/dimensions to players
     // (and render above the fog overlay client-side). Filter server-side for non-DMs using
     // the same concealment rules as token redaction; player-declared templates stay visible
     // to their owner via declaredByUserId.
-    let aoe = redactedDomain.aoe ?? [];
+    let aoe = withLinks.aoe ?? [];
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       const fog = parseFog(row.fog);
       const invalidFog = row.fog !== null && fog === null;
@@ -1067,7 +1158,7 @@ export class EncountersService {
       }
     }
     return {
-      ...redactedDomain,
+      ...withLinks,
       aoe,
       combatants: list,
       ...(hpSyncConflicts && hpSyncConflicts.length > 0 ? { hpSyncConflicts } : {}),
@@ -2248,7 +2339,8 @@ export class EncountersService {
         monstersDefeated: t.monstersDefeated,
       };
     });
-    return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
+    const redacted = await this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
+    return this.attachEncounterLinkMeta(redacted, campaignId);
   }
 
   /**

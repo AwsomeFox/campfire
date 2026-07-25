@@ -5,6 +5,7 @@ import { RoleAccessModule } from '../membership/role-access.module';
 import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { RevisionsModule } from '../revisions/revisions.module';
 import { EventsModule } from '../events/events.module';
+import { EncountersModule } from '../encounters/encounters.module';
 import { SessionsService } from './sessions.service';
 import { SessionSharesService } from './session-shares.service';
 import { SchedulingService } from './scheduling.service';
@@ -19,7 +20,7 @@ import {
 } from './scheduling.controller';
 
 @Module({
-  imports: [AuditModule, NotificationsModule, RoleAccessModule, ProposalRecordsModule, RevisionsModule, EventsModule],
+  imports: [AuditModule, NotificationsModule, RoleAccessModule, ProposalRecordsModule, RevisionsModule, EventsModule, EncountersModule],
   controllers: [
     CampaignSessionsController,
     SessionsController,

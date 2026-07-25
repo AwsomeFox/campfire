@@ -39,6 +39,7 @@ import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
 import { buildLocationRevealPreview } from '../../components/entityRevealPreview';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
+import { EncounterBacklinksCard } from '../../components/EncounterBacklinksCard';
 import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { StatusMenuButton } from '../../components/StatusMenuButton';
 import { useAnnounce } from '../../components/Announcer';
@@ -760,6 +761,8 @@ export default function LocationPage() {
                   </div>
                 </Card>
               )}
+
+              <EncounterBacklinksCard campaignId={cid} encounters={location.linkedEncounters ?? []} />
 
               <EntityDiscussion campaignId={cid} entityType="location" entityId={id} />
             </div>
