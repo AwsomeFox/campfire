@@ -9,16 +9,17 @@ one.
 - **Endpoint:** `https://<your-host>/mcp` (stateless streamable HTTP, JSON-RPC).
 - **Auth:** `Authorization: Bearer cf_pat_…` (personal access token), **or** an
   OAuth access token from the connector flow below.
-- **Tools:** 130+ covering campaigns, quests, objectives, story arcs/beats/branches,
+- **Tools:** 208 covering campaigns, quests, objectives, story arcs/beats/branches,
   NPCs, locations, factions, characters, encounters and combatants, dice, sessions,
   notes, the inbox, proposals, the AI Dungeon Master seat, members, rule packs, the
   session-zero charter, audit, and export.
   Call `tools/list` for the live catalogue with full input schemas — every tool's
   arguments are strictly validated and described.
-- **Resources & prompts:** read surfaces (campaigns, campaign summary, party, session
-  recaps, the session-zero charter) are also exposed as MCP **resources**, and the
-  server ships prep/recap **prompts** — call `resources/list` and `prompts/list` to
-  discover them.
+- **Resources:** 6 read surfaces (campaign index, campaign summary, party,
+  session recaps, session-zero charter, AI-authorized support preferences) exposed as
+  MCP **resources** — call `resources/list` to discover concrete URIs.
+- **Prompts:** 2 authoring prompts (recap-writer, session-prep) — call
+  `prompts/list` to discover them.
 - **Errors** come back as structured JSON: `{ "error": { "status", "code", "message" } }`.
 - **Discovery:** use the `list_*` tools to find ids before `get_*`/mutating tools.
 
