@@ -170,6 +170,7 @@ async function spawnAppOnce(
   });
 
   let output = '';
+  let outputOffset = 0;
   if (!collectSpawnCoverage) {
     child.stdout?.on('data', (chunk) => {
       output += chunk.toString();
@@ -182,9 +183,13 @@ async function spawnAppOnce(
   const readOutput = (): string => {
     if (collectSpawnCoverage && fs.existsSync(childLogPath)) {
       try {
-        return fs.readFileSync(childLogPath, 'utf8');
+        const buf = fs.readFileSync(childLogPath);
+        if (buf.length > outputOffset) {
+          output += buf.subarray(outputOffset).toString();
+          outputOffset = buf.length;
+        }
       } catch {
-        return output;
+        /* ignore */
       }
     }
     return output;
