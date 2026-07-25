@@ -4059,9 +4059,8 @@ export class McpToolsService {
       },
     );
 
-    this.writeTool(
+    this.tool(
       server,
-      user,
       'list_campaign_library_monsters',
       'List homebrew monsters saved in a campaign library for reuse (issue #425).',
       { campaignId: CampaignIdArg },

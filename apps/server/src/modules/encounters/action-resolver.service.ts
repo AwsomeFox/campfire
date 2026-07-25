@@ -314,11 +314,12 @@ export class ActionResolverService {
     let idx = req.actionIndex ?? -1;
     if (idx < 0 && req.actionName) idx = statActions.findIndex((a) => a.name === req.actionName);
     if (idx < 0 || idx >= statActions.length) {
-      throw new BadRequestException(
-        statActions.length === 0
-          ? 'This combatant has no sheet actions; pass an inline `spec` to resolve an ad-hoc action.'
-          : `Action ${req.actionName ?? req.actionIndex} not found on this combatant.`,
-      );
+      if (statActions.length === 0) {
+        throw new BadRequestException(
+          'This combatant has no sheet actions; pass an inline `spec` to resolve an ad-hoc action.',
+        );
+      }
+      throw new NotFoundException(`Action ${req.actionName ?? req.actionIndex} not found on this combatant.`);
     }
     const action = statActions[idx];
     const parsed = ActionSpec.safeParse(action.spec);

@@ -186,7 +186,12 @@ function damagePartsFrom(raw: unknown): Array<{ formula: string; flat: number; t
       const base = m[1];
       const sign = m[2] === '-' ? -1 : 1;
       const flat = m[3] ? sign * Number(m[3]) : 0;
-      out.push({ formula: base, flat, type });
+      // ActionSpec.flat is non-negative; keep penalties in the dice formula (e.g. 1d8-1).
+      if (flat < 0) {
+        out.push({ formula: `${base}${flat}`, flat: 0, type });
+      } else {
+        out.push({ formula: base, flat, type });
+      }
     } else {
       out.push({ formula: expr.trim(), flat: 0, type });
     }
@@ -321,7 +326,14 @@ export function expandRawStatblockAction(raw: unknown, source: string, ruleSyste
 /** Expand all action sections from a monster `dataJson` via the campaign adapter. */
 export function expandStatblockActions(
   data: Record<string, unknown>,
-  adapter: { mapStatblock: (d: Record<string, unknown>) => { actions?: unknown; reactions?: unknown; legendaryActions?: unknown } },
+  adapter: {
+    mapStatblock: (d: Record<string, unknown>) => {
+      actions?: unknown;
+      reactions?: unknown;
+      legendaryActions?: unknown;
+      specialAbilities?: unknown;
+    };
+  },
   ruleSystem = '',
 ): CharacterAction[] {
   const mapped = adapter.mapStatblock(data);
@@ -336,6 +348,7 @@ export function expandStatblockActions(
   push('action', mapped.actions ?? data.actions);
   push('reaction', mapped.reactions ?? data.reactions);
   push('legendary', mapped.legendaryActions ?? data.legendary_actions ?? data.legendaryActions);
+  push('special', mapped.specialAbilities ?? data.special_abilities ?? data.specialAbilities);
   return out.slice(0, 50);
 }
 

@@ -2210,6 +2210,41 @@ function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
   `);
 }
 
+/** Issue #425: upgraded DBs created by migrateCampaignLibraryMonstersTable lack FK cascades. */
+function migrateCampaignLibraryMonstersForeignKeys(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_library_monsters'")
+    .get();
+  if (!hasTable) return;
+
+  const fks = sqlite.prepare('PRAGMA foreign_key_list(campaign_library_monsters)').all() as Array<{
+    table: string;
+    from: string;
+  }>;
+  const hasCampaignFk = fks.some((fk) => fk.from === 'campaign_id' && fk.table === 'campaigns');
+  if (hasCampaignFk) return;
+
+  sqlite.exec(`
+    CREATE TABLE campaign_library_monsters_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      statblock_json TEXT NOT NULL,
+      source_rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO campaign_library_monsters_new
+      (id, campaign_id, name, statblock_json, source_rule_entry_id, created_at, updated_at)
+    SELECT clm.id, clm.campaign_id, clm.name, clm.statblock_json, clm.source_rule_entry_id, clm.created_at, clm.updated_at
+    FROM campaign_library_monsters clm
+    JOIN campaigns c ON c.id = clm.campaign_id;
+    DROP TABLE campaign_library_monsters;
+    ALTER TABLE campaign_library_monsters_new RENAME TO campaign_library_monsters;
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
+  `);
+}
+
 /**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
@@ -2688,6 +2723,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
   { name: '0098_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
   { name: '0099_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
+  { name: '0100_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
 ];
 
 /**
