@@ -8,8 +8,9 @@
  * pages) and MembersPage's audit list — out of scope here to avoid duplicating
  * owned surfaces; this page covers the General + Rule system + Danger tab.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import type { Campaign, CampaignCloneMode, CampaignClonePreview, CampaignInvite, DangerLevel, RulePack } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { useAuth } from '../../app/auth';
@@ -18,9 +19,15 @@ import { useCampaigns } from '../../app/CampaignContext';
 import { Card, ErrorNote, Skeleton } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { mechanicsForPackSlug, ruleSystemAdapterLabel } from '../../lib/rules';
-import { decodeLocationHashId } from '../../lib/decodeLocationHashId';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import AiDmCard from './AiDmCard';
+import {
+  SETTINGS_SECTIONS,
+  settingsHashTarget,
+  settingsSectionForHash,
+  type SettingsSectionId,
+} from './settingsNavigation';
+import './CampaignSettingsPage.css';
 import { GameIcon } from '../../components/GameIcon';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ConfirmDestructiveDialog } from '../../components/ConfirmDestructiveDialog';
@@ -51,7 +58,10 @@ export default function CampaignSettingsPage() {
   const isDm = role === 'dm';
   const navigate = useNavigate();
   const location = useLocation();
+  const { t } = useTranslation();
   const { refresh: refreshCampaigns } = useCampaigns();
+  const pageRef = useRef<HTMLDivElement>(null);
+  const compactNavigationRef = useRef<HTMLDetailsElement>(null);
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,62 +100,47 @@ export default function CampaignSettingsPage() {
 
   const settingsReady = mutationsEnabledForRoute(campaign, id, loading);
 
-  // Deep-link support (#343 / #751): the AI-DM onboarding checklist links to specific
-  // controls by hash (e.g. #ai-dm-provider, #ai-dm-budget). React Router doesn't
-  // auto-scroll to a hash, and the target may appear only after AiDmCard finishes its
-  // own async seat load — retry on a short interval until the anchor exists (or 10s).
+  // Give the default section a canonical URL without adding a history entry. Section
+  // links themselves push normal entries so Back/Forward traverses the settings IA.
   useEffect(() => {
-    if (!campaign?.id || !location.hash) return;
-    const hashId = decodeLocationHashId(location.hash);
-    let frame: number | null = null;
-    let retryTimer: number | null = null;
-    let cancelled = false;
-    let delay = 100;
+    if (!campaign || location.hash) return;
+    navigate(`${location.pathname}${location.search}#campaign`, { replace: true });
+  }, [campaign, location.hash, location.pathname, location.search, navigate]);
 
-    const clearRetry = () => {
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
-        retryTimer = null;
+  // Deep-link support (#343 / #751 / #866): onboarding and section nav link to specific
+  // controls by hash. React Router doesn't focus or reliably scroll hash targets, and
+  // AI subsections render after async seat load — observe the page until the target exists.
+  useEffect(() => {
+    if (!campaign?.id || !settingsSectionForHash(location.hash)) return;
+    const targetId = settingsHashTarget(location.hash);
+    if (!targetId) return;
+
+    let observer: MutationObserver | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const stopObserving = () => {
+      observer?.disconnect();
+      observer = undefined;
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+        timeoutId = undefined;
       }
     };
-
-    const scrollToAnchor = (): boolean => {
-      const el = document.getElementById(hashId);
-      if (!el) return false;
-      clearRetry();
-      if (frame !== null) window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-      });
+    const focusTarget = () => {
+      const target = document.getElementById(targetId);
+      if (!(target instanceof HTMLElement)) return false;
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
+      stopObserving();
       return true;
     };
 
-    const scheduleRetry = (startedAt: number) => {
-      clearRetry();
-      if (cancelled) return;
-      if (Date.now() - startedAt >= 10_000) return;
-      retryTimer = window.setTimeout(() => {
-        retryTimer = null;
-        if (cancelled) return;
-        if (scrollToAnchor()) return;
-        delay = Math.min(delay * 2, 250);
-        scheduleRetry(startedAt);
-      }, delay);
-    };
-
-    if (!scrollToAnchor()) {
-      // Bounded backoff polling avoids a subtree MutationObserver on #root.
-      const startedAt = Date.now();
-      scheduleRetry(startedAt);
+    if (!focusTarget() && pageRef.current) {
+      observer = new MutationObserver(focusTarget);
+      observer.observe(pageRef.current, { childList: true, subtree: true });
+      timeoutId = setTimeout(stopObserving, 10_000);
     }
-
-    return () => {
-      cancelled = true;
-      clearRetry();
-      if (frame !== null) window.cancelAnimationFrame(frame);
-    };
-  }, [campaign?.id, location.hash]);
+    return stopObserving;
+  }, [campaign?.id, location.hash, location.key]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -168,73 +163,140 @@ export default function CampaignSettingsPage() {
     );
   }
 
+  const selectedSection = settingsSectionForHash(location.hash) ?? (!location.hash ? 'campaign' : null);
+  const selectedDescriptor = SETTINGS_SECTIONS.find((section) => section.id === selectedSection);
+
   return (
-    <div className="w-full mx-auto px-5 pt-7 pb-12 flex flex-col gap-3.5" style={{ maxWidth: 640 }}>
-      <PageTitle>Campaign settings</PageTitle>
+    <div ref={pageRef} className="settings-page">
+      <PageTitle>{t('settings.title')}</PageTitle>
 
       {campaign && settingsReady ? (
-        <>
-          {error && <ErrorNote message={error} onRetry={load} />}
-          <GeneralCard
-            key={`general-${campaign.id}`}
-            campaignId={id}
-            campaign={campaign}
-            onSaved={(c) => {
-              setCampaign(c);
-              void refreshCampaigns();
-            }}
-          />
-          <StatusCard
-            key={`status-${campaign.id}`}
-            campaignId={id}
-            campaign={campaign}
-            onSaved={(c) => {
-              setCampaign(c);
-              void refreshCampaigns();
-            }}
-          />
-          <PublicRecapSharingCard
-            key={`recap-${campaign.id}`}
-            campaign={campaign}
-            onChanged={async () => {
-              await load();
-              await refreshCampaigns();
-            }}
-          />
-          <PublicInvitesCard
-            key={`invites-${campaign.id}`}
-            campaign={campaign}
-            onChanged={async () => {
-              await load();
-              await refreshCampaigns();
-            }}
-          />
-          <RuleSystemCard
-            key={`rules-${campaign.id}`}
-            campaignId={id}
-            campaign={campaign}
-            isAdmin={isAdmin}
-            onSaved={(c) => setCampaign(c)}
-          />
-          <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
-          <ExportCard key={`export-${campaign.id}`} campaignId={id} />
-          <CloneCard
-            key={`clone-${campaign.id}`}
-            campaign={campaign}
-            onCloned={(c) => {
-              void refreshCampaigns();
-              navigate(`/c/${c.id}`);
-            }}
-          />
-          <DangerZoneCard
-            key={`danger-${campaign.id}`}
-            campaign={campaign}
-            onDeleted={() => {
-              void refreshCampaigns();
-              navigate('/');
-            }}
-          />
-        </>
+        <div className="settings-page__layout">
+          <aside className="settings-side-nav">
+            <SettingsNavigation
+              selectedSection={selectedSection}
+              currentUrl={`${location.pathname}${location.search}`}
+            />
+          </aside>
+
+          <div className="settings-page__content">
+            <details ref={compactNavigationRef} className="settings-compact-nav">
+              <summary>
+                {t('settings.jumpTo')}: {selectedDescriptor
+                  ? t(`${selectedDescriptor.translationKey}.label`)
+                  : t('settings.navigationHeading')}
+              </summary>
+              <SettingsNavigation
+                selectedSection={selectedSection}
+                currentUrl={`${location.pathname}${location.search}`}
+                onNavigate={() => {
+                  if (compactNavigationRef.current) compactNavigationRef.current.open = false;
+                }}
+              />
+            </details>
+
+            {error && <ErrorNote message={error} onRetry={load} />}
+
+            <SettingsCategory
+              id="campaign"
+              selected={selectedSection === 'campaign'}
+              title={t('settings.categories.campaign.label')}
+              description={t('settings.categories.campaign.description')}
+            >
+              <GeneralCard
+                key={`general-${campaign.id}`}
+                campaignId={id}
+                campaign={campaign}
+                onSaved={(c) => {
+                  setCampaign(c);
+                  void refreshCampaigns();
+                }}
+              />
+              <PublicRecapSharingCard
+                key={`recap-${campaign.id}`}
+                campaign={campaign}
+                onChanged={async () => {
+                  await load();
+                  await refreshCampaigns();
+                }}
+              />
+              <PublicInvitesCard
+                key={`invites-${campaign.id}`}
+                campaign={campaign}
+                onChanged={async () => {
+                  await load();
+                  await refreshCampaigns();
+                }}
+              />
+            </SettingsCategory>
+
+            <SettingsCategory
+              id="gameplay-rules"
+              selected={selectedSection === 'gameplay-rules'}
+              title={t('settings.categories.gameplayRules.label')}
+              description={t('settings.categories.gameplayRules.description')}
+            >
+              <RuleSystemCard
+                key={`rules-${campaign.id}`}
+                campaignId={id}
+                campaign={campaign}
+                isAdmin={isAdmin}
+                onSaved={(c) => setCampaign(c)}
+              />
+            </SettingsCategory>
+
+            <SettingsCategory
+              id="ai"
+              selected={selectedSection === 'ai'}
+              title={t('settings.categories.ai.label')}
+              description={t('settings.categories.ai.description')}
+            >
+              <AiDmCard key={`aidm-${campaign.id}`} campaignId={id} />
+            </SettingsCategory>
+
+            <SettingsCategory
+              id="data"
+              selected={selectedSection === 'data'}
+              title={t('settings.categories.data.label')}
+              description={t('settings.categories.data.description')}
+            >
+              <ExportCard key={`export-${campaign.id}`} campaignId={id} />
+              <CloneCard
+                key={`clone-${campaign.id}`}
+                campaign={campaign}
+                onCloned={(c) => {
+                  void refreshCampaigns();
+                  navigate(`/c/${c.id}`);
+                }}
+              />
+            </SettingsCategory>
+
+            <SettingsCategory
+              id="lifecycle"
+              selected={selectedSection === 'lifecycle'}
+              title={t('settings.categories.lifecycle.label')}
+              description={t('settings.categories.lifecycle.description')}
+            >
+              <StatusCard
+                key={`status-${campaign.id}`}
+                campaignId={id}
+                campaign={campaign}
+                onSaved={(c) => {
+                  setCampaign(c);
+                  void refreshCampaigns();
+                }}
+              />
+              <DangerZoneCard
+                key={`danger-${campaign.id}`}
+                campaign={campaign}
+                onDeleted={() => {
+                  void refreshCampaigns();
+                  navigate('/');
+                }}
+              />
+            </SettingsCategory>
+          </div>
+        </div>
       ) : error && !campaign ? (
         <ErrorNote message={error} onRetry={load} />
       ) : (
@@ -243,6 +305,73 @@ export default function CampaignSettingsPage() {
         </Card>
       )}
     </div>
+  );
+}
+
+function SettingsNavigation({
+  selectedSection,
+  currentUrl,
+  onNavigate,
+}: {
+  selectedSection: SettingsSectionId | null;
+  currentUrl: string;
+  onNavigate?: () => void;
+}) {
+  const { t } = useTranslation();
+  const headingId = onNavigate ? undefined : 'settings-navigation-heading';
+
+  return (
+    <>
+      {headingId && <h2 id={headingId} className="sr-only">{t('settings.navigationHeading')}</h2>}
+      <nav
+        className="settings-nav"
+        aria-label={headingId ? undefined : t('settings.navigationLabel')}
+        aria-labelledby={headingId}
+      >
+        {SETTINGS_SECTIONS.map((section) => (
+          <Link
+            key={section.id}
+            className="settings-nav__link"
+            to={`${currentUrl}#${section.id}`}
+            aria-current={selectedSection === section.id ? 'location' : undefined}
+            onClick={onNavigate}
+          >
+            {t(`${section.translationKey}.label`)}
+          </Link>
+        ))}
+      </nav>
+    </>
+  );
+}
+
+function SettingsCategory({
+  id,
+  selected,
+  title,
+  description,
+  children,
+}: {
+  id: SettingsSectionId;
+  selected: boolean;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  const headingId = `settings-${id}-heading`;
+  return (
+    <section
+      id={id}
+      className="settings-category settings-anchor"
+      data-selected={selected}
+      aria-labelledby={headingId}
+      tabIndex={-1}
+    >
+      <header className="settings-category__header">
+        <h2 id={headingId} className="settings-category__title">{title}</h2>
+        <p className="settings-category__description">{description}</p>
+      </header>
+      {children}
+    </section>
   );
 }
 
@@ -288,9 +417,15 @@ function PublicRecapSharingCard({ campaign, onChanged }: { campaign: Campaign; o
   }
 
   return (
-    <div className="card elev-sm" data-testid="public-recap-sharing-settings">
+    <div
+      id="public-recap-sharing"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="public-recap-sharing-settings"
+      aria-labelledby="public-recap-sharing-heading"
+    >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="card-kicker" style={{ margin: 0 }}>Public recap sharing</span>
+        <span id="public-recap-sharing-heading" className="card-kicker" style={{ margin: 0 }}>Public recap sharing</span>
         <span className={`tag ${campaign.publicRecapSharingEnabled ? 'tag-accent' : 'tag-neutral'}`}>
           {campaign.publicRecapSharingEnabled ? 'enabled' : 'disabled'}
         </span>
@@ -388,9 +523,15 @@ function PublicInvitesCard({ campaign, onChanged }: { campaign: Campaign; onChan
   const canEnable = campaign.status === 'active' && campaign.deletedAt == null;
 
   return (
-    <div className="card elev-sm" data-testid="public-invites-settings">
+    <div
+      id="public-invites"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="public-invites-settings"
+      aria-labelledby="public-invites-heading"
+    >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="card-kicker" style={{ margin: 0 }}>Public invites</span>
+        <span id="public-invites-heading" className="card-kicker" style={{ margin: 0 }}>Public invites</span>
         <span className={`tag ${campaign.publicInvitesEnabled ? 'tag-accent' : 'tag-neutral'}`}>
           {campaign.publicInvitesEnabled ? 'enabled' : 'suspended'}
         </span>
@@ -500,8 +641,13 @@ function GeneralCard({
   }
 
   return (
-    <div className="card elev-sm">
-      <span className="card-kicker">Campaign</span>
+    <div
+      id="campaign-general"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      aria-labelledby="campaign-general-heading"
+    >
+      <span id="campaign-general-heading" className="card-kicker">Campaign</span>
       <CampaignMetadataFields
         idPrefix="settings"
         name={name}
@@ -747,9 +893,15 @@ function StatusCard({
   const previewVisible = pending && (snapshot.phase === 'preview' || snapshot.phase === 'confirming');
 
   return (
-    <div className="card elev-sm" data-testid="campaign-status-settings">
+    <div
+      id="status"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      data-testid="campaign-status-settings"
+      aria-labelledby="status-heading"
+    >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="card-kicker" style={{ margin: 0 }}>Status &amp; archive</span>
+        <span id="status-heading" className="card-kicker" style={{ margin: 0 }}>Status &amp; archive</span>
         {archived && <span className="tag tag-neutral" style={{ fontSize: 10 }}>read-only</span>}
       </div>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
@@ -993,9 +1145,14 @@ function RuleSystemCard({
     : 'No installed rules — dice, sheets and notes still work; combat uses D&D 5e defaults.';
 
   return (
-    <div className="card elev-sm">
+    <div
+      id="rule-system"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      aria-labelledby="rule-system-heading"
+    >
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="card-kicker" style={{ margin: 0 }}>Rule system</span>
+        <span id="rule-system-heading" className="card-kicker" style={{ margin: 0 }}>Rule system</span>
         {currentPack ? (
           <>
             <span className="tag tag-accent-2" style={{ fontSize: 10 }}>{currentPack.name}</span>
@@ -1101,8 +1258,13 @@ function RuleSystemCard({
 
 function ExportCard({ campaignId }: { campaignId: number }) {
   return (
-    <div className="card elev-sm">
-      <span className="card-kicker">Export campaign</span>
+    <div
+      id="export"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      aria-labelledby="export-heading"
+    >
+      <span id="export-heading" className="card-kicker">Export campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         Take everything with you — no lock-in. Includes quests, NPCs, locations, characters, sessions and notes.
       </p>
@@ -1175,8 +1337,13 @@ function CloneCard({ campaign, onCloned }: { campaign: Campaign; onCloned: (c: C
     : [];
 
   return (
-    <div className="card elev-sm">
-      <span className="card-kicker">Duplicate campaign</span>
+    <div
+      id="duplicate"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      aria-labelledby="duplicate-heading"
+    >
+      <span id="duplicate-heading" className="card-kicker">Duplicate campaign</span>
       <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>
         Reuse your prep. A full copy duplicates world-building and play state — quests, NPCs, locations,
         factions, characters, sessions, notes, encounters, storylines, timeline, session-zero charter,
@@ -1276,8 +1443,15 @@ function DangerZoneCard({ campaign, onDeleted }: { campaign: Campaign; onDeleted
   }
 
   return (
-    <div className="card elev-sm" style={{ borderLeft: '2px solid #f87171' }} data-testid="danger-zone-card">
-      <span className="card-kicker" style={{ color: '#f87171' }}>Danger zone</span>
+    <div
+      id="danger-zone"
+      className="card elev-sm settings-anchor"
+      tabIndex={-1}
+      style={{ borderLeft: '2px solid #f87171' }}
+      data-testid="danger-zone-card"
+      aria-labelledby="danger-zone-heading"
+    >
+      <span id="danger-zone-heading" className="card-kicker" style={{ color: '#f87171' }}>Danger zone</span>
       <div className="flex items-center gap-2">
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>
           Deleting a campaign moves it to the Trash — it's hidden and restorable. Nothing is
