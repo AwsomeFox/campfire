@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuditModule } from '../audit/audit.module';
 import { SettingsModule } from '../settings/settings.module';
 import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
+import { AiDriverModule } from '../ai-driver/ai-driver.module';
 import { AiConsoleService } from './ai-console.service';
 import { AiConsoleController } from './ai-console.controller';
 
@@ -17,7 +18,7 @@ import { AiConsoleController } from './ai-console.controller';
  * (AiDmService); this module surfaces and configures it.
  */
 @Module({
-  imports: [AuditModule, SettingsModule, AiProviderConfigModule],
+  imports: [AuditModule, SettingsModule, AiProviderConfigModule, AiDriverModule],
   controllers: [AiConsoleController],
   providers: [AiConsoleService],
   exports: [AiConsoleService],

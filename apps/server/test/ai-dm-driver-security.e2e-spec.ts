@@ -443,11 +443,11 @@ describe('ai-dm driver — #381 mid-turn control state is not reverted; turns se
     expect(paused).toBe(true);
     // #1057: pause/takeover mid-turn is `frozen`, distinct from mode-switch `aborted`.
     expect(res.body.stopReason).toBe('frozen');
-    // The provider completed a paid call before the freeze was observed. Suppress
-    // narration/tools, but account for that usage while the spend lock is held.
-    expect(res.body.tokensUsed).toBe(11);
+    // #1057 / #558: pause aborts the in-flight stream immediately; usage is metered for the
+    // partial output received before the stop control committed (not the full scripted turn).
+    expect(res.body.tokensUsed).toBeGreaterThan(0);
     const seat = await h.getSeat(campaignId);
-    expect(seat.body.tokensUsed).toBe(11);
+    expect(seat.body.tokensUsed).toBe(res.body.tokensUsed);
     expect(seat.body.turnCount).toBe(1);
 
     // The turn's finally/detect path must NOT stomp the mid-turn pause back to idle/running.

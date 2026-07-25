@@ -61,7 +61,48 @@ export type AiDmStopReason =
   | 'max_steps' // the tool loop hit its iteration ceiling
   | 'aborted' // seat left Driver mid-turn; session was torn down (#1071)
   | 'frozen' // a DM pause or human takeover landed mid-turn; abort early (#1057)
+  | 'cancelled' // kill switch or stop control aborted the in-flight provider request (#558)
   | 'provider_error'; // provider threw / idle-timed-out mid-stream (#1046 / #1063)
+
+/** Abort reason wired into provider AbortSignals when a stop control fires (#558). */
+export const GENERATION_STOP_ABORT = 'generation_stop';
+
+/** Result of re-checking whether an in-flight generation may proceed (#558). */
+export type GenerationAuthority = 'ok' | 'cancelled' | 'aborted' | 'frozen';
+
+/** Map a failed generation-authority check onto the turn stop reason (#558). */
+export function generationAuthorityStopReason(auth: Exclude<GenerationAuthority, 'ok'>): AiDmStopReason {
+  if (auth === 'aborted') return 'aborted';
+  if (auth === 'frozen') return 'frozen';
+  return 'cancelled';
+}
+
+/** Whether a finished turn should emit the ordered `turn.cancelled` SSE before `turn.end` (#558). */
+export function shouldEmitTurnCancelled(stopReason: AiDmStopReason): boolean {
+  return stopReason === 'cancelled' || stopReason === 'frozen';
+}
+
+/**
+ * Link multiple AbortSignals into one composite signal. `cleanup` removes listeners so idle
+ * timers and generation handles do not leak across steps (#558 / #1063).
+ */
+export function linkAbortSignals(...sources: AbortSignal[]): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  for (const s of sources) {
+    if (s.aborted) {
+      controller.abort();
+      break;
+    }
+    s.addEventListener('abort', onAbort);
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      for (const s of sources) s.removeEventListener('abort', onAbort);
+    },
+  };
+}
 
 /** One tool the AI executed this turn (id-only; details are audited, not returned raw). */
 export interface AiDmExecutedTool {
@@ -815,11 +856,20 @@ export function wrapUntrustedPlayerInput(input: string): string {
  * tool (so canon edits become pending proposals a human DM reviews) and rejects any tool
  * call whose `campaignId` argument points at a different campaign than this seat.
  */
+/** In-flight provider generation tracked per campaign (#558). */
+interface ActiveGeneration {
+  controller: AbortController;
+  /** Set when a stop control commits so late tool dispatch is blocked even if the signal races. */
+  stopped: boolean;
+}
+
 @Injectable()
 export class AiDriverService {
   private readonly logger = new Logger(AiDriverService.name);
   /** In-memory per-campaign session state (single-instance deploy, like CampaignEventsService). */
   private readonly sessions = new Map<number, AiDmSessionState>();
+  /** Abort handles for each campaign's active generation (#558). */
+  private readonly activeGenerations = new Map<number, ActiveGeneration>();
   /** Last player input per campaign — replayed by the retry/nudge/flag levers (#314). */
   private readonly lastInputs = new Map<number, string>();
   private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
@@ -862,6 +912,7 @@ export class AiDriverService {
   teardownSession(campaignId: number): AiDmSessionState {
     const existing = this.sessions.get(campaignId);
     if (existing) {
+      this.cancelGeneration(campaignId);
       existing.detached = true;
       // Release the turn slot on the detached object so its finally compare-and-set no-ops,
       // and so any late status reads on the orphaned reference do not look "still running".
@@ -874,6 +925,97 @@ export class AiDriverService {
     return fresh;
   }
 
+  /**
+   * Abort the in-flight provider generation for one campaign (#558). Called by pause, takeover,
+   * passed pause-votes, and mode-switch teardown so the active stream stops immediately.
+   */
+  cancelGeneration(campaignId: number): void {
+    const gen = this.activeGenerations.get(campaignId);
+    if (!gen) return;
+    gen.stopped = true;
+    if (!gen.controller.signal.aborted) {
+      gen.controller.abort(GENERATION_STOP_ABORT);
+    }
+  }
+
+  /** Kill-switch path: abort every active provider generation server-wide (#558). */
+  cancelAllGenerations(): void {
+    for (const campaignId of this.activeGenerations.keys()) {
+      this.cancelGeneration(campaignId);
+    }
+  }
+
+  private beginGeneration(campaignId: number): { signal: AbortSignal; handle: ActiveGeneration } {
+    const handle: ActiveGeneration = { controller: new AbortController(), stopped: false };
+    this.activeGenerations.set(campaignId, handle);
+    return { signal: handle.controller.signal, handle };
+  }
+
+  /** Compare-and-set: an orphaned turn must not erase a newer turn's cancellation handle (#558 / #1071). */
+  private endGeneration(campaignId: number, handle: ActiveGeneration): void {
+    if (this.activeGenerations.get(campaignId) === handle) {
+      this.activeGenerations.delete(campaignId);
+    }
+  }
+
+  /**
+   * Re-check stop authority immediately before a provider step or tool dispatch (#558).
+   * Distinct from the mid-turn freeze guard: the kill switch and the generation abort handle
+   * can fire while `session.state` is still `running`.
+   */
+  private async checkGenerationAuthority(
+    campaignId: number,
+    session: AiDmSessionState,
+    signal: AbortSignal,
+  ): Promise<GenerationAuthority> {
+    if (session.detached) return 'aborted';
+    const gen = this.activeGenerations.get(campaignId);
+    if (gen?.stopped || signal.aborted) {
+      return isFrozen(session) ? 'frozen' : 'cancelled';
+    }
+    if (isFrozen(session)) return 'frozen';
+    if (!(await this.aiDm.isExperimentalEnabled())) return 'cancelled';
+    return 'ok';
+  }
+
+  private emitTurnEnd(
+    campaignId: number,
+    stopReason: AiDmStopReason,
+    narration: string,
+    steps: number,
+    tokensUsed: number,
+    budgetRemaining: number,
+    providerError?: AiProviderError,
+    tokensUsageUnknown = false,
+  ): void {
+    if (stopReason === 'provider_error') {
+      this.stream.emit({
+        type: 'turn.error',
+        campaignId,
+        stopReason: 'provider_error',
+        code: providerError?.kind ?? 'unknown',
+        message: providerError?.message ?? describeStuck('provider_error'),
+        retryable: providerError?.retryable ?? true,
+        steps,
+        tokensUsed,
+        ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+        budgetRemaining,
+      });
+    }
+    if (shouldEmitTurnCancelled(stopReason)) {
+      this.stream.emit({ type: 'turn.cancelled', campaignId, narration, stopReason });
+    }
+    this.stream.emit({
+      type: 'turn.end',
+      campaignId,
+      stopReason,
+      steps,
+      tokensUsed,
+      ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+      budgetRemaining,
+    });
+  }
+
   /** Pause/resume the seat — a paused seat rejects new turns until resumed (explicit stop condition). */
   setPaused(campaignId: number, paused: boolean): AiDmSessionState {
     const session = this.ensureSession(campaignId);
@@ -882,6 +1024,7 @@ export class AiDriverService {
     // from a human who holds it — handback owns that transition).
     if (paused) {
       session.state = 'paused';
+      this.cancelGeneration(campaignId);
     } else if (session.state === 'paused') {
       session.state = session.stuck ? 'awaiting_players' : 'running';
     }
@@ -1129,22 +1272,15 @@ export class AiDriverService {
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
+    const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
     let providerError: AiProviderError | undefined;
     let tokensUsageUnknown = false;
 
     try {
       for (let step = 0; step < maxSteps; step++) {
-        // Mode-switch teardown (#1071) detaches this object while we still hold it — stop
-        // before the next provider call so we cannot interleave with a replacement session.
-        if (session.detached) {
-          stopReason = 'aborted';
-          break;
-        }
-        // Mid-turn freeze (#1057) — a DM pause or granted takeover sets session.state to
-        // 'paused' or 'human_control'. Distinct from `'aborted'` (mode-switch teardown): the
-        // stuck ladder must not park on top of the human's explicit freeze.
-        if (isFrozen(session)) {
-          stopReason = 'frozen';
+        const preAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+        if (preAuth !== 'ok') {
+          stopReason = generationAuthorityStopReason(preAuth);
           break;
         }
         if (budgetRemaining <= 0) {
@@ -1163,29 +1299,19 @@ export class AiDriverService {
           if (currentRemaining <= 0) {
             return { kind: 'budget_exhausted' as const, seat: currentSeat, budgetRemaining: 0 };
           }
-          // Detach (#1071) vs freeze (#1057) must stay distinct — `frozen` keeps the stuck
-          // ladder from parking on top of an explicit human pause/takeover.
-          if (session.detached) {
+          // Detach (#1071) vs freeze (#1057) vs kill (#558) — authority is re-checked under the
+          // spend lock immediately before the provider call.
+          const lockAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (lockAuth !== 'ok') {
             return {
-              kind: 'aborted' as const,
+              kind: 'stopped' as const,
+              reason: lockAuth,
               seat: currentSeat,
               budgetRemaining: currentRemaining,
               text: '',
               metered: null,
             };
           }
-          if (isFrozen(session)) {
-            return {
-              kind: 'frozen' as const,
-              seat: currentSeat,
-              budgetRemaining: currentRemaining,
-              text: '',
-              metered: null,
-            };
-          }
-          // assertRunnable's server-cap check happened before this turn entered
-          // the queue. Repeat it under ownership so a preceding Scribe spend
-          // cannot make that admission stale while the Driver waits.
           try {
             await this.aiDm.assertWithinServerTokenCap();
           } catch {
@@ -1194,7 +1320,7 @@ export class AiDriverService {
 
           const maxTokens = Math.min(perStepCap, currentRemaining);
           steps = stepNumber;
-          const step = await this.streamStep(campaignId, provider, session, {
+          const step = await this.streamStep(campaignId, provider, session, generationSignal, {
             system,
             messages,
             // Issue #564: the executable model derives ONLY from the effective provider
@@ -1226,7 +1352,7 @@ export class AiDriverService {
             };
           }
 
-          const { text, result, aborted } = step;
+          const { text, result, aborted, cancelled } = step;
 
           // Meter this step's REAL usage before releasing the mutex, including
           // a completed/partial stream that was frozen before narration/tool
@@ -1251,8 +1377,19 @@ export class AiDriverService {
             action: 'ai-dm.driver.turn',
             detail: `step ${stepNumber} model=${servedModel || 'default'} +${usage} tokens by ${triggeredBy.id}`,
           });
-          // streamStep sets `aborted` only on mode-switch detach mid-stream (#1071).
-          if (aborted || session.detached) {
+          // streamStep sets `aborted` on mode-switch detach and `cancelled` on stop-control abort (#558).
+          if (aborted || cancelled || session.detached) {
+            const postAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+            if (postAuth !== 'ok') {
+              return {
+                kind: 'stopped' as const,
+                reason: postAuth,
+                seat: metered.seat,
+                budgetRemaining: metered.budgetRemaining,
+                text,
+                metered,
+              };
+            }
             return {
               kind: 'aborted' as const,
               seat: metered.seat,
@@ -1261,10 +1398,11 @@ export class AiDriverService {
               metered,
             };
           }
-          // #1057: re-check after streaming — a pause/takeover can land while we streamed.
-          if (isFrozen(session)) {
+          const postStreamAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+          if (postStreamAuth !== 'ok') {
             return {
-              kind: 'frozen' as const,
+              kind: 'stopped' as const,
+              reason: postStreamAuth,
               seat: metered.seat,
               budgetRemaining: metered.budgetRemaining,
               text,
@@ -1280,19 +1418,19 @@ export class AiDriverService {
           stopReason = 'budget_exhausted';
           break;
         }
+        if (spend.kind === 'stopped') {
+          latestSeat = spend.seat;
+          budgetRemaining = spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = generationAuthorityStopReason(spend.reason);
+          if (spend.text) finalNarration = spend.text;
+          break;
+        }
         if (spend.kind === 'aborted') {
           latestSeat = spend.seat;
           budgetRemaining = spend.budgetRemaining;
           totalTokens += spend.metered?.tokensUsed ?? 0;
           stopReason = 'aborted';
-          if (spend.text) finalNarration = spend.text;
-          break;
-        }
-        if (spend.kind === 'frozen') {
-          latestSeat = spend.seat;
-          budgetRemaining = spend.budgetRemaining;
-          totalTokens += spend.metered?.tokensUsed ?? 0;
-          stopReason = 'frozen';
           if (spend.text) finalNarration = spend.text;
           break;
         }
@@ -1321,13 +1459,9 @@ export class AiDriverService {
         budgetRemaining = metered.budgetRemaining;
         latestSeat = metered.seat;
 
-        if (session.detached) {
-          stopReason = 'aborted';
-          if (text) finalNarration = text;
-          break;
-        }
-        if (isFrozen(session)) {
-          stopReason = 'frozen';
+        const postStepAuth = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+        if (postStepAuth !== 'ok') {
+          stopReason = generationAuthorityStopReason(postStepAuth);
           if (text) finalNarration = text;
           break;
         }
@@ -1345,9 +1479,10 @@ export class AiDriverService {
 
         // Feed the assistant's tool-call turn back, then execute each call and append its result.
         messages.push({ role: 'assistant', content: text || undefined, toolCalls });
-        const { toolErrored } = await this.executeToolCalls(
+        const { toolErrored, authorityStop } = await this.executeToolCalls(
           campaignId,
           session,
+          generationSignal,
           actor,
           triggeredBy,
           seatToolset,
@@ -1356,13 +1491,8 @@ export class AiDriverService {
           messages,
           executed,
         );
-        if (session.detached) {
-          stopReason = 'aborted';
-          break;
-        }
-        // #1057: re-check after tool execution — a pause/takeover can land between steps.
-        if (isFrozen(session)) {
-          stopReason = 'frozen';
+        if (authorityStop) {
+          stopReason = generationAuthorityStopReason(authorityStop);
           break;
         }
         if (toolErrored) {
@@ -1391,6 +1521,7 @@ export class AiDriverService {
         detail: `${detail} (triggered by ${triggeredBy.id})`,
       });
     } finally {
+      this.endGeneration(campaignId, generationHandle);
       // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
       // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and
@@ -1408,7 +1539,7 @@ export class AiDriverService {
     // Detached mid-turn: skip stuck detection (would mutate/emit against a dead object) and
     // just signal turn.end so open stream clients close the orphaned bubble cleanly.
     if (session.detached) {
-      this.stream.emit({ type: 'turn.end', campaignId, stopReason: 'aborted', steps, tokensUsed: totalTokens, budgetRemaining });
+      this.emitTurnEnd(campaignId, 'aborted', finalNarration, steps, totalTokens, budgetRemaining);
       return {
         narration: finalNarration,
         stopReason: 'aborted',
@@ -1430,30 +1561,7 @@ export class AiDriverService {
       triggeredBy,
     });
 
-    if (stopReason === 'provider_error') {
-      this.stream.emit({
-        type: 'turn.error',
-        campaignId,
-        stopReason: 'provider_error',
-        code: providerError?.kind ?? 'unknown',
-        message: providerError?.message ?? describeStuck('provider_error'),
-        retryable: providerError?.retryable ?? true,
-        steps,
-        tokensUsed: totalTokens,
-        ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
-        budgetRemaining,
-      });
-    }
-
-    this.stream.emit({
-      type: 'turn.end',
-      campaignId,
-      stopReason,
-      steps,
-      tokensUsed: totalTokens,
-      ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
-      budgetRemaining,
-    });
+    this.emitTurnEnd(campaignId, stopReason, finalNarration, steps, totalTokens, budgetRemaining, providerError, tokensUsageUnknown);
 
     this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
 
@@ -1515,9 +1623,10 @@ export class AiDriverService {
     campaignId: number,
     provider: AiProvider,
     session: AiDmSessionState,
+    generationSignal: AbortSignal,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
   ): Promise<
-    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean }
+    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean; cancelled: boolean }
     | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError }
   > {
     let text = '';
@@ -1525,7 +1634,9 @@ export class AiDriverService {
     let streamUsage: AiUsage | undefined;
     const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
-    const ac = new AbortController();
+    let cancelled = false;
+    const idleAc = new AbortController();
+    const linked = linkAbortSignals(generationSignal, idleAc.signal);
     const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const clearIdle = () => {
@@ -1538,7 +1649,7 @@ export class AiDriverService {
       clearIdle();
       if (idleMs <= 0) return;
       idleTimer = setTimeout(() => {
-        ac.abort(
+        idleAc.abort(
           new AiProviderError('timeout', `AI provider stream idle for ${idleMs}ms`, {
             provider: provider.name,
           }),
@@ -1596,13 +1707,17 @@ export class AiDriverService {
           tools: req.tools,
           toolChoice: req.tools.length > 0 ? 'auto' : undefined,
         },
-        { signal: ac.signal },
+        { signal: linked.signal },
       )) {
         // Mode-switch teardown detached this session mid-stream (#1071): stop forwarding
         // deltas so an orphaned turn cannot splice narration onto the live SSE channel.
         if (session.detached) {
           aborted = true;
-          ac.abort();
+          idleAc.abort();
+          break;
+        }
+        if (generationSignal.aborted) {
+          cancelled = true;
           break;
         }
         armIdle(); // reset idle watchdog on every chunk (#1063)
@@ -1622,18 +1737,24 @@ export class AiDriverService {
         }
       }
     } catch (err) {
-      const partial = partialResult();
-      if (err instanceof AiProviderError) {
-        return { ok: false, text, result: partial, error: err };
+      // Stop-control abort (#558) is intentional — surface as cancelled, not provider_error.
+      if (generationSignal.aborted) {
+        cancelled = true;
+      } else {
+        const partial = partialResult();
+        if (err instanceof AiProviderError) {
+          return { ok: false, text, result: partial, error: err };
+        }
+        throw err;
       }
-      throw err;
     } finally {
+      linked.cleanup();
       // Idle timer must not outlive the step — clear only when the stream completes or aborts.
       clearIdle();
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { ok: true, text, result, aborted };
+    return { ok: true, text, result, aborted, cancelled };
   }
 
   /**
@@ -1648,6 +1769,7 @@ export class AiDriverService {
   private async executeToolCalls(
     campaignId: number,
     session: AiDmSessionState,
+    generationSignal: AbortSignal,
     actor: string,
     triggeredBy: RequestUser,
     seatToolset: DriverToolset,
@@ -1655,9 +1777,14 @@ export class AiDriverService {
     toolCalls: AiToolCall[],
     messages: AiMessage[],
     executed: AiDmExecutedTool[],
-  ): Promise<{ toolErrored: boolean }> {
+  ): Promise<{ toolErrored: boolean; authorityStop: Exclude<GenerationAuthority, 'ok'> | null }> {
     let toolErrored = false;
     for (const call of toolCalls) {
+      const authority = await this.checkGenerationAuthority(campaignId, session, generationSignal);
+      if (authority !== 'ok') {
+        return { toolErrored: false, authorityStop: authority };
+      }
+
       const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
 
       // (0) Tool-scoping (#317/#378): the seat physically cannot call destructive/admin/economy
@@ -1902,7 +2029,7 @@ export class AiDriverService {
 
       if (res.isError) toolErrored = true;
     }
-    return { toolErrored };
+    return { toolErrored, authorityStop: null };
   }
 
   /**
@@ -2360,6 +2487,7 @@ export class AiDriverService {
       } else if (vote.kind === 'pause') {
         session.status = 'paused';
         session.state = 'paused';
+        this.cancelGeneration(campaignId);
       } else {
         // override: discard the disputed ruling and let play resume.
         session.stuck = null;
@@ -2455,6 +2583,7 @@ export class AiDriverService {
     session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
     session.status = 'paused'; // freeze the AI seat while a human holds it
     session.state = 'human_control';
+    this.cancelGeneration(campaignId);
     session.stuck = null; // human control supersedes the stuck ladder (#560)
     session.takeoverRequestedBy = null;
     session.levers = this.leversFor(session);
@@ -2839,9 +2968,9 @@ export function classifyStuck(ctx: {
 }): AiDmStuckReason | null {
   // Mode-switch teardown is not a stuck condition — the seat was intentionally reset.
   if (ctx.stopReason === 'aborted') return null;
-  // #1057: a freeze (DM pause/takeover mid-turn) is not a stuck condition — the human
-  // deliberately froze the seat, so parking the ladder would conflict with their action.
+  // #1057 / #558: a deliberate freeze or kill-switch cancel is not a stuck condition.
   if (ctx.stopReason === 'frozen') return null;
+  if (ctx.stopReason === 'cancelled') return null;
   if (ctx.stopReason === 'tool_error') return 'tool_error';
   if (ctx.stopReason === 'budget_exhausted') return 'budget_exhausted';
   if (ctx.stopReason === 'max_steps') return 'max_steps';
