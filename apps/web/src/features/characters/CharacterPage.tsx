@@ -138,7 +138,6 @@ export default function CharacterPage() {
   const { tab, setTab, tabRefs, onTabKeyDown } = useCharacterSheetTab({
     campaignId: cid,
     characterId: id,
-    liveEncounter: liveEncounter != null,
   });
 
   const load = useCallback(async () => {
