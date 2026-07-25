@@ -3948,7 +3948,64 @@ function CombatantRow({
               onRoll={onRollDeathSave}
             />
           )}
-        {combatant.conditions.length > 0 && (
+        {(combatant.conditionInstances?.length ?? 0) > 0 ? (
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+            {combatant.conditionInstances!.map((inst) => {
+              const details = [
+                inst.source ? `Source: ${inst.source}` : '',
+                inst.notes ? `Notes: ${inst.notes}` : '',
+                inst.saveAbility ? `Save: DC ${inst.saveDc ?? '?'} ${inst.saveAbility}` : '',
+              ].filter(Boolean).join(' · ');
+              return (
+                <span
+                  key={inst.id || inst.name}
+                  className="tag tag-outline"
+                  title={details || inst.name}
+                  style={{ gap: 6, display: 'inline-flex', alignItems: 'center' }}
+                >
+                  <span>
+                    {inst.name}
+                    {inst.stacks > 1 && <strong style={{ marginLeft: 3 }}>×{inst.stacks}</strong>}
+                    {inst.isConcentration && (
+                      <span role="img" aria-label="Concentration linked" title="Concentration linked" style={{ marginLeft: 4 }}>
+                        🔮
+                      </span>
+                    )}
+                    {inst.roundsRemaining != null && (
+                      <span className="tag tag-neutral text-[10px]" style={{ marginLeft: 4, padding: '0 4px' }}>
+                        {inst.roundsRemaining}r
+                      </span>
+                    )}
+                    {inst.saveAbility && (
+                      <span className="text-[10px] text-muted" style={{ marginLeft: 4 }}>
+                        [{inst.saveAbility}{inst.saveDc != null ? ` ${inst.saveDc}` : ''}]
+                      </span>
+                    )}
+                  </span>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${inst.name}`}
+                      onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
+                      disabled={busy}
+                      style={{
+                        cursor: busy ? 'default' : 'pointer',
+                        opacity: 0.7,
+                        background: 'transparent',
+                        border: 0,
+                        padding: 0,
+                        font: 'inherit',
+                        color: 'inherit',
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        ) : combatant.conditions.length > 0 ? (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditions.map((cond) => (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
@@ -3975,7 +4032,7 @@ function CombatantRow({
               </span>
             ))}
           </div>
-        )}
+        ) : null}
         {canEdit && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
