@@ -88,11 +88,11 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     ]);
   });
 
-  it('drafts a story beat (filed as a quest) and a recap (filed as a session)', async () => {
-    h.script({ text: JSON.stringify({ title: 'The Missing Caravan', summary: 'A merchant train vanished on the moor road.' }) });
+  it('drafts a story beat (filed as story_beat) and a recap (filed as a session)', async () => {
+    h.script({ text: JSON.stringify({ title: 'The Missing Caravan', body: 'A merchant train vanished on the moor road.' }) });
     const beat = await draft({ target: 'beat', prompt: 'the next hook' });
     expect(beat.status).toBe(201);
-    expect(beat.body.entityType).toBe('quest');
+    expect(beat.body.entityType).toBe('story_beat');
     expect(beat.body.proposals[0].payload.title).toBe('The Missing Caravan');
     expect(beat.body.proposals[0].payload.body).toContain('merchant train');
 
@@ -101,6 +101,45 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(recap.status).toBe(201);
     expect(recap.body.entityType).toBe('session');
     expect(recap.body.proposals[0].payload.recap).toContain('crossed the moor');
+  });
+
+  it('approving a drafted story beat creates it under the target arc', async () => {
+    const arc = await request(h.server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Main arc' });
+    expect(arc.status).toBe(201);
+    const arcId = arc.body.id;
+
+    h.script({ text: JSON.stringify({ title: 'Gate confrontation', body: 'The party reaches the city gate at dusk.' }) });
+    const drafted = await draft({ target: 'beat', prompt: 'the next beat', arcId });
+    expect(drafted.status).toBe(201);
+    expect(drafted.body.entityType).toBe('story_beat');
+    expect(drafted.body.proposals[0].payload.arcId).toBe(arcId);
+
+    const before = await request(h.server).get(`/api/v1/arcs/${arcId}`).set(dm);
+    expect(before.body.beats).toHaveLength(0);
+
+    const approve = await request(h.server).post(`/api/v1/proposals/${drafted.body.proposalIds[0]}/approve`).set(dm).send({});
+    expect(approve.status).toBe(201);
+    expect(approve.body.status).toBe('approved');
+    expect(approve.body.entityId).toBeGreaterThan(0);
+
+    const after = await request(h.server).get(`/api/v1/arcs/${arcId}`).set(dm);
+    expect(after.body.beats).toHaveLength(1);
+    expect(after.body.beats[0].title).toBe('Gate confrontation');
+    expect(after.body.beats[0].body).toContain('city gate');
+  });
+
+  it('rejects beat drafts that target an arc from another campaign', async () => {
+    const otherCampaignId = await h.createCampaign('Other Campaign');
+    await h.configureSeat(otherCampaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const otherArc = await request(h.server)
+      .post(`/api/v1/campaigns/${otherCampaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Foreign arc' });
+    expect(otherArc.status).toBe(201);
+
+    const res = await draft({ target: 'beat', prompt: 'the next beat', arcId: otherArc.body.id });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('does not belong to this campaign');
   });
 
   it('drafts an encounter (reusing #304) — proposal carries seeded params; approve creates it', async () => {

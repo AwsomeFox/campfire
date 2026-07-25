@@ -127,6 +127,39 @@ export function firstInvalidRecapControlId(
   return null;
 }
 
+/** Recap editor draft snapshot for protected-form persistence (issue #641). */
+export type RecapEditorDraft = {
+  title: string;
+  playedAt: string;
+  recap: string;
+};
+
+export const EMPTY_RECAP_EDITOR_DRAFT: RecapEditorDraft = { title: '', playedAt: '', recap: '' };
+
+export function recapEditorDraftFromSession(input: {
+  title: string;
+  playedAt: string | null;
+  recap: string;
+}): RecapEditorDraft {
+  return {
+    title: input.title,
+    playedAt: input.playedAt ? input.playedAt.slice(0, 10) : '',
+    recap: input.recap,
+  };
+}
+
+export function isRecapEditorDirty(draft: RecapEditorDraft, baseline: RecapEditorDraft): boolean {
+  return !recapEditorDraftsEqual(draft, baseline);
+}
+
+export function recapEditorDraftsEqual(a: RecapEditorDraft, b: RecapEditorDraft): boolean {
+  return a.title === b.title && a.playedAt === b.playedAt && a.recap === b.recap;
+}
+
+export function isNewRecapDraftMeaningful(draft: RecapEditorDraft): boolean {
+  return draft.title.trim() !== '' || draft.recap.trim() !== '' || draft.playedAt.trim() !== '';
+}
+
 /** Build aria-describedby from help + field error + optional form error. */
 export function recapDescribedBy(
   ids: RecapFieldIds,
