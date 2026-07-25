@@ -31,6 +31,7 @@ import type {
   EncounterDifficulty,
   EncounterEvent,
   EncounterWithCombatants,
+  TurnWorkspace as TurnWorkspaceData,
   FogState,
   GenerateMapParams,
   GeneratedMapResult,
@@ -1130,7 +1131,21 @@ export default function RunSessionPage() {
       api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSettled: () => invalidateEncounter(queryClient, eid),
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  const endTurn = useMutation({
+    mutationFn: (expectedCurrentCombatantId: number) =>
+      api.post(`${API}/encounters/${eid}/end-turn`, { expectedCurrentCombatantId }),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
   });
 
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
@@ -1464,6 +1479,19 @@ export default function RunSessionPage() {
     () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
     [encounter],
   );
+
+  const { data: turnWorkspace } = useQuery({
+    queryKey: [...queryKeys.encounterTurn(eid), encounter?.round ?? 0, currentCombatantId ?? 0],
+    queryFn: () => api.get<TurnWorkspaceData>(`${API}/encounters/${eid}/turn`),
+    enabled: encounter?.status === 'running',
+    staleTime: 2_000,
+  });
+
+  const currentCombatant = useMemo(
+    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
+    [encounter?.combatants, currentCombatantId],
+  );
+
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
     if (el) combatantRowRefs.current.set(combatantId, el);
@@ -1864,6 +1892,7 @@ export default function RunSessionPage() {
           currentCombatantId={currentCombatantId ?? null}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
+          currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
@@ -2039,6 +2068,21 @@ export default function RunSessionPage() {
               onReleaseLegendary={
                 canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
                   ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
+              canEndMyTurn={
+                c.id === currentCombatantId &&
+                turnWorkspace?.canEndTurn === true &&
+                turnWorkspace.isYourTurn === true
+              }
+              onEndMyTurn={
+                c.id === currentCombatantId
+                  ? () => endTurn.mutate(c.id)
+                  : undefined
+              }
+              onPatchTurnState={
+                canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
+                  ? (patch) => patchCombatantTurnState(c.id, patch)
                   : undefined
               }
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
@@ -4496,6 +4540,9 @@ function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
+  canEndMyTurn,
+  onEndMyTurn,
+  onPatchTurnState,
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
@@ -4546,6 +4593,11 @@ function CombatantRow({
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
+  /** Issue #487: player may end their own turn from the active combatant row. */
+  canEndMyTurn?: boolean;
+  onEndMyTurn?: () => void;
+  /** Issue #487: delay / ready action controls on the current turn. */
+  onPatchTurnState?: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -4553,10 +4605,14 @@ function CombatantRow({
   const [nameDraft, setNameDraft] = useState(combatant.name);
   const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
   const [tempDraft, setTempDraft] = useState('');
+  const [readiedDraft, setReadiedDraft] = useState(combatant.turnState?.readied ?? '');
   useEffect(() => {
     setNameDraft(combatant.name);
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
   }, [combatant.name, combatant.hpMax]);
+  useEffect(() => {
+    setReadiedDraft(combatant.turnState?.readied ?? '');
+  }, [combatant.turnState?.readied]);
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
@@ -4824,6 +4880,20 @@ function CombatantRow({
                 </span>
               )
             )}
+            {combatant.turnState?.delaying && (
+              <span className="tag tag-neutral" data-testid={`delaying-${combatant.id}`} title="Delaying their turn">
+                Delaying
+              </span>
+            )}
+            {combatant.turnState?.readied && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`readied-${combatant.id}`}
+                title={`Readied: ${combatant.turnState.readied}`}
+              >
+                Readied
+              </span>
+            )}
             {canEditIdentity && (
               <button
                 type="button"
@@ -4941,6 +5011,87 @@ function CombatantRow({
             ))}
           </div>
         ) : null}
+        {isCurrentTurn && onPatchTurnState && (
+          <div
+            className="flex gap-2 flex-wrap items-center"
+            style={{ marginTop: 6 }}
+            data-testid={`turn-actions-${combatant.id}`}
+          >
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid={`delay-toggle-${combatant.id}`}
+              onClick={() => onPatchTurnState({ delaying: !combatant.turnState?.delaying })}
+              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+            >
+              {combatant.turnState?.delaying ? 'Resume turn' : 'Delay turn'}
+            </button>
+            <label className="sr-only" htmlFor={`readied-${combatant.id}`}>
+              Readied action trigger for {combatant.name}
+            </label>
+            <input
+              id={`readied-${combatant.id}`}
+              type="text"
+              className="input"
+              placeholder="Ready action trigger…"
+              value={readiedDraft}
+              disabled={busy}
+              maxLength={200}
+              onChange={(e) => setReadiedDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const trimmed = readiedDraft.trim();
+                  onPatchTurnState({ readied: trimmed || null });
+                }
+              }}
+              style={{ maxWidth: 220, minHeight: 28, fontSize: 12, padding: '2px 8px' }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid={`readied-set-${combatant.id}`}
+              onClick={() => {
+                const trimmed = readiedDraft.trim();
+                onPatchTurnState({ readied: trimmed || null });
+              }}
+              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+            >
+              Set ready
+            </button>
+            {combatant.turnState?.readied && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                data-testid={`readied-clear-${combatant.id}`}
+                onClick={() => {
+                  setReadiedDraft('');
+                  onPatchTurnState({ readied: null });
+                }}
+                style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+              >
+                Clear ready
+              </button>
+            )}
+          </div>
+        )}
+        {canEndMyTurn && onEndMyTurn && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busy}
+              data-testid={`end-my-turn-${combatant.id}`}
+              onClick={onEndMyTurn}
+              style={{ minHeight: 32, fontSize: 13 }}
+            >
+              End my turn →
+            </button>
+          </div>
+        )}
         {canEdit && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
