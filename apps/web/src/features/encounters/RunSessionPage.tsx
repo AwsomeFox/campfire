@@ -22,13 +22,16 @@ import type {
   AoeShape,
   AoeTemplate,
   Attachment,
+  CampaignLibraryMonster,
   Character,
   Combatant,
   CombatantKind,
+  CombatantStatblock as CombatantStatblockData,
   DifficultyBand,
   EncounterDifficulty,
   EncounterEvent,
   EncounterWithCombatants,
+  TurnWorkspace as TurnWorkspaceData,
   FogState,
   GenerateMapParams,
   GeneratedMapResult,
@@ -41,7 +44,13 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, buildDifficultyExplanation } from '@campfire/schema';
+import {
+  COMBATANT_STATBLOCK_HELP,
+  defaultCombatantStatblock,
+  LAIR_INITIATIVE_COUNT,
+  LEGENDARY_ACTION_SLOT,
+  buildDifficultyExplanation,
+} from '@campfire/schema';
 import {
   FogUndoStack,
   appendFogReveal,
@@ -75,6 +84,8 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
+import { CombatantActionsList } from './CombatantActionsList';
+import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -1138,7 +1149,21 @@ export default function RunSessionPage() {
       api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
     onMutate: () => setActionError(null),
     onError: reportError,
-    onSettled: () => invalidateEncounter(queryClient, eid),
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
+  });
+
+  const endTurn = useMutation({
+    mutationFn: (expectedCurrentCombatantId: number) =>
+      api.post(`${API}/encounters/${eid}/end-turn`, { expectedCurrentCombatantId }),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => {
+      invalidateEncounter(queryClient, eid);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.encounterTurn(eid) });
+    },
   });
 
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
@@ -1472,6 +1497,19 @@ export default function RunSessionPage() {
     () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
     [encounter],
   );
+
+  const { data: turnWorkspace } = useQuery({
+    queryKey: [...queryKeys.encounterTurn(eid), encounter?.round ?? 0, currentCombatantId ?? 0],
+    queryFn: () => api.get<TurnWorkspaceData>(`${API}/encounters/${eid}/turn`),
+    enabled: encounter?.status === 'running',
+    staleTime: 2_000,
+  });
+
+  const currentCombatant = useMemo(
+    () => (currentCombatantId != null ? encounter?.combatants.find((c) => c.id === currentCombatantId) : undefined),
+    [encounter?.combatants, currentCombatantId],
+  );
+
   const combatantRowRefs = useRef(new Map<number, HTMLElement>());
   const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
     if (el) combatantRowRefs.current.set(combatantId, el);
@@ -1872,9 +1910,19 @@ export default function RunSessionPage() {
           currentCombatantId={currentCombatantId ?? null}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
+          currentTurnState={currentCombatant?.turnState}
           actionsDisabled={riskyBlocked}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
+          onUseSuggestedAction={
+            isDm && currentCombatantId != null
+              ? (actionIndex, actionName, spec) => {
+                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
+                  if (!actor || !spec) return;
+                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                }
+              : undefined
+          }
         />
       )}
 
@@ -1981,6 +2029,7 @@ export default function RunSessionPage() {
             <CombatantRow
               key={c.id}
               rowRef={(el) => setCombatantRowRef(c.id, el)}
+              encounterId={eid}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
@@ -2003,6 +2052,11 @@ export default function RunSessionPage() {
                       if (!act?.spec) return;
                       onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
                     }
+                  : undefined
+              }
+              onUseMonsterAction={
+                canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                  ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                   : undefined
               }
               busy={pendingCombatantIds.has(c.id)}
@@ -2032,6 +2086,21 @@ export default function RunSessionPage() {
               onReleaseLegendary={
                 canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
                   ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
+              canEndMyTurn={
+                c.id === currentCombatantId &&
+                turnWorkspace?.canEndTurn === true &&
+                turnWorkspace.isYourTurn === true
+              }
+              onEndMyTurn={
+                c.id === currentCombatantId
+                  ? () => endTurn.mutate(c.id)
+                  : undefined
+              }
+              onPatchTurnState={
+                canEditCombatant(c) && c.id === currentCombatantId && encounter.status === 'running'
+                  ? (patch) => patchCombatantTurnState(c.id, patch)
                   : undefined
               }
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
@@ -4525,6 +4594,7 @@ function ApplyDamageBar({
       className="cf-inset"
       role="group"
       aria-label={`Apply ${amount} rolled ${label}`}
+      data-testid="apply-damage-bar"
       style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px' }}
     >
       <span style={{ fontSize: 12.5 }}>
@@ -4596,6 +4666,7 @@ function ApplyDamageBar({
                 style={{ fontSize: 12, padding: '0 12px' }}
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
                 disabled={applyDisabled}
+                data-testid={`apply-damage-target-${c.id}`}
                 onClick={() => onApply(c.id, delta)}
               >
                 {c.name}{acLabel}
@@ -4652,6 +4723,7 @@ function ApplyDamageBar({
 
 function CombatantRow({
   rowRef,
+  encounterId,
   combatant,
   isCurrentTurn,
   canEdit,
@@ -4666,6 +4738,7 @@ function CombatantRow({
   onRollError,
   onApplyDamage,
   onUseAction,
+  onUseMonsterAction,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -4684,9 +4757,13 @@ function CombatantRow({
   legendaryActions,
   onUseLegendary,
   onReleaseLegendary,
+  canEndMyTurn,
+  onEndMyTurn,
+  onPatchTurnState,
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
+  encounterId: number;
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
@@ -4708,8 +4785,9 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
-  /** Issue #414: open the structured action Use flow for a resolvable action index. */
+  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
+  onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -4732,6 +4810,11 @@ function CombatantRow({
   legendaryActions?: Combatant['legendaryActions'];
   onUseLegendary?: () => void;
   onReleaseLegendary?: () => void;
+  /** Issue #487: player may end their own turn from the active combatant row. */
+  canEndMyTurn?: boolean;
+  onEndMyTurn?: () => void;
+  /** Issue #487: delay / ready action controls on the current turn. */
+  onPatchTurnState?: (patch: Record<string, unknown>) => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -4739,10 +4822,14 @@ function CombatantRow({
   const [nameDraft, setNameDraft] = useState(combatant.name);
   const [hpMaxDraft, setHpMaxDraft] = useState(combatant.hpMax?.toString() ?? '');
   const [tempDraft, setTempDraft] = useState('');
+  const [readiedDraft, setReadiedDraft] = useState(combatant.turnState?.readied ?? '');
   useEffect(() => {
     setNameDraft(combatant.name);
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
   }, [combatant.name, combatant.hpMax]);
+  useEffect(() => {
+    setReadiedDraft(combatant.turnState?.readied ?? '');
+  }, [combatant.turnState?.readied]);
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
@@ -5010,6 +5097,20 @@ function CombatantRow({
                 </span>
               )
             )}
+            {combatant.turnState?.delaying && (
+              <span className="tag tag-neutral" data-testid={`delaying-${combatant.id}`} title="Delaying their turn">
+                Delaying
+              </span>
+            )}
+            {combatant.turnState?.readied && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`readied-${combatant.id}`}
+                title={`Readied: ${combatant.turnState.readied}`}
+              >
+                Readied
+              </span>
+            )}
             {canEditIdentity && (
               <button
                 type="button"
@@ -5127,6 +5228,87 @@ function CombatantRow({
             ))}
           </div>
         ) : null}
+        {isCurrentTurn && onPatchTurnState && (
+          <div
+            className="flex gap-2 flex-wrap items-center"
+            style={{ marginTop: 6 }}
+            data-testid={`turn-actions-${combatant.id}`}
+          >
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid={`delay-toggle-${combatant.id}`}
+              onClick={() => onPatchTurnState({ delaying: !combatant.turnState?.delaying })}
+              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+            >
+              {combatant.turnState?.delaying ? 'Resume turn' : 'Delay turn'}
+            </button>
+            <label className="sr-only" htmlFor={`readied-${combatant.id}`}>
+              Readied action trigger for {combatant.name}
+            </label>
+            <input
+              id={`readied-${combatant.id}`}
+              type="text"
+              className="input"
+              placeholder="Ready action trigger…"
+              value={readiedDraft}
+              disabled={busy}
+              maxLength={200}
+              onChange={(e) => setReadiedDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const trimmed = readiedDraft.trim();
+                  onPatchTurnState({ readied: trimmed || null });
+                }
+              }}
+              style={{ maxWidth: 220, minHeight: 28, fontSize: 12, padding: '2px 8px' }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid={`readied-set-${combatant.id}`}
+              onClick={() => {
+                const trimmed = readiedDraft.trim();
+                onPatchTurnState({ readied: trimmed || null });
+              }}
+              style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+            >
+              Set ready
+            </button>
+            {combatant.turnState?.readied && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                data-testid={`readied-clear-${combatant.id}`}
+                onClick={() => {
+                  setReadiedDraft('');
+                  onPatchTurnState({ readied: null });
+                }}
+                style={{ fontSize: 'var(--type-label)', minHeight: 24, padding: '2px 8px' }}
+              >
+                Clear ready
+              </button>
+            )}
+          </div>
+        )}
+        {canEndMyTurn && onEndMyTurn && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={busy}
+              data-testid={`end-my-turn-${combatant.id}`}
+              onClick={onEndMyTurn}
+              style={{ minHeight: 32, fontSize: 13 }}
+            >
+              End my turn →
+            </button>
+          </div>
+        )}
         {canEdit && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
@@ -5224,6 +5406,23 @@ function CombatantRow({
             stays scannable; lazily fetched on first expand. */}
         {canViewStatblock && combatant.ruleEntryId != null && (
           <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
+        )}
+        {onUseMonsterAction && (
+          <CombatantActionsList
+            encounterId={encounterId}
+            combatantId={combatant.id}
+            enabled
+            onUseAction={onUseMonsterAction}
+          />
+        )}
+        {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
+          <details className="mt-2">
+            <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
+            <CombatantStatblockEditor
+              value={combatant.statblock}
+              onChange={(next) => onPatchCombatant?.({ statblock: next })}
+            />
+          </details>
         )}
         {/* Character card (in-encounter sheet): a player sees their own combat stats —
             abilities, saves, skills, actions, spell slots — without leaving the tracker,
@@ -5659,11 +5858,12 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
 
 // ---------------------------------------------------------------------------
 
-type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
-const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'party', 'npc'];
+type AddTab = 'manual' | 'compendium' | 'library' | 'party' | 'npc';
+const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'library', 'party', 'npc'];
 const ADD_TAB_LABELS: Record<AddTab, string> = {
   manual: 'Manual',
   compendium: 'Compendium',
+  library: 'Library',
   party: 'Party',
   npc: 'NPC',
 };
@@ -5689,6 +5889,7 @@ function AddCombatantPanel({
   const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
     manual: null,
     compendium: null,
+    library: null,
     party: null,
     npc: null,
   });
@@ -5700,6 +5901,10 @@ function AddCombatantPanel({
   const [hpMax, setHpMax] = useState('');
   const [initMod, setInitMod] = useState('');
   const [manualCount, setManualCount] = useState('1');
+  const [manualStatblock, setManualStatblock] = useState<CombatantStatblockData>(() => defaultCombatantStatblock());
+
+  // Campaign library (issue #425)
+  const [library, setLibrary] = useState<CampaignLibraryMonster[]>([]);
 
   // Compendium
   const [query, setQuery] = useState('');
@@ -5782,6 +5987,22 @@ function AddCombatantPanel({
   }, [cid]);
 
   useEffect(() => {
+    if (tab !== 'library') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+        if (!cancelled) setLibrary(list);
+      } catch {
+        if (!cancelled) setLibrary([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid, tab]);
+
+  useEffect(() => {
     if ((tab !== 'compendium' && tab !== 'npc') || !debouncedQuery.trim()) {
       setResults([]);
       return;
@@ -5840,12 +6061,55 @@ function AddCombatantPanel({
         hpMax: hpMax ? Math.max(1, Number(hpMax)) : undefined,
         initMod: initMod ? Number(initMod) : undefined,
         count: parseCount(manualCount),
+        statblock: manualStatblock,
       });
       setName('');
       setHpMax('');
       setInitMod('');
       setManualCount('1');
+      setManualStatblock(defaultCombatantStatblock());
       await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addFromLibrary(entry: CampaignLibraryMonster) {
+    setSaving(true);
+    setError(null);
+    try {
+      const resolvedHp = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : 10;
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'monster' as CombatantKind,
+        name: entry.name,
+        libraryMonsterId: entry.id,
+        hpMax: resolvedHp,
+        count: parseCount(manualCount),
+      });
+      await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveManualToLibrary() {
+    if (!name.trim()) {
+      setError('Enter a name before saving to the campaign library.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${cid}/library/monsters`, {
+        name: name.trim(),
+        statblock: manualStatblock,
+      });
+      const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+      setLibrary(list);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
@@ -5979,7 +6243,7 @@ function AddCombatantPanel({
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
       <div
-        className="seg self-start inline-flex"
+        className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
         aria-label="Add combatant"
         data-testid="add-combatant-tabs"
@@ -6026,7 +6290,7 @@ function AddCombatantPanel({
         aria-labelledby="add-combatant-tab-manual"
         tabIndex={0}
         hidden={tab !== 'manual'}
-        className={tab === 'manual' ? '' : 'hidden'}
+        className={tab === 'manual' ? 'space-y-3' : 'hidden'}
       >
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
@@ -6048,7 +6312,45 @@ function AddCombatantPanel({
           <Btn type="submit" disabled={saving || !name.trim()}>
             {saving ? 'Adding…' : 'Add'}
           </Btn>
+          <Btn type="button" ghost disabled={saving || !name.trim()} onClick={() => void saveManualToLibrary()}>
+            Save to library
+          </Btn>
         </form>
+        <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
+          {COMBATANT_STATBLOCK_HELP.library}
+        </p>
+        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} />
+      </div>
+
+      <div
+        id="add-combatant-panel-library"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-library"
+        tabIndex={0}
+        hidden={tab !== 'library'}
+        className={tab === 'library' ? 'space-y-2' : 'hidden'}
+      >
+        {library.length === 0 ? (
+          <p className="text-muted text-sm">No saved homebrew monsters yet. Build one on the Manual tab and save it to the library.</p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {library.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className="card elev-sm text-left"
+                style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
+                disabled={saving}
+                onClick={() => void addFromLibrary(entry)}
+              >
+                <span className="font-medium">{entry.name}</span>
+                <span className="text-muted text-xs block">
+                  {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div

@@ -341,6 +341,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(MIGRATION_NAMES).toContain('0090_trash_soft_delete_701');
       expect(MIGRATION_NAMES).toContain('0095_campaign_catch_up_cursors');
+      expect(MIGRATION_NAMES).toContain('0101_ai_scribe_session_scope_499');
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_usage_history'").get(),
       ).toBeTruthy();

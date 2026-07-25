@@ -17,6 +17,8 @@ import {
   ActionResolveRequest,
   ActionUndoToken,
   CampaignCreate,
+  CampaignLibraryMonsterCreate,
+  CampaignLibraryMonsterUpdate,
   CampaignUpdate,
   CharacterCreate,
   CharacterUpdate,
@@ -118,6 +120,7 @@ import { ProposalRecordsService } from '../proposals/proposal-records.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
+import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
 import { ActionResolverService } from '../encounters/action-resolver.service';
 import { MapsService } from '../maps/maps.service';
 import { AiMapService } from '../ai-map/ai-map.service';
@@ -383,6 +386,7 @@ export class McpToolsService {
     private readonly proposals: ProposalsService,
     private readonly rules: RulesService,
     private readonly encounters: EncountersService,
+    private readonly campaignLibrary: CampaignLibraryService,
     private readonly maps: MapsService,
     private readonly aiMap: AiMapService,
     private readonly audit: AuditService,
@@ -967,12 +971,21 @@ export class McpToolsService {
         'propose/none writeScope token is refused (this spends the AI budget + files a proposal) — only a direct-write token ' +
         '(or a session) may trigger it. Idempotent: a re-run over unchanged material, or while a scribe recap proposal is ' +
         'still pending, is a no-op that returns the existing proposal. Pass dryRun:true to generate a preview without filing ' +
-        'anything. Returns the recorded job + any filed proposal ids.',
-      { campaignId: CampaignIdArg, dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal'), narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)') },
-      async ({ campaignId, dryRun, narrationLanguage }) => {
+        'anything. Pass force:true to bypass idempotency for an explicit rerun (#499). Optionally pass scheduledSessionId to ' +
+        'scope assembly to one ended scheduled game night. Returns the recorded job + any filed proposal ids + sourcePreview.',
+      {
+        campaignId: CampaignIdArg,
+        dryRun: z.boolean().optional().describe('Generate a preview without filing a proposal'),
+        force: z.boolean().optional().describe('Bypass idempotency and re-draft (#499)'),
+        scheduledSessionId: Id.optional().describe('Scope assembly to one scheduled session window (#499)'),
+        narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635)'),
+      },
+      async ({ campaignId, dryRun, force, scheduledSessionId, narrationLanguage }) => {
         await this.access.requireRole(user, campaignId as number, 'dm');
         return this.scribe.run(campaignId as number, 'on_demand', user, {
           dryRun: (dryRun as boolean | undefined) ?? false,
+          force: (force as boolean | undefined) ?? false,
+          ...(scheduledSessionId !== undefined ? { scheduledSessionId: scheduledSessionId as number } : {}),
           ...(narrationLanguage !== undefined ? { narrationLanguage: narrationLanguage as z.infer<typeof NarrationLanguage> } : {}),
         });
       },
@@ -4052,6 +4065,68 @@ export class McpToolsService {
         const role = await this.access.requireRole(user, row.campaignId, 'dm');
         await this.encounters.remove(encounterId as number, user, role);
         return { ok: true, encounterId };
+      },
+    );
+
+    this.tool(
+      server,
+      'list_campaign_library_monsters',
+      'List homebrew monsters saved in a campaign library for reuse (issue #425).',
+      { campaignId: CampaignIdArg },
+      async ({ campaignId }) => {
+        await this.access.requireMember(user, campaignId as number);
+        return this.campaignLibrary.listForCampaign(campaignId as number);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'create_campaign_library_monster',
+      'DM only: save a homebrew monster statblock to the campaign library (issue #425).',
+      { campaignId: CampaignIdArg, ...CampaignLibraryMonsterCreate.shape },
+      async ({ campaignId, ...fields }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.campaignLibrary.create(campaignId as number, CampaignLibraryMonsterCreate.parse(fields), user, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_campaign_library_monster',
+      'DM only: update a saved campaign-library monster (issue #425).',
+      { libraryMonsterId: Id.describe('Library monster id'), ...CampaignLibraryMonsterUpdate.shape },
+      async ({ libraryMonsterId, ...fields }) => {
+        const row = await this.campaignLibrary.getRowOrThrow(libraryMonsterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.campaignLibrary.update(libraryMonsterId as number, CampaignLibraryMonsterUpdate.parse(fields), user, role, row.campaignId);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'delete_campaign_library_monster',
+      'DM only: delete a saved campaign-library monster (issue #425).',
+      { libraryMonsterId: Id.describe('Library monster id') },
+      async ({ libraryMonsterId }) => {
+        const row = await this.campaignLibrary.getRowOrThrow(libraryMonsterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        await this.campaignLibrary.remove(libraryMonsterId as number, user, role, row.campaignId);
+        return { ok: true, libraryMonsterId };
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'clone_campaign_library_monster',
+      'DM only: clone a campaign-library monster under a new name (issue #425).',
+      { campaignId: CampaignIdArg, libraryMonsterId: Id.describe('Source library monster id'), name: z.string().min(1).max(120) },
+      async ({ campaignId, libraryMonsterId, name }) => {
+        const role = await this.access.requireRole(user, campaignId as number, 'dm');
+        return this.campaignLibrary.clone(libraryMonsterId as number, name as string, user, role, campaignId as number);
       },
     );
 

@@ -58,14 +58,16 @@ test.describe('encounter dice — apply rolled damage', () => {
       }
       const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
       encounterId = enc.id;
-      const brixiCombatant = (enc.combatants as Array<{ id: number; characterId: number | null }>).find(
-        (c) => c.characterId === characterId,
+      let brixiCombatantId: number | null = (
+        (enc.combatants as Array<{ id: number; characterId: number | null }>).find((c) => c.characterId === characterId)?.id ?? null
       );
-      if (!brixiCombatant) {
+      if (brixiCombatantId == null) {
         const addRes = await dm.post(`/api/v1/encounters/${enc.id}/combatants`, {
           data: { kind: 'character', characterId },
         });
         expect(addRes.ok(), `add Brixi combatant: ${await addRes.text()}`).toBeTruthy();
+        const added = (await addRes.json()) as { id: number };
+        brixiCombatantId = added.id;
       }
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
       const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
@@ -86,15 +88,16 @@ test.describe('encounter dice — apply rolled damage', () => {
       await expect(rollToast.getByTestId('roll-result-apply')).toBeVisible();
       await rollToast.getByTestId('roll-result-apply').click();
 
-      const applyBar = page.getByRole('group', { name: /rolled/i });
+      const applyBar = page.getByTestId('apply-damage-bar');
       await expect(applyBar).toBeVisible();
 
       // A player may only apply to combatants they control — their own character, not the monster.
       await expect(applyBar.getByRole('button', { name: 'Straw Dummy' })).toHaveCount(0);
-      await expect(applyBar.getByRole('button', { name: 'Brixi Applybar' })).toBeVisible();
+      const brixiTarget = applyBar.getByTestId(`apply-damage-target-${brixiCombatantId}`);
+      await expect(brixiTarget).toBeVisible();
 
       // Apply → HP drops, the combat log records the damage, and the bar dismisses.
-      await applyBar.getByRole('button', { name: 'Brixi Applybar' }).click();
+      await brixiTarget.click();
       await expect(applyBar).toHaveCount(0);
       // Issue #620/#494: the damage may be attributed to the current-turn combatant (rendered
       // as "X to Brixi Applybar: took N damage") when Brixi didn't win initiative, or

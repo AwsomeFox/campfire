@@ -54,6 +54,7 @@ function combatant(id: number, initiative: number, sortOrder = id): Combatant {
     activeEffects: [],
     conditionInstances: [],
     legendaryActions: null,
+    statblock: null,
   };
 }
 

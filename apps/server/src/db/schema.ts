@@ -1223,6 +1223,8 @@ export const aiScribeConfigs = sqliteTable('ai_scribe_configs', {
   postSession: integer('post_session', { mode: 'boolean' }).notNull().default(false),
   cron: integer('cron', { mode: 'boolean' }).notNull().default(false),
   budgetPerRun: integer('budget_per_run').notNull().default(2000),
+  // Durable cursor for cron/incremental assembly (#499).
+  sourceCursorAt: text('source_cursor_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -1238,6 +1240,9 @@ export const aiScribeJobs = sqliteTable('ai_scribe_jobs', {
   tokensUsed: integer('tokens_used').notNull().default(0),
   provider: text('provider').notNull().default(''),
   detail: text('detail').notNull().default(''),
+  // Post-session exactly-once binding + archived assembly counts (#499).
+  scheduledSessionId: integer('scheduled_session_id'),
+  sourceStats: text('source_stats'),
   createdBy: text('created_by').notNull().default(''),
   createdAt: text('created_at').notNull(),
 });
@@ -1293,6 +1298,19 @@ export const combatants = sqliteTable('combatants', {
   activeEffects: text('active_effects'),
   // Issue #423: structured condition instances as a JSON ConditionInstance[] blob.
   conditionInstances: text('condition_instances'),
+  // Issue #425: inline homebrew statblock JSON (CombatantStatblock) for manual monsters.
+  statblockJson: text('statblock_json'),
+});
+
+/** Campaign-scoped homebrew monster library (issue #425). */
+export const campaignLibraryMonsters = sqliteTable('campaign_library_monsters', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  name: text('name').notNull(),
+  statblockJson: text('statblock_json').notNull(),
+  sourceRuleEntryId: integer('source_rule_entry_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

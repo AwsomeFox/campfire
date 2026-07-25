@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantStatblock, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, combatantActionsFromStatblock, defaultCombatantStatblock, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, expandStatblockActions, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, isResolvableSpec, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -47,6 +47,7 @@ import {
 import type { CombatantHpState, GeneratorCandidate, RosterSlotPlan, RosterTuneOp } from './encounters.logic';
 import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants';
 import { AttachmentsService } from '../attachments/attachments.service';
+import { CampaignLibraryService } from '../campaign-library/campaign-library.service';
 import { canWriteBackHp, hpSyncSliceOf, hpSyncSlicesEqual } from './hp-sync';
 
 type EncounterCreateInput = z.infer<typeof EncounterCreate>;
@@ -99,6 +100,12 @@ function parseAoe(text: string | null): AoeTemplateType[] {
   if (text == null) return [];
   const parsed = zod.array(AoeTemplate).safeParse(fromJsonText<unknown>(text, null));
   return parsed.success ? parsed.data : [];
+}
+
+function parseCombatantStatblock(text: string | null): CombatantStatblock | null {
+  if (text == null) return null;
+  const parsed = CombatantStatblock.safeParse(fromJsonText(text, null));
+  return parsed.success ? parsed.data : null;
 }
 
 function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
@@ -174,6 +181,7 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     activeEffects: parseActiveEffects(row.activeEffects),
     conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
     legendaryActions: null,
+    statblock: parseCombatantStatblock(row.statblockJson),
   };
 }
 
@@ -291,12 +299,16 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
  * is shared table knowledge and a player already sees their own character sheet.
  */
 function redactMonsterHp(c: Combatant): Combatant {
-  if ((c.kind !== 'monster' && c.kind !== 'npc') || c.hpCurrent === null || c.hpMax === null) return c;
+  if (c.kind !== 'monster' && c.kind !== 'npc') return c;
+  // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  const redacted = { ...c, statblock: null };
+  if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return {
-    ...c,
-    hpBand: hpBandFor(c.hpCurrent, c.hpMax),
+    ...redacted,
+    hpBand: hpBandFor(redacted.hpCurrent, redacted.hpMax),
     hpCurrent: null,
     hpMax: null,
     spCurrent: null,
@@ -348,6 +360,7 @@ export class EncountersService {
     private readonly rolls: RollsService,
     private readonly revisions: RevisionsService,
     private readonly attachmentsService: AttachmentsService,
+    private readonly campaignLibrary: CampaignLibraryService,
   ) {}
 
   /**
@@ -2400,6 +2413,7 @@ export class EncountersService {
     let rpMax = 0;
     let eac: number | null = null;
     let kac: number | null = null;
+    let statblockJson: string | null = null;
 
     // NPC identity link (kind='npc'): validate the NPC belongs to this campaign and use
     // it as the default name. HP/initiative still come from a linked statblock
@@ -2558,6 +2572,22 @@ export class EncountersService {
     }
     if (hpCurrent === undefined) hpCurrent = hpMax;
 
+    // Issue #425: inline homebrew statblock or campaign-library snapshot.
+    if (input.libraryMonsterId !== undefined) {
+      const lib = await this.campaignLibrary.getOrThrow(input.libraryMonsterId, encounterRow.campaignId);
+      statblockJson = toJsonText(lib.statblock);
+    } else if (input.statblock !== undefined) {
+      statblockJson = toJsonText(CombatantStatblock.parse(input.statblock));
+    } else if (
+      input.kind === 'monster' &&
+      characterId === null &&
+      npcId === null &&
+      ruleEntryId === null
+    ) {
+      // Manual monster with no compendium link — seed playable defaults.
+      statblockJson = toJsonText(defaultCombatantStatblock());
+    }
+
     // Issue #114: `count` adds N identical combatants in one call. Auto-suffix the
     // names "Goblin 1".."Goblin N" so duplicate monsters are distinguishable in the
     // order (the docs' "three goblins" example). count is meaningless for a
@@ -2620,6 +2650,7 @@ export class EncountersService {
             // Issue #486: character combatants inherit sheet conditions; monsters/NPCs start empty.
             conditions: characterId !== null ? characterConditions : '[]',
             ruleEntryId,
+            statblockJson,
             sortOrder: sql`(SELECT COALESCE(MAX(${combatants.sortOrder}), -1) + 1 FROM ${combatants} WHERE ${combatants.encounterId} = ${encounterId})`,
           })
           .returning();
@@ -2747,6 +2778,9 @@ export class EncountersService {
     if (patch.tokenY !== undefined) staticUpdate.tokenY = patch.tokenY === null ? null : clampPercent(patch.tokenY);
     // Token footprint size (issue #40) — DM-only (identity-like), same gate as name/hpMax above.
     if (patch.tokenSize !== undefined && isDm) staticUpdate.tokenSize = patch.tokenSize;
+    if (patch.statblock !== undefined && isDm) {
+      staticUpdate.statblockJson = toJsonText(CombatantStatblock.parse(patch.statblock));
+    }
 
     const hpMaxChanged = patch.hpMax !== undefined && isDm;
     // Any field that flows through the 5e HP/death-save engine (applyCombatantHp).
@@ -2784,7 +2818,8 @@ export class EncountersService {
       !conditionsTouched &&
       !conditionInstancesTouched &&
       !spFieldsTouched &&
-      !deathStateTouched
+      !deathStateTouched &&
+      patch.statblock === undefined
     ) {
       return combatantToDomain(existing);
     }
@@ -4001,34 +4036,53 @@ export class EncountersService {
    */
   private async suggestedActionsForCombatant(c: Combatant): Promise<TurnSuggestedAction[]> {
     const out: TurnSuggestedAction[] = [];
+    const pushAction = (defaultSource: string, actions: ReturnType<typeof combatantActionsFromStatblock>, startIndex: number) => {
+      for (let i = 0; i < actions.length; i++) {
+        const a = actions[i];
+        const source = typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : defaultSource;
+        const bits = [a.toHit, a.damage, a.notes].filter(Boolean);
+        out.push({
+          name: a.name.slice(0, 160),
+          source,
+          summary: bits.join(' · ').slice(0, 600),
+          actionIndex: startIndex + i,
+          resolvable: isResolvableSpec(a.spec),
+          spec: a.spec ?? null,
+        });
+      }
+    };
     if (c.kind === 'character' && c.characterId !== null) {
       const [character] = await this.db.select({ actions: characters.actions }).from(characters).where(eq(characters.id, c.characterId)).limit(1);
-      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown }>>(character?.actions ?? null, []);
-      for (const a of actions) {
+      const actions = fromJsonText<Array<{ name?: unknown; kind?: unknown; notes?: unknown; damage?: unknown; toHit?: unknown; spec?: unknown }>>(character?.actions ?? null, []);
+      for (let i = 0; i < actions.length; i++) {
+        const a = actions[i];
         if (typeof a?.name !== 'string' || a.name.length === 0) continue;
         const bits = [typeof a.toHit === 'string' ? a.toHit : '', typeof a.damage === 'string' ? a.damage : '', typeof a.notes === 'string' ? a.notes : ''].filter(Boolean);
-        out.push({ name: a.name.slice(0, 160), source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action', summary: bits.join(' · ').slice(0, 600) });
+        const specParsed = zod.object({ spec: zod.unknown().optional() }).passthrough().safeParse(a);
+        const spec = specParsed.success ? specParsed.data.spec : undefined;
+        out.push({
+          name: a.name.slice(0, 160),
+          source: typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : 'action',
+          summary: bits.join(' · ').slice(0, 600),
+          actionIndex: i,
+          resolvable: isResolvableSpec(spec as Parameters<typeof isResolvableSpec>[0]),
+          spec: (spec as Parameters<typeof isResolvableSpec>[0]) ?? null,
+        });
       }
       return out.slice(0, 100);
     }
+    if (c.statblock) {
+      pushAction('action', combatantActionsFromStatblock(c.statblock), 0);
+      return out.slice(0, 100);
+    }
     if (c.ruleEntryId !== null) {
-      const adapter = await this.adapterForCampaign((await this.getRowOrThrow(c.encounterId)).campaignId);
+      const encounterRow = await this.getRowOrThrow(c.encounterId);
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
       const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, c.ruleEntryId)).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
-      const mapped = adapter.mapStatblock(data);
-      const push = (source: string, raw: unknown) => {
-        if (!Array.isArray(raw)) return;
-        for (const item of raw as Array<Record<string, unknown>>) {
-          const name = typeof item?.name === 'string' ? item.name : '';
-          if (!name) continue;
-          const desc = typeof item?.desc === 'string' ? item.desc : typeof item?.description === 'string' ? (item.description as string) : '';
-          out.push({ name: name.slice(0, 160), source, summary: desc.slice(0, 600) });
-        }
-      };
-      push('action', mapped.actions);
-      push('reaction', mapped.reactions);
-      push('legendary', mapped.legendaryActions);
-      push('special', mapped.specialAbilities);
+      const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');
+      pushAction('action', expanded, 0);
       return out.slice(0, 100);
     }
     return out;

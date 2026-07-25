@@ -33,10 +33,14 @@ import {
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
 import { ActionSpec } from './action-resolver';
+import { CharacterAction } from './character-action';
+import { CombatantStatblock } from './combatant-statblock';
 import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './character-action';
+export * from './combatant-statblock';
 export * from './character-creation';
 export * from './narration-language';
 
@@ -391,27 +395,6 @@ export type DeathState = z.infer<typeof DeathState>;
  */
 export const CharacterStatus = z.enum(['active', 'draft', 'dead', 'retired', 'inactive']);
 export type CharacterStatus = z.infer<typeof CharacterStatus>;
-
-/**
- * One row in the Actions card — attack, spell, or feature. toHit/damage are free text ("+5",
- * "1d8+3 slashing") so non-attack actions stay valid, and `notes` is always preserved (and,
- * as of issue #414, rendered). The OPTIONAL `spec` (issue #414) carries the structured action
- * model — mode, action-economy cost, DC source, range/shape, target rules, outcome branches,
- * effects/durations, uses/recharge/concentration, damage types, healing/temp HP, and rule
- * provenance — that powers the guided Use flow (roll → classify → preview → apply atomically).
- * It is optional and fully defaulted, so every pre-#414 action parses unchanged and simply has
- * no structured resolver (the card falls back to the freeform toHit/damage/notes statblock).
- */
-export const CharacterAction = z.object({
-  name: z.string().min(1).max(120),
-  kind: z.string().max(40).default(''), // "melee", "ranged", "spell", "feature"…
-  toHit: z.string().max(20).default(''),
-  damage: z.string().max(80).default(''),
-  targetAc: z.string().max(20).default(''), // "EAC", "KAC", "AC" etc.
-  notes: z.string().max(500).default(''),
-  spec: ActionSpec.optional(),
-});
-export type CharacterAction = z.infer<typeof CharacterAction>;
 
 /** Slots at one spell level. `used` is clamped server-side to [0, max]. */
 export const SpellSlotLevel = z.object({
@@ -5641,6 +5624,8 @@ export const ScribeConfig = z.object({
   postSession: z.boolean().default(false), // sweep + draft after a scheduled session ends
   cron: z.boolean().default(false), // include this campaign in the periodic cron sweep
   budgetPerRun: z.number().int().min(1).max(200_000).default(2000), // per-run output-token cap
+  // Durable cursor for cron/incremental runs — only material newer than this is assembled (#499).
+  sourceCursorAt: IsoDate.nullable().default(null),
   ...timestamps,
 });
 export type ScribeConfig = z.infer<typeof ScribeConfig>;
@@ -5651,6 +5636,24 @@ export const ScribeConfigUpdate = z.object({
   budgetPerRun: z.number().int().min(1).max(200_000).optional(),
 });
 export type ScribeConfigUpdate = z.infer<typeof ScribeConfigUpdate>;
+
+// Archived counts for what a run assembled — stored on the job row for audit (#499).
+export const ScribeSourceStats = z.object({
+  resolvedInbox: z.number().int().nonnegative().default(0),
+  encounters: z.number().int().nonnegative().default(0),
+  diceRolls: z.number().int().nonnegative().default(0),
+  scheduledSessionId: Id.optional(),
+  windowStart: IsoDate.optional(),
+  windowEnd: IsoDate.optional(),
+  sinceAt: IsoDate.optional(),
+});
+export type ScribeSourceStats = z.infer<typeof ScribeSourceStats>;
+
+// Dry-run / pre-flight preview of what would be assembled (#499).
+export const ScribeSourcePreview = ScribeSourceStats.extend({
+  estimatedPromptTokens: z.number().int().nonnegative().default(0),
+});
+export type ScribeSourcePreview = z.infer<typeof ScribeSourcePreview>;
 
 // A recorded scribe run (read via GET /campaigns/:id/scribe/jobs).
 export const ScribeJob = z.object({
@@ -5663,6 +5666,9 @@ export const ScribeJob = z.object({
   tokensUsed: z.number().int().nonnegative().default(0),
   provider: z.string().default(''), // which provider produced it (e.g. 'mock','anthropic','noop')
   detail: z.string().default(''), // human-readable note / skip reason / error
+  sourceHash: z.string().nullable().default(null), // sha256 of assembled source — idempotency archive
+  scheduledSessionId: Id.nullable().default(null), // post_session: exactly which game night (#499)
+  sourceStats: ScribeSourceStats.nullable().default(null), // archived assembly counts
   createdBy: z.string().default(''),
   createdAt: IsoDate,
 });
@@ -5673,6 +5679,10 @@ export type ScribeJob = z.infer<typeof ScribeJob>;
 export const ScribeRunRequest = z.object({
   dryRun: z.boolean().default(false),
   narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
+  // Bypass idempotency and re-draft even when source is unchanged or a proposal is pending (#499).
+  force: z.boolean().default(false),
+  // Target a specific ended scheduled session (post_session scope); on-demand only.
+  scheduledSessionId: Id.optional(),
 });
 export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
 
@@ -5683,6 +5693,7 @@ export const ScribeRunResult = z.object({
   proposalIds: z.array(Id).default([]),
   dryRun: z.boolean().default(false),
   preview: z.string().nullable().default(null), // drafted recap text (dry-run only)
+  sourcePreview: ScribeSourcePreview.nullable().default(null), // assembly counts + token estimate (#499)
 });
 export type ScribeRunResult = z.infer<typeof ScribeRunResult>;
 
@@ -6824,6 +6835,9 @@ export const Combatant = z.object({
   conditionInstances: z.array(ConditionInstance).max(50).default([]),
   // Populated server-side when the linked statblock has legendary actions (issue #618).
   legendaryActions: LegendaryActionPool.nullable().default(null),
+  // Inline homebrew statblock for manual monsters (issue #425). Null when HP/init-only
+  // or when actions are expanded from a linked compendium entry at read time.
+  statblock: CombatantStatblock.nullable().default(null),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -6843,6 +6857,11 @@ export const CombatantCreate = z.object({
   // auto-suffixed "Goblin 1".."Goblin N" so duplicate monsters are distinguishable.
   // Ignored (single add, no suffix) for character/characterId adds — a PC is unique.
   count: z.number().int().min(1).max(50).optional(),
+  // Inline homebrew statblock (issue #425). When omitted on a manual add, the server
+  // seeds sensible defaults so the monster is immediately playable.
+  statblock: CombatantStatblock.optional(),
+  // Add from a saved campaign-library monster (snapshot copied server-side).
+  libraryMonsterId: Id.optional(),
 });
 export const CombatantUpdate = z.object({
   hpDelta: z.number().int().optional(),
@@ -6905,6 +6924,8 @@ export const CombatantUpdate = z.object({
   // Token footprint size category (issue #40) — dm only, enforced server-side (an
   // identity-like attribute, alongside name/hpMax/initMod above).
   tokenSize: TokenSize.optional(),
+  // Inline homebrew statblock edits (issue #425) — dm only, enforced server-side.
+  statblock: CombatantStatblock.optional(),
 });
 
 /**
@@ -7073,6 +7094,12 @@ export const TurnSuggestedAction = z.object({
   // Where it came from — 'action', 'reaction', 'legendary', 'special', 'spell', or 'feature'.
   source: z.string().max(40),
   summary: z.string().max(600).default(''),
+  // Index into the combatant's usable-actions list (issue #425). Omitted for prose-only rows.
+  actionIndex: z.number().int().min(0).optional(),
+  // True when the action carries a structured spec the Use flow can resolve.
+  resolvable: z.boolean().default(false),
+  // Structured spec when resolvable (issue #425) — omitted for prose-only rows.
+  spec: ActionSpec.nullable().optional(),
 });
 export type TurnSuggestedAction = z.infer<typeof TurnSuggestedAction>;
 

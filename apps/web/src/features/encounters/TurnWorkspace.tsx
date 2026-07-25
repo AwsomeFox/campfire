@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
+import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData, ActionSpec } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
@@ -32,10 +32,14 @@ interface TurnWorkspaceProps {
   currentCombatantId: number | null;
   isDm: boolean;
   ruleSystem?: string | null;
+  /** Current combatant turn state (delay / ready) from the encounter roster. */
+  currentTurnState?: CombatantTurnState;
   /** When true, conflict-prone turn controls stay disabled (issue #471). */
   actionsDisabled?: boolean;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
+  /** Issue #425: DM uses a suggested monster action from the turn workspace. */
+  onUseSuggestedAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -85,15 +89,18 @@ export function TurnWorkspace({
   currentCombatantId,
   isDm,
   ruleSystem,
+  currentTurnState,
   actionsDisabled = false,
   onRollDeathSave,
   onPatchCombatant,
+  onUseSuggestedAction,
 }: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
@@ -152,6 +159,10 @@ export function TurnWorkspace({
       });
     }
   }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+
+  useEffect(() => {
+    setReadiedDraft(currentTurnState?.readied ?? '');
+  }, [currentTurnState?.readied]);
 
   const filteredActions = useMemo(() => {
     const list = turn?.suggestedActions ?? [];
@@ -263,6 +274,71 @@ export function TurnWorkspace({
         </span>
       </div>
 
+      {/* Delay / ready (issue #487) — MVP flags on the current turn. */}
+      {(turn.isYourTurn || isDm) && (
+        <section data-testid="turn-delay-ready">
+          <h3 className="text-sm font-semibold text-white mb-1.5">Delay &amp; ready</h3>
+          <div className="flex gap-2 flex-wrap items-center">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={controlsDisabled}
+              data-testid="workspace-delay-toggle"
+              onClick={() => turnState.mutate({ delaying: !currentTurnState?.delaying })}
+            >
+              {currentTurnState?.delaying ? 'Resume turn' : 'Delay turn'}
+            </button>
+            <input
+              type="text"
+              className="input"
+              placeholder="Ready action trigger…"
+              aria-label="Readied action trigger"
+              value={readiedDraft}
+              disabled={controlsDisabled}
+              maxLength={200}
+              onChange={(e) => setReadiedDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const trimmed = readiedDraft.trim();
+                  turnState.mutate({ readied: trimmed || null });
+                }
+              }}
+              style={{ maxWidth: 260 }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={controlsDisabled}
+              data-testid="workspace-readied-set"
+              onClick={() => {
+                const trimmed = readiedDraft.trim();
+                turnState.mutate({ readied: trimmed || null });
+              }}
+            >
+              Set ready
+            </button>
+            {currentTurnState?.readied && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={controlsDisabled}
+                data-testid="workspace-readied-clear"
+                onClick={() => {
+                  setReadiedDraft('');
+                  turnState.mutate({ readied: null });
+                }}
+              >
+                Clear ready
+              </button>
+            )}
+          </div>
+          {currentTurnState?.readied && (
+            <p className="text-xs text-muted m-0 mt-1">Readied: {currentTurnState.readied}</p>
+          )}
+        </section>
+      )}
+
       {/* Active effects (duration + save timing). */}
       {turn.activeEffects.length > 0 && (
         <section>
@@ -322,10 +398,21 @@ export function TurnWorkspace({
           />
           <ul className="list-none p-0 m-0 space-y-1 max-h-48 overflow-auto">
             {filteredActions.map((a, i) => (
-              <li key={`${a.name}-${i}`} className="text-sm">
-                <span className="text-white font-medium">{a.name}</span>
-                <span className="text-muted"> · {a.source}</span>
-                {a.summary && <span className="text-muted"> — {a.summary}</span>}
+              <li key={`${a.name}-${i}`} className="text-sm flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="text-white font-medium">{a.name}</span>
+                  <span className="text-muted"> · {a.source}</span>
+                  {a.summary && <span className="text-muted"> — {a.summary}</span>}
+                </div>
+                {a.resolvable && onUseSuggestedAction && a.actionIndex != null && a.spec && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary !min-h-8 text-xs shrink-0"
+                    onClick={() => onUseSuggestedAction(a.actionIndex!, a.name, a.spec!)}
+                  >
+                    Use
+                  </button>
+                )}
               </li>
             ))}
             {filteredActions.length === 0 && <li className="text-sm text-muted">No matching actions.</li>}
@@ -336,8 +423,8 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate()}>
-            End turn →
+          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate()} data-testid="workspace-end-turn">
+            {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
           <span className="text-sm text-muted">The DM advances turns in this campaign.</span>

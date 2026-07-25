@@ -2233,6 +2233,79 @@ function migrateCombatantsTableForConditionInstances(sqlite: Database.Database):
   }
 }
 
+/** Issue #425: inline homebrew statblock JSON on manual monster combatants. */
+function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'statblock_json')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN statblock_json TEXT');
+  }
+}
+
+/** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
+function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table with FKs.
+
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_library_monsters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      statblock_json TEXT NOT NULL,
+      source_rule_entry_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
+  `);
+}
+
+/** Issue #425: upgraded DBs created by migrateCampaignLibraryMonstersTable lack FK cascades. */
+function migrateCampaignLibraryMonstersForeignKeys(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table with FKs.
+
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_library_monsters'")
+    .get();
+  if (!hasTable) return;
+
+  const fks = sqlite.prepare('PRAGMA foreign_key_list(campaign_library_monsters)').all() as Array<{
+    table: string;
+    from: string;
+  }>;
+  const hasCampaignFk = fks.some((fk) => fk.from === 'campaign_id' && fk.table === 'campaigns');
+  if (hasCampaignFk) return;
+
+  sqlite.exec(`
+    CREATE TABLE campaign_library_monsters_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      statblock_json TEXT NOT NULL,
+      source_rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO campaign_library_monsters_new
+      (id, campaign_id, name, statblock_json, source_rule_entry_id, created_at, updated_at)
+    SELECT clm.id, clm.campaign_id, clm.name, clm.statblock_json, clm.source_rule_entry_id, clm.created_at, clm.updated_at
+    FROM campaign_library_monsters clm
+    JOIN campaigns c ON c.id = clm.campaign_id;
+    DROP TABLE campaign_library_monsters;
+    ALTER TABLE campaign_library_monsters_new RENAME TO campaign_library_monsters;
+    CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
+  `);
+}
+
 /**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
@@ -2612,6 +2685,36 @@ function migrateCampaignCatchUpCursorsTable(sqlite: Database.Database): void {
   `);
 }
 
+function migrateAiScribeSessionScope499(sqlite: Database.Database): void {
+  const hasConfigs = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_configs'")
+    .get();
+  if (hasConfigs) {
+    const configCols = sqlite.prepare('PRAGMA table_info(ai_scribe_configs)').all() as Array<{ name: string }>;
+    if (!configCols.some((c) => c.name === 'source_cursor_at')) {
+      sqlite.exec('ALTER TABLE ai_scribe_configs ADD COLUMN source_cursor_at TEXT');
+    }
+  }
+
+  const hasJobs = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_scribe_jobs'")
+    .get();
+  if (hasJobs) {
+    const jobCols = sqlite.prepare('PRAGMA table_info(ai_scribe_jobs)').all() as Array<{ name: string }>;
+    if (!jobCols.some((c) => c.name === 'scheduled_session_id')) {
+      sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN scheduled_session_id INTEGER');
+    }
+    if (!jobCols.some((c) => c.name === 'source_stats')) {
+      sqlite.exec('ALTER TABLE ai_scribe_jobs ADD COLUMN source_stats TEXT');
+    }
+  }
+
+  sqlite.exec(`
+    CREATE INDEX IF NOT EXISTS idx_ai_scribe_jobs_session_trigger
+      ON ai_scribe_jobs(campaign_id, scheduled_session_id, trigger);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2712,6 +2815,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0098_encounters_hex_orientation', run: migrateEncountersTableForHexOrientation },
   { name: '0099_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
   { name: '0100_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
+  { name: '0101_ai_scribe_session_scope_499', run: migrateAiScribeSessionScope499 },
+  { name: '0102_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
+  { name: '0103_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
+  { name: '0104_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
 ];
 
 /**

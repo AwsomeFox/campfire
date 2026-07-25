@@ -60,7 +60,12 @@ export class ScribeController {
   @ApiResponse({ status: 201, description: 'The recorded job + any filed proposal ids (+ preview on a dry run).' })
   async run(@Param('id', ParseIntPipe) id: number, @Body() body: ScribeRunRequestDto, @CurrentUser() user: RequestUser) {
     await this.access.requireRole(user, id, 'dm');
-    return this.scribe.run(id, 'on_demand', user, { dryRun: body.dryRun, narrationLanguage: body.narrationLanguage });
+    return this.scribe.run(id, 'on_demand', user, {
+      dryRun: body.dryRun,
+      narrationLanguage: body.narrationLanguage,
+      force: body.force,
+      scheduledSessionId: body.scheduledSessionId,
+    });
   }
 
   @Get('jobs')
