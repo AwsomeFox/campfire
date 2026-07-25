@@ -1067,6 +1067,92 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(ended.status).toBe('ended');
   });
 
+  it('end_turn and set_turn_state (delay/readied) via MCP (issue #487)', async () => {
+    const dmClient = await mcpClient(dmToken);
+
+    const live = parseResult(
+      await dmClient.callTool({ name: 'list_encounters', arguments: { campaignId, status: 'running' } }),
+    ) as Array<{ id: number }>;
+    for (const e of live) {
+      await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: e.id } });
+    }
+
+    const charRes = await dmAgent.post(`/api/v1/campaigns/${campaignId}/characters`).send({
+      name: 'MCP Turn Hero',
+      hpMax: 20,
+      hpCurrent: 20,
+    });
+    expect(charRes.status).toBe(201);
+
+    const createResult = await dmClient.callTool({
+      name: 'create_encounter',
+      arguments: { campaignId, name: 'MCP End Turn Drill' },
+    });
+    const encounter = parseResult(createResult) as {
+      id: number;
+      combatants: Array<{ id: number; characterId: number | null }>;
+    };
+    let hero = encounter.combatants.find((c) => c.characterId === charRes.body.id);
+    if (!hero) {
+      const add = await dmClient.callTool({
+        name: 'add_combatant',
+        arguments: { encounterId: encounter.id, kind: 'character', characterId: charRes.body.id },
+      });
+      expect(add.isError).toBeFalsy();
+      hero = parseResult(add) as { id: number; characterId: number | null };
+    }
+
+    const goblin = await dmClient.callTool({
+      name: 'add_combatant',
+      arguments: { encounterId: encounter.id, kind: 'monster', name: 'MCP Goblin', hpMax: 5 },
+    });
+    expect(goblin.isError).toBeFalsy();
+
+    await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
+    const mid = parseResult(
+      await dmClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number }> };
+    for (const c of mid.combatants) {
+      await dmClient.callTool({
+        name: 'update_combatant',
+        arguments: {
+          encounterId: encounter.id,
+          combatantId: c.id,
+          initiative: c.id === hero!.id ? 99 : 1,
+        },
+      });
+    }
+    const begun = parseResult(
+      await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { status: string; currentCombatantId: number | null; combatants: Array<{ id: number; initiative: number | null }> };
+    expect(begun.status).toBe('running');
+    expect(begun.currentCombatantId).toBe(hero!.id);
+    const turnOrder = [...begun.combatants]
+      .filter((c) => c.initiative != null)
+      .sort((a, b) => (b.initiative ?? 0) - (a.initiative ?? 0));
+    const heroIdx = turnOrder.findIndex((c) => c.id === hero!.id);
+    const expectedNextId = turnOrder[(heroIdx + 1) % turnOrder.length]!.id;
+
+    const readyResult = await dmClient.callTool({
+      name: 'set_turn_state',
+      arguments: { encounterId: encounter.id, combatantId: hero!.id, readied: 'When hostile moves' },
+    });
+    expect(readyResult.isError).toBeFalsy();
+    expect((parseResult(readyResult) as { turnState: { readied: string | null } }).turnState.readied).toBe(
+      'When hostile moves',
+    );
+
+    const endTurnResult = await dmClient.callTool({
+      name: 'end_turn',
+      arguments: { encounterId: encounter.id, expectedCurrentCombatantId: hero!.id },
+    });
+    expect(endTurnResult.isError).toBeFalsy();
+    const afterEnd = parseResult(endTurnResult) as { currentCombatantId: number | null };
+    expect(afterEnd.currentCombatantId).toBe(expectedNextId);
+
+    await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: encounter.id } });
+  });
+
   it('get_encounter redacts monster HP for a non-DM viewer PAT (issue #256)', async () => {
     // DM seeds an encounter with a monster carrying exact HP.
     const dmC = await mcpClient(dmToken);
