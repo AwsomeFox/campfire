@@ -28,10 +28,9 @@ export function VirtualList<T>({
     if (!el) return;
     const start = Math.floor(el.scrollTop / estimateHeight);
     const visible = Math.ceil(el.clientHeight / estimateHeight);
-    setRange({
-      start: Math.max(0, start - overscan),
-      end: Math.min(items.length, start + visible + overscan),
-    });
+    const nextStart = Math.max(0, start - overscan);
+    const nextEnd = Math.min(items.length, start + visible + overscan);
+    setRange((prev) => (prev.start === nextStart && prev.end === nextEnd ? prev : { start: nextStart, end: nextEnd }));
   }, [estimateHeight, items.length, overscan]);
 
   useEffect(() => {

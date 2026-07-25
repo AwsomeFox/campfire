@@ -633,7 +633,8 @@ export class SchedulingService {
     // Issue #867: a trashed campaign's public calendar feed must look identical to
     // an unknown/rotated token — no schedule disclosure after Trash.
     if (campaign.deletedAt != null) throw new NotFoundException('Unknown calendar feed');
-    const schedules = await this.listUpcomingForCampaign(campaign.id);
+    // ICS feeds include past + future so previously-synced events don't vanish (see buildCampaignIcs).
+    const schedules = await this.listForCampaign(campaign.id);
     return buildCampaignIcs({ id: campaign.id, name: campaign.name }, schedules);
   }
 }
