@@ -7,6 +7,7 @@ import {
   StoryBeatUpdate,
   StoryBeatStatusPatch,
   StoryBranchCreate,
+  StoryBranchUpdate,
   ExpectedUpdatedAt,
 } from '@campfire/schema';
 
@@ -21,3 +22,4 @@ export class StoryBeatCreateDto extends createZodDto(StoryBeatCreate.strict()) {
 export class StoryBeatUpdateDto extends createZodDto(StoryBeatUpdate.extend({ expectedUpdatedAt: ExpectedUpdatedAt }).strict()) {}
 export class StoryBeatStatusPatchDto extends createZodDto(StoryBeatStatusPatch) {}
 export class StoryBranchCreateDto extends createZodDto(StoryBranchCreate.strict()) {}
+export class StoryBranchUpdateDto extends createZodDto(StoryBranchUpdate.strict()) {}

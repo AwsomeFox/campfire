@@ -16,7 +16,7 @@ import {
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
   NarrationLanguage,
 } from '@campfire/schema';
-import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
+import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity, CampaignImportPreflight, OnUnresolvedCompendium } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import {
   campaigns,
@@ -88,6 +88,12 @@ import { ATTACHMENT_STATE_COMMITTED } from '../attachments/attachment.constants'
 import { sanitizeAttachmentFilename } from '../attachments/filename';
 import { APP_VERSION } from '../../common/build-metadata';
 import { CURRENT_SCHEMA_REVISION } from '../backup/backup-manifest';
+import {
+  assertCompendiumImportAllowed,
+  buildResolutionMap,
+  preflightCompendiumImport,
+  resolveImportedCombatantRuleEntryId,
+} from './compendium-import';
 
 /** Generous cap on an uploaded import archive: several full-size (8MB) maps + text. */
 const MAX_IMPORT_ARCHIVE_BYTES = 128 * 1024 * 1024;
@@ -191,6 +197,10 @@ export interface ImportResult {
   attachmentsSkipped: number;
   attachmentsFailed: number;
   attachmentDetails: ImportAttachmentResult[];
+  /** Issue #584: compendium dependency preflight outcome for this import run. */
+  compendiumPreflight?: CampaignImportPreflight;
+  /** Issue #584: combatants imported without a live compendium link (detached snapshots). */
+  compendiumDetachedCount?: number;
 }
 
 type CampaignCreateInput = z.infer<typeof CampaignCreate>;
@@ -712,7 +722,7 @@ export class CampaignsService {
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
-      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, id), notDeleted(inventoryItems.deletedAt))),
       this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
       this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
     ]);
@@ -967,7 +977,7 @@ export class CampaignsService {
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
-      this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, id)),
+      this.db.select().from(inventoryItems).where(and(eq(inventoryItems.campaignId, id), notDeleted(inventoryItems.deletedAt))),
       this.db.select().from(partyTreasury).where(eq(partyTreasury.campaignId, id)).limit(1),
       this.db.select().from(entityRevisions).where(eq(entityRevisions.campaignId, id)),
     ]);
@@ -1747,6 +1757,28 @@ export class CampaignsService {
    * THAT one file to the #84 row-without-file shape, never a partial import.
    * Returns an ImportResult with imported/skipped/failed counts + file details.
    */
+  /**
+   * Issue #584 — compendium dependency/license preflight for a Campfire export document.
+   * Runs before any mutation so missing or incompatible rule packs can block import or
+   * guide installation. Does not create a campaign.
+   */
+  async preflightImport(input: CampaignImportInput): Promise<CampaignImportPreflight> {
+    const encounterRows = asArr(input.encounters);
+    const exportDeps = asArr(input.compendiumDependencies)
+      .map((d) => ({
+        packSlug: str(d.packSlug),
+        packVersion: str(d.packVersion),
+        name: str(d.name, str(d.packSlug)),
+        license: str(d.license),
+        sourceUrl: str(d.sourceUrl),
+        entrySlugs: Array.isArray(d.entrySlugs)
+          ? (d.entrySlugs as unknown[]).filter((s): s is string => typeof s === 'string' && s.length > 0)
+          : [],
+      }))
+      .filter((d) => d.packSlug.length > 0);
+    return preflightCompendiumImport(this.db, encounterRows, exportDeps);
+  }
+
   async importCampaign(
     input: CampaignImportInput,
     user: RequestUser,
@@ -1775,6 +1807,23 @@ export class CampaignsService {
     const noteRows = asArr(doc.notes);
     const commentRows = asArr(doc.comments);
     const encounterRows = asArr(doc.encounters);
+    const onUnresolvedCompendium: OnUnresolvedCompendium = doc.onUnresolvedCompendium === 'detach' ? 'detach' : 'block';
+    const exportDeps = asArr(doc.compendiumDependencies)
+      .map((d) => ({
+        packSlug: str(d.packSlug),
+        packVersion: str(d.packVersion),
+        name: str(d.name, str(d.packSlug)),
+        license: str(d.license),
+        sourceUrl: str(d.sourceUrl),
+        entrySlugs: Array.isArray(d.entrySlugs)
+          ? (d.entrySlugs as unknown[]).filter((s): s is string => typeof s === 'string' && s.length > 0)
+          : [],
+      }))
+      .filter((d) => d.packSlug.length > 0);
+    const compendiumPreflight = await preflightCompendiumImport(this.db, encounterRows, exportDeps);
+    assertCompendiumImportAllowed(compendiumPreflight, onUnresolvedCompendium);
+    const compendiumResolution = buildResolutionMap(compendiumPreflight, onUnresolvedCompendium);
+    let compendiumDetachedCount = 0;
     // Issue #266: entity types the export used to drop wholesale — now recreated with
     // fresh ids and intra-campaign refs remapped (npc→faction, beat→arc, branch→beat).
     const factionRows = asArr(doc.factions);
@@ -2279,6 +2328,8 @@ export class CampaignsService {
           const cSrcId = intOrNull(c.id);
           const charSrc = intOrNull(c.characterId);
           const npcSrc = intOrNull(c.npcId);
+          const compendiumResolved = resolveImportedCombatantRuleEntryId(c, compendiumResolution);
+          if (compendiumResolved.detached) compendiumDetachedCount += 1;
           const [cRow] = tx
             .insert(combatants)
             .values({
@@ -2292,7 +2343,7 @@ export class CampaignsService {
               hpCurrent: intOr(c.hpCurrent, 10),
               hpMax: intOr(c.hpMax, 10),
               conditions: jsonCol(c.conditions, '[]'),
-              ruleEntryId: intOrNull(c.ruleEntryId), // compendium is server-global — best-effort, may dangle
+              ruleEntryId: compendiumResolved.ruleEntryId,
               sortOrder: intOr(c.sortOrder, 0),
             })
             .returning()
@@ -2744,6 +2795,8 @@ export class CampaignsService {
       attachmentsSkipped: 0, // populated by importArchive (which knows the skip count)
       attachmentsFailed,
       attachmentDetails,
+      compendiumPreflight,
+      compendiumDetachedCount,
     };
     } finally {
       // Always sweep the staging dir, success OR failure. On success the staged

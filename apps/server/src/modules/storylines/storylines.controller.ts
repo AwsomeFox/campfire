@@ -13,6 +13,7 @@ import {
   StoryBeatUpdateDto,
   StoryBeatStatusPatchDto,
   StoryBranchCreateDto,
+  StoryBranchUpdateDto,
 } from './storylines.dto';
 
 /**
@@ -213,6 +214,21 @@ export class BeatsController {
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     res.status(201);
     return this.storylines.addBranch(id, body, user, role);
+  }
+
+  @Patch(':id/branches/:branchId')
+  @ApiOperation({ summary: 'Update a branch label, target beat, or sort order', description: 'DM only. `toBeatId` may be set to null to clear the target.' })
+  @ApiResponse({ status: 200, description: 'Updated branch.' })
+  @ApiResponse({ status: 400, description: 'toBeatId does not exist in this campaign.' })
+  async updateBranch(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('branchId', ParseIntPipe) branchId: number,
+    @Body() body: StoryBranchUpdateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const row = await this.storylines.getBeatRowOrThrow(id);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.storylines.updateBranch(id, branchId, body, user, role);
   }
 
   @Delete(':id/branches/:branchId')

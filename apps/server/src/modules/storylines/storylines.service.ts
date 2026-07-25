@@ -9,6 +9,7 @@ import {
   StoryBeatUpdate,
   StoryBeatStatusPatch,
   StoryBranchCreate,
+  StoryBranchUpdate,
 } from '@campfire/schema';
 import type { StoryArc, StoryBeat, StoryBranch, StoryBeatWithBranches, StoryArcWithBeats, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -28,6 +29,7 @@ type StoryBeatCreateInput = z.infer<typeof StoryBeatCreate>;
 type StoryBeatUpdateInput = z.infer<typeof StoryBeatUpdate>;
 type StoryBeatStatusPatchInput = z.infer<typeof StoryBeatStatusPatch>;
 type StoryBranchCreateInput = z.infer<typeof StoryBranchCreate>;
+type StoryBranchUpdateInput = z.infer<typeof StoryBranchUpdate>;
 
 function arcToDomain(row: typeof storyArcs.$inferSelect): StoryArc {
   return {
@@ -485,6 +487,60 @@ export class StorylinesService {
       action: 'storyline.branch.create',
       entityType: 'story_branch',
       entityId: row.id,
+      campaignId: beat.campaignId,
+    });
+    return branchToDomain(row);
+  }
+
+  /**
+   * Update a branch's label, target beat, or sort order. `toBeatId` may be set to
+   * `null` to clear the target; omitted fields are left unchanged. The target, when
+   * provided (non-null), must be a beat in the same campaign as the source.
+   */
+  async updateBranch(
+    beatId: number,
+    branchId: number,
+    input: StoryBranchUpdateInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<StoryBranch> {
+    const beat = await this.getBeatRowOrThrow(beatId);
+    const [existing] = await this.db
+      .select()
+      .from(storyBranches)
+      .where(and(eq(storyBranches.id, branchId), eq(storyBranches.beatId, beatId)))
+      .limit(1);
+    if (!existing) throw new NotFoundException(`Branch ${branchId} not found`);
+    if (input.toBeatId != null) {
+      const [target] = await this.db
+        .select({ id: storyBeats.id })
+        .from(storyBeats)
+        .where(and(eq(storyBeats.id, input.toBeatId), eq(storyBeats.campaignId, beat.campaignId), notDeleted(storyBeats.deletedAt)))
+        .limit(1);
+      if (!target) {
+        throw new BadRequestException(`toBeatId ${input.toBeatId} does not exist in this campaign`);
+      }
+    }
+    const set: { label?: string; toBeatId?: number | null; sortOrder?: number } = {};
+    if (input.label !== undefined) set.label = input.label;
+    if (input.toBeatId !== undefined) set.toBeatId = input.toBeatId;
+    if (input.sortOrder !== undefined) set.sortOrder = input.sortOrder;
+    if (Object.keys(set).length === 0) {
+      // No fields to update — return the existing row unchanged instead of
+      // issuing an empty UPDATE, which some drivers reject as invalid SQL.
+      return branchToDomain(existing);
+    }
+    const [row] = await this.db
+      .update(storyBranches)
+      .set(set)
+      .where(and(eq(storyBranches.id, branchId), eq(storyBranches.beatId, beatId)))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'storyline.branch.update',
+      entityType: 'story_branch',
+      entityId: branchId,
       campaignId: beat.campaignId,
     });
     return branchToDomain(row);
