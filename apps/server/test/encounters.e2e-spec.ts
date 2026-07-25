@@ -688,7 +688,7 @@ describe('encounters (e2e)', () => {
     });
   });
 
-  describe('ended encounter is immutable (issue #163)', () => {
+  describe('ended encounter is immutable (issues #163, #470)', () => {
     // An ended encounter's combatant rows are a frozen historical snapshot. Patching a
     // combatant on it must be rejected AND must not rewrite the linked character's live
     // sheet HP (the pre-fix bug: a post-combat combatant patch leaked back onto current HP).
@@ -771,6 +771,78 @@ describe('encounters (e2e)', () => {
 
       const del = await request(server).delete(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`).set(dm);
       expect(del.status).toBe(409);
+    });
+
+    it('encounter-level PATCHes (name, map, grid, fog, AoE, links, hidden) are rejected (409) on an ended encounter', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const before = await request(server).get(`/api/v1/encounters/${endedEncounterId}`).set(dm);
+      expect(before.status).toBe(200);
+      const snapshot = before.body;
+
+      const upload = await request(server)
+        .post(`/api/v1/campaigns/${endedCampaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+          filename: 'battle.png',
+          contentType: 'image/png',
+        });
+      expect(upload.status).toBe(201);
+
+      const loc = await request(server)
+        .post(`/api/v1/campaigns/${endedCampaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Frozen Hall' });
+      expect(loc.status).toBe(201);
+
+      const cases = [
+        ['name', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ name: 'Rewritten Title' })],
+        [
+          'mapAttachmentId',
+          () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ mapAttachmentId: upload.body.id }),
+        ],
+        ['gridSize', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ gridSize: 10 })],
+        [
+          'fog',
+          () =>
+            request(server)
+              .patch(`/api/v1/encounters/${endedEncounterId}`)
+              .set(dm)
+              .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 50 }] } }),
+        ],
+        [
+          'aoe',
+          () =>
+            request(server)
+              .patch(`/api/v1/encounters/${endedEncounterId}`)
+              .set(dm)
+              .send({ aoe: [{ id: 'aoe-1', shape: 'circle', x: 50, y: 50, sizeFt: 20, angleDeg: 0, color: null }] }),
+        ],
+        ['hidden', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ hidden: true })],
+        [
+          'locationId',
+          () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ locationId: loc.body.id }),
+        ],
+        [
+          'generate-map',
+          () => request(server).post(`/api/v1/encounters/${endedEncounterId}/generate-map`).set(dm).send({ kind: 'dungeon', size: 'large' }),
+        ],
+      ] as const;
+
+      for (const [, req] of cases) {
+        const res = await req();
+        expect(res.status).toBe(409);
+        const after = await request(server).get(`/api/v1/encounters/${endedEncounterId}`).set(dm);
+        expect(after.body.name).toBe(snapshot.name);
+        expect(after.body.mapAttachmentId).toBe(snapshot.mapAttachmentId);
+        expect(after.body.gridSize).toBe(snapshot.gridSize);
+        expect(after.body.fog).toEqual(snapshot.fog);
+        expect(after.body.aoe).toEqual(snapshot.aoe);
+        expect(after.body.hidden).toBe(snapshot.hidden);
+        expect(after.body.locationId).toBe(snapshot.locationId);
+        expect(after.body.status).toBe('ended');
+      }
     });
 
     it('after /reopen the same combatant patch succeeds and mirrors to the character sheet again', async () => {
