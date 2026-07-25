@@ -432,7 +432,6 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
-  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -2365,6 +2364,11 @@ export interface RuleSystemAdapter {
    */
   attributeDicePool?(score: number): AttributeDicePool;
   /**
+   * OPTIONAL — whether this rule system tracks 5e 3-success/3-failure death saving throws (issue #424).
+   * 5e sets this to true; systems without 5e death saves set it to false or omit it.
+   */
+  readonly hasDeathSaves?: boolean;
+  /**
    * Whether this rule system is field-compatible with the D&D Beyond public-sheet importer
    * (issue #714). The importer maps a DDB sheet into the D&D-5e character shape (six
    * abilities, 5e AC/HP math, 5e conditions, 5e skills/saves), so importing into a
@@ -2509,6 +2513,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
   presentation: DND5E_STATBLOCK_PRESENTATION,
+  hasDeathSaves: true,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -3731,6 +3736,15 @@ export function listRuleSystemAdapters(): RuleSystemAdapter[] {
   // Sort by id so snapshot order does not depend on ADAPTERS insertion order.
   out.sort((a, b) => a.id.localeCompare(b.id));
   return out;
+}
+
+/**
+ * Determine whether a rule system adapter supports 5e 3-pip death saving throws (issue #424).
+ * Returns true for 5e / 5e-derived adapters, false for non-5e systems unless explicitly enabled.
+ */
+export function hasDeathSavesForAdapter(adapter?: Pick<RuleSystemAdapter, 'id' | 'hasDeathSaves'> | null): boolean {
+  if (!adapter) return true;
+  return adapter.hasDeathSaves ?? (adapter.id === DND5E_ADAPTER_ID || adapter.id === DND5E_PACK_SLUG);
 }
 
 /**
@@ -6663,6 +6677,9 @@ export const TurnActor = z.object({
   characterId: Id.nullable().default(null),
   // The user who owns the linked character (null for monsters/NPCs, or an unlinked PC).
   ownerUserId: z.string().nullable().default(null),
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
 });
 export type TurnActor = z.infer<typeof TurnActor>;
 
