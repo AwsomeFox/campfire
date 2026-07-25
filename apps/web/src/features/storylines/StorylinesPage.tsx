@@ -105,6 +105,61 @@ const BEAT_CONTENT_CONFLICT_FIELDS: Array<ConflictField<StorylineContentDraft>> 
   { key: 'prose', label: 'Body', merge: true },
 ];
 
+/** Compute sortOrder patches after an adjacent swap (issue #1312). */
+function reorderPatches<T extends { id: number; sortOrder: number }>(
+  items: T[],
+  index: number,
+  direction: -1 | 1,
+): { id: number; sortOrder: number }[] | null {
+  const target = index + direction;
+  if (target < 0 || target >= items.length) return null;
+  const next = [...items];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next
+    .map((item, sortOrder) => ({ id: item.id, sortOrder }))
+    .filter(({ id, sortOrder }) => items.find((item) => item.id === id)!.sortOrder !== sortOrder);
+}
+
+function ReorderButtons({
+  label,
+  index,
+  count,
+  disabled,
+  onMove,
+}: {
+  label: string;
+  index: number;
+  count: number;
+  disabled?: boolean;
+  onMove: (direction: -1 | 1) => void;
+}) {
+  return (
+    <span style={{ display: 'inline-flex', gap: 2, flex: 'none' }}>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        style={{ fontSize: 11, padding: '0 4px', minWidth: 24 }}
+        disabled={disabled || index === 0}
+        aria-label={`Move ${label} up`}
+        onClick={() => onMove(-1)}
+      >
+        ↑
+      </button>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        style={{ fontSize: 11, padding: '0 4px', minWidth: 24 }}
+        disabled={disabled || index === count - 1}
+        aria-label={`Move ${label} down`}
+        onClick={() => onMove(1)}
+      >
+        ↓
+      </button>
+    </span>
+  );
+}
+
+
 export default function StorylinesPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
@@ -118,6 +173,7 @@ export default function StorylinesPage() {
   const [newArcTitle, setNewArcTitle] = useState('');
   const [newArcSummary, setNewArcSummary] = useState('');
   const [arcCreateError, setArcCreateError] = useState<string | null>(null);
+  const [arcReorderError, setArcReorderError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const newArcTitleRef = useRef<HTMLInputElement>(null);
   // Issue #854: Enter confirming IME composition must not create an arc.
@@ -217,6 +273,9 @@ export default function StorylinesPage() {
     return map;
   }, [arcs]);
 
+  // Disable the header affordance while arcs are loading or once any arc exists (#1307).
+  const disableHeaderDraft = loading || arcs.length > 0;
+
   const createArc = async () => {
     const title = newArcTitle.trim();
     if (!title || busy) return;
@@ -234,6 +293,39 @@ export default function StorylinesPage() {
     } catch {
       setArcCreateError("Couldn't create the arc. Your title has been kept. Try again.");
       requestAnimationFrame(() => newArcTitleRef.current?.focus());
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const moveArc = async (index: number, direction: -1 | 1) => {
+    const patch = reorderPatches(arcs, index, direction);
+    if (!patch || busy) return;
+    const target = index + direction;
+    const movedTitle = arcs[index].title;
+    setArcReorderError(null);
+    setBusy(true);
+    const next = [...arcs];
+    [next[index], next[target]] = [next[target], next[index]];
+    setArcs(next);
+    try {
+      await Promise.all(
+        patch.map((p) => {
+          const arc = arcs.find((a) => a.id === p.id);
+          if (!arc) return Promise.resolve();
+          return api.patch(`${API}/arcs/${p.id}`, { sortOrder: p.sortOrder, expectedUpdatedAt: arc.updatedAt });
+        }),
+      );
+      await load();
+      announce(`Moved arc ${movedTitle}.`);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        await load();
+        setArcReorderError('This arc changed elsewhere. The list was refreshed — try again.');
+        return;
+      }
+      setArcReorderError("Couldn't reorder arcs. The list was refreshed.");
+      await load();
     } finally {
       setBusy(false);
     }
@@ -264,12 +356,17 @@ export default function StorylinesPage() {
         </span>
         <div style={{ flex: 1 }} />
         {/*
-          Issue #639: beats are a Storylines entity, so "Draft a beat with AI" lives
-          here — on the surface that owns the content type — not on Quests. The button
-          self-gates (DM + AI-DM seat enabled, co_dm/driver mode), so it renders for the
-          only audience that can ever use it on this DM-only page.
+          Issue #639 / #1307: beats are a Storylines entity. The header affordance is for
+          initial full-story drafting when no arcs exist yet; once a story is underway,
+          draft per-arc from each arc card instead.
         */}
-        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
+        <DraftWithAiButton
+          campaignId={cid}
+          target="beat"
+          label="Draft a beat with AI"
+          disabled={disableHeaderDraft}
+          disabledTitle="Use the per-arc Draft beat with AI button once you have story arcs."
+        />
       </div>
 
       <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
@@ -331,6 +428,7 @@ export default function StorylinesPage() {
       )}
 
       {error && <ErrorNote message={error} onRetry={() => void load()} />}
+      {arcReorderError && <ErrorNote message={arcReorderError} />}
 
       {loading && !arcs.length ? (
         <div className="card elev-sm">
@@ -339,16 +437,20 @@ export default function StorylinesPage() {
       ) : arcs.length === 0 ? (
         <EmptyState icon="oak-leaf" title="No storylines yet" hint={isDm ? 'Create an arc to start planning.' : undefined} />
       ) : (
-        arcs.map((arc) => (
+        arcs.map((arc, arcIndex) => (
           <ArcCard
             key={arc.id}
             arc={arc}
+            arcIndex={arcIndex}
+            arcCount={arcs.length}
             cid={cid}
             canDmWrite={canDmWrite}
             allBeats={allBeats}
             linkOptions={linkOptions}
             linkOptionState={{ options: linkOptions, failed: linkOptionsError, loading: linkOptionsLoading, onRetry: () => void loadLinkOptions() }}
             onChange={load}
+            onMoveArc={(direction) => void moveArc(arcIndex, direction)}
+            arcReorderBusy={busy}
           />
         ))
       )}
@@ -358,24 +460,33 @@ export default function StorylinesPage() {
 
 function ArcCard({
   arc,
+  arcIndex,
+  arcCount,
   cid,
   canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
   onChange,
+  onMoveArc,
+  arcReorderBusy,
 }: {
   arc: StoryArcWithBeats;
+  arcIndex: number;
+  arcCount: number;
   cid: number;
   canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
   onChange: RefreshStorylines;
+  onMoveArc: (direction: -1 | 1) => void;
+  arcReorderBusy: boolean;
 }) {
   const [newBeatTitle, setNewBeatTitle] = useState('');
   const [newBeatBody, setNewBeatBody] = useState('');
   const [beatCreateError, setBeatCreateError] = useState<string | null>(null);
+  const [beatReorderError, setBeatReorderError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingContent, setEditingContent] = useState(false);
   const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: arc.title, prose: arc.summary ?? '' });
@@ -545,6 +656,35 @@ function ArcCard({
     }
   };
 
+  const moveBeat = async (index: number, direction: -1 | 1) => {
+    const patch = reorderPatches(arc.beats, index, direction);
+    if (!patch || busy || arcReorderBusy) return;
+    const movedTitle = arc.beats[index].title;
+    setBeatReorderError(null);
+    setBusy(true);
+    try {
+      await Promise.all(
+        patch.map((p) => {
+          const beat = arc.beats.find((b) => b.id === p.id);
+          if (!beat) return Promise.resolve();
+          return api.patch(`${API}/beats/${p.id}`, { sortOrder: p.sortOrder, expectedUpdatedAt: beat.updatedAt });
+        }),
+      );
+      await onChange();
+      announce(`Moved beat ${movedTitle} in ${arc.title}.`);
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        await onChange();
+        setBeatReorderError('This beat changed elsewhere. The list was refreshed — try again.');
+        return;
+      }
+      setBeatReorderError("Couldn't reorder beats. The list was refreshed.");
+      await onChange();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <section
       className="card elev-sm"
@@ -569,6 +709,15 @@ function ArcCard({
         {editingContent ? `Edit arc ${arc.title}` : arc.title}
       </h2>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        {canDmWrite && arcCount > 1 && (
+          <ReorderButtons
+            label={arc.title}
+            index={arcIndex}
+            count={arcCount}
+            disabled={busy || arcReorderBusy}
+            onMove={onMoveArc}
+          />
+        )}
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="sr-only" htmlFor={arcStatusId}>Status for arc {arc.title}</label>
@@ -618,6 +767,15 @@ function ArcCard({
             Delete
           </button>
         )}
+        {canDmWrite && (
+          <DraftWithAiButton
+            campaignId={cid}
+            target="beat"
+            arcId={arc.id}
+            label="Draft beat with AI"
+            className="!min-h-0 !py-1 text-xs"
+          />
+        )}
       </div>
 
       {statusError && (
@@ -663,20 +821,31 @@ function ArcCard({
         />
       )}
 
+      {beatReorderError && (
+        <div style={{ marginTop: -2 }}>
+          <ErrorNote message={beatReorderError} />
+        </div>
+      )}
+
+
       {arc.beats.length === 0 ? (
         <p className="text-muted" style={{ margin: 0, fontSize: 12 }}>No beats yet.</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {arc.beats.map((beat) => (
+          {arc.beats.map((beat, beatIndex) => (
             <BeatRow
               key={beat.id}
               beat={beat}
+              beatIndex={beatIndex}
+              beatCount={arc.beats.length}
               cid={cid}
               canDmWrite={canDmWrite}
               allBeats={allBeats}
               linkOptions={linkOptions}
               linkOptionState={linkOptionState}
               onChange={onChange}
+              onMoveBeat={(direction) => void moveBeat(beatIndex, direction)}
+              reorderBusy={busy || arcReorderBusy}
             />
           ))}
         </div>
@@ -740,20 +909,28 @@ function ArcCard({
 
 function BeatRow({
   beat,
+  beatIndex,
+  beatCount,
   cid,
   canDmWrite,
   allBeats,
   linkOptions,
   linkOptionState,
   onChange,
+  onMoveBeat,
+  reorderBusy,
 }: {
   beat: StoryBeatWithBranches;
+  beatIndex: number;
+  beatCount: number;
   cid: number;
   canDmWrite: boolean;
   allBeats: Map<number, { title: string; arcTitle: string }>;
   linkOptions: LinkOptions;
   linkOptionState: LinkOptionState;
   onChange: RefreshStorylines;
+  onMoveBeat: (direction: -1 | 1) => void;
+  reorderBusy: boolean;
 }) {
   const [addingBranch, setAddingBranch] = useState(false);
   const [branchLabel, setBranchLabel] = useState('');
@@ -1010,6 +1187,15 @@ function BeatRow({
         {editingContent ? `Edit beat ${beat.title}` : beat.title}
       </h3>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {canDmWrite && beatCount > 1 && (
+          <ReorderButtons
+            label={beat.title}
+            index={beatIndex}
+            count={beatCount}
+            disabled={busy || reorderBusy}
+            onMove={onMoveBeat}
+          />
+        )}
         <span aria-hidden="true" style={{ width: 14, flex: 'none', textAlign: 'center' }}>{BEAT_GLYPH[beat.status]}</span>
         {canDmWrite ? (
           <div className="field" style={{ marginBottom: 0 }}>
