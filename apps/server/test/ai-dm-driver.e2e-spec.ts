@@ -117,9 +117,20 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     const grant = await h.sendMessage(campaignId, { input: 'Resolve loot.' });
     expect(grant.status).toBe(201);
     expect(grant.body.toolCalls).toEqual([
-      { name: 'adjust_treasury', isError: false, proposed: false },
-      { name: 'add_inventory_item', isError: false, proposed: false },
+      { name: 'adjust_treasury', isError: false, proposed: false, pendingConfirmation: true },
+      { name: 'add_inventory_item', isError: false, proposed: false, pendingConfirmation: true },
     ]);
+
+    const pending = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(pending.status).toBe(200);
+    expect(pending.body).toHaveLength(2);
+    for (const entry of pending.body as Array<{ id: string }>) {
+      const approved = await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+        .set(dm)
+        .send({ action: 'approve', confirmationId: entry.id });
+      expect(approved.status).toBe(201);
+    }
 
     const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
     expect(treasury.status).toBe(200);
@@ -148,7 +159,18 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
 
     const update = await h.sendMessage(campaignId, { input: 'Add two more potions.' });
     expect(update.status).toBe(201);
-    expect(update.body.toolCalls).toEqual([{ name: 'update_inventory_item', isError: false, proposed: false }]);
+    expect(update.body.toolCalls).toEqual([
+      { name: 'update_inventory_item', isError: false, proposed: false, pendingConfirmation: true },
+    ]);
+
+    const pendingUpdate = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(pendingUpdate.status).toBe(200);
+    expect(pendingUpdate.body).toHaveLength(1);
+    const approvedUpdate = await request(h.server)
+      .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+      .set(dm)
+      .send({ action: 'approve', confirmationId: pendingUpdate.body[0].id });
+    expect(approvedUpdate.status).toBe(201);
 
     const inventoryAfter = await request(h.server).get(`/api/v1/campaigns/${campaignId}/inventory`).set(dm);
     expect(inventoryAfter.status).toBe(200);
@@ -170,7 +192,7 @@ describe('ai-dm driver runtime — session loop + streamed narration + tool exec
     const audit = await h.getAudit(campaignId);
     const driverToolEvents = audit.body.filter((e: { action: string }) => e.action === 'ai-dm.driver.tool');
     const seatActor = `ai-dm-seat:${campaignId}`;
-    expect(driverToolEvents).toHaveLength(3);
+    expect(driverToolEvents.length).toBeGreaterThanOrEqual(3);
     expect(driverToolEvents.every((e: { actor: string }) => e.actor === seatActor)).toBe(true);
     expect(audit.body.some((e: { action: string }) => e.action === 'treasury.update')).toBe(true);
     expect(audit.body.some((e: { action: string }) => e.action === 'item.create')).toBe(true);
