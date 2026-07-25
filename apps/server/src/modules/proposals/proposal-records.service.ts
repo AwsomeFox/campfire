@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters, factions } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -30,9 +30,9 @@ import { projectProposal, projectProposals } from './proposal-projection';
 // standalone rather than derived from EntityType. Factions (issue #1056) are also
 // proposable for Co-DM drafting and are create-only in v1 (direct faction writes remain
 // DM-gated; the proposal queue is the co-DM intermediary).
-export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map';
+export type ProposableEntityType = Exclude<EntityType, 'campaign'> | 'map' | 'story_beat';
 
-const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction'];
+const PROPOSABLE_ENTITY_TYPES: ProposableEntityType[] = ['quest', 'npc', 'location', 'session', 'character', 'encounter', 'map', 'faction', 'story_beat'];
 
 export function isProposableEntityType(value: string): value is ProposableEntityType {
   return (PROPOSABLE_ENTITY_TYPES as string[]).includes(value);
@@ -248,6 +248,28 @@ export class ProposalRecordsService {
         // Factions with hidden=true are DM-only prep — non-DMs must not see them.
         if (role !== 'dm' && row.hidden) throw new NotFoundException(`Faction ${entityId} not found`);
         return { ...row };
+      }
+      case 'story_beat': {
+        const [row] = await this.db
+          .select()
+          .from(storyBeats)
+          .where(and(eq(storyBeats.id, entityId), eq(storyBeats.campaignId, campaignId)))
+          .limit(1);
+        if (!row) throw new NotFoundException(`Story beat ${entityId} not found`);
+        return {
+          id: row.id,
+          campaignId: row.campaignId,
+          arcId: row.arcId,
+          title: row.title,
+          body: row.body,
+          status: row.status,
+          sortOrder: row.sortOrder,
+          sessionId: row.sessionId,
+          questId: row.questId,
+          encounterId: row.encounterId,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        };
       }
     }
   }
