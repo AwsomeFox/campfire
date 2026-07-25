@@ -27,7 +27,7 @@ export function CombatantStatblockEditor({
   onChange: (next: CombatantStatblock) => void;
   disabled?: boolean;
 }) {
-  const { t } = useTranslation();
+  useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
 
   const patch = (partial: Partial<CombatantStatblock>) => onChange({ ...statblock, ...partial });

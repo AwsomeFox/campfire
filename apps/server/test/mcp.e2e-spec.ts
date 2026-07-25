@@ -235,6 +235,12 @@ const ALL_TOOLS = [
   'reveal_attachment',
   'hide_attachment',
   'delete_attachment',
+  // campaign library monsters (issue #425)
+  'list_campaign_library_monsters',
+  'create_campaign_library_monster',
+  'update_campaign_library_monster',
+  'delete_campaign_library_monster',
+  'clone_campaign_library_monster',
 ];
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
@@ -324,7 +330,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...ALL_TOOLS].sort());
 
-    expect(tools).toHaveLength(208);
+    expect(tools).toHaveLength(213);
 
     // Strict schemas must still be ADVERTISED even though per-call validation happens
     // in our handler (so failures return the documented {"error"} JSON): every tool

@@ -9,6 +9,7 @@ import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
+import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
 import { EncountersService } from '../../src/modules/encounters/encounters.service';
 import { CharactersService } from '../../src/modules/characters/characters.service';
 import type { RequestUser } from '../../src/common/user.types';
@@ -39,7 +40,8 @@ describe('encounter reopen HP sync (issue #466, service layer)', () => {
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm);
     const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
-    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments);
+    const campaignLibrary = new CampaignLibraryService(orm, audit);
+    const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
     const charactersService = new CharactersService(orm, audit, revisions, events, rolls);
     return { orm, encountersService, charactersService, audit };
   }
