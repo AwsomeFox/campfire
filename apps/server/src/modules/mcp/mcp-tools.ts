@@ -96,6 +96,8 @@ import {
 } from '@campfire/schema';
 import { hasServerAdminPower, type RequestUser } from '../../common/user.types';
 import { buildMcpEnvelope } from '../../common/api-error.envelope';
+import { getRequestContext, getRequestId, patchRequestContext } from '../../common/request-context';
+import { logRequest } from '../../common/request-log';
 import { requireWriteMode, assertDirectWriteAllowed } from '../../common/proposed.util';
 import { fromJsonText } from '../../common/json';
 import { resolveSavingThrow } from './saving-throw-math';
@@ -178,6 +180,26 @@ function ok(data: unknown): ToolResult {
 function fail(err: unknown): ToolResult {
   const envelope = buildMcpEnvelope(err);
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(envelope) }] };
+}
+
+function campaignIdFromToolArgs(args: Record<string, unknown>): number | undefined {
+  const raw = args.campaignId;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
+}
+
+function logMcpTool(name: string, args: Record<string, unknown>, startedAt: number, result: 'ok' | 'error'): void {
+  const requestId = getRequestId();
+  if (!requestId) return;
+  const ctx = getRequestContext();
+  logRequest({
+    requestId,
+    transport: 'mcp',
+    result,
+    latencyMs: Math.max(0, Date.now() - startedAt),
+    tool: name,
+    actor: ctx?.actor,
+    campaignId: campaignIdFromToolArgs(args),
+  });
 }
 
 /**
@@ -546,10 +568,18 @@ export class McpToolsService {
       cb: (args: Record<string, unknown>) => Promise<ToolResult>,
     ) => void;
     const cb = async (args: Record<string, unknown>): Promise<ToolResult> => {
+      const startedAt = Date.now();
       try {
         const validated = strictShape.parse(args ?? {}) as Record<string, unknown>;
-        return ok(await handler(validated));
+        patchRequestContext({
+          tool: name,
+          campaignId: campaignIdFromToolArgs(validated),
+        });
+        const data = await handler(validated);
+        logMcpTool(name, validated, startedAt, 'ok');
+        return ok(data);
       } catch (err) {
+        logMcpTool(name, args ?? {}, startedAt, 'error');
         return fail(err);
       }
     };

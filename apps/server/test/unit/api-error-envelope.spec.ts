@@ -17,6 +17,7 @@ import {
   resolveRequestId,
   resolveRequestIdFromHeader,
 } from '../../src/common/api-error.envelope';
+import { createRequestContext, runWithRequestContext } from '../../src/common/request-context';
 
 /**
  * Issue #682 — pure unit tests for the unified error envelope.
@@ -229,6 +230,14 @@ describe('api-error.envelope — buildMcpEnvelope', () => {
     const wrapped = buildMcpEnvelope(new BadRequestException('x'));
     expect(typeof wrapped.error.requestId).toBe('string');
     expect(wrapped.error.requestId!.length).toBeGreaterThan(0);
+  });
+
+  it('reuses the active request context id for MCP when present (#684)', () => {
+    const ctx = createRequestContext({ inboundHeader: 'mcp-context-id', transport: 'mcp' });
+    runWithRequestContext(ctx, () => {
+      const wrapped = buildMcpEnvelope(new BadRequestException('x'));
+      expect(wrapped.error.requestId).toBe('mcp-context-id');
+    });
   });
 
   it('sanitizes 5xx messages on MCP too', () => {

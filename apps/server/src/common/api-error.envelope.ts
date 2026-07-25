@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { getRequestId } from './request-context';
 import type { HttpException } from '@nestjs/common';
 import type { ZodError } from 'zod';
 
@@ -373,9 +374,8 @@ export function buildRestEnvelope(opts: {
 
 /**
  * Build the MCP envelope — the same payload as REST minus HTTP-context fields,
- * wrapped inside `{ "error": <envelope> }`. `requestId` is included when known
- * (the MCP transport doesn't currently thread a per-request id, so it's
- * generated per-error here — still useful for support correlation).
+ * wrapped inside `{ "error": <envelope> }`. `requestId` is taken from the
+ * active request context when present (issue #684), else minted per-error.
  */
 export function buildMcpEnvelope(err: unknown): { error: ApiErrorEnvelope } {
   const norm = normalizeError(err);
@@ -389,7 +389,7 @@ export function buildMcpEnvelope(err: unknown): { error: ApiErrorEnvelope } {
     status: norm.status,
     code: norm.code,
     message,
-    requestId: randomUUID(),
+    requestId: getRequestId() ?? randomUUID(),
   };
   if (norm.errors && norm.errors.length > 0) error.errors = norm.errors;
   if (isHttpException(err)) {
