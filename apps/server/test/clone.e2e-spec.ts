@@ -674,7 +674,7 @@ describe('campaign clone extended modules (e2e, issue #435)', () => {
     expect(arcs.body[0].beats[0].encounterId).toBe(clonedEncs.body[0].id);
 
     const timeline = await dmAgent.get(`/api/v1/campaigns/${cloneId}/timeline`);
-    expect(timeline.body.some((e: { title: string }) => e.title === 'The founding')).toBe(true);
+    expect(timeline.body.items.some((e: { title: string }) => e.title === 'The founding')).toBe(true);
     const calendar = await dmAgent.get(`/api/v1/campaigns/${cloneId}/timeline/calendar`);
     expect(calendar.body.currentDate).toBe('Year 5, Harvest');
 
