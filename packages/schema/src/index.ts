@@ -2136,7 +2136,31 @@ export interface MonsterStatblockData {
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
   legendaryActions?: unknown;
+  /** Lair actions the creature takes on initiative count 20 (issue #618). */
+  lairActions?: unknown;
   reactions?: unknown;
+}
+
+/** 5e lair actions fire on initiative count 20 (issue #618). */
+export const LAIR_INITIATIVE_COUNT = 20;
+
+/** Default legendary-action pool per round for boss creatures (issue #618). */
+export const LEGENDARY_ACTIONS_PER_ROUND = 3;
+
+/** Action-economy slot key for legendary-action usage on a combatant (issue #618). */
+export const LEGENDARY_ACTION_SLOT = 'legendary';
+
+/** Whether a mapped statblock section has at least one named entry (issue #618). */
+export function statblockSectionHasEntries(raw: unknown): boolean {
+  if (!Array.isArray(raw)) return false;
+  return raw.some((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const o = item as Record<string, unknown>;
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    if (name.length > 0) return true;
+    const desc = typeof o.desc === 'string' ? o.desc : typeof o.description === 'string' ? o.description : '';
+    return desc.trim().length > 0;
+  });
 }
 
 /**
@@ -2522,6 +2546,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       legendaryActions: d.legendaryActions ?? d.legendary_actions,
+      lairActions: d.lairActions ?? d.lair_actions,
       reactions: d.reactions,
     };
   },
@@ -5377,6 +5402,17 @@ export type AoeTemplate = z.infer<typeof AoeTemplate>;
  * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
  * drop one (a live table gesture, not DM-gated like fog).
  */
+/** Encounter turn pointer phase — combatant turn vs lair action at init 20 (issue #618). */
+export const EncounterTurnPhase = z.enum(['combatant', 'lair']);
+export type EncounterTurnPhase = z.infer<typeof EncounterTurnPhase>;
+
+/** Per-combatant legendary-action pool surfaced on encounter reads (issue #618). */
+export const LegendaryActionPool = z.object({
+  max: z.number().int().positive(),
+  used: z.number().int().nonnegative(),
+});
+export type LegendaryActionPool = z.infer<typeof LegendaryActionPool>;
+
 export const MapPing = z.object({
   x: z.number().min(0).max(100),
   y: z.number().min(0).max(100),
@@ -5400,6 +5436,10 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Boss-fight scheduling (issue #618): when `turnPhase` is `lair`, `currentCombatantId`
+  // is null and `lairResumeCombatantId` is the next combatant after the lair slot resolves.
+  turnPhase: EncounterTurnPhase.default('combatant'),
+  lairResumeCombatantId: Id.nullable().default(null),
   // Optional links to WHERE / WHY / WHEN the encounter happened (issue #126) and an
   // optional battle map (issue #39). All nullable; absent in older DBs pre-migration.
   locationId: Id.nullable().default(null),
@@ -6339,6 +6379,8 @@ export const Combatant = z.object({
   // Structured active effects with duration + save timing (issue #413), alongside the
   // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
   activeEffects: z.array(ActiveEffect).max(50).default([]),
+  // Populated server-side when the linked statblock has legendary actions (issue #618).
+  legendaryActions: LegendaryActionPool.nullable().default(null),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
