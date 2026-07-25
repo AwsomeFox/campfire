@@ -22,6 +22,7 @@ import {
 import { api, ApiError, API } from '../../lib/api';
 import { AiProviderPrivacyNotice } from '../../components/AiProviderPrivacyNotice';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { SkeletonConditionalRegion } from '../../components/ui';
 
 const PROVIDER_TYPES: AiProviderConfigType[] = ['openai', 'anthropic', 'gemini', 'mock'];
 
@@ -266,7 +267,7 @@ export function ProviderForm({
   }
 
   if (loading) {
-    return <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Loading…</p>;
+    return <SkeletonConditionalRegion preset="provider-form" />;
   }
   if (loadError) {
     return <p className="text-sm" style={{ color: '#f87171' }}>{loadError}</p>;
