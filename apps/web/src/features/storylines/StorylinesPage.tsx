@@ -1003,7 +1003,6 @@ function BeatRow({
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
   const editBranchLabelRef = useRef<HTMLInputElement>(null);
-  const branchEditTriggerRef = useRef<HTMLButtonElement>(null);
   const editTriggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
   // Issue #854: Enter confirming IME composition must not create a branch.
@@ -1219,8 +1218,7 @@ function BeatRow({
     setEditingBranch(null);
     setEditBranchError(null);
     // Restore focus to the branch row container (stable id + tabIndex={-1}),
-    // not the edit button — the button is unmounted while the edit form is
-    // shown, so branchEditTriggerRef.current is null at this point.
+    // not the edit button — the button is unmounted while the edit form is shown.
     if (branch) {
       requestAnimationFrame(() => {
         document.getElementById(branchDomId(branch.id))?.focus();
@@ -1591,7 +1589,6 @@ function BeatRow({
             </span>
             {canDmWrite && (
               <button
-                ref={branch.id === (editingBranch?.id ?? -1) ? branchEditTriggerRef : undefined}
                 type="button"
                 className="btn btn-ghost"
                 style={{ fontSize: 10, padding: '0 4px' }}
