@@ -68,11 +68,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     dismiss();
   }, [roll, activeApplyHandler, dismiss]);
 
-  const canApply =
-    roll != null &&
-    activeApplyHandler != null &&
-    rollApplyEligible &&
-    looksLikeDamageRoll(roll);
+  const canApply = roll != null && activeApplyHandler != null && looksLikeDamageRoll(roll);
 
   return (
     <RollResultToastContext.Provider value={{ showRoll, setApplyDamageHandler }}>
