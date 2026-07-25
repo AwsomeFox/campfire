@@ -43,6 +43,7 @@ function combatant(id: number, initiative: number | null): Combatant {
     tokenHiddenByFog: false,
     turnState: { ...EMPTY_TURN_STATE },
     activeEffects: [],
+    conditionInstances: [],
     legendaryActions: null,
   };
 }
