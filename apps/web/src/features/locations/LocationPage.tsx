@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
-import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
+import type { Attachment, Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
@@ -31,7 +31,8 @@ import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/Loc
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
-import { attachmentFileUrl } from '../../components/ImageUpload';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
@@ -135,6 +136,7 @@ export default function LocationPage() {
   const [pinX, setPinX] = useState('50');
   const [pinY, setPinY] = useState('50');
   const [pinSaving, setPinSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Reset editor chrome tied to the prior record whenever the route identity changes
   // (issue #853) — parent/child links reuse this component instance.
@@ -282,6 +284,18 @@ export default function LocationPage() {
   function cancelEdit() {
     setEditing(false);
     setProposeMode(false);
+  }
+
+  async function savePortrait(attachment: Attachment) {
+    setActionError(null);
+    try {
+      await api.patch(`${API}/locations/${id}`, {
+        portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+      });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
+    }
   }
 
   async function save() {
@@ -500,6 +514,7 @@ export default function LocationPage() {
       />
 
       {error && <ErrorNote message={error} onRetry={load} />}
+      {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
 
       {proposeDone && !editing && (
         <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
@@ -513,6 +528,29 @@ export default function LocationPage() {
       {!editing && (
         <>
           <div className="flex items-center gap-2.5 flex-wrap">
+            {canDmWrite ? (
+              <div className="w-32 h-20 shrink-0">
+                <ImageUpload
+                  campaignId={cid}
+                  kind="portrait"
+                  shape="rect"
+                  previewUrl={location.portraitUrl ?? undefined}
+                  label="Landmark"
+                  onUploaded={savePortrait}
+                  onError={setActionError}
+                />
+              </div>
+            ) : location.portraitUrl ? (
+              <img
+                src={location.portraitUrl}
+                alt=""
+                className="h-20 w-32 rounded-xl object-cover border border-[var(--color-divider)] shrink-0"
+              />
+            ) : (
+              <div className="h-20 w-32 rounded-xl bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center shrink-0">
+                <GameIcon slug="position-marker" size={28} className="text-[var(--color-accent)]" />
+              </div>
+            )}
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
             {isDm && location.status === 'unexplored' && (
@@ -759,6 +797,8 @@ export default function LocationPage() {
                   </div>
                 </Card>
               )}
+
+              <EntityDiscussion campaignId={cid} entityType="location" entityId={id} />
             </div>
 
             <div className="space-y-4 min-w-0">

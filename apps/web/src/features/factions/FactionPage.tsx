@@ -8,13 +8,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
-import type { Faction, FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
+import type { Attachment, Faction, FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../../components/ui';
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
@@ -22,6 +23,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
 import { buildFactionRevealPreview } from '../../components/entityRevealPreview';
 import { GameIcon } from '../../components/GameIcon';
+import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import {
   DmPrivacyGroup,
   FACTION_EDITOR_ID_PREFIX,
@@ -61,6 +63,7 @@ export default function FactionPage() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
   const [bumping, setBumping] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   // Optimistic-concurrency guard (#157/#440): a stale save 409s instead of clobbering a
   // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
   // affordance; `historyNonce` refetches the edit-history panel after each save.
@@ -117,6 +120,18 @@ export default function FactionPage() {
       setError(err instanceof ApiError ? err.message : "Couldn't change reputation.");
     } finally {
       setBumping(false);
+    }
+  }
+
+  async function savePortrait(attachment: Attachment) {
+    setActionError(null);
+    try {
+      await api.patch(`${API}/factions/${id}`, {
+        portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+      });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't save the emblem.");
     }
   }
 
@@ -259,6 +274,7 @@ export default function FactionPage() {
       />
 
       {error && <ErrorNote message={error} onRetry={load} />}
+      {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
 
       {canDmWrite && (
         <VisibleToPlayersBar
@@ -277,9 +293,28 @@ export default function FactionPage() {
       {!editing && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
-            <div className="rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0" style={{ height: 52, width: 52 }}>
-              {initials(faction.name)}
-            </div>
+            {canDmWrite ? (
+              <ImageUpload
+                campaignId={cid}
+                kind="portrait"
+                shape="circle"
+                previewUrl={faction.portraitUrl ?? undefined}
+                label="Emblem"
+                onUploaded={savePortrait}
+                onError={setActionError}
+              />
+            ) : faction.portraitUrl ? (
+              <img
+                src={faction.portraitUrl}
+                alt=""
+                className="h-13 w-13 rounded-full object-cover border border-[var(--color-divider)] shrink-0"
+                style={{ height: 52, width: 52 }}
+              />
+            ) : (
+              <div className="rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0" style={{ height: 52, width: 52 }}>
+                {initials(faction.name)}
+              </div>
+            )}
             <div className="min-w-0">
               <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{faction.name}</h1>
               {faction.kind && <p className="text-sm text-slate-400 break-words">{faction.kind}</p>}
@@ -365,6 +400,8 @@ export default function FactionPage() {
                   </div>
                 )}
               </Card>
+
+              <EntityDiscussion campaignId={cid} entityType="faction" entityId={id} />
             </div>
 
             <div className="space-y-4 min-w-0">
