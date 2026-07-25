@@ -15,6 +15,7 @@ import { UsersCard } from './UsersCard';
 import { ResetRequestsCard } from './ResetRequestsCard';
 import { SettingsCard } from './SettingsCard';
 import { GameIcon } from '../../components/GameIcon';
+import { PageTitle } from '../../components/PageTitle';
 import { MembershipIntegrityCard } from './MembershipIntegrityCard';
 import { RosterImportCard } from './RosterImportCard';
 
@@ -69,7 +70,9 @@ function AdminUsers() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">
-      <h1 className="flex items-center gap-2 text-xl font-extrabold text-white"><GameIcon slug="person" size={20} /> Users</h1>
+      <PageTitle className="flex items-center gap-2 text-xl font-extrabold text-white">
+        <GameIcon slug="person" size={20} aria-hidden /> Users
+      </PageTitle>
       {error && <ErrorNote message={error} onRetry={load} />}
       <UsersCard users={users ?? []} onChange={load} />
       <RosterImportCard />

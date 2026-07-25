@@ -518,9 +518,12 @@ export default function TimelinePage() {
           ) : (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
               <div style={{ flex: 1 }}>
-                <div className="text-muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                <h2
+                  className="text-muted"
+                  style={{ margin: 0, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700 }}
+                >
                   Current in-world date
-                </div>
+                </h2>
                 <div style={{ fontFamily: 'var(--font-heading)', fontSize: 18, fontWeight: 500, marginTop: 2 }}>
                   {calendar?.currentDate || <span className="text-muted" style={{ fontStyle: 'italic', fontWeight: 400 }}>Not set</span>}
                 </div>
@@ -669,17 +672,17 @@ export default function TimelinePage() {
                         <span className="tag tag-outline" style={{ fontSize: 10 }} title="Hidden from players"><GameIcon slug="sight-disabled" size={11} className="inline align-text-bottom mr-1" />Hidden</span>
                       )}
                     </div>
-                    <div
+                    <h2
                       style={{
                         fontFamily: 'var(--font-heading)',
                         fontWeight: 500,
                         fontSize: 16,
-                        marginTop: 4,
+                        margin: '4px 0 0',
                         color: 'var(--color-text)',
                       }}
                     >
                       {e.title}
-                    </div>
+                    </h2>
                     {e.body && (
                       <div style={{ marginTop: 6 }}>
                         <Markdown>{e.body}</Markdown>
