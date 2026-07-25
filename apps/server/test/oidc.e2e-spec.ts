@@ -171,10 +171,10 @@ async function spawnAppOnce(
 
   let output = '';
   if (!collectSpawnCoverage) {
-    child.stdout.on('data', (chunk) => {
+    child.stdout?.on('data', (chunk) => {
       output += chunk.toString();
     });
-    child.stderr.on('data', (chunk) => {
+    child.stderr?.on('data', (chunk) => {
       output += chunk.toString();
     });
   }
