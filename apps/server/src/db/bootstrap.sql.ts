@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS npcs (
   faction_id INTEGER REFERENCES factions(id) ON DELETE SET NULL,
   body TEXT NOT NULL DEFAULT '',
   dm_secret TEXT NOT NULL DEFAULT '',
+  portrait_url TEXT,
   icon_slug TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
   deleted_at TEXT,
@@ -1045,6 +1046,11 @@ CREATE TABLE IF NOT EXISTS encounter_events (
   actor_id INTEGER,
   target_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  chain_id TEXT,
+  parent_event_id INTEGER,
+  phase TEXT,
+  performed_by_json TEXT,
+  metadata_json TEXT,
   created_at TEXT NOT NULL
 );
 

@@ -75,7 +75,7 @@ async function openGestureFixture(page: Page) {
     gridSnap: false,
     gridType: 'square',
     fog: { enabled: true, revealed: [] },
-    aoe: [{ id: AOE_ID, shape: 'circle', x: 40, y: 40, sizeFt: 10, angleDeg: 0, color: null }],
+    aoe: [{ id: AOE_ID, shape: 'circle', x: 40, y: 40, sizeFt: 10, angleDeg: 0, color: null, declaredByUserId: null }],
     combatants: original.combatants.map((combatant, index) =>
       index === 0 ? { ...combatant, tokenX: 25, tokenY: 25, tokenSize: 'medium' } : combatant,
     ),

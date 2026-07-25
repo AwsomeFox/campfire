@@ -4,7 +4,10 @@ import {
   advanceCombatLogAnnouncements,
   formatCombatLogAnnouncement,
   formatCombatLogAnnouncementBatch,
+  formatCombatLogChainDetails,
+  formatCombatLogChainSummary,
   formatCombatLogEventSummary,
+  groupCombatLogEvents,
 } from '../../src/features/encounters/combatLogAccessibility';
 
 function event(id: number, type: EncounterEventType, patch: Partial<EncounterEvent> = {}): EncounterEvent {
@@ -18,6 +21,11 @@ function event(id: number, type: EncounterEventType, patch: Partial<EncounterEve
     actorId: null,
     targetId: null,
     detail: '',
+    chainId: null,
+    parentEventId: null,
+    phase: null,
+    performedBy: null,
+    metadata: {},
     createdAt: `2026-07-22T12:00:${String(id).padStart(2, '0')}.000Z`,
     ...patch,
   };
@@ -75,5 +83,19 @@ test.describe('combat-log accessibility formatting', () => {
     expect(formatCombatLogAnnouncementBatch(burst.appendedEvents).indexOf('gained Prone')).toBeLessThan(
       formatCombatLogAnnouncementBatch(burst.appendedEvents).indexOf('bridge is unstable'),
     );
+  });
+
+  test('groups correlated action chains and formats expandable summaries (issue #426)', () => {
+    const chainId = 'chain-test-1';
+    const events = [
+      event(10, 'note', { actor: 'Mira', chainId, phase: 'declare', metadata: { actionName: 'Fireball', mode: 'save' }, detail: 'used Fireball' }),
+      event(11, 'roll', { actor: 'Mira', target: 'Ash Hound', chainId, phase: 'ruling', detail: 'failed save', metadata: { playerText: 'Ash Hound failed the save' } }),
+      event(12, 'damage', { actor: 'Mira', target: 'Ash Hound', chainId, phase: 'consequence', detail: 'took 14 damage' }),
+    ];
+    const chains = groupCombatLogEvents(events);
+    expect(chains).toHaveLength(1);
+    expect(chains[0].events).toHaveLength(3);
+    expect(formatCombatLogChainSummary(chains[0])).toBe('Mira: used Fireball');
+    expect(formatCombatLogChainDetails(chains[0])).toEqual(['Ash Hound: Ash Hound failed the save', 'Ash Hound: took 14 damage']);
   });
 });

@@ -827,6 +827,7 @@ export const Npc = z.object({
   factionId: Id.nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  portraitUrl: z.string().max(500).nullable().default(null),
   // Optional on-theme icon (issue #302): the slug of a bundled game-icons.net
   // entity icon (see apps/web/src/lib/icons) shown in place of the initials
   // avatar. '' means "no icon — fall back to initials". The web app validates
@@ -1123,6 +1124,9 @@ export const ScheduledSessionListPage = z.object({
   offset: z.number().int().nonnegative(),
 });
 export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
+
+// Fog-of-war visibility helpers shared by server redaction and the web VTT (issue #465).
+export * from './fog-visibility';
 
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
@@ -5671,6 +5675,9 @@ export const AoeTemplate = z.object({
   sizeFt: z.number().positive().max(1000),
   angleDeg: z.number().min(-360).max(360).default(0),
   color: z.string().max(24).nullable().default(null),
+  // Optional owner for player-declared templates (issue #465). DM/AI templates omit this;
+  // the declaring player still sees their template in unrevealed fog.
+  declaredByUserId: z.string().min(1).max(120).nullable().default(null),
 });
 export type AoeTemplate = z.infer<typeof AoeTemplate>;
 
@@ -6859,8 +6866,42 @@ export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiati
 // 'effect' (issue #413) records a start/end-of-turn effect resolution (ongoing damage,
 // regeneration tick, an expired effect, a prompted repeat save). Appended alongside the
 // existing types by the turn-advancement path; free-text column, so older DBs are unaffected.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect']);
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect', 'resource_changed']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
+
+/** Phase within an action-resolution event chain (issue #426). */
+export const EncounterEventPhase = z.enum(['declare', 'roll', 'ruling', 'consequence', 'resource', 'undo']);
+export type EncounterEventPhase = z.infer<typeof EncounterEventPhase>;
+
+/** Who performed the action that produced a combat-log chain (issue #426). */
+export const EncounterEventPerformedBy = z.object({
+  userId: z.string().max(120).nullable().default(null),
+  role: z.string().max(24).nullable().default(null),
+  kind: z.enum(['human', 'ai', 'system']).default('human'),
+});
+export type EncounterEventPerformedBy = z.infer<typeof EncounterEventPerformedBy>;
+
+/** Structured payload for expandable combat-log details (issue #426). */
+export const EncounterEventMetadata = z.object({
+  actionName: z.string().max(120).optional(),
+  mode: z.string().max(24).optional(),
+  outcome: z.string().max(24).optional(),
+  playerText: z.string().max(600).optional(),
+  dmText: z.string().max(600).optional(),
+  naturalRoll: z.number().int().nullable().optional(),
+  attackTotal: z.number().int().nullable().optional(),
+  saveTotal: z.number().int().nullable().optional(),
+  vsValue: z.number().int().nullable().optional(),
+  saveDc: z.number().int().nullable().optional(),
+  degree: z.string().max(24).optional(),
+  damageSummary: z.string().max(200).optional(),
+  costSlot: z.string().max(40).optional(),
+  costCount: z.number().int().optional(),
+  spellLevelSpent: z.number().int().optional(),
+  undoOfChainId: z.string().max(64).optional(),
+  ruleSystem: z.string().max(40).optional(),
+});
+export type EncounterEventMetadata = z.infer<typeof EncounterEventMetadata>;
 
 export const EncounterEvent = z.object({
   id: Id,
@@ -6886,6 +6927,13 @@ export const EncounterEvent = z.object({
   // #869) — store deltas/outcomes only ("took 8 damage", "Combat started"); the
   // UI composes names from actor/target.
   detail: z.string().max(500).default(''),
+  // Issue #426: correlate declaration, rolls, rulings, consequences, resources,
+  // and undo in one event chain without rewriting history.
+  chainId: z.string().max(64).nullable().default(null),
+  parentEventId: Id.nullable().default(null),
+  phase: EncounterEventPhase.nullable().default(null),
+  performedBy: EncounterEventPerformedBy.nullable().default(null),
+  metadata: EncounterEventMetadata.default({}),
   createdAt: IsoDate,
 });
 export type EncounterEvent = z.infer<typeof EncounterEvent>;
@@ -7525,6 +7573,27 @@ export const AuditEntry = z.object({
   createdAt: IsoDate,
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;
+
+/** Default page size for cursor-paginated campaign audit lists (issue #443). */
+export const AUDIT_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on campaign audit lists — clients page with `cursor`, not a huge page. */
+export const AUDIT_LIST_MAX_LIMIT = 200;
+
+/**
+ * Paginated campaign audit list response (issue #443).
+ *
+ * Returned when the client requests the envelope (`envelope=1`) or passes filter/cursor
+ * params. Bare GET (no query) and legacy `?limit`/`?offset` paging still return a bare
+ * `AuditEntry[]` for backward compatibility.
+ */
+export const AuditListPage = z.object({
+  items: z.array(AuditEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type AuditListPage = z.infer<typeof AuditListPage>;
 
 // ---------- admin observability (issue #22) ----------
 // Server-wide operational snapshot for the admin console (GET /admin/metrics,

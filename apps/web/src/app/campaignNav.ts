@@ -90,6 +90,7 @@ export function buildCampaignNavGroups(
         { key: 'proposals', label: t('nav.proposals'), to: `${base}/proposals`, badge: pendingProposals },
         { key: 'trash', label: t('nav.trash'), to: `${base}/trash`, badge: trashCount },
         { key: 'members', label: t('nav.members'), to: `${base}/members` },
+        { key: 'audit', label: 'Audit log', to: `${base}/audit` },
       ]
     : [{ key: 'proposals', label: t('nav.myProposals'), to: `${base}/proposals` }];
 

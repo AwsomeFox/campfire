@@ -53,26 +53,19 @@ export class CatchUpService {
   async markCaughtUp(userId: number, campaignId: number, at?: string): Promise<{ lastCaughtUpAt: string }> {
     const stamp = at?.trim() || nowIso();
     const now = nowIso();
-    const [existing] = await this.db
-      .select({ id: campaignCatchUpCursors.id })
-      .from(campaignCatchUpCursors)
-      .where(and(eq(campaignCatchUpCursors.userId, userId), eq(campaignCatchUpCursors.campaignId, campaignId)))
-      .limit(1);
-
-    if (existing) {
-      await this.db
-        .update(campaignCatchUpCursors)
-        .set({ lastCaughtUpAt: stamp, updatedAt: now })
-        .where(eq(campaignCatchUpCursors.id, existing.id));
-    } else {
-      await this.db.insert(campaignCatchUpCursors).values({
+    await this.db
+      .insert(campaignCatchUpCursors)
+      .values({
         userId,
         campaignId,
         lastCaughtUpAt: stamp,
         createdAt: now,
         updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [campaignCatchUpCursors.userId, campaignCatchUpCursors.campaignId],
+        set: { lastCaughtUpAt: stamp, updatedAt: now },
       });
-    }
     return { lastCaughtUpAt: stamp };
   }
 

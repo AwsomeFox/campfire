@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
-import type { Faction, Location, Npc, Quest } from '@campfire/schema';
+import type { Attachment, Faction, Location, Npc, Quest } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -25,6 +25,7 @@ import { buildNpcRevealPreview } from '../../components/entityRevealPreview';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
+import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import {
   DmPrivacyGroup,
   LabeledField,
@@ -86,6 +87,7 @@ export default function NpcPage() {
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   // Optimistic-concurrency guard (#157/#233): a stale save 409s instead of clobbering a
   // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
   // affordance; `historyNonce` refetches the edit-history panel after each save.
@@ -300,6 +302,18 @@ export default function NpcPage() {
 
   if (!npc) return null;
 
+  async function savePortrait(attachment: Attachment) {
+    setActionError(null);
+    try {
+      await api.patch(`${API}/npcs/${id}`, {
+        portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+      });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
+    }
+  }
+
   const revealPreview = buildNpcRevealPreview({
     name: npc.name,
     role: npc.role,
@@ -318,6 +332,7 @@ export default function NpcPage() {
       />
 
       {error && <ErrorNote message={error} onRetry={load} />}
+      {actionError && <ErrorNote message={actionError} onRetry={() => setActionError(null)} />}
 
       {canDmWrite && (
         <VisibleToPlayersBar
@@ -345,15 +360,34 @@ export default function NpcPage() {
       {!editing && (
         <>
           <div className="flex items-center gap-3 flex-wrap">
-            <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0 overflow-hidden" style={{ height: 52, width: 52 }}>
-              <GameIcon
-                slug={npc.iconSlug}
-                size={30}
-                title={npc.name}
-                className="text-[var(--color-accent)]"
-                fallback={initials(npc.name)}
+            {canDmWrite ? (
+              <ImageUpload
+                campaignId={cid}
+                kind="portrait"
+                shape="circle"
+                previewUrl={npc.portraitUrl ?? undefined}
+                label="Portrait"
+                onUploaded={savePortrait}
+                onError={setActionError}
               />
-            </div>
+            ) : npc.portraitUrl ? (
+              <img
+                src={npc.portraitUrl}
+                alt=""
+                className="h-13 w-13 rounded-full object-cover border border-[var(--color-divider)] shrink-0"
+                style={{ height: 52, width: 52 }}
+              />
+            ) : (
+              <div className="h-13 w-13 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-base text-[var(--color-neutral-400)] shrink-0 overflow-hidden" style={{ height: 52, width: 52 }}>
+                <GameIcon
+                  slug={npc.iconSlug}
+                  size={30}
+                  title={npc.name}
+                  className="text-[var(--color-accent)]"
+                  fallback={initials(npc.name)}
+                />
+              </div>
+            )}
             <div className="min-w-0">
               <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{npc.name}</h1>
               {npc.role && <p className="text-sm text-slate-400 break-words">{npc.role}</p>}
