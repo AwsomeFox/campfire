@@ -101,7 +101,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
     sourcePortraitUrl = `/api/v1/attachments/${portraitAttachmentId}/file`;
     const hero = await dmAgent
       .post(`/api/v1/campaigns/${campaignId}/characters`)
-      .send({ name: 'Hero', className: 'Fighter', ownerUserId: playerId, portraitUrl: sourcePortraitUrl });
+      .send({ name: 'Hero', className: 'Fighter', status: 'active', ownerUserId: playerId, portraitUrl: sourcePortraitUrl });
     expect(hero.status).toBe(201);
     heroId = hero.body.id;
     const remoteHero = await dmAgent
@@ -109,6 +109,7 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
       .send({
         name: 'Remote Voice',
         className: 'Bard',
+        status: 'active',
         ownerUserId: playerId,
         portraitUrl: 'https://images.example.test/remote-voice.png',
       });

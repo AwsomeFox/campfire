@@ -134,6 +134,7 @@ describe('encounters (e2e)', () => {
     let activeId: number;
     let deadId: number;
     let retiredId: number;
+    let draftId: number;
 
     beforeAll(async () => {
       const server = ctx.app.getHttpServer();
@@ -147,6 +148,14 @@ describe('encounters (e2e)', () => {
       expect(active.status).toBe(201);
       expect(active.body.status).toBe('active');
       activeId = active.body.id;
+
+      const draft = await request(server)
+        .post(`/api/v1/campaigns/${statusCampId}/characters`)
+        .set(dm)
+        .send({ name: 'Work In Progress' });
+      expect(draft.status).toBe(201);
+      expect(draft.body.status).toBe('draft');
+      draftId = draft.body.id;
 
       const dead = await request(server)
         .post(`/api/v1/campaigns/${statusCampId}/characters`)
@@ -163,7 +172,7 @@ describe('encounters (e2e)', () => {
       retiredId = retired.body.id;
     });
 
-    it('only active characters are auto-added; dead/retired are skipped', async () => {
+    it('only active characters are auto-added; dead/retired/draft are skipped', async () => {
       const server = ctx.app.getHttpServer();
       const res = await request(server).post(`/api/v1/campaigns/${statusCampId}/encounters`).set(dm).send({ name: 'New Fight', hidden: false });
       expect(res.status).toBe(201);
@@ -171,6 +180,7 @@ describe('encounters (e2e)', () => {
       expect(charIds).toContain(activeId);
       expect(charIds).not.toContain(deadId);
       expect(charIds).not.toContain(retiredId);
+      expect(charIds).not.toContain(draftId);
       expect(res.body.combatants).toHaveLength(1);
     });
 
