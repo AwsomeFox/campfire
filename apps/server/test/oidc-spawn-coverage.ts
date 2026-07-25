@@ -104,7 +104,10 @@ export async function mergeLatestChildV8Coverage(): Promise<void> {
       const incoming = converter.toIstanbul();
       const coverageMap = libCoverage.createCoverageMap(globalWithCoverage.__coverage__);
       coverageMap.merge(incoming);
-      globalWithCoverage.__coverage__ = coverageMap.data;
+      // Update entries in-place — do not replace `__coverage__` or Jest loses its reference.
+      for (const file of Object.keys(incoming)) {
+        globalWithCoverage.__coverage__[file] = coverageMap.data[file];
+      }
     } catch {
       // Skip dist files v8-to-istanbul cannot map (e.g. missing source maps).
     }
