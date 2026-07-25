@@ -11,6 +11,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -23,9 +24,12 @@ import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
 import { Btn, ErrorNote, Skeleton } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { GameIcon } from '../../components/GameIcon';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
+import { parseCampaignIdParam } from '../../lib/parseCampaignIdParam';
 import { useFormattingLocale, useTimeFormat } from '../../lib/format';
 import {
   rememberCancelledScheduleDetail,
@@ -392,6 +396,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         item.id === message.id && !item.readAt ? { ...item, readAt: message.readAt } : item
       )) ?? previous);
     } else if (message.type === 'unread') {
+      allReadAtRef.current = null;
       readAtByIdRef.current.delete(message.id);
       setItems((previous) => previous?.map((item) => (
         item.id === message.id ? { ...item, readAt: null } : item
@@ -403,6 +408,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         idSet.has(item.id) && !item.readAt ? { ...item, readAt: message.readAt } : item
       )) ?? previous);
     } else if (message.type === 'unread-bulk') {
+      allReadAtRef.current = null;
       const idSet = new Set(message.ids);
       idSet.forEach((id) => readAtByIdRef.current.delete(id));
       setItems((previous) => previous?.map((item) => (
@@ -555,6 +561,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
     if (notification.readAt) {
       try {
         await api.post(`${API}/notifications/${notification.id}/unread`);
+        allReadAtRef.current = null;
         cancelCountRequest();
         syncReadMessage({ type: 'unread', id: notification.id });
         channelRef.current?.postMessage({ type: 'unread', id: notification.id } satisfies NotificationSyncMessage);
@@ -590,6 +597,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
   const markUnreadBulk = useCallback(async (opts: { ids?: number[]; campaignId?: number; all?: boolean }): Promise<BulkMarkResult> => {
     try {
       const res = await api.post<BulkMarkResult>(`${API}/notifications/mark-unread`, opts);
+      allReadAtRef.current = null;
       cancelCountRequest();
       syncReadMessage({ type: 'unread-bulk', ids: res.updatedIds });
       channelRef.current?.postMessage({ type: 'unread-bulk', ids: res.updatedIds } satisfies NotificationSyncMessage);
@@ -720,13 +728,34 @@ function notificationCopy(
 }
 
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
-  const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
+  const {
+    count,
+    items,
+    loadError,
+    closePanel,
+    retryLoadItems,
+    markRead,
+    markReadBulk,
+    markUnreadBulk,
+  } = notifications;
   const formattingLocale = useFormattingLocale();
   const timeFormat = useTimeFormat();
   const narrow = useIsNarrowViewport();
   const navigate = useNavigate();
+  const location = useLocation();
   const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
-  
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    body: string;
+    confirmLabel: string;
+    action: () => Promise<void>;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState<{ message: string; ids: number[] } | null>(null);
+  const [undoGeneration, setUndoGeneration] = useState(0);
+  const markDisplayedRef = useRef<HTMLButtonElement>(null);
+  const initialActionFocusRef = useRef(false);
+
   const panelMountedRef = useRef(true);
   useEffect(() => {
     panelMountedRef.current = true;
@@ -735,8 +764,28 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     };
   }, []);
 
-  const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
-  
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: closePanel,
+    inertBackground: true,
+    disabled: confirmDialog !== null,
+  });
+
+  const campaignIdFromRoute = useMemo(() => {
+    const match = /^\/c\/(\d+)/.exec(location.pathname);
+    return parseCampaignIdParam(match?.[1]);
+  }, [location.pathname]);
+
+  const displayedUnreadItems = useMemo(
+    () => (items ?? []).filter((notification) => !notification.readAt),
+    [items],
+  );
+
+  useEffect(() => {
+    if (initialActionFocusRef.current || items === null || displayedUnreadItems.length === 0) return;
+    markDisplayedRef.current?.focus();
+    initialActionFocusRef.current = true;
+  }, [displayedUnreadItems.length, items]);
+
   const listDescription =
     items === null
       ? loadError
@@ -745,18 +794,115 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
       : `${items.length} ${items.length === 1 ? 'item' : 'items'}.`;
   const statusAnnouncement = markAllAnnouncement ?? listDescription;
 
-  const handleMarkAllRead = useCallback(async () => {
-    const ok = await markAllRead();
+  const recordMarkRead = useCallback(async (
+    opts: { ids?: number[]; campaignId?: number; all?: boolean },
+    successMessage: string | ((res: BulkMarkResult) => string),
+    failureMessage: string,
+  ) => {
+    const res = await markReadBulk(opts);
     if (!panelMountedRef.current) return;
-    setMarkAllAnnouncement(
-      ok ? 'All notifications marked as read.' : "Couldn't mark all notifications as read.",
+    if (res.updated > 0) {
+      setMarkAllAnnouncement(typeof successMessage === 'function' ? successMessage(res) : successMessage);
+      setUndoGeneration((generation) => generation + 1);
+      setPendingUndo({
+        message: `Marked ${res.updated} notification${res.updated === 1 ? '' : 's'} as read.`,
+        ids: res.updatedIds,
+      });
+    } else {
+      setMarkAllAnnouncement(failureMessage);
+    }
+  }, [markReadBulk]);
+
+  const handleMarkDisplayedRead = useCallback(async () => {
+    const unreadIds = displayedUnreadItems.map((notification) => notification.id);
+    if (unreadIds.length === 0) return;
+    await recordMarkRead(
+      { ids: unreadIds },
+      (res) => `Marked ${res.updated} displayed notification${res.updated === 1 ? '' : 's'} as read.`,
+      "Couldn't mark displayed notifications as read.",
     );
-  }, [markAllRead]);
+  }, [displayedUnreadItems, recordMarkRead]);
+
+  const handleMarkCampaignRead = useCallback(() => {
+    if (!campaignIdFromRoute) return;
+    const campaignUnreadInView = displayedUnreadItems.filter(
+      (notification) => notification.campaignId === campaignIdFromRoute,
+    ).length;
+    const requiresConfirm = items !== null && items.length >= 30 && campaignUnreadInView > 0;
+
+    const run = async () => {
+      await recordMarkRead(
+        { campaignId: campaignIdFromRoute },
+        'Marked campaign notifications as read.',
+        "Couldn't mark campaign notifications as read.",
+      );
+    };
+
+    if (requiresConfirm) {
+      setConfirmDialog({
+        title: 'Mark all notifications in this campaign as read?',
+        body: 'This will mark every unread notification in the current campaign as read, including rows not shown in this panel.',
+        confirmLabel: 'Mark campaign read',
+        action: run,
+      });
+    } else {
+      void run();
+    }
+  }, [campaignIdFromRoute, displayedUnreadItems, items, recordMarkRead]);
+
+  const handleMarkAllRead = useCallback(() => {
+    if (count === 0) return;
+    const affectsUndisplayed = count > displayedUnreadItems.length;
+
+    const run = async () => {
+      await recordMarkRead(
+        { all: true },
+        'All notifications marked as read.',
+        "Couldn't mark all notifications as read.",
+      );
+    };
+
+    if (affectsUndisplayed) {
+      setConfirmDialog({
+        title: `Mark all ${count} notifications as read?`,
+        body: `This will mark ${count} unread notification${count === 1 ? '' : 's'} across all campaigns as read, including rows not currently displayed.`,
+        confirmLabel: `Mark all ${count} read`,
+        action: run,
+      });
+    } else {
+      void run();
+    }
+  }, [count, displayedUnreadItems.length, recordMarkRead]);
+
+  const handleConfirmExecute = useCallback(async () => {
+    if (!confirmDialog) return;
+    setConfirmBusy(true);
+    try {
+      await confirmDialog.action();
+    } finally {
+      if (panelMountedRef.current) {
+        setConfirmBusy(false);
+        setConfirmDialog(null);
+      }
+    }
+  }, [confirmDialog]);
+
+  const handleUndo = useCallback(async () => {
+    if (!pendingUndo) return;
+    const { ids } = pendingUndo;
+    const res = await markUnreadBulk({ ids });
+    if (!panelMountedRef.current) return;
+    if (res.updated > 0) {
+      setPendingUndo(null);
+    } else {
+      throw new Error('Restore failed');
+    }
+  }, [markUnreadBulk, pendingUndo]);
 
   const handleViewAllCenter = useCallback(() => {
     closePanel();
-    navigate('/notifications');
-  }, [closePanel, navigate]);
+    navigate(campaignIdFromRoute ? `/c/${campaignIdFromRoute}/notifications` : '/notifications');
+  }, [campaignIdFromRoute, closePanel, navigate]);
 
   const rootClassName = narrow
     ? 'fixed inset-0 flex items-end justify-center'
@@ -823,9 +969,24 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             {statusAnnouncement}
           </span>
           <div className="flex-1" />
-          {count > 0 && (
-            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={() => void handleMarkAllRead()}>
-              Mark all read
+          {displayedUnreadItems.length > 0 && (
+            <Btn
+              ref={markDisplayedRef}
+              ghost
+              style={{ fontSize: 11, minHeight: 32 }}
+              onClick={() => void handleMarkDisplayedRead()}
+            >
+              Mark displayed ({displayedUnreadItems.length}) read
+            </Btn>
+          )}
+          {campaignIdFromRoute && displayedUnreadItems.some((n) => n.campaignId === campaignIdFromRoute) && (
+            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={handleMarkCampaignRead}>
+              Mark campaign read
+            </Btn>
+          )}
+          {count > displayedUnreadItems.length && (
+            <Btn ghost style={{ fontSize: 11, minHeight: 32 }} onClick={handleMarkAllRead}>
+              Mark all ({count}) read
             </Btn>
           )}
           <CloseButton onClose={closePanel} label="Close notifications" />
@@ -919,7 +1080,26 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             Notification Center &rarr;
           </button>
         </div>
+        {pendingUndo && (
+          <UndoSnackbar
+            key={undoGeneration}
+            message={pendingUndo.message}
+            onUndo={handleUndo}
+            onExpire={() => setPendingUndo(null)}
+            successMessage="Restored notifications as unread."
+          />
+        )}
       </div>
+      {confirmDialog && (
+        <ConfirmDialog
+          title={confirmDialog.title}
+          body={confirmDialog.body}
+          confirmLabel={confirmDialog.confirmLabel}
+          busy={confirmBusy}
+          onConfirm={() => void handleConfirmExecute()}
+          onCancel={() => setConfirmDialog(null)}
+        />
+      )}
     </div>
   );
 }

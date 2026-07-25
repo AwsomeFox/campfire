@@ -1019,5 +1019,71 @@ describe('Issue #550: notification pagination, filtering, bulk operations & undo
     expect(singleRead.body.readAt).not.toBeNull();
     expect((await player.get('/api/v1/notifications/unread-count')).body.count).toBe(0);
   });
+
+  it('paginates 205 notifications without gaps or duplicates', async () => {
+    const c3 = await dm.post('/api/v1/campaigns').send({ name: 'Campaign Gamma' });
+    const campaign3Id = c3.body.id;
+    await dm.post(`/api/v1/campaigns/${campaign3Id}/members`).send({ userId: playerId, role: 'player' });
+
+    for (let i = 1; i <= 205; i++) {
+      await dm.post(`/api/v1/campaigns/${campaign3Id}/sessions`).send({
+        number: i + 200,
+        title: `Gamma Session ${i}`,
+        recap: `Gamma recap ${i}`,
+      });
+    }
+
+    const unreadCountRes = await player.get('/api/v1/notifications/unread-count');
+    const totalUnread = unreadCountRes.body.count as number;
+    expect(totalUnread).toBeGreaterThanOrEqual(205);
+
+    const seen = new Set<number>();
+    let cursor: number | null = null;
+    let pages = 0;
+    let expectedTotal: number | null = null;
+    while (pages < 20) {
+      const query = cursor ? `?limit=50&cursor=${cursor}` : '?limit=50';
+      const page = await player.get(`/api/v1/notifications${query}`);
+      expect(page.status).toBe(200);
+      if (expectedTotal === null) expectedTotal = page.body.total as number;
+      expect(page.body.total).toBe(expectedTotal);
+      for (const row of page.body.items as Array<{ id: number }>) {
+        expect(seen.has(row.id)).toBe(false);
+        seen.add(row.id);
+      }
+      if (!page.body.hasMore) {
+        expect(page.body.nextCursor).toBeNull();
+        break;
+      }
+      cursor = page.body.nextCursor;
+      pages += 1;
+    }
+    expect(seen.size).toBe(expectedTotal);
+  });
+
+  it('keeps pagination stable when new notifications arrive between pages', async () => {
+    const before = await player.get('/api/v1/notifications/unread-count');
+    const page1 = await player.get('/api/v1/notifications?limit=20');
+    expect(page1.status).toBe(200);
+
+    await dm.post(`/api/v1/campaigns/${campaign1Id}/sessions`).send({
+      number: 999,
+      title: 'Concurrent arrival',
+      recap: 'Arrived while paging',
+    });
+
+    const page2 = await player.get(`/api/v1/notifications?limit=20&cursor=${page1.body.nextCursor}`);
+    expect(page2.status).toBe(200);
+    const after = await player.get('/api/v1/notifications/unread-count');
+    expect(after.body.count).toBe(before.body.count + 1);
+
+    const mergedIds = [...page1.body.items, ...page2.body.items].map((row: { id: number }) => row.id);
+    expect(new Set(mergedIds).size).toBe(mergedIds.length);
+  });
+
+  it('rejects bulk mark-read without ids, campaignId, or all', async () => {
+    const invalid = await player.post('/api/v1/notifications/mark-read').send({});
+    expect(invalid.status).toBe(400);
+  });
 });
 
