@@ -6,7 +6,7 @@
  * silently caps a player at a single owned character (issue #129).
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/schema';
