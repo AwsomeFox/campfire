@@ -4396,3 +4396,102 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     });
   });
 });
+
+describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Issue 487 Campaign' });
+    campaignId = campRes.body.id;
+    await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/characters`)
+      .set(dm)
+      .send({ name: 'Aria', stats: { DEX: 16 }, hpCurrent: 20, hpMax: 20, ownerUserId: 'dev:p-1' });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  async function seedRunningFight(): Promise<{ encounterId: number; ariaId: number; monsterId: number }> {
+    const server = ctx.app.getHttpServer();
+    const res = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/encounters`)
+      .set(dm)
+      .send({ name: 'Player Turn Drill', hidden: false });
+    const encounterId = res.body.id as number;
+    const ariaId = (res.body.combatants as Array<{ id: number }>)[0].id;
+    const monster = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Goblin', hpMax: 7, initMod: -1 });
+    const monsterId = monster.body.id as number;
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${ariaId}`)
+      .set(dm)
+      .send({ initiative: 20 });
+    await request(server)
+      .patch(`/api/v1/encounters/${encounterId}/combatants/${monsterId}`)
+      .set(dm)
+      .send({ initiative: 5 });
+    await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    return { encounterId, ariaId, monsterId };
+  }
+
+  it('player may set delay and readied on their own turn via turn-state', async () => {
+    const { encounterId, ariaId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+
+    const delayed = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaId}/turn-state`)
+      .set(player)
+      .send({ delaying: true });
+    expect(delayed.status).toBe(200);
+    expect(delayed.body.turnState.delaying).toBe(true);
+
+    const readied = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/combatants/${ariaId}/turn-state`)
+      .set(player)
+      .send({ readied: 'When the door opens' });
+    expect(readied.status).toBe(200);
+    expect(readied.body.turnState.readied).toBe('When the door opens');
+  });
+
+  it('player POST /end-turn advances when it is their turn', async () => {
+    const { encounterId, ariaId, monsterId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+
+    const before = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+    expect(before.body.currentCombatantId).toBe(ariaId);
+
+    const res = await request(server)
+      .post(`/api/v1/encounters/${encounterId}/end-turn`)
+      .set(player)
+      .send({ expectedCurrentCombatantId: ariaId });
+    expect(res.status).toBe(201);
+    expect(res.body.currentCombatantId).toBe(monsterId);
+  });
+
+  it('player POST /end-turn is forbidden when it is not their turn', async () => {
+    const { encounterId, ariaId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+    await request(server)
+      .post(`/api/v1/encounters/${encounterId}/end-turn`)
+      .set(player)
+      .send({ expectedCurrentCombatantId: ariaId });
+
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/end-turn`).set(player).send({});
+    expect(res.status).toBe(403);
+  });
+
+  it('DM POST /next-turn still advances (override)', async () => {
+    const { encounterId } = await seedRunningFight();
+    const server = ctx.app.getHttpServer();
+    const res = await request(server).post(`/api/v1/encounters/${encounterId}/next-turn`).set(dm);
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('running');
+  });
+});

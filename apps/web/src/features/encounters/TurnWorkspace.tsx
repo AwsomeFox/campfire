@@ -17,7 +17,7 @@ import { useTranslation } from 'react-i18next';
  * app's standard focusable controls (no custom key handling that would trap focus).
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
+import type { CombatantTurnState, TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
 import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
@@ -32,6 +32,8 @@ interface TurnWorkspaceProps {
   currentCombatantId: number | null;
   isDm: boolean;
   ruleSystem?: string | null;
+  /** Current combatant turn state (delay / ready) from the encounter roster. */
+  currentTurnState?: CombatantTurnState;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
 }
@@ -83,6 +85,7 @@ export function TurnWorkspace({
   currentCombatantId,
   isDm,
   ruleSystem,
+  currentTurnState,
   onRollDeathSave,
   onPatchCombatant,
 }: TurnWorkspaceProps) {
@@ -91,6 +94,7 @@ export function TurnWorkspace({
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [readiedDraft, setReadiedDraft] = useState(currentTurnState?.readied ?? '');
 
   const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
   const hasDeathSaves = hasDeathSavesForAdapter(adapter);
@@ -149,6 +153,10 @@ export function TurnWorkspace({
       });
     }
   }, [announce, encounterId, isYourTurn, currentId, currentName, turnRound]);
+
+  useEffect(() => {
+    setReadiedDraft(currentTurnState?.readied ?? '');
+  }, [currentTurnState?.readied]);
 
   const filteredActions = useMemo(() => {
     const list = turn?.suggestedActions ?? [];
@@ -259,6 +267,71 @@ export function TurnWorkspace({
         </span>
       </div>
 
+      {/* Delay / ready (issue #487) — MVP flags on the current turn. */}
+      {(turn.isYourTurn || isDm) && (
+        <section data-testid="turn-delay-ready">
+          <h3 className="text-sm font-semibold text-white mb-1.5">Delay &amp; ready</h3>
+          <div className="flex gap-2 flex-wrap items-center">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid="workspace-delay-toggle"
+              onClick={() => turnState.mutate({ delaying: !currentTurnState?.delaying })}
+            >
+              {currentTurnState?.delaying ? 'Resume turn' : 'Delay turn'}
+            </button>
+            <input
+              type="text"
+              className="input"
+              placeholder="Ready action trigger…"
+              aria-label="Readied action trigger"
+              value={readiedDraft}
+              disabled={busy}
+              maxLength={200}
+              onChange={(e) => setReadiedDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const trimmed = readiedDraft.trim();
+                  turnState.mutate({ readied: trimmed || null });
+                }
+              }}
+              style={{ maxWidth: 260 }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              data-testid="workspace-readied-set"
+              onClick={() => {
+                const trimmed = readiedDraft.trim();
+                turnState.mutate({ readied: trimmed || null });
+              }}
+            >
+              Set ready
+            </button>
+            {currentTurnState?.readied && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                data-testid="workspace-readied-clear"
+                onClick={() => {
+                  setReadiedDraft('');
+                  turnState.mutate({ readied: null });
+                }}
+              >
+                Clear ready
+              </button>
+            )}
+          </div>
+          {currentTurnState?.readied && (
+            <p className="text-xs text-muted m-0 mt-1">Readied: {currentTurnState.readied}</p>
+          )}
+        </section>
+      )}
+
       {/* Active effects (duration + save timing). */}
       {turn.activeEffects.length > 0 && (
         <section>
@@ -332,8 +405,8 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={busy} onClick={() => endTurn.mutate()}>
-            End turn →
+          <Btn disabled={busy} onClick={() => endTurn.mutate()} data-testid="workspace-end-turn">
+            {turn.isYourTurn ? 'End my turn →' : 'End turn →'}
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (
           <span className="text-sm text-muted">The DM advances turns in this campaign.</span>
