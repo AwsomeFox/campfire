@@ -39,9 +39,9 @@ import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
+import { consumeEncounterAftermathRecap } from '../encounters/encounterAftermathHandoff';
 import {
-  consumeEncounterAftermathRecap,
-} from '../encounters/encounterAftermathHandoff';
+  assertMutationTarget,
   decideRouteBoundCommit,
   mutationsEnabledForRoute,
   RouteBoundLoadSequencer,

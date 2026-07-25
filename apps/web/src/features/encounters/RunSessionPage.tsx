@@ -53,7 +53,7 @@ import {
   inlineCharacterSheetsStatusLabel,
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
-import { endedSummaryTallies, isDown } from './encounterEndedSummary';
+import { isDown } from './encounterEndedSummary';
 import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';

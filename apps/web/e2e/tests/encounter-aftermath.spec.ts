@@ -1,10 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { test, expect, type Locator, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { seed, stateFor } from './seed';
-
-function aftermathPanel(page: Page): Locator {
-  return page.getByRole('region', { name: 'Aftermath' }).or(page.locator('[aria-labelledby="encounter-aftermath-heading"]'));
-}
 
 test.describe('ended encounter aftermath workflow (issue #473)', () => {
   test.describe('DM', () => {

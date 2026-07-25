@@ -161,7 +161,7 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
           <h3 id="encounter-aftermath-recap-heading" className="text-xs font-bold uppercase tracking-wide text-slate-400 m-0">
             Recap draft
           </h3>
-          <CopyControl value={aftermath.recapDraft} label="Copy recap draft" />
+          <CopyControl text={aftermath.recapDraft} label="Copy recap draft" />
         </div>
         <TextArea
           readOnly
