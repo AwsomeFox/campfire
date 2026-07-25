@@ -820,10 +820,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     const campaignUnreadInView = displayedUnreadItems.filter(
       (notification) => notification.campaignId === campaignIdFromRoute,
     ).length;
-    const hasOtherCampaignUnread = displayedUnreadItems.some(
-      (notification) => notification.campaignId !== campaignIdFromRoute,
-    );
-    const requiresConfirm = count > campaignUnreadInView || hasOtherCampaignUnread;
+    const requiresConfirm = items !== null && items.length >= 30 && campaignUnreadInView > 0;
 
     const run = async () => {
       await recordMarkRead(
@@ -843,7 +840,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     } else {
       void run();
     }
-  }, [campaignIdFromRoute, count, displayedUnreadItems, recordMarkRead]);
+  }, [campaignIdFromRoute, displayedUnreadItems, items, recordMarkRead]);
 
   const handleMarkAllRead = useCallback(() => {
     if (count === 0) return;
