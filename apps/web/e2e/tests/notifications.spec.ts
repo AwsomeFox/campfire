@@ -247,7 +247,7 @@ test.describe('shared notification controller', () => {
     await expect(confirm).toBeVisible();
     await confirm.getByRole('button', { name: 'Mark all 35 read' }).click();
     await expect(confirm).toHaveCount(0);
-    await expect(dialog.getByRole('status')).toHaveText('All notifications marked as read.');
+    await expect(dialog.locator('span[role="status"]')).toHaveText('All notifications marked as read.');
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
@@ -276,7 +276,7 @@ test.describe('shared notification controller', () => {
     const confirm = page.getByRole('dialog').filter({ hasText: 'Mark all 35 notifications as read?' });
     await confirm.getByRole('button', { name: 'Mark all 35 read' }).click();
     await expect(confirm).toHaveCount(0);
-    await expect(dialog.getByRole('status')).toHaveText("Couldn't mark all notifications as read.");
+    await expect(dialog.locator('span[role="status"]')).toHaveText("Couldn't mark all notifications as read.");
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications (35 unread)' })).toBeVisible();
