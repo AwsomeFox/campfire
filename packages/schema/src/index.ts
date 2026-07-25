@@ -1144,6 +1144,7 @@ export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
 
 // Fog-of-war visibility helpers shared by server redaction and the web VTT (issue #465).
 export * from './fog-visibility';
+export * from './fog-editor';
 
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
@@ -5641,6 +5642,8 @@ export type TokenSize = z.infer<typeof TokenSize>;
  * rectangles is "in the dark".
  */
 export const FogRect = z.object({
+  /** Stable id for per-region select/move/delete (issue #472). Omitted on legacy rows. */
+  id: z.string().min(1).max(40).optional(),
   x: z.number().min(0).max(100),
   y: z.number().min(0).max(100),
   w: z.number().min(0).max(100),

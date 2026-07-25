@@ -3066,6 +3066,38 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
         .send({ fog: { enabled: true, revealed: [{ x: -5, y: 0, w: 200, h: 10 }] } });
       expect(res.status).toBe(400);
     });
+
+    it('issue #472: per-region fog edits with ids persist for every client read', async () => {
+      const server = ctx.app.getHttpServer();
+      const write = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({
+          fog: {
+            enabled: true,
+            revealed: [
+              { id: 'west', x: 0, y: 0, w: 40, h: 40 },
+              { id: 'east', x: 55, y: 55, w: 35, h: 35 },
+            ],
+          },
+        });
+      expect(write.status).toBe(200);
+      expect(write.body.fog.revealed).toHaveLength(2);
+
+      const trimmed = await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({
+          fog: {
+            enabled: true,
+            revealed: [{ id: 'east', x: 50, y: 50, w: 35, h: 35 }],
+          },
+        });
+      expect(trimmed.status).toBe(200);
+
+      const playerRead = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(playerRead.body.fog.revealed).toEqual([{ id: 'east', x: 50, y: 50, w: 35, h: 35 }]);
+    });
   });
 
   describe('issue #465: AoE template fog secrecy', () => {
