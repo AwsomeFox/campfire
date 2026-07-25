@@ -10,6 +10,7 @@ import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
 import { clampSessionsListLimit, sessionsListOffset } from './sessions-pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
+import { foldForSearch, foldedIncludes } from '../../common/text-search';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -18,6 +19,15 @@ import type { RequestUser } from '../../common/user.types';
 
 type SessionCreateInput = z.infer<typeof SessionCreate>;
 type SessionUpdateInput = z.infer<typeof SessionUpdate>;
+
+export type SessionSearchEntry = {
+  id: number;
+  campaignId: number;
+  number: number;
+  title: string;
+  recap: string;
+  dmSecret: string;
+};
 
 export function toDomain(row: typeof sessions.$inferSelect): Session {
   return {
@@ -258,6 +268,54 @@ export class SessionsService {
     q = applyPage(q, page);
     const rows = await q;
     return redactSecrets(rows.map(toDomain), role);
+  }
+
+  /**
+   * Bounded campaign-search read (issue #442). Indexes the full recap body (not the
+   * list-shape excerpt) with the same role redaction as list/get. Fold-match runs in
+   * JS so Unicode haystacks stay aligned with SearchService (#624).
+   */
+  async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<SessionSearchEntry[]> {
+    const boundedLimit = Math.max(1, Math.min(limit, 50));
+    // SearchService passes an already-folded needle; fold again for idempotent callers (#624).
+    const folded = foldForSearch(needle.trim());
+    if (!folded) return [];
+
+    const rows = await this.db
+      .select({
+        id: sessions.id,
+        campaignId: sessions.campaignId,
+        number: sessions.number,
+        title: sessions.title,
+        recap: sessions.recap,
+        dmSecret: sessions.dmSecret,
+      })
+      .from(sessions)
+      .where(and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)))
+      .orderBy(desc(sessions.number));
+
+    const redacted = redactSecrets(
+      rows.map((r) => ({
+        id: r.id,
+        campaignId: r.campaignId,
+        number: r.number,
+        title: r.title,
+        recap: r.recap,
+        dmSecret: r.dmSecret,
+      })),
+      role,
+    );
+
+    return redacted
+      .filter((s) => {
+        const title = s.title.trim() || `Session ${s.number}`;
+        return (
+          foldedIncludes(title, folded)
+          || foldedIncludes(s.recap, folded)
+          || foldedIncludes(s.dmSecret, folded)
+        );
+      })
+      .slice(0, boundedLimit);
   }
 
   async getRowOrThrow(id: number, includeDeleted = false) {
