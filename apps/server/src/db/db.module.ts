@@ -1070,6 +1070,23 @@ function migrateEncountersTableForGridCalibration(sqlite: Database.Database): vo
 }
 
 /**
+ * Migration for DBs created before hex orientation (issue #467): `encounters` gained
+ * `hex_orientation` (NOT NULL DEFAULT 'pointy' — existing hex grids keep pointy-top).
+ */
+function migrateEncountersTableForHexOrientation(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('hex_orientation')) {
+    sqlite.exec("ALTER TABLE encounters ADD COLUMN hex_orientation TEXT NOT NULL DEFAULT 'pointy'");
+  }
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -2765,11 +2782,12 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
   { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
-  { name: '0098_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
-  { name: '0099_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
-  { name: '0100_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
-  { name: '0101_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
-  { name: '0102_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
+  { name: '0098_encounters_hex_orientation', run: migrateEncountersTableForHexOrientation },
+  { name: '0099_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
+  { name: '0100_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
+  { name: '0101_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
+  { name: '0102_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
+  { name: '0103_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
 ];
 
 /**
