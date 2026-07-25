@@ -172,7 +172,7 @@ export function EncounterAiDriverPanel({
     setFollowLatest(true);
     setUnreadBelow(0);
     prevEntryCountRef.current = transcript.entries.length;
-  }, [open, campaignId, encounterId]);
+  }, [open, campaignId, encounterId, transcript.entries.length]);
 
   useEffect(() => {
     followLatestRef.current = followLatest;
