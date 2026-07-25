@@ -93,7 +93,6 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
   function makeService(
     toolResults: Record<string, { text: string; isError?: boolean }>,
     campaignLanguage: NarrationLanguage = 'en',
-    override?: NarrationLanguage,
   ) {
     const call = jest.fn(async (name: string, _args: Record<string, unknown>) => {
       const hit = toolResults[name];

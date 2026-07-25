@@ -199,9 +199,9 @@ function NarrationLanguageSection({
         personal UI language in Preferences.
       </p>
       <div className="field" style={{ maxWidth: 320 }}>
-        <label htmlFor="ai-dm-narration-language">Campaign narration language</label>
+        <label htmlFor="ai-dm-narration-language-select">Campaign narration language</label>
         <select
-          id="ai-dm-narration-language"
+          id="ai-dm-narration-language-select"
           className="input"
           value={narrationLanguage}
           disabled={saving}
