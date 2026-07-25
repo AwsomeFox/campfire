@@ -698,6 +698,8 @@ CREATE TABLE IF NOT EXISTS encounters (
   round INTEGER NOT NULL DEFAULT 0,
   turn_index INTEGER NOT NULL DEFAULT 0,
   current_combatant_id INTEGER REFERENCES combatants(id) ON DELETE SET NULL,
+  turn_phase TEXT NOT NULL DEFAULT 'combatant',
+  lair_resume_combatant_id INTEGER REFERENCES combatants(id) ON DELETE SET NULL,
   location_id INTEGER REFERENCES locations(id) ON DELETE SET NULL,
   quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
   session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
