@@ -346,6 +346,24 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     expect(awardProps.includeNonActive.description).toContain('explicit opt-in');
   });
 
+  it('tools/list advertises additionalProperties:false on every tool that accepts args (issue #567)', async () => {
+    const client = await mcpClient(dmToken);
+    const { tools } = await client.listTools();
+
+    const offenders: Array<{ name: string; additionalProperties: unknown }> = [];
+    for (const tool of tools) {
+      const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
+      if (Object.keys(properties).length === 0) {
+        // zero-arg tools have no properties to be strict about
+        continue;
+      }
+      if (tool.inputSchema.additionalProperties !== false) {
+        offenders.push({ name: tool.name, additionalProperties: tool.inputSchema.additionalProperties });
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it('tools/list input schemas inline every property — no sibling $refs (issue #31: add_combatant.ruleEntryId)', async () => {
     const client = await mcpClient(dmToken);
     const { tools } = await client.listTools();
