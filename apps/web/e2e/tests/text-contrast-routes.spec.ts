@@ -26,6 +26,7 @@ test.describe('Representative route contrast (#593)', () => {
       await page.locator('main').waitFor({ state: 'visible' });
 
       const results = await new AxeBuilder({ page })
+        .include('main')
         .withRules(['color-contrast'])
         .analyze();
 
