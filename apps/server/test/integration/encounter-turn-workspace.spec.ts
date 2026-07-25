@@ -171,6 +171,21 @@ describe('encounter turn workspace (real SQLite, service layer)', () => {
     expect(currentId(orm, encounterId)).toBe(c1);
   });
 
+  it('undo resets the restored combatant’s per-turn action economy', async () => {
+    dataDir = makeTempDataDir();
+    const { orm, service } = build();
+    const { encounterId, c1, c2 } = seed(orm);
+
+    await service.updateCombatantTurnState(encounterId, c1, { useSlot: 'action', moveFt: 30 }, dmUser, 'dm');
+    await service.endTurn(encounterId, { expectedCurrentCombatantId: c1 }, dmUser, 'dm');
+    expect(currentId(orm, encounterId)).toBe(c2);
+    await service.undoTurn(encounterId, dmUser, 'dm');
+    const [c1row] = orm.select().from(combatants).where(eq(combatants.id, c1)).limit(1).all();
+    const turnState = JSON.parse(c1row.turnState ?? '{}');
+    expect(turnState.used).toEqual({});
+    expect(turnState.movementUsedFt).toBe(0);
+  });
+
   it('advancing resets the incoming combatant’s per-turn action economy', async () => {
     dataDir = makeTempDataDir();
     const { orm, service } = build();
