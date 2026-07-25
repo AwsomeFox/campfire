@@ -141,7 +141,7 @@ export function Dialog({
     onClose: onBackdropClick ?? (() => {}),
     disabled: !onBackdropClick,
     autoFocus: true,
-    inertBackground: Boolean(onBackdropClick),
+    inertBackground: true,
   });
 
   return createPortal(

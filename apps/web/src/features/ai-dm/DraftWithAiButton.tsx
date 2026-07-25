@@ -220,7 +220,7 @@ function DraftWithAiModal({
       <div
         id={id}
         ref={dialogRef}
-        className="cf-card w-full max-w-lg p-5 space-y-3.5"
+        className="cf-card cf-density-default w-full max-w-lg space-y-3.5"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

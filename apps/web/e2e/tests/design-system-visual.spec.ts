@@ -62,7 +62,13 @@ test.describe('Design-system visual geometry (#674)', () => {
       await page.goto(`/c/${campaign.id}`);
       const party = page.locator('section.cf-card', { has: page.getByText('Party', { exact: true }) });
       await expect(party).toBeVisible();
-      const { paddingTop, borderRadius } = await cardMetrics(page, 'section.cf-card >> nth=0');
+      const { paddingTop, borderRadius } = await party.evaluate((node) => {
+        const style = getComputedStyle(node);
+        return {
+          paddingTop: parseFloat(style.paddingTop),
+          borderRadius: parseFloat(style.borderTopLeftRadius),
+        };
+      });
       expect(paddingTop).toBeGreaterThan(7);
       expect(paddingTop).toBeLessThan(12);
       expect(borderRadius).toBe(8);

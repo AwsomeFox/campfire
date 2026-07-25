@@ -1094,6 +1094,15 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
   border-radius: var(--radius-md);
 }
+.cf-dm-panel.cf-density-compact {
+  padding: var(--cf-density-compact-card-padding);
+}
+.cf-dm-panel.cf-density-default {
+  padding: var(--cf-density-default-card-padding);
+}
+.cf-dm-panel.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-card-padding);
+}
 
 /* HP bar */
 .cf-hp {

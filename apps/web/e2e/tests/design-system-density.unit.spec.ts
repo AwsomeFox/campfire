@@ -33,7 +33,7 @@ const READ = (path: string) => readFileSync(path, 'utf8');
 const DRIFT_PATTERNS: ReadonlyArray<{ name: string; pattern: RegExp; why: string }> = [
   {
     name: 'ad-hoc cf-card padding',
-    pattern: /\bcf-card\s+p-\d/,
+    pattern: /['"`][^'"`\n]*\bcf-card\s[^'"`\n]*\bp-\d/,
     why: 'compose <Card density="…"> instead of cf-card + Tailwind padding (issue #674)',
   },
   {

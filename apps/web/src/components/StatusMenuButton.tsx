@@ -395,7 +395,7 @@ export function StatusMenuButton<V extends string>({
           role="listbox"
           aria-labelledby={buttonId}
           tabIndex={-1}
-          className="cf-card cf-density-compact cf-card-flush cf-status-menu space-y-0.5 min-w-[140px] z-20"
+          className="cf-card cf-density-compact cf-status-menu space-y-0.5 min-w-[140px] z-20"
           style={{ position: 'fixed', marginBlockStart: 4 }}
         >
           {options.map((option, index) => {

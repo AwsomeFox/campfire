@@ -21,7 +21,7 @@ import {
   type CampaignChooserFilters,
 } from '../../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../../lib/unsavedWork';
-import { Card, Chip, Btn, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
+import { Card, Chip, statusVariant, EmptyState, ErrorNote, Skeleton } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
@@ -251,12 +251,9 @@ function CampaignTile({
         <Link
           to={dashboardHref}
           onClick={onNavigate}
-          className="block"
-          style={{ color: 'inherit', textDecoration: 'none' }}
+          className="cf-btn cf-btn-ghost cf-density-compact text-xs inline-flex w-full justify-center no-underline"
         >
-          <Btn density="compact" ghost className="w-full justify-center text-xs">
-            Dashboard
-          </Btn>
+          Dashboard
         </Link>
       </div>
     </Card>
