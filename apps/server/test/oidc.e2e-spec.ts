@@ -8,6 +8,7 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
+  mergePendingChildV8Coverage,
   oidcSpawnCoverageEnabled,
 } from './oidc-spawn-coverage';
 
@@ -214,8 +215,14 @@ async function spawnAppOnce(
       child.stdout?.destroy();
       child.stderr?.destroy();
     };
+    const mergeSpawnCoverage = (): void => {
+      if (oidcSpawnCoverageEnabled()) {
+        mergePendingChildV8Coverage();
+      }
+    };
     if (exitState.current || child.killed) {
       releaseChild();
+      mergeSpawnCoverage();
       return;
     }
     child.kill('SIGTERM');
@@ -228,6 +235,7 @@ async function spawnAppOnce(
       await new Promise((r) => setTimeout(r, 200));
     }
     releaseChild();
+    mergeSpawnCoverage();
   };
 
   try {
@@ -445,8 +453,6 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
   afterAll(async () => {
     await idp.close();
-    await new Promise((r) => setTimeout(r, 100));
-    await mergeChildV8Coverage();
     cleanupChildV8CoverageDir();
   });
 
