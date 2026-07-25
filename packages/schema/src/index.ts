@@ -455,6 +455,7 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
+  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -6379,7 +6380,7 @@ export type ActiveEffect = z.infer<typeof ActiveEffect>;
 /**
  * One structured condition instance on a combatant (issue #423). Carries source/rule-entry provenance,
  * duration/expiry timing, repeat saves, concentration link, stack count, notes, and custom condition flag.
- * Kept in dual-sync with combatant.conditions (string[]) for complete backward compatibility.
+ * The legacy `combatant.conditions` string array is derived from instances via `deriveConditionNames()`.
  */
 export const ConditionInstance = z.object({
   id: z.string().min(1).max(40),
