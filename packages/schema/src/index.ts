@@ -6939,6 +6939,22 @@ export const RollRequest = z.object({
   dc: z.number().int().min(1).max(99).optional(),
 });
 export type RollRequest = z.infer<typeof RollRequest>;
+
+// ---------- manual physical roll entry (issue #673) ----------
+// A user-provided result from a physical (paper-table) die roll. The server does not
+// generate any randomness; it simply records the reported total/label/actor/DC so the
+// shared dice log can be honest about provenance. A natural d20 may be supplied for
+// display, but no success/crit details are fabricated: only the declared total and
+// optional DC comparison are persisted.
+export const ManualRollRequest = z.object({
+  total: z.number().int().min(-9999).max(9999),
+  label: z.string().max(120).optional(),
+  actor: z.string().max(200).optional().describe('Name of the person who physically rolled, e.g. a player or character'),
+  natural: z.number().int().min(1).max(20).optional().describe('The natural d20 face that was rolled, if any'),
+  dc: z.number().int().min(1).max(99).optional(),
+});
+export type ManualRollRequest = z.infer<typeof ManualRollRequest>;
+
 // Per-term breakdown entry for a compound dice expression (issue #536). Named so the
 // roller, the persistence layer, and the web UI all share one shape. A die term carries
 // its rolls + the kept subset; a modifier term carries only its signed value.
@@ -7153,6 +7169,7 @@ export const DiceRoll = RollResult.extend({
   campaignId: Id,
   rollerUserId: z.string().max(200), // RequestUser.id — String(users.id) or 'dev:<name>' / 'token:<name>' actors
   rollerName: z.string().max(200).default(''),
+  manual: z.boolean().default(false),
   createdAt: IsoDate,
 });
 export type DiceRoll = z.infer<typeof DiceRoll>;

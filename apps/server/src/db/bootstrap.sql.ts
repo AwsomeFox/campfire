@@ -734,6 +734,8 @@ CREATE TABLE IF NOT EXISTS dice_rolls (
   total INTEGER NOT NULL,
   label TEXT,
   dc INTEGER,
+  -- Issue #673: manual/physical roll provenance. 1 = user-reported, 0 = server-generated.
+  manual INTEGER NOT NULL DEFAULT 0,
   -- Per-term breakdown for compound expressions (issue #536), JSON text — null for a
   -- classic single-term roll (no breakdown). Mirrors the kept column's nullable-JSON shape.
   terms TEXT,

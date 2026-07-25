@@ -934,6 +934,9 @@ export const diceRolls = sqliteTable('dice_rolls', {
   // Optional check context (issue #130): label + difficulty class. success is derived.
   label: text('label'),
   dc: integer('dc'),
+  // Issue #673: honest manual/physical roll provenance. 1 = user-reported physical roll,
+  // 0 = server-generated dice result. Defaults to 0 so existing rolls keep their meaning.
+  manual: integer('manual').notNull().default(0),
   createdAt: text('created_at').notNull(),
 });
 

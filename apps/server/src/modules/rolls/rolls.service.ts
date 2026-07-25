@@ -80,6 +80,7 @@ function toDomain(row: typeof diceRolls.$inferSelect): DiceRoll {
     ...(row.label ? { label: row.label } : {}),
     // success is derived, not stored — it's always total >= dc when a dc is set.
     ...(row.dc != null ? { dc: row.dc, success: row.total >= row.dc } : {}),
+    manual: Boolean(row.manual),
     createdAt: row.createdAt,
   };
 }
@@ -117,13 +118,18 @@ export class RollsService implements OnApplicationBootstrap {
    * pruning moved to the background sweep (issue #614) so the insert path is
    * always fast and a roll is never lost to a synchronous delete race.
    */
-  async record(campaignId: number, result: RollResult, user: RequestUser): Promise<DiceRoll> {
+  async record(
+    campaignId: number,
+    result: RollResult,
+    user: RequestUser,
+    opts?: { manual?: boolean; rollerName?: string },
+  ): Promise<DiceRoll> {
     const [row] = await this.db
       .insert(diceRolls)
       .values({
         campaignId,
         rollerUserId: user.id,
-        rollerName: user.name,
+        rollerName: opts?.rollerName?.trim() || user.name,
         expr: result.expr,
         rolls: toJsonText(result.rolls),
         kept: result.kept !== undefined ? toJsonText(result.kept) : null,
@@ -131,6 +137,7 @@ export class RollsService implements OnApplicationBootstrap {
         total: result.total,
         label: result.label ?? null,
         dc: result.dc ?? null,
+        manual: opts?.manual ? 1 : 0,
         createdAt: nowIso(),
       })
       .returning();

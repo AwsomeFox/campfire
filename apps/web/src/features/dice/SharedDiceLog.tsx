@@ -70,6 +70,12 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   } | null>(null);
   /** Which campaign the in-memory `rolls` array came from (guards campaign switches). */
   const rollsCampaignIdRef = useRef<number | null>(null);
+  // Issue #673: physical/paper-table manual roll form state.
+  const [manualTotal, setManualTotal] = useState('');
+  const [manualLabel, setManualLabel] = useState('');
+  const [manualActor, setManualActor] = useState('');
+  const [manualNatural, setManualNatural] = useState('');
+  const [manualDc, setManualDc] = useState('');
 
   useEffect(() => {
     rollAnnouncementRef.current = null;
@@ -194,6 +200,69 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     [campaignId, limit, announce, t],
   );
 
+  const submitManual = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const total = Number(manualTotal);
+      if (!Number.isFinite(total)) {
+        setError('Total must be a number.');
+        return;
+      }
+      const naturalRaw = manualNatural.trim();
+      const natural = naturalRaw ? Number(naturalRaw) : undefined;
+      if (natural !== undefined && (!Number.isInteger(natural) || natural < 1 || natural > 20)) {
+        setError('Natural d20 must be between 1 and 20.');
+        return;
+      }
+      const dcRaw = manualDc.trim();
+      const dc = dcRaw ? Number(dcRaw) : undefined;
+      if (dc !== undefined && (!Number.isInteger(dc) || dc < 1 || dc > 99)) {
+        setError('DC must be between 1 and 99.');
+        return;
+      }
+      setRolling(true);
+      setError(null);
+      try {
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/rolls/manual`, {
+          total,
+          label: manualLabel.trim() || undefined,
+          actor: manualActor.trim() || undefined,
+          natural,
+          dc,
+        });
+        const batch = formatDiceRollAnnouncementBatch([result], t);
+        if (batch) {
+          rememberLocalDiceAnnouncement(campaignId, result.id);
+          announce(batch, {
+            dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+          });
+        }
+        setRolls((prev) => {
+          rollsCampaignIdRef.current = campaignId;
+          const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
+          const previous = rollAnnouncementRef.current;
+          const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+          const advanced = advanceDiceRollAnnouncements(next, cursor);
+          rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+          return next;
+        });
+        setJustRolledId(result.id);
+        setManualTotal('');
+        setManualLabel('');
+        setManualActor('');
+        setManualNatural('');
+        setManualDc('');
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : t('dice.rollError');
+        setError(message);
+        announce(message, { assertive: true });
+      } finally {
+        setRolling(false);
+      }
+    },
+    [campaignId, limit, manualTotal, manualLabel, manualActor, manualNatural, manualDc, announce, t],
+  );
+
   async function rollFromInput(e: FormEvent) {
     e.preventDefault();
     await submitExpr(expr);
@@ -225,6 +294,78 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               </Btn>
             </form>
           </details>
+
+          {!compact && (
+            <details className="dice-manual">
+              <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+                Log physical roll
+              </summary>
+              <form
+                onSubmit={submitManual}
+                className="flex gap-2 items-end flex-wrap"
+                style={{ marginTop: 8 }}
+              >
+                <div className="field" style={{ flex: 1, minWidth: 100 }}>
+                  <label>Total</label>
+                  <TextInput
+                    type="number"
+                    aria-label="Manual roll total"
+                    placeholder="15"
+                    value={manualTotal}
+                    onChange={(e) => setManualTotal(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="field" style={{ flex: 1, minWidth: 120 }}>
+                  <label>Label</label>
+                  <TextInput
+                    aria-label="Manual roll label"
+                    placeholder="e.g. DEX save"
+                    value={manualLabel}
+                    onChange={(e) => setManualLabel(e.target.value)}
+                  />
+                </div>
+                <div className="field" style={{ flex: 1, minWidth: 120 }}>
+                  <label>Actor</label>
+                  <TextInput
+                    aria-label="Who rolled"
+                    placeholder="Player or character"
+                    value={manualActor}
+                    onChange={(e) => setManualActor(e.target.value)}
+                  />
+                </div>
+                <div className="field" style={{ flex: 0, minWidth: 70 }}>
+                  <label>Nat d20</label>
+                  <TextInput
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={20}
+                    aria-label="Natural d20"
+                    placeholder="1-20"
+                    value={manualNatural}
+                    onChange={(e) => setManualNatural(e.target.value)}
+                  />
+                </div>
+                <div className="field" style={{ flex: 0, minWidth: 60 }}>
+                  <label>DC</label>
+                  <TextInput
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={99}
+                    aria-label="Difficulty class"
+                    placeholder="—"
+                    value={manualDc}
+                    onChange={(e) => setManualDc(e.target.value)}
+                  />
+                </div>
+                <Btn type="submit" disabled={rolling || manualTotal.trim() === ''}>
+                  Log
+                </Btn>
+              </form>
+            </details>
+          )}
         </>
       ) : (
         <p className="text-muted m-0" style={{ fontSize: 11.5 }}>
@@ -244,9 +385,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
           </p>
         ) : (
           rolls.map((r) => {
-            const flavor = d20Flavor(r);
+            const flavor = r.manual ? null : d20Flavor(r);
             const fresh = r.id === justRolledId;
-            const totalClass = d20TotalClasses(flavor, fresh);
+            const totalClass = r.manual ? '' : d20TotalClasses(flavor, fresh);
             return (
             <div
               key={r.id}
@@ -258,15 +399,37 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                   {r.rollerName || r.rollerUserId}
                 </span>
                 <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {r.label ? `${r.label}: ` : ''}
-                  <bdi>
-                    {r.expr}
-                    {r.dc != null ? ` vs DC ${r.dc}` : ''}
-                  </bdi>
+                  {r.manual ? (
+                    <bdi>
+                      {r.label ? `${r.label}: ` : ''}
+                      <span
+                        style={{
+                          fontSize: 10,
+                          textTransform: 'uppercase',
+                          letterSpacing: 0.3,
+                          padding: '1px 4px',
+                          border: '1px solid var(--color-divider)',
+                          borderRadius: 4,
+                          marginRight: 6,
+                        }}
+                      >
+                        Manual
+                      </span>
+                      physical
+                      {r.rolls && r.rolls.length > 0 ? ` (nat ${r.rolls[0]})` : ''}
+                      {r.dc != null ? ` vs DC ${r.dc}` : ''}
+                    </bdi>
+                  ) : (
+                    <bdi>
+                      {r.label ? `${r.label}: ` : ''}
+                      {r.expr}
+                      {r.dc != null ? ` vs DC ${r.dc}` : ''}
+                    </bdi>
+                  )}
                 </span>
               </span>
-              <RolledDice rolls={r.rolls} kept={r.kept} />
-              {r.terms && <RolledTerms terms={r.terms} />}
+              {!r.manual && <RolledDice rolls={r.rolls} kept={r.kept} />}
+              {!r.manual && r.terms && <RolledTerms terms={r.terms} />}
               {fresh && flavor === 'crit' && (
                 <span className="cf-crit-spark" aria-hidden="true" style={{ fontSize: compact ? 12 : 14, color: 'var(--cf-crit)', flex: 'none' }}>
                   ✦
