@@ -23,6 +23,9 @@ const SECRET_VALUE_PATTERNS: RegExp[] = [
   /\bcf_pat_[a-f0-9]{48}\b/gi,
   /\bBearer\s+\S+/gi,
   /\bapi[_-]?key[=:]\s*\S+/gi,
+  // OIDC callback query params can carry provider error text or auth codes.
+  /([?&]error_description=)[^&"]+/gi,
+  /([?&]code=)[^&"]+/gi,
 ];
 
 /**
