@@ -8,7 +8,7 @@
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
  */
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
 import { Link, NavLink, Outlet, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -43,6 +43,7 @@ import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 import { LiveEncounterProvider } from './LiveEncounterContext';
 import { useLiveEncounterState } from '../lib/useLiveEncounterState';
+import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import {
   buildCampaignNavGroups,
   isActiveNavPath,
@@ -50,6 +51,17 @@ import {
   type NavGroup,
   type NavItem,
 } from './campaignNav';
+
+function MaybeCampaignCommands({ campaignId, children }: { campaignId?: number; children: ReactNode }) {
+  if (campaignId === undefined) return <>{children}</>;
+  return (
+    <CampaignAccessProvider campaignId={campaignId}>
+      <KeyboardCommandProvider campaignId={campaignId}>
+        {children}
+      </KeyboardCommandProvider>
+    </CampaignAccessProvider>
+  );
+}
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -166,6 +178,7 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
   const { t } = useTranslation();
   const [q, setQ] = useState('');
   const navigate = useNavigate();
+  const { ariaKeyshortcuts, titleSuffix } = useKeyboardCommandHint('globalSearch');
   return (
     <form
       className="px-0.5 mb-1"
@@ -181,6 +194,8 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
         onChange={(e) => setQ(e.target.value)}
         placeholder={t('nav.searchPlaceholder')}
         aria-label={t('nav.searchAria')}
+        aria-keyshortcuts={ariaKeyshortcuts}
+        title={`${t('nav.searchAria')}${titleSuffix}`}
         className="w-full text-sm"
         style={{
           background: 'var(--color-surface, rgba(255,255,255,0.03))',
@@ -192,6 +207,22 @@ function SidebarSearch({ campaignId }: { campaignId: number }) {
         }}
       />
     </form>
+  );
+}
+
+function SidebarKeyboardShortcutsButton() {
+  const { t } = useTranslation();
+  const commands = useKeyboardCommands();
+  const { ariaKeyshortcuts, titleSuffix } = useKeyboardCommandHint('shortcutHelp');
+  if (!commands) return null;
+  return (
+    <SidebarNavButton
+      item={{ key: 'keyboard-shortcuts', label: t('keyboard.openHelp'), to: undefined }}
+      active={false}
+      onClick={() => commands.openHelp()}
+      ariaKeyshortcuts={ariaKeyshortcuts}
+      title={`${t('keyboard.openHelp')}${titleSuffix}`}
+    />
   );
 }
 
@@ -264,7 +295,19 @@ function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   );
 }
 
-function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: boolean; onClick?: () => void }) {
+function SidebarNavButton({
+  item,
+  active,
+  onClick,
+  ariaKeyshortcuts,
+  title,
+}: {
+  item: NavItem;
+  active: boolean;
+  onClick?: () => void;
+  ariaKeyshortcuts?: string;
+  title?: string;
+}) {
   const inner = (
     <>
       <span
@@ -309,6 +352,8 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
         onClick={onClick}
         className="flex items-center gap-2 px-2.5 text-sm text-left w-full"
         style={{ ...sharedStyle, ...activeStyle }}
+        aria-keyshortcuts={ariaKeyshortcuts}
+        title={title}
       >
         {inner}
       </button>
@@ -656,6 +701,7 @@ function LayoutContent() {
   return (
     <AiDmLiveActivityProvider value={liveActivity}>
     <LiveEncounterProvider value={liveEncounter}>
+    <MaybeCampaignCommands campaignId={campaignId}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
       <SkipToMainLink mainRef={mainRef} />
       {/* Desktop sidebar */}
@@ -742,6 +788,7 @@ function LayoutContent() {
               item={{ key: 'preferences', label: t('nav.preferences'), to: '/preferences' }}
               active={location.pathname === '/preferences'}
             />
+            <SidebarKeyboardShortcutsButton />
             <SidebarNavButton
               item={{ key: 'change-password', label: t('nav.changePassword'), to: undefined }}
               active={false}
@@ -898,13 +945,7 @@ function LayoutContent() {
           <RouteChangeFocus mainRef={mainRef} campaignName={campaign?.name ?? null} />
           <MentionsProvider campaignId={campaignId}>
             <EntityDeepLinkFocus />
-            {campaignId !== undefined ? (
-              <CampaignAccessProvider campaignId={campaignId}>
-                <Outlet />
-              </CampaignAccessProvider>
-            ) : (
-              <Outlet />
-            )}
+            <Outlet />
           </MentionsProvider>
         </main>
       </div>
@@ -967,6 +1008,7 @@ function LayoutContent() {
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
       <NotificationsPanel />
     </div>
+    </MaybeCampaignCommands>
     </LiveEncounterProvider>
     </AiDmLiveActivityProvider>
   );

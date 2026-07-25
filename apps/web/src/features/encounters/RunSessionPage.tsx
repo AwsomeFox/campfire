@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { useKeyboardCommandHint, useKeyboardGuardedAction } from '../../components/KeyboardCommandProvider';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -1229,6 +1230,21 @@ export default function RunSessionPage() {
 
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
+  const nextTurnShortcut = useKeyboardCommandHint('encounterNextTurn');
+
+  useKeyboardGuardedAction(
+    'encounterNextTurn',
+    canDmWrite && encounter
+      ? {
+          canExecute: () => {
+            if (!encounter || headerBusy) return false;
+            if (confirmEnd || confirmReopen || confirmDelete) return false;
+            return dmLifecycleActions(encounter.status).nextTurn;
+          },
+          execute: nextTurn,
+        }
+      : null,
+  );
 
   // Issue #636: scroll the active combatant row into view when the turn advances.
   const currentCombatantId = useMemo(
@@ -1431,7 +1447,12 @@ export default function RunSessionPage() {
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
-                <Btn disabled={headerBusy} onClick={nextTurn}>
+                <Btn
+                  disabled={headerBusy}
+                  onClick={nextTurn}
+                  aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
+                  title={`Next turn${nextTurnShortcut.titleSuffix}`}
+                >
                   Next turn →
                 </Btn>
               </>
