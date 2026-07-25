@@ -29,16 +29,18 @@ export class AuditController {
   })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max entries to return (default 100, max 500).' })
   @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Entries to skip, for paging older history (default 0).' })
+  @ApiQuery({ name: 'requestId', required: false, type: String, description: 'Filter to rows stamped with this correlation id (issue #684).' })
   @ApiResponse({ status: 200, description: 'Audit entries, most-recent-first.' })
   async list(
     @Param('id', ParseIntPipe) id: number,
     @CurrentUser() user: RequestUser,
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
+    @Query('requestId') requestId?: string,
   ) {
     // allowArchived: reading the audit log of an archived (read-only) campaign is fine.
     await this.access.requireRole(user, id, 'dm', { allowArchived: true });
     const page = parsePageParams({ limit, offset }, AUDIT_MAX_LIMIT);
-    return this.audit.listForCampaign(id, page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0);
+    return this.audit.listForCampaign(id, page.limit ?? AUDIT_DEFAULT_LIMIT, page.offset ?? 0, { requestId });
   }
 }

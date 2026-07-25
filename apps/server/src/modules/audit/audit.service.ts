@@ -1,6 +1,7 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
 import { and, count, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
 import type { AuditActorRole } from '@campfire/schema';
+import { getRequestId } from '../../common/request-context';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -99,6 +100,7 @@ export class AuditService implements OnApplicationBootstrap {
       entityType: params.entityType ?? null,
       entityId: params.entityId ?? null,
       detail: params.detail ?? '',
+      requestId: getRequestId() ?? null,
       createdAt: nowIso(),
     });
   }
@@ -220,13 +222,14 @@ export class AuditService implements OnApplicationBootstrap {
     campaignId: number,
     limit = 100,
     offset = 0,
-    filters: { sinceId?: number; sinceTs?: string; action?: string; entityType?: string } = {},
+    filters: { sinceId?: number; sinceTs?: string; action?: string; entityType?: string; requestId?: string } = {},
   ) {
     const conditions = [eq(auditLog.campaignId, campaignId)];
     if (filters.sinceId != null) conditions.push(gt(auditLog.id, filters.sinceId));
     if (filters.sinceTs != null && filters.sinceTs !== '') conditions.push(gt(auditLog.createdAt, filters.sinceTs));
     if (filters.action != null && filters.action !== '') conditions.push(eq(auditLog.action, filters.action));
     if (filters.entityType != null && filters.entityType !== '') conditions.push(eq(auditLog.entityType, filters.entityType));
+    if (filters.requestId != null && filters.requestId !== '') conditions.push(eq(auditLog.requestId, filters.requestId));
     return this.db
       .select()
       .from(auditLog)
@@ -241,11 +244,25 @@ export class AuditService implements OnApplicationBootstrap {
    * (campaign_id IS NULL): user create/disable/delete, settings changes,
    * rule-pack installs, admin token mints. Server-admin only (see controller).
    */
-  async listServerAdmin(limit = 100, offset = 0) {
+  async listServerAdmin(limit = 100, offset = 0, requestId?: string) {
+    if (requestId) {
+      return this.searchByRequestId(requestId, limit, offset);
+    }
     return this.db
       .select()
       .from(auditLog)
       .where(isNull(auditLog.campaignId))
+      .orderBy(desc(auditLog.id))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  /** Server-admin correlation search across every audit row (issue #684). */
+  async searchByRequestId(requestId: string, limit = 100, offset = 0) {
+    return this.db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.requestId, requestId))
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);

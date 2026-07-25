@@ -7321,6 +7321,7 @@ export const AuditEntry = z.object({
   entityType: z.string().max(40).nullable(),
   entityId: Id.nullable(),
   detail: z.string().max(2000).default(''),
+  requestId: z.string().max(128).nullable().optional(),
   createdAt: IsoDate,
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;

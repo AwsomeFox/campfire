@@ -11,7 +11,7 @@ import { SESSION_COOKIE_NAME } from './modules/auth/auth.constants';
 import { APP_VERSION } from './common/build-metadata';
 import { resolveTrustProxy, resolveAllowInsecureHttp, isDevAuthActive } from './common/security-config';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
-import { resolveRequestIdFromHeader } from './common/api-error.envelope';
+import { requestContextMiddleware } from './common/request-context.middleware';
 import { registerErrorSchemas } from './common/openapi-error-schemas';
 
 patchNestJsSwagger();
@@ -104,18 +104,9 @@ export function configureApp(app: INestApplication): void {
   // size limit, not these parsers, so this cap doesn't affect them.
   app.use(express.json({ limit: '16mb' }));
   app.use(express.urlencoded({ extended: true, limit: '16mb' }));
-  // Issue #682 — stamp a per-request id on EVERY response (not just errors).
-  // Accepts an inbound `X-Request-Id` header (validated, length-capped, charset-
-  // restricted to defeat log-injection) so a downstream caller's correlation id
-  // propagates end-to-end; mints a fresh UUIDv4 otherwise. The AllExceptionsFilter
-  // reuses the same id on the error envelope's `body.requestId`, so a user-reported
-  // id pivots to both the success-path access log and the error-path stack trace.
-  app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const requestId = resolveRequestIdFromHeader(req.headers['x-request-id']);
-    (req as { requestId?: string }).requestId = requestId;
-    res.setHeader('X-Request-Id', requestId);
-    next();
-  });
+  // Issue #682 / #684 — per-request id on every response + AsyncLocalStorage context
+  // for structured logs, audit rows, MCP envelopes, and provider retries.
+  app.use(requestContextMiddleware);
 
   const corsOrigin = resolveCorsOrigin();
   if (corsOrigin) {
