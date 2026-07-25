@@ -2304,6 +2304,8 @@ function migrateHotHistoryCompositeIndexes(sqlite: Database.Database): void {
 
   if (hasTable('comments')) {
     sqlite.exec(`
+      -- idx_comments_entity existed as (campaign_id, entity_type, entity_id); add id so
+      -- ORDER BY id ASC can be served from the index without a filesort.
       DROP INDEX IF EXISTS idx_comments_entity;
       CREATE INDEX IF NOT EXISTS idx_comments_entity
         ON comments(campaign_id, entity_type, entity_id, id);

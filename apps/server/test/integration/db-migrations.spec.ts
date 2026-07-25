@@ -351,6 +351,15 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         (sqlite.pragma('index_list(notes)') as Array<{ name: string }>).map((index) => index.name),
       ).toEqual(expect.arrayContaining(['idx_notes_campaign_id_desc', 'idx_notes_inbox_resolved']));
       expect(
+        (sqlite.pragma('index_list(comments)') as Array<{ name: string }>).map((index) => index.name),
+      ).toEqual(expect.arrayContaining(['idx_comments_entity', 'idx_comments_campaign_id']));
+      expect(
+        (sqlite.pragma('index_list(scheduled_sessions)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_scheduled_sessions_campaign_at');
+      expect(
+        (sqlite.pragma('index_list(timeline_events)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_timeline_events_campaign_sort');
+      expect(
         (sqlite.pragma('index_list(dice_rolls)') as Array<{ name: string }>).map((index) => index.name),
       ).toContain('idx_dice_rolls_campaign_id_desc');
       expect(

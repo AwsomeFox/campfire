@@ -70,7 +70,7 @@ describe('db hot-history composite indexes (#617)', () => {
     }
   });
 
-  it('rebuilds composites when upgrading a DB that still has legacy single-column indexes', () => {
+  it('rebuilds composites when upgrading a DB that still has legacy indexes', () => {
     dataDir = makeTempDataDir();
     const seeded = openDatabase(dataDir);
     seeded.sqlite.close();
