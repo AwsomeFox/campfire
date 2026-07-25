@@ -22,9 +22,11 @@ import type {
   AoeShape,
   AoeTemplate,
   Attachment,
+  CampaignLibraryMonster,
   Character,
   Combatant,
   CombatantKind,
+  CombatantStatblock as CombatantStatblockData,
   DifficultyBand,
   EncounterDifficulty,
   EncounterEvent,
@@ -42,7 +44,24 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, buildDifficultyExplanation } from '@campfire/schema';
+import {
+  COMBATANT_STATBLOCK_HELP,
+  defaultCombatantStatblock,
+  LAIR_INITIATIVE_COUNT,
+  LEGENDARY_ACTION_SLOT,
+  buildDifficultyExplanation,
+} from '@campfire/schema';
+import {
+  FogUndoStack,
+  appendFogReveal,
+  deleteFogRegion,
+  ensureFogRectIds,
+  eraseFogRegion,
+  fogRectFromCorners,
+  fogStatesEqual,
+  hitTestFogRegion,
+  moveFogRegion,
+} from '@campfire/schema';
 import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -65,6 +84,8 @@ import { SharedDiceLog } from '../dice/SharedDiceLog';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { CheckRequestPanel, CheckRequestPrompts } from './CheckRequests';
 import { ActionUsePanel } from './ActionUseFlow';
+import { CombatantActionsList } from './CombatantActionsList';
+import { CombatantStatblockEditor } from './CombatantStatblockEditor';
 import { StatBlock, hasMonsterStatblock } from '../../components/StatBlock';
 import { CharacterStatCard } from '../../components/CharacterStatCard';
 import { Card, Btn, TextInput, HpBar, Skeleton, ErrorNote, EmptyState } from '../../components/ui';
@@ -93,6 +114,7 @@ import {
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
+import { gridCellRevealRect } from './fogGridReveal';
 import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
   calibrationToPx,
@@ -106,9 +128,8 @@ import {
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import { formatRulerReadout, gridCellUnitPlural, measureToolHelp } from './rulerReadout';
 import {
-  gridCellLabel,
-  gridCellLabelPlural,
   hexAoeCirclePolygons,
   hexPolygons,
   hexKeyboardStepPx,
@@ -1892,6 +1913,15 @@ export default function RunSessionPage() {
           actionsDisabled={riskyBlocked}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
+          onUseSuggestedAction={
+            isDm && currentCombatantId != null
+              ? (actionIndex, actionName, spec) => {
+                  const actor = orderedCombatants.find((c) => c.id === currentCombatantId);
+                  if (!actor || !spec) return;
+                  onUseActionRequested(actor.id, actor.name, actionIndex, actionName, spec);
+                }
+              : undefined
+          }
         />
       )}
 
@@ -1998,6 +2028,7 @@ export default function RunSessionPage() {
             <CombatantRow
               key={c.id}
               rowRef={(el) => setCombatantRowRef(c.id, el)}
+              encounterId={eid}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
@@ -2020,6 +2051,11 @@ export default function RunSessionPage() {
                       if (!act?.spec) return;
                       onUseActionRequested(c.id, c.name, actionIndex, act.name, act.spec);
                     }
+                  : undefined
+              }
+              onUseMonsterAction={
+                canEditCombatant(c) && c.characterId == null && (c.kind === 'monster' || c.kind === 'npc')
+                  ? (actionIndex, actionName, spec) => onUseActionRequested(c.id, c.name, actionIndex, actionName, spec)
                   : undefined
               }
               busy={pendingCombatantIds.has(c.id)}
@@ -2250,14 +2286,7 @@ function clampGridPercent(value: number): number {
   return Math.max(1, Math.min(100, value));
 }
 
-/** Normalize two drag corners (percent) into a positive-size {x,y,w,h} rectangle. */
-function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number; w: number; h: number } {
-  const x = Math.min(a.x, b.x);
-  const y = Math.min(a.y, b.y);
-  return { x, y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
-}
-
-type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
+type MapTool = 'move' | 'measure' | 'reveal' | 'erase' | 'select' | 'ping' | 'calibrate';
 
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
@@ -2313,7 +2342,7 @@ function aoePolygonPoints(
  * encounter background with combatant tokens overlaid at combatant.tokenX/tokenY (0–100
  * percent). On top of the #39 token drag it adds:
  *  - a configurable square grid overlay (DM sets cell size / scale / unit / snap),
- *  - a click-drag measurement ruler that reads out distance in squares + feet,
+ *  - a click-drag measurement ruler that reads out distance in grid cells + scale units,
  *  - per-token size footprints (tiny→gargantuan) via combatant.tokenSize,
  *  - a square OR hex grid overlay (issue #238, gridType),
  *  - fog of war: the DM reveals rectangular regions; players see only revealed area, and
@@ -2394,7 +2423,8 @@ export function BattleMap({
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
     | { kind: 'aoe'; pointerId: number; captureTarget: Element; templateId: string; point: MapPoint }
-    | { kind: 'fog'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'fog'; mode: 'reveal' | 'erase'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
+    | { kind: 'fog-region'; pointerId: number; captureTarget: Element; regionId: string; start: MapPoint; last: MapPoint }
     | { kind: 'measure'; pointerId: number; captureTarget: Element; start: MapPoint; end: MapPoint }
     | { kind: 'calibrate'; pointerId: number; captureTarget: Element; anchor: CalibrateAnchor; point: MapPoint }
     | { kind: 'ping'; pointerId: number; captureTarget: Element; arm: MapPingTapArm }
@@ -2406,6 +2436,18 @@ export function BattleMap({
   const [tool, setTool] = useState<MapTool>('move');
   const [ruler, setRuler] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
   const [revealCorners, setRevealCorners] = useState<{ start: { x: number; y: number }; end: { x: number; y: number } } | null>(null);
+  const [selectedFogRegionId, setSelectedFogRegionId] = useState<string | null>(null);
+  const [fogRegionDrag, setFogRegionDrag] = useState<{ id: string; dx: number; dy: number } | null>(null);
+  const fogUndoStackRef = useRef(new FogUndoStack());
+  const lastLocalFogRef = useRef<FogState | null>(encounter.fog);
+  const [fogUndoUi, setFogUndoUi] = useState({ canUndo: false, canRedo: false });
+
+  const syncFogUndoUi = useCallback(() => {
+    setFogUndoUi({
+      canUndo: fogUndoStackRef.current.canUndo(),
+      canRedo: fogUndoStackRef.current.canRedo(),
+    });
+  }, []);
   const gridDisclosure = useDisclosure({
     focusManagement: false,
     regionLabel: 'Grid and fog settings',
@@ -2452,6 +2494,8 @@ export function BattleMap({
       setAoeDrag(null);
     } else if (kind === 'fog') {
       setRevealCorners(null);
+    } else if (kind === 'fog-region') {
+      setFogRegionDrag(null);
     } else if (kind === 'calibrate') {
       setCalibrateDrag(null);
     } else if (kind === 'ping') {
@@ -2618,6 +2662,45 @@ export function BattleMap({
   }, [encounter.aoe, encounter.fog, effectiveIsDm, viewerUserId]);
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
+
+  const commitFogEdit = useCallback(
+    (next: FogState | null) => {
+      fogUndoStackRef.current.commit(lastLocalFogRef.current, next);
+      lastLocalFogRef.current = next;
+      onSetFog(next);
+      syncFogUndoUi();
+    },
+    [onSetFog, syncFogUndoUi],
+  );
+
+  useEffect(() => {
+    if (!fogStatesEqual(encounter.fog, lastLocalFogRef.current)) {
+      lastLocalFogRef.current = encounter.fog;
+      fogUndoStackRef.current.reset();
+      setSelectedFogRegionId(null);
+      setFogRegionDrag(null);
+      syncFogUndoUi();
+    }
+  }, [encounter.fog, syncFogUndoUi]);
+
+  const undoFogEdit = useCallback(() => {
+    if (!fogUndoStackRef.current.canUndo()) return;
+    const prev = fogUndoStackRef.current.undo(lastLocalFogRef.current);
+    lastLocalFogRef.current = prev;
+    onSetFog(prev);
+    syncFogUndoUi();
+    announce('Fog edit undone.');
+  }, [announce, onSetFog, syncFogUndoUi]);
+
+  const redoFogEdit = useCallback(() => {
+    if (!fogUndoStackRef.current.canRedo()) return;
+    const next = fogUndoStackRef.current.redo(lastLocalFogRef.current);
+    lastLocalFogRef.current = next;
+    onSetFog(next);
+    syncFogUndoUi();
+    announce('Fog edit redone.');
+  }, [announce, onSetFog, syncFogUndoUi]);
+
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
   // Those combatants land in `hiddenByFog` via tokenHiddenByFog (issue #418), not Unplaced.
 
@@ -2725,6 +2808,27 @@ export function BattleMap({
       if (e.key === '3') { changeTool('ping'); return; }
       if (e.key === '4') { changeTool('reveal'); return; }
       if (e.key === '5') { changeTool('calibrate'); return; }
+      if (e.key === '6') { changeTool('erase'); return; }
+      if (e.key === '7') { changeTool('select'); return; }
+    }
+
+    if (canDmWrite && fogOn && (e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undoFogEdit();
+      return;
+    }
+    if (canDmWrite && fogOn && (e.ctrlKey || e.metaKey) && (e.key === 'Z' || e.key === 'y')) {
+      e.preventDefault();
+      redoFogEdit();
+      return;
+    }
+
+    if (tool === 'select' && selectedFogRegionId && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      commitFogEdit(deleteFogRegion(fog, selectedFogRegionId));
+      setSelectedFogRegionId(null);
+      announce('Fog region removed.');
+      return;
     }
 
     // Keyboard measurement: Enter to start at the map center, arrows to aim, Enter to finish, Escape to clear.
@@ -2745,8 +2849,12 @@ export function BattleMap({
             hexOrientation,
             gridDistanceRule,
           );
-          const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
+          announce(
+            formatRulerReadout(
+              { cells, scale: gridScale ?? 0, gridUnit, gridType },
+              'announce',
+            ),
+          );
         }
         return;
       }
@@ -2762,18 +2870,26 @@ export function BattleMap({
       }
     }
 
-    // Keyboard fog reveal: Enter to start a rectangle at the map center, arrows to resize, Enter to reveal, Escape to cancel.
-    if (tool === 'reveal') {
+    // Keyboard fog reveal/erase: Enter to start a rectangle at the map center, arrows to resize, Enter to commit, Escape to cancel.
+    if (tool === 'reveal' || tool === 'erase') {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         if (!revealCorners) {
           setRevealCorners({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
-          announce('Reveal rectangle started at map center. Arrow keys to resize, Enter to reveal, Escape to cancel.');
+          announce(
+            tool === 'erase'
+              ? 'Erase rectangle started at map center. Arrow keys to resize, Enter to erase, Escape to cancel.'
+              : 'Reveal rectangle started at map center. Arrow keys to resize, Enter to reveal, Escape to cancel.',
+          );
         } else {
-          const rect = rectFromCorners(revealCorners.start, revealCorners.end);
+          const rect = fogRectFromCorners(revealCorners.start, revealCorners.end);
           if (rect.w >= 1 && rect.h >= 1) {
-            commitFogReveal(revealCorners.start, revealCorners.end);
-            announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
+            if (tool === 'erase') {
+              commitFogEdit(eraseFogRegion(fog, rect));
+              announce(`Erased ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
+            } else {
+              commitFogReveal(revealCorners.start, revealCorners.end);
+            }
           }
           setRevealCorners(null);
         }
@@ -2811,13 +2927,13 @@ export function BattleMap({
 
   /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
   function commitFogReveal(start: MapPoint, end: MapPoint): void {
-    let rect = rectFromCorners(start, end);
+    let rect = fogRectFromCorners(start, end);
     if (rect.w >= 1 && rect.h >= 1) {
       if (gridOn && gridType === 'hex' && calibration && mapRect) {
         rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
       }
-      const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-      onSetFog(next);
+      commitFogEdit(appendFogReveal(fog, rect));
+      announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
     }
   }
 
@@ -2925,10 +3041,40 @@ export function BattleMap({
       activeGestureRef.current = { kind: 'measure', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRuler({ start: pct, end: pct });
     } else if (tool === 'reveal' && canDmWrite) {
+      if (e.shiftKey && gridOn && baseCalibration && mapRect) {
+        const cell = gridCellRevealRect(pct, baseCalibration, mapRect);
+        if (cell) {
+          commitFogEdit(appendFogReveal(fog, cell));
+          announce('Revealed grid cell.');
+          return;
+        }
+      }
       e.currentTarget.setPointerCapture?.(e.pointerId);
       successfulPointerUpRef.current = null;
-      activeGestureRef.current = { kind: 'fog', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
+      activeGestureRef.current = { kind: 'fog', mode: 'reveal', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
       setRevealCorners({ start: pct, end: pct });
+    } else if (tool === 'erase' && canDmWrite) {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+      successfulPointerUpRef.current = null;
+      activeGestureRef.current = { kind: 'fog', mode: 'erase', pointerId: e.pointerId, captureTarget: e.currentTarget, start: pct, end: pct };
+      setRevealCorners({ start: pct, end: pct });
+    } else if (tool === 'select' && canDmWrite && fogOn) {
+      const regionId = hitTestFogRegion(fog?.revealed ?? [], pct.x, pct.y);
+      if (regionId) {
+        setSelectedFogRegionId(regionId);
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+        successfulPointerUpRef.current = null;
+        activeGestureRef.current = {
+          kind: 'fog-region',
+          pointerId: e.pointerId,
+          captureTarget: e.currentTarget,
+          regionId,
+          start: pct,
+          last: pct,
+        };
+      } else {
+        setSelectedFogRegionId(null);
+      }
     } else if (tool === 'move') {
       // Click on empty map in move mode clears any AoE or token selection (deselect).
       setSelectedAoeId(null);
@@ -2970,10 +3116,19 @@ export function BattleMap({
     } else if (gesture.kind === 'calibrate') {
       gesture.point = pct;
       setCalibrateDrag({ anchor: gesture.anchor, ...pct });
-    } else {
+    } else if (gesture.kind === 'fog') {
       gesture.end = pct;
-      if (gesture.kind === 'measure') setRuler({ start: gesture.start, end: pct });
-      else setRevealCorners({ start: gesture.start, end: pct });
+      setRevealCorners({ start: gesture.start, end: pct });
+    } else if (gesture.kind === 'fog-region') {
+      gesture.last = pct;
+      setFogRegionDrag({
+        id: gesture.regionId,
+        dx: pct.x - gesture.start.x,
+        dy: pct.y - gesture.start.y,
+      });
+    } else if (gesture.kind === 'measure') {
+      gesture.end = pct;
+      setRuler({ start: gesture.start, end: pct });
     }
   }
 
@@ -3069,12 +3224,31 @@ export function BattleMap({
       return;
     }
     if (gesture.kind === 'fog') {
-      commitFogReveal(gesture.start, finalPoint ?? gesture.end);
+      if (gesture.mode === 'erase') {
+        const rect = fogRectFromCorners(gesture.start, finalPoint ?? gesture.end);
+        if (rect.w >= 1 && rect.h >= 1) {
+          commitFogEdit(eraseFogRegion(fog, rect));
+        }
+      } else {
+        commitFogReveal(gesture.start, finalPoint ?? gesture.end);
+      }
+      setRevealCorners(null);
       return;
     }
-    // A ruler stays on screen after release so the readout can be read; it clears when the
-    // next measurement starts, the tool changes, or move mode is re-entered.
-    setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
+    if (gesture.kind === 'fog-region') {
+      const final = finalPoint ?? gesture.last;
+      const dx = final.x - gesture.start.x;
+      const dy = final.y - gesture.start.y;
+      if (Math.abs(dx) >= 0.25 || Math.abs(dy) >= 0.25) {
+        commitFogEdit(moveFogRegion(fog, gesture.regionId, dx, dy));
+      }
+      setFogRegionDrag(null);
+      return;
+    }
+    if (gesture.kind === 'measure') {
+      setRuler({ start: gesture.start, end: finalPoint ?? gesture.end });
+      return;
+    }
   }
 
   function onPingKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
@@ -3186,8 +3360,7 @@ export function BattleMap({
     onSetAoe(aoeTemplates.filter((t) => t.id !== id));
   }
 
-  // Measurement readout (5e: distance counts whole squares along the longer axis is common,
-  // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
+  // Measurement readout — fractional cells along a straight line, rounded to whole cells for scale.
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
     const cells = mapPercentGridDistance(
@@ -3200,11 +3373,18 @@ export function BattleMap({
       hexOrientation,
       gridDistanceRule,
     );
-    const feet = Math.round(cells) * (gridScale ?? 0);
-    return { cells, feet };
+    return { cells };
   })();
 
-  const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
+  const revealPreview = revealCorners ? fogRectFromCorners(revealCorners.start, revealCorners.end) : null;
+  const fogBrushMode = tool === 'erase' ? 'erase' : 'reveal';
+  const displayedFogRects = useMemo(() => {
+    const revealed = ensureFogRectIds(fog?.revealed ?? []);
+    if (!fogRegionDrag) return revealed;
+    return revealed.map((r) =>
+      r.id === fogRegionDrag.id ? { ...r, x: r.x + fogRegionDrag.dx, y: r.y + fogRegionDrag.dy } : r,
+    );
+  }, [fog?.revealed, fogRegionDrag]);
   const selectedAoe = aoeTemplates.find((t) => t.id === selectedAoeId) ?? null;
   const selectedToken = selectedTokenId != null ? encounter.combatants.find((c) => c.id === selectedTokenId) ?? null : null;
 
@@ -3235,6 +3415,8 @@ export function BattleMap({
     setCalibrateDrag(null);
     setSelectedAoeId(null);
     setSelectedTokenId(null);
+    setSelectedFogRegionId(null);
+    setFogRegionDrag(null);
   }
 
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
@@ -3349,9 +3531,35 @@ export function BattleMap({
             aria-label="Map tools"
           >
             {modeBtn('move', 'Move')}
-            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
+            {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? measureToolHelp(gridType) : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
-            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region. Shift-click a grid cell when the grid is on.')}
+            {effectiveCanDmWrite && modeBtn('erase', 'Erase', !fogOn, fogOn ? 'Click-drag to hide a fog region' : 'Enable fog first')}
+            {effectiveCanDmWrite && modeBtn('select', 'Select', !fogOn, fogOn ? 'Select, drag, or delete a revealed region' : 'Enable fog first')}
+            {effectiveCanDmWrite && fogOn && (
+              <>
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-undo"
+                  title="Undo last fog edit (Ctrl+Z)"
+                  disabled={!fogUndoUi.canUndo}
+                  onClick={undoFogEdit}
+                >
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  className="cf-map-tool cf-map-focusable"
+                  data-testid="map-fog-redo"
+                  title="Redo fog edit (Ctrl+Shift+Z)"
+                  disabled={!fogUndoUi.canRedo}
+                  onClick={redoFogEdit}
+                >
+                  Redo
+                </button>
+              </>
+            )}
             {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
             {effectiveCanDmWrite && canAoe && (
               <>
@@ -3703,7 +3911,7 @@ export function BattleMap({
                 <input
                   type="checkbox"
                   checked={fogOn}
-                  onChange={(e) => onSetFog(e.target.checked ? { enabled: true, revealed: fog?.revealed ?? [] } : null)}
+                  onChange={(e) => commitFogEdit(e.target.checked ? { enabled: true, revealed: fog?.revealed ?? [] } : null)}
                 />
                 Fog
               </label>
@@ -3711,7 +3919,7 @@ export function BattleMap({
                 type="button"
                 className="cf-chip"
                 disabled={!fogOn}
-                onClick={() => onSetFog({ enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] })}
+                onClick={() => commitFogEdit({ enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] })}
                 style={{ cursor: fogOn ? 'pointer' : 'default', opacity: fogOn ? 1 : 0.5 }}
               >
                 Reveal all
@@ -3720,7 +3928,7 @@ export function BattleMap({
                 type="button"
                 className="cf-chip"
                 disabled={!fogOn || (fog?.revealed.length ?? 0) === 0}
-                onClick={() => onSetFog({ enabled: true, revealed: [] })}
+                onClick={() => commitFogEdit({ enabled: true, revealed: [] })}
                 style={{ cursor: fogOn && (fog?.revealed.length ?? 0) > 0 ? 'pointer' : 'default', opacity: fogOn && (fog?.revealed.length ?? 0) > 0 ? 1 : 0.5 }}
               >
                 Hide all
@@ -3827,8 +4035,10 @@ export function BattleMap({
                 ? 'grab'
                 : tool === 'measure'
                   ? 'crosshair'
-                  : tool === 'reveal'
+                  : tool === 'reveal' || tool === 'erase'
                     ? 'cell'
+                    : tool === 'select'
+                      ? 'pointer'
                     : tool === 'ping'
                       ? 'pointer'
                       : undefined,
@@ -4158,8 +4368,8 @@ export function BattleMap({
                     <defs>
                       <mask id={`fogmask-${encounter.id}`}>
                         <rect x={0} y={0} width={100} height={100} fill="#fff" />
-                        {(fog?.revealed ?? []).map((r, i) => (
-                          <rect key={i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
+                        {(displayedFogRects ?? []).map((r, i) => (
+                          <rect key={r.id ?? i} x={r.x} y={r.y} width={r.w} height={r.h} fill="#000" />
                         ))}
                       </mask>
                     </defs>
@@ -4167,7 +4377,7 @@ export function BattleMap({
                   </svg>
                 )}
 
-                {/* In-progress reveal rectangle (DM). */}
+                {/* In-progress reveal/erase rectangle (DM). */}
                 {revealPreview && (
                   <div
                     className="absolute"
@@ -4177,11 +4387,34 @@ export function BattleMap({
                       top: `${revealPreview.y}%`,
                       width: `${revealPreview.w}%`,
                       height: `${revealPreview.h}%`,
-                      border: '2px dashed var(--color-accent)',
-                      background: 'rgba(56,189,248,.12)',
+                      border: `2px dashed ${fogBrushMode === 'erase' ? 'var(--color-danger, #f87171)' : 'var(--color-accent)'}`,
+                      background: fogBrushMode === 'erase' ? 'rgba(248,113,113,.12)' : 'rgba(56,189,248,.12)',
                       zIndex: 8,
                     }}
                   />
+                )}
+
+                {selectedFogRegionId && fogOn && (
+                  (() => {
+                    const r = displayedFogRects.find((rect) => rect.id === selectedFogRegionId);
+                    if (!r) return null;
+                    return (
+                      <div
+                        className="absolute"
+                        data-testid="map-fog-region-selected"
+                        style={{
+                          left: `${r.x}%`,
+                          top: `${r.y}%`,
+                          width: `${r.w}%`,
+                          height: `${r.h}%`,
+                          border: '2px solid var(--color-accent)',
+                          boxShadow: '0 0 0 1px rgba(15,23,42,.6)',
+                          pointerEvents: 'none',
+                          zIndex: 8,
+                        }}
+                      />
+                    );
+                  })()
                 )}
 
                 {/* Measurement ruler (issue #40). */}
@@ -4216,7 +4449,15 @@ export function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
+                        {formatRulerReadout(
+                          {
+                            cells: rulerReadout.cells,
+                            scale: gridScale ?? 0,
+                            gridUnit,
+                            gridType,
+                          },
+                          'display',
+                        )}
                       </div>
                     )}
                   </>
@@ -4291,7 +4532,7 @@ export function BattleMap({
           {!isCast && (
           <>
           <div id="map-keyboard-help" className="sr-only">
-            Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete or Backspace removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
+            Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete or Backspace removes a selected fog region in Select mode. Number keys 1 to 7 switch tools. In measure, reveal, or erase mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Ctrl+Z undoes the last fog edit; Ctrl+Shift+Z redoes. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
           </div>
           <div
             className="text-muted"
@@ -4299,10 +4540,14 @@ export function BattleMap({
             aria-hidden="true"
           >
             {tool === 'measure'
-              ? 'Click-drag or press Enter to start measuring at the map center, then arrow keys to aim and Enter to finish. Escape cancels.'
+              ? `Click-drag or press Enter to start measuring in ${gridCellUnitPlural(gridType)} at the map center, then arrow keys to aim and Enter to finish. Escape cancels.`
               : tool === 'reveal'
-                ? 'Click-drag or press Enter to start a reveal rectangle at the map center, then arrow keys to resize and Enter to reveal. Escape cancels.'
-                : tool === 'ping'
+                ? 'Click-drag or Shift-click a grid cell to reveal. Press Enter to start a reveal rectangle at the map center, arrow keys to resize, Enter to commit. Escape cancels. Ctrl+Z undoes fog edits.'
+                : tool === 'erase'
+                  ? 'Click-drag or press Enter to erase a revealed region. Escape cancels. Ctrl+Z undoes fog edits.'
+                  : tool === 'select'
+                    ? 'Click a revealed region to select it, drag to move, Delete to remove. Escape deselects when a region is focused.'
+                    : tool === 'ping'
                   ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
@@ -4358,6 +4603,7 @@ function ApplyDamageBar({
       className="cf-inset"
       role="group"
       aria-label={`Apply ${amount} rolled ${label}`}
+      data-testid="apply-damage-bar"
       style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px' }}
     >
       <span style={{ fontSize: 12.5 }}>
@@ -4429,6 +4675,7 @@ function ApplyDamageBar({
                 style={{ fontSize: 12, padding: '0 12px' }}
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
                 disabled={applyDisabled}
+                data-testid={`apply-damage-target-${c.id}`}
                 onClick={() => onApply(c.id, delta)}
               >
                 {c.name}{acLabel}
@@ -4485,6 +4732,7 @@ function ApplyDamageBar({
 
 function CombatantRow({
   rowRef,
+  encounterId,
   combatant,
   isCurrentTurn,
   canEdit,
@@ -4499,6 +4747,7 @@ function CombatantRow({
   onRollError,
   onApplyDamage,
   onUseAction,
+  onUseMonsterAction,
   busy,
   conditionSuggestions,
   ruleSystem,
@@ -4523,6 +4772,7 @@ function CombatantRow({
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
+  encounterId: number;
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
@@ -4544,8 +4794,9 @@ function CombatantRow({
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
   onApplyDamage: (amount: number, label: string) => void;
-  /** Issue #414: open the structured action Use flow for a resolvable action index. */
+  /** Issue #414 / #425: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
+  onUseMonsterAction?: (actionIndex: number, actionName: string, spec: ActionSpec) => void;
   busy: boolean;
   /** Condition chips offered by the active campaign's rule-system adapter (issue #234). */
   conditionSuggestions: readonly string[];
@@ -5165,6 +5416,23 @@ function CombatantRow({
         {canViewStatblock && combatant.ruleEntryId != null && (
           <CombatantStatblock ruleEntryId={combatant.ruleEntryId} ruleSystem={ruleSystem} />
         )}
+        {onUseMonsterAction && (
+          <CombatantActionsList
+            encounterId={encounterId}
+            combatantId={combatant.id}
+            enabled
+            onUseAction={onUseMonsterAction}
+          />
+        )}
+        {canEditIdentity && combatant.statblock && combatant.kind === 'monster' && (
+          <details className="mt-2">
+            <summary className="text-xs text-muted cursor-pointer">Edit statblock</summary>
+            <CombatantStatblockEditor
+              value={combatant.statblock}
+              onChange={(next) => onPatchCombatant?.({ statblock: next })}
+            />
+          </details>
+        )}
         {/* Character card (in-encounter sheet): a player sees their own combat stats —
             abilities, saves, skills, actions, spell slots — without leaving the tracker,
             and the DM sees the whole party's. Character data is party-visible (dmSecret is
@@ -5599,11 +5867,12 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
 
 // ---------------------------------------------------------------------------
 
-type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
-const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'party', 'npc'];
+type AddTab = 'manual' | 'compendium' | 'library' | 'party' | 'npc';
+const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'library', 'party', 'npc'];
 const ADD_TAB_LABELS: Record<AddTab, string> = {
   manual: 'Manual',
   compendium: 'Compendium',
+  library: 'Library',
   party: 'Party',
   npc: 'NPC',
 };
@@ -5629,6 +5898,7 @@ function AddCombatantPanel({
   const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
     manual: null,
     compendium: null,
+    library: null,
     party: null,
     npc: null,
   });
@@ -5640,6 +5910,10 @@ function AddCombatantPanel({
   const [hpMax, setHpMax] = useState('');
   const [initMod, setInitMod] = useState('');
   const [manualCount, setManualCount] = useState('1');
+  const [manualStatblock, setManualStatblock] = useState<CombatantStatblockData>(() => defaultCombatantStatblock());
+
+  // Campaign library (issue #425)
+  const [library, setLibrary] = useState<CampaignLibraryMonster[]>([]);
 
   // Compendium
   const [query, setQuery] = useState('');
@@ -5722,6 +5996,22 @@ function AddCombatantPanel({
   }, [cid]);
 
   useEffect(() => {
+    if (tab !== 'library') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+        if (!cancelled) setLibrary(list);
+      } catch {
+        if (!cancelled) setLibrary([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [cid, tab]);
+
+  useEffect(() => {
     if ((tab !== 'compendium' && tab !== 'npc') || !debouncedQuery.trim()) {
       setResults([]);
       return;
@@ -5780,12 +6070,55 @@ function AddCombatantPanel({
         hpMax: hpMax ? Math.max(1, Number(hpMax)) : undefined,
         initMod: initMod ? Number(initMod) : undefined,
         count: parseCount(manualCount),
+        statblock: manualStatblock,
       });
       setName('');
       setHpMax('');
       setInitMod('');
       setManualCount('1');
+      setManualStatblock(defaultCombatantStatblock());
       await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addFromLibrary(entry: CampaignLibraryMonster) {
+    setSaving(true);
+    setError(null);
+    try {
+      const resolvedHp = hpMax.trim() && Number.isFinite(Number(hpMax)) ? Math.max(1, Number(hpMax)) : 10;
+      await api.post(`${API}/encounters/${encounterId}/combatants`, {
+        kind: 'monster' as CombatantKind,
+        name: entry.name,
+        libraryMonsterId: entry.id,
+        hpMax: resolvedHp,
+        count: parseCount(manualCount),
+      });
+      await onAdded();
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveManualToLibrary() {
+    if (!name.trim()) {
+      setError('Enter a name before saving to the campaign library.');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.post(`${API}/campaigns/${cid}/library/monsters`, {
+        name: name.trim(),
+        statblock: manualStatblock,
+      });
+      const list = await api.get<CampaignLibraryMonster[]>(`${API}/campaigns/${cid}/library/monsters`);
+      setLibrary(list);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
@@ -5919,7 +6252,7 @@ function AddCombatantPanel({
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
       <div
-        className="seg self-start inline-flex"
+        className="seg seg-wrap self-start inline-flex max-w-full"
         role="tablist"
         aria-label="Add combatant"
         data-testid="add-combatant-tabs"
@@ -5966,7 +6299,7 @@ function AddCombatantPanel({
         aria-labelledby="add-combatant-tab-manual"
         tabIndex={0}
         hidden={tab !== 'manual'}
-        className={tab === 'manual' ? '' : 'hidden'}
+        className={tab === 'manual' ? 'space-y-3' : 'hidden'}
       >
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
@@ -5988,7 +6321,45 @@ function AddCombatantPanel({
           <Btn type="submit" disabled={saving || !name.trim()}>
             {saving ? 'Adding…' : 'Add'}
           </Btn>
+          <Btn type="button" ghost disabled={saving || !name.trim()} onClick={() => void saveManualToLibrary()}>
+            Save to library
+          </Btn>
         </form>
+        <p className="text-[11px] text-muted m-0" title={COMBATANT_STATBLOCK_HELP.library}>
+          {COMBATANT_STATBLOCK_HELP.library}
+        </p>
+        <CombatantStatblockEditor value={manualStatblock} onChange={setManualStatblock} disabled={saving} />
+      </div>
+
+      <div
+        id="add-combatant-panel-library"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-library"
+        tabIndex={0}
+        hidden={tab !== 'library'}
+        className={tab === 'library' ? 'space-y-2' : 'hidden'}
+      >
+        {library.length === 0 ? (
+          <p className="text-muted text-sm">No saved homebrew monsters yet. Build one on the Manual tab and save it to the library.</p>
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            {library.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className="card elev-sm text-left"
+                style={{ border: 0, font: 'inherit', color: 'var(--color-text)', cursor: 'pointer', padding: '8px 12px' }}
+                disabled={saving}
+                onClick={() => void addFromLibrary(entry)}
+              >
+                <span className="font-medium">{entry.name}</span>
+                <span className="text-muted text-xs block">
+                  {entry.statblock.actions.length} action{entry.statblock.actions.length === 1 ? '' : 's'}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div

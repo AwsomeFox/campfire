@@ -42,25 +42,25 @@ write(
 );
 
 replace('README.md', [
-  ['an MCP server (130+ tools)', `an MCP server (${tools} tools)`],
-  ['server with **137 tools**', `server with **${tools} tools**`],
-  ['MCP server (137 tools)', `MCP server (${tools} tools)`],
+  ['an MCP server (208 tools)', `an MCP server (${tools} tools)`],
+  ['server with **208 tools**', `server with **${tools} tools**`],
+  ['MCP server (208 tools)', `MCP server (${tools} tools)`],
 ]);
 
 replace('apps/server/README.md', [
   [
-    '**Tool catalog** (207 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`\'s\n`ALL_TOOLS`',
+    '**Tool catalog** (208 — `modules/mcp/mcp-catalog.ts`; see `test/mcp.e2e-spec.ts`\'s\n`MCP_TOOL_NAMES`',
     `**Tool catalog** (${tools} — \`modules/mcp/mcp-catalog.ts\`; see \`test/mcp.e2e-spec.ts\`'s\n\`MCP_TOOL_NAMES\``,
   ],
 ]);
 
-replace('website/docs/index.md', [['**137-tool**', `**${tools}-tool**`]]);
+replace('website/docs/index.md', [['**208-tool**', `**${tools}-tool**`]]);
 
-replace('website/docs/ai/capabilities.md', [['server** (137 tools)', `server** (${tools} tools)`]]);
+replace('website/docs/ai/capabilities.md', [['server** (208 tools)', `server** (${tools} tools)`]]);
 
 replace('website/docs/ai/reference.md', [
   [
-    '- **Tools:** 130+ covering campaigns, quests, objectives, story arcs/beats/branches,\n' +
+    '- **Tools:** 208 covering campaigns, quests, objectives, story arcs/beats/branches,\n' +
       '  NPCs, locations, factions, characters, encounters and combatants, dice, sessions,\n' +
       '  notes, the inbox, proposals, the AI Dungeon Master seat, members, rule packs, the\n' +
       '  session-zero charter, audit, and export.\n' +
@@ -86,15 +86,11 @@ replace('website/docs/ai/reference.md', [
 
 replace('website/docs/reference/roadmap.md', [
   [
-    '- ✅ **Full MCP parity — 137 tools** covering campaign lifecycle',
+    '- ✅ **Full MCP parity — 208 tools** covering campaign lifecycle',
     `- ✅ **Full MCP parity — ${tools} tools** covering campaign lifecycle`,
   ],
   [
-    '- ✅ **MCP resources & prompts** — read surfaces are also exposed as MCP resources, plus prep/recap prompts, beyond the tool set',
-    `- ✅ **MCP resources & prompts** — ${resources} read surfaces plus ${prompts} prep/recap prompts, beyond the ${tools}-tool set`,
-  ],
-  [
-    '- ✅ **MCP resources & prompts** — read surfaces are exposed as MCP resources, with prep/recap prompts, beyond the tool set',
+    '- ✅ **MCP resources & prompts** — 6 read surfaces plus 2 prep/recap prompts, beyond the 208-tool set',
     `- ✅ **MCP resources & prompts** — ${resources} read surfaces plus ${prompts} prep/recap prompts, beyond the ${tools}-tool set`,
   ],
 ]);

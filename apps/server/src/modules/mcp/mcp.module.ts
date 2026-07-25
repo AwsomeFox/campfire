@@ -14,6 +14,7 @@ import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { ProposalsModule } from '../proposals/proposals.module';
 import { RulesModule } from '../rules/rules.module';
 import { EncountersModule } from '../encounters/encounters.module';
+import { CampaignLibraryModule } from '../campaign-library/campaign-library.module';
 import { MapsModule } from '../maps/maps.module';
 import { AiMapModule } from '../ai-map/ai-map.module';
 import { AuditModule } from '../audit/audit.module';
@@ -50,6 +51,7 @@ import { McpController } from './mcp.controller';
     ProposalsModule,
     RulesModule,
     EncountersModule,
+    CampaignLibraryModule,
     MapsModule,
     AiMapModule,
     AuditModule,
