@@ -11,6 +11,14 @@
       "running": "Running",
       "ended": "Ended"
     },
+    "list": {
+      "filterAll": "All",
+      "searchPlaceholder": "Search by name…",
+      "filterStatus": "Filter by status",
+      "noResults": "Nothing matches your filters.",
+      "resultCount": "{{count}} encounter",
+      "resultCount_other": "{{count}} encounters"
+    },
     "empty": {
       "title": "لا توجد مواجهات بعد",
       "hintDm": "Start one when combat kicks off.",

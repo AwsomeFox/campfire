@@ -116,16 +116,21 @@ export class CampaignEncountersController {
   @Get()
   @ApiOperation({ summary: 'List encounters in a campaign', description: 'Requires campaign membership.' })
   @ApiQuery({ name: 'status', required: false, enum: ['preparing', 'running', 'ended'], description: 'Filter to a single encounter status.' })
-  @ApiResponse({ status: 200, description: 'Encounters in the campaign.' })
+  @ApiQuery({ name: 'q', required: false, type: String, description: 'Unicode-aware case-folded substring search over encounter name (issue #490).' })
+  @ApiResponse({ status: 200, description: 'Encounters in the campaign, sorted running → preparing → ended then by updatedAt desc.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: EncounterStatus | undefined,
+    @Query('q') q: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
+    if (status !== undefined && status !== 'preparing' && status !== 'running' && status !== 'ended') {
+      throw new BadRequestException("status must be one of: 'preparing', 'running', 'ended'");
+    }
     // The caller's role drives entity-level secrecy (issue #262): a non-DM never sees a
     // hidden (prepared, not-yet-sprung) encounter in the list.
     const role = await this.access.requireMember(user, campaignId);
-    return this.encounters.listForCampaign(campaignId, status, role);
+    return this.encounters.listForCampaign(campaignId, status, role, q);
   }
 }
 
@@ -294,12 +299,13 @@ export class EncountersController {
     description:
       "dm role required. Edit the name, attach/clear a location/quest/session link (issue #126), and/or attach/clear the battle map via mapAttachmentId (issue #39). " +
       'Optionally pass `expectedUpdatedAt` (the updatedAt you last read) to opt into optimistic concurrency (issue #532): ' +
-      'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another DM tab or a connected AI.',
+      'a stale value returns 409 Conflict instead of silently clobbering a fresher edit from another DM tab or a connected AI. ' +
+      'An ended encounter rejects all field writes with 409 — reopen it first (issues #163, #470).',
   })
   @ApiResponse({ status: 200, description: 'Updated encounter with combatants.' })
   @ApiResponse({ status: 400, description: 'mapAttachmentId does not exist in this campaign.' })
   @ApiResponse({ status: 404, description: 'A linked location/quest/session id is not in this encounter\'s campaign.' })
-  @ApiResponse({ status: 409, description: 'Stale expectedUpdatedAt — another DM or the AI saved this encounter since you loaded it. Reload the latest before reapplying.' })
+  @ApiResponse({ status: 409, description: 'Stale expectedUpdatedAt, or the encounter has ended — reopen it before editing map/grid/fog/links (issues #163, #470).' })
   async update(@Param('id', ParseIntPipe) id: number, @Body() body: EncounterUpdateDto, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
