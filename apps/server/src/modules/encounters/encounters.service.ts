@@ -3897,9 +3897,10 @@ export class EncountersService {
    */
   private async suggestedActionsForCombatant(c: Combatant): Promise<TurnSuggestedAction[]> {
     const out: TurnSuggestedAction[] = [];
-    const pushAction = (source: string, actions: ReturnType<typeof combatantActionsFromStatblock>, startIndex: number) => {
+    const pushAction = (defaultSource: string, actions: ReturnType<typeof combatantActionsFromStatblock>, startIndex: number) => {
       for (let i = 0; i < actions.length; i++) {
         const a = actions[i];
+        const source = typeof a.kind === 'string' && a.kind ? a.kind.slice(0, 40) : defaultSource;
         const bits = [a.toHit, a.damage, a.notes].filter(Boolean);
         out.push({
           name: a.name.slice(0, 160),
@@ -3936,8 +3937,9 @@ export class EncountersService {
       return out.slice(0, 100);
     }
     if (c.ruleEntryId !== null) {
-      const adapter = await this.adapterForCampaign((await this.getRowOrThrow(c.encounterId)).campaignId);
-      const ruleSystem = await this.ruleSystemForCampaign((await this.getRowOrThrow(c.encounterId)).campaignId);
+      const encounterRow = await this.getRowOrThrow(c.encounterId);
+      const adapter = await this.adapterForCampaign(encounterRow.campaignId);
+      const ruleSystem = await this.ruleSystemForCampaign(encounterRow.campaignId);
       const [entry] = await this.db.select({ dataJson: ruleEntries.dataJson }).from(ruleEntries).where(eq(ruleEntries.id, c.ruleEntryId)).limit(1);
       const data = fromJsonText<Record<string, unknown>>(entry?.dataJson ?? null, {});
       const expanded = expandStatblockActions(data, adapter, ruleSystem ?? '');

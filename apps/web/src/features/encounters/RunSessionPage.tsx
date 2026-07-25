@@ -5239,6 +5239,7 @@ function AddCombatantPanel({
   }, [cid]);
 
   useEffect(() => {
+    if (tab !== 'library') return;
     let cancelled = false;
     (async () => {
       try {
@@ -5493,7 +5494,7 @@ function AddCombatantPanel({
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
-      <div className="seg self-start inline-flex">
+      <div className="seg seg-wrap self-start inline-flex max-w-full">
         {(['manual', 'compendium', 'library', 'party', 'npc'] as AddTab[]).map((t) => (
           <button
             key={t}

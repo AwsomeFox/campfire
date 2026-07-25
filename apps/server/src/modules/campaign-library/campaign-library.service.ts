@@ -117,10 +117,12 @@ export class CampaignLibraryService {
 
   /** Clone a library entry (or compendium-derived snapshot) under a new name. */
   async clone(id: number, name: string, user: RequestUser, role: Role, campaignId: number): Promise<CampaignLibraryMonster> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new BadRequestException('A library monster needs a name.');
     const source = await this.getOrThrow(id, campaignId);
     return this.create(
       campaignId,
-      { name: name.trim(), statblock: source.statblock, sourceRuleEntryId: source.sourceRuleEntryId ?? undefined },
+      { name: trimmed, statblock: source.statblock, sourceRuleEntryId: source.sourceRuleEntryId ?? undefined },
       user,
       role,
     );

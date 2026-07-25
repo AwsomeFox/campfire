@@ -186,7 +186,7 @@ function damagePartsFrom(raw: unknown): Array<{ formula: string; flat: number; t
       const base = m[1];
       const sign = m[2] === '-' ? -1 : 1;
       const flat = m[3] ? sign * Number(m[3]) : 0;
-      out.push({ formula: base, flat: Math.max(0, flat), type });
+      out.push({ formula: base, flat, type });
     } else {
       out.push({ formula: expr.trim(), flat: 0, type });
     }
