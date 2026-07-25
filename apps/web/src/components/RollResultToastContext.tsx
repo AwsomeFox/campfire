@@ -86,10 +86,13 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
-    setRollApplyHandler(options?.onApply ?? applyHandlerRef.current);
+    setRollApplyHandler((prev) => options?.onApply ?? applyHandlerRef.current ?? prev);
   }, []);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
+    const handler = options?.onApply ?? applyHandlerRef.current;
+    if (handler) setRollApplyHandler(handler);
+
     if (prefersReducedMotion() || !overlayRef.current) {
       applyToast(r, options);
       return;
@@ -132,17 +135,21 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     setRollApplyHandler(null);
   }, []);
 
-  const activeApplyHandler = rollApplyHandler ?? applyHandler;
+  const activeApplyHandler = rollApplyHandler ?? applyHandlerRef.current;
 
   const handleApply = useCallback(() => {
-    if (!roll || !activeApplyHandler) return;
+    if (!roll) return;
+    const handler = rollApplyHandler ?? applyHandlerRef.current;
+    if (!handler) return;
     if (rollApplyHandler == null && !looksLikeDamageRoll(roll)) return;
     const label = roll.label || roll.expr;
-    activeApplyHandler(Math.max(0, roll.total), label);
+    handler(Math.max(0, roll.total), label);
     dismiss();
-  }, [roll, rollApplyHandler, activeApplyHandler, dismiss]);
+  }, [roll, rollApplyHandler, dismiss]);
 
-  const canApply = roll != null && activeApplyHandler != null;
+  const canApply =
+    roll != null &&
+    (activeApplyHandler != null || looksLikeDamageRoll(roll));
 
   const overlayDice = overlay
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
