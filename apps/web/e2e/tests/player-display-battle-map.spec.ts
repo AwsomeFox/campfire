@@ -6,7 +6,6 @@ import { seed, stateFor } from './seed';
  * visible tokens, and shared AoE templates; unrevealed secrets stay off-screen.
  */
 
-const DM = { username: 'dm', password: 'campfire-dm-pw-1' };
 const AOE_ID = 'cast-aoe-lit';
 const AOE_DARK_ID = 'cast-aoe-dark';
 
