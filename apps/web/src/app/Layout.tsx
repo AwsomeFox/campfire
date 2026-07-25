@@ -43,6 +43,13 @@ import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 import { LiveEncounterProvider } from './LiveEncounterContext';
 import { useLiveEncounterState } from '../lib/useLiveEncounterState';
+import {
+  buildCampaignNavGroups,
+  isActiveNavPath,
+  navGroupsForMoreSheet,
+  type NavGroup,
+  type NavItem,
+} from './campaignNav';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -153,14 +160,6 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
     </div>
   );
 }
-
-type NavItem = {
-  key: string;
-  label: string;
-  to?: string;
-  soon?: boolean;
-  badge?: number;
-};
 
 /** Campaign-wide search box (issue #64). Submits to /c/:id/search?q=. */
 function SidebarSearch({ campaignId }: { campaignId: number }) {
@@ -289,7 +288,11 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
     minHeight: 36,
     borderRadius: 'var(--radius-md)',
   } as const;
-  if (item.soon || !item.to) {
+  const activeStyle = {
+    color: active ? 'var(--color-accent)' : 'var(--color-neutral-300)',
+    background: active ? 'color-mix(in srgb, var(--color-accent) 9%, transparent)' : 'transparent',
+  } as const;
+  if (item.soon) {
     return (
       <div
         className="flex items-center gap-2 px-2.5 text-sm cursor-not-allowed select-none"
@@ -299,16 +302,24 @@ function SidebarNavButton({ item, active, onClick }: { item: NavItem; active: bo
       </div>
     );
   }
+  if (!item.to) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className="flex items-center gap-2 px-2.5 text-sm text-left w-full"
+        style={{ ...sharedStyle, ...activeStyle }}
+      >
+        {inner}
+      </button>
+    );
+  }
   return (
     <Link
       to={item.to}
       onClick={onClick}
       className="flex items-center gap-2 px-2.5 text-sm"
-      style={{
-        ...sharedStyle,
-        color: active ? 'var(--color-accent)' : 'var(--color-neutral-300)',
-        background: active ? 'color-mix(in srgb, var(--color-accent) 9%, transparent)' : 'transparent',
-      }}
+      style={{ ...sharedStyle, ...activeStyle }}
     >
       {inner}
     </Link>
@@ -588,41 +599,25 @@ function LayoutContent() {
 
   const displayName = me?.user.displayName || me?.user.username || '';
 
-  // Nav items that actually resolve to a route. Design's Encounters/World/
-  // Compendium/Settings(player-facing) items render greyed with a "soon" tag.
-  const mainNav: NavItem[] = campaignId !== undefined
-    ? [
-        { key: 'dashboard', label: t('nav.dashboard'), to: `/c/${campaignId}` },
-        { key: 'quests', label: t('nav.quests'), to: `/c/${campaignId}/quests` },
-        { key: 'world', label: t('nav.world'), to: `/c/${campaignId}/locations` },
-        { key: 'npcs', label: t('nav.npcs'), to: `/c/${campaignId}/npcs` },
-        { key: 'factions', label: t('nav.factions'), to: `/c/${campaignId}/factions` },
-        { key: 'party', label: t('nav.party'), to: `/c/${campaignId}/party` },
-        { key: 'inventory', label: t('nav.inventory'), to: `/c/${campaignId}/inventory` },
-        { key: 'sessions', label: t('nav.sessions'), to: `/c/${campaignId}/sessions` },
-        { key: 'timeline', label: t('nav.timeline'), to: `/c/${campaignId}/timeline` },
-        { key: 'session-zero', label: t('nav.sessionZero'), to: `/c/${campaignId}/session-zero` },
-        { key: 'encounters', label: t('nav.encounters'), to: `/c/${campaignId}/encounters` },
-        // Only surfaced while the AI holds the DM seat (Driver mode) — issue #339.
-        ...(aiDriverActive ? [{ key: 'table', label: t('nav.table'), to: `/c/${campaignId}/table` }] : []),
-        { key: 'compendium', label: t('nav.compendium'), to: `/c/${campaignId}/compendium` },
-        { key: 'notes', label: t('nav.myNotes'), to: `/c/${campaignId}/notes` },
-        // Non-DM members get a self-view of the proposals they've submitted (issue #124);
-        // the DM's full review queue lives under dmNav below.
-        ...(!isDm ? [{ key: 'proposals', label: t('nav.myProposals'), to: `/c/${campaignId}/proposals` }] : []),
-      ]
-    : [];
+  // Task-grouped campaign nav (issue #643): Play, Prepare, World, Records, Manage.
+  const campaignNavGroups: NavGroup[] = useMemo(
+    () =>
+      campaignId !== undefined
+        ? buildCampaignNavGroups(t, campaignId, {
+            isDm,
+            aiDriverActive,
+            inboxCount,
+            pendingProposals,
+            trashCount,
+          })
+        : [],
+    [campaignId, t, isDm, aiDriverActive, inboxCount, pendingProposals, trashCount],
+  );
 
-  const dmNav: NavItem[] = campaignId !== undefined && isDm
-    ? [
-        { key: 'storylines', label: t('nav.storylines'), to: `/c/${campaignId}/storylines` },
-        { key: 'settings', label: t('nav.settings'), to: `/c/${campaignId}/settings` },
-        { key: 'inbox', label: t('nav.scribeInbox'), to: `/c/${campaignId}/inbox`, badge: inboxCount },
-        { key: 'proposals', label: t('nav.proposals'), to: `/c/${campaignId}/proposals`, badge: pendingProposals },
-        { key: 'trash', label: t('nav.trash'), to: `/c/${campaignId}/trash`, badge: trashCount },
-        { key: 'members', label: t('nav.members'), to: `/c/${campaignId}/members` },
-      ]
-    : [];
+  const moreSheetNavGroups = useMemo(
+    () => navGroupsForMoreSheet(campaignNavGroups),
+    [campaignNavGroups],
+  );
 
   // Server admin console is on any /admin* route (issue #350) — mirrors the
   // campaign dmNav pattern above so the sidebar shows a "Server admin" section
@@ -640,14 +635,7 @@ function LayoutContent() {
       ]
     : [];
 
-  const isActivePath = (to?: string) => {
-    if (!to) return false;
-    const path = to.split('#')[0];
-    if (path === `/c/${campaignId}` || path === '/admin') {
-      return location.pathname === path;
-    }
-    return location.pathname.startsWith(path);
-  };
+  const isActivePath = (to?: string) => isActiveNavPath(location.pathname, to, campaignId);
 
   if (lostAccess) {
     return (
@@ -701,24 +689,21 @@ function LayoutContent() {
 
           {campaignId !== undefined && <SidebarSearch campaignId={campaignId} />}
 
-          <nav className="flex flex-col gap-0.5">
-            {mainNav.map((item) => (
-              <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
-            ))}
-          </nav>
-
-          {isDm && (
-            <>
-              <div className="text-muted text-[10.5px] uppercase tracking-wide pt-3 pb-1 px-2.5">
-                {t('nav.dungeonMaster')}
+          {campaignNavGroups.map((group, index) => (
+            <div key={group.key}>
+              <div
+                className="text-muted text-[10.5px] uppercase tracking-wide pb-1 px-2.5"
+                style={{ paddingTop: index === 0 ? 0 : 12 }}
+              >
+                {group.label}
               </div>
               <nav className="flex flex-col gap-0.5">
-                {dmNav.map((item) => (
+                {group.items.map((item) => (
                   <SidebarNavButton key={item.key} item={item} active={isActivePath(item.to)} />
                 ))}
               </nav>
-            </>
-          )}
+            </div>
+          ))}
 
           {onAdminRoute && isAdmin && (
             <>
@@ -733,42 +718,41 @@ function LayoutContent() {
             </>
           )}
 
-          <nav className="flex flex-col gap-0.5 mt-1">
+          <div className="flex-1" />
+          <div className="hr my-1" />
+          <div className="text-muted text-[10.5px] uppercase tracking-wide pt-3 pb-1 px-2.5">
+            {t('nav.groupAccount')}
+          </div>
+          <div className="flex items-center justify-between px-2 text-[11px] text-muted">
+            <span className="truncate">{displayName}</span>
+            {roleLabel && <span className="tag tag-accent" style={{ fontSize: 9.5 }}>{roleLabel}</span>}
+          </div>
+          <nav className="flex flex-col gap-0.5">
             {isAdmin && !onAdminRoute && (
               <SidebarNavButton
                 item={{ key: 'admin', label: t('nav.serverAdmin'), to: '/admin' }}
-                active={location.pathname === '/admin'}
+                active={location.pathname.startsWith('/admin')}
               />
             )}
             <SidebarNavButton
               item={{ key: 'tokens', label: t('nav.apiTokens'), to: '/tokens' }}
               active={location.pathname === '/tokens'}
             />
-          </nav>
-
-          <div className="flex-1" />
-          <div className="hr my-1" />
-          <div className="flex items-center justify-between px-2 text-[11px] text-muted">
-            <span className="truncate">{displayName}</span>
-            {roleLabel && <span className="tag tag-accent" style={{ fontSize: 9.5 }}>{roleLabel}</span>}
-          </div>
-          <div className="flex items-center gap-1.5 px-1">
-            <Link to="/preferences" className="btn btn-ghost flex-1 justify-start" style={{ fontSize: 12 }}>
-              {t('nav.preferences')}
-            </Link>
-          </div>
-          <div className="flex items-center gap-1.5 px-1">
-            <button
-              className="btn btn-ghost flex-1 justify-start"
-              style={{ fontSize: 12 }}
+            <SidebarNavButton
+              item={{ key: 'preferences', label: t('nav.preferences'), to: '/preferences' }}
+              active={location.pathname === '/preferences'}
+            />
+            <SidebarNavButton
+              item={{ key: 'change-password', label: t('nav.changePassword'), to: undefined }}
+              active={false}
               onClick={() => setShowPasswordModal(true)}
-            >
-              {t('nav.changePassword')}
-            </button>
-          </div>
-          <button className="btn btn-ghost justify-start" style={{ fontSize: 12 }} onClick={onLogout}>
-            {t('nav.signOut')}
-          </button>
+            />
+            <SidebarNavButton
+              item={{ key: 'sign-out', label: t('nav.signOut'), to: undefined }}
+              active={false}
+              onClick={onLogout}
+            />
+          </nav>
         </aside>
       )}
 
@@ -965,8 +949,9 @@ function LayoutContent() {
         <MoreSheet
           displayName={displayName}
           roleLabel={roleLabel}
-          mainNav={mainNav}
-          dmNav={dmNav}
+          navGroups={moreSheetNavGroups}
+          isActivePath={isActivePath}
+          adminActive={onAdminRoute}
           isAdmin={isAdmin}
           switchCampaignState={switchCampaignState}
           onSwitchCampaignClick={onSwitchCampaignClick}
@@ -990,8 +975,9 @@ function LayoutContent() {
 function MoreSheet({
   displayName,
   roleLabel,
-  mainNav,
-  dmNav,
+  navGroups,
+  isActivePath,
+  adminActive,
   isAdmin,
   switchCampaignState,
   onSwitchCampaignClick,
@@ -1001,8 +987,9 @@ function MoreSheet({
 }: {
   displayName: string;
   roleLabel: string | null;
-  mainNav: NavItem[];
-  dmNav: NavItem[];
+  navGroups: NavGroup[];
+  isActivePath: (to?: string) => boolean;
+  adminActive: boolean;
   isAdmin: boolean;
   switchCampaignState: { switchFrom: string } | undefined;
   onSwitchCampaignClick: (event: { preventDefault(): void }) => void;
@@ -1010,6 +997,7 @@ function MoreSheet({
   onChangePassword: () => void;
   onLogout: () => void;
 }) {
+  const { t } = useTranslation();
   // Escape-to-close, focus trap, and focus restore to the trigger (issue #92),
   // combined with #104's positioning: capped height + internal scroll so a tall
   // list never clips above the viewport, plus a visible close button.
@@ -1028,7 +1016,7 @@ function MoreSheet({
         ref={sheetRef}
         role="dialog"
         aria-modal="true"
-        aria-label="More navigation"
+        aria-label={t('nav.moreNavigation')}
         className="card elev-lg w-full flex flex-col"
         style={{
           maxWidth: 440,
@@ -1045,12 +1033,12 @@ function MoreSheet({
         />
         <div className="flex items-start gap-2 shrink-0" style={{ padding: '0 6px 6px' }}>
           <div className="text-muted flex-1 min-w-0" style={{ fontSize: 11 }}>
-            Signed in as {displayName}
-            {roleLabel ? ` · viewing as ${roleLabel}` : ''}
+            {t('nav.signedInAs', { name: displayName })}
+            {roleLabel ? t('nav.viewingAs', { role: roleLabel }) : ''}
           </div>
           <button
             type="button"
-            aria-label="Close menu"
+            aria-label={t('nav.closeMenu')}
             onClick={onClose}
             className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
             style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
@@ -1059,36 +1047,61 @@ function MoreSheet({
           </button>
         </div>
         <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
-          {mainNav.map((item) => (
-            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
+          {navGroups.map((group) => (
+            <div key={group.key}>
+              <div className="text-muted uppercase tracking-wide px-2.5 pt-2 pb-1" style={{ fontSize: 10.5 }}>
+                {group.label}
+              </div>
+              {group.items.map((item) => (
+                <MoreSheetItem
+                  key={item.key}
+                  item={item}
+                  active={isActivePath(item.to)}
+                  onNavigate={onClose}
+                />
+              ))}
+            </div>
           ))}
-          {dmNav.map((item) => (
-            <MoreSheetItem key={item.key} item={item} onNavigate={onClose} />
-          ))}
+          <div className="text-muted uppercase tracking-wide px-2.5 pt-2 pb-1" style={{ fontSize: 10.5 }}>
+            {t('nav.groupAccount')}
+          </div>
           {isAdmin && (
-            <MoreSheetItem item={{ key: 'admin', label: 'Server admin', to: '/admin' }} onNavigate={onClose} />
+            <MoreSheetItem
+              item={{ key: 'admin', label: t('nav.serverAdmin'), to: '/admin' }}
+              active={adminActive}
+              onNavigate={onClose}
+            />
           )}
-          <MoreSheetItem item={{ key: 'tokens', label: 'API tokens', to: '/tokens' }} onNavigate={onClose} />
           <MoreSheetItem
-            item={{ key: 'switch', label: 'Switch campaign', to: '/' }}
+            item={{ key: 'tokens', label: t('nav.apiTokens'), to: '/tokens' }}
+            active={isActivePath('/tokens')}
+            onNavigate={onClose}
+          />
+          <MoreSheetItem
+            item={{ key: 'switch', label: t('nav.switchCampaign'), to: '/' }}
+            active={false}
             state={switchCampaignState}
             onNavigate={onClose}
             onClick={onSwitchCampaignClick}
           />
-          <MoreSheetItem item={{ key: 'preferences', label: 'Preferences', to: '/preferences' }} onNavigate={onClose} />
+          <MoreSheetItem
+            item={{ key: 'preferences', label: t('nav.preferences'), to: '/preferences' }}
+            active={isActivePath('/preferences')}
+            onNavigate={onClose}
+          />
           <button
             className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full"
             style={{ fontSize: 14.5, color: 'var(--color-text)' }}
             onClick={onChangePassword}
           >
-            Change password
+            {t('nav.changePassword')}
           </button>
           <button
             className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md w-full text-rose-400"
             style={{ fontSize: 14.5 }}
             onClick={onLogout}
           >
-            Sign out
+            {t('nav.signOut')}
           </button>
         </div>
       </div>
@@ -1098,15 +1111,21 @@ function MoreSheet({
 
 function MoreSheetItem({
   item,
+  active,
   onNavigate,
   state,
   onClick,
 }: {
   item: NavItem;
+  active: boolean;
   onNavigate: () => void;
   state?: { switchFrom: string };
   onClick?: (event: { preventDefault(): void }) => void;
 }) {
+  const activeStyle = {
+    color: active ? 'var(--color-accent)' : 'var(--color-text)',
+    background: active ? 'color-mix(in srgb, var(--color-accent) 9%, transparent)' : 'transparent',
+  } as const;
   if (item.soon || !item.to) {
     return (
       <div
@@ -1127,7 +1146,8 @@ function MoreSheetItem({
         if (!event.defaultPrevented) onNavigate();
       }}
       className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left rounded-md"
-      style={{ fontSize: 14.5, color: 'var(--color-text)' }}
+      style={{ fontSize: 14.5, ...activeStyle }}
+      aria-current={active ? 'page' : undefined}
     >
       <span className="flex-1 truncate">{item.label}</span>
       {!!item.badge && (

@@ -356,10 +356,24 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
         .get(`/api/v1/campaigns/${clone.id}/comments`)
         .query({ entityType: 'session', entityId: sessions.body[0].id });
       expect(clonedComments.status).toBe(200);
-      expect(clonedComments.body).toHaveLength(3);
-      const spoken = clonedComments.body.find((c: { body: string }) => c.body === 'Hero speaks in the source campaign.');
-      const remoteSpoken = clonedComments.body.find((c: { body: string }) => c.body === 'Remote portrait voice.');
-      const reply = clonedComments.body.find((c: { body: string }) => c.body === 'A threaded reply.');
+      const clonedDiscussion = clonedComments.body as {
+        items: Array<{ root: Record<string, unknown>; replies: Array<Record<string, unknown>> }>;
+        totalComments: number;
+      };
+      const clonedFlat = clonedDiscussion.items.flatMap((thread) => [thread.root, ...thread.replies]) as Array<{
+        body: string;
+        id: number;
+        parentId?: number | null;
+        characterId?: number;
+        characterName?: string;
+        inCharacter?: boolean;
+        characterAvatarUrl?: string;
+      }>;
+      expect(clonedDiscussion.totalComments).toBe(3);
+      expect(clonedFlat).toHaveLength(3);
+      const spoken = clonedFlat.find((c) => c.body === 'Hero speaks in the source campaign.');
+      const remoteSpoken = clonedFlat.find((c) => c.body === 'Remote portrait voice.');
+      const reply = clonedFlat.find((c) => c.body === 'A threaded reply.');
       expect(spoken).toMatchObject({
         characterId: clonedHero.id,
         characterName: 'Hero',
@@ -372,15 +386,15 @@ describe('campaign clone (e2e, real cookie sessions)', () => {
         inCharacter: true,
         characterAvatarUrl: 'https://images.example.test/remote-voice.png',
       });
-      expect(reply.parentId).toBe(spoken.id);
+      expect(reply!.parentId).toBe(spoken!.id);
 
       // Faction-anchored discussion must remap through factionMap (not be dropped).
       const clonedFactionComments = await dmAgent
         .get(`/api/v1/campaigns/${clone.id}/comments`)
         .query({ entityType: 'faction', entityId: clonedFactions.body[0].id });
       expect(clonedFactionComments.status).toBe(200);
-      expect(clonedFactionComments.body).toHaveLength(1);
-      expect(clonedFactionComments.body[0]).toMatchObject({
+      expect(clonedFactionComments.body.total).toBe(1);
+      expect(clonedFactionComments.body.items[0].root).toMatchObject({
         entityType: 'faction',
         entityId: clonedFactions.body[0].id,
         body: 'Faction intrigue stays on clone.',

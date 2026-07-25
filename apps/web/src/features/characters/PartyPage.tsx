@@ -6,7 +6,9 @@
  * silently caps a player at a single owned character (issue #129).
  */
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { useParams, Link, useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Character, CampaignMember, RuleSystemAdapter } from '@campfire/schema';
 import { levelForXpForAdapter, ddbImportSupported, ruleSystemAdapter, xpProgressionSupported } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -27,6 +29,7 @@ export default function PartyPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { me } = useAuth();
   const { canDmWrite, canPlayerWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
   // The campaign record drives the D&D Beyond import affordance (issue #714): the importer
   // produces a 5e-shaped character, so it is only offered for an explicitly-D&D-5e campaign.
   // A homebrew campaign (no pack selected) resolves to 5e for combat math but is NOT treated
@@ -284,7 +287,7 @@ function CharacterCard({
   return (
     <div className={`cf-card cf-card-hover p-3.5 space-y-2.5 ${isActive ? '' : 'opacity-60'}`}>
       <div className="relative">
-        <Link to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
+        <ListDetailLink to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
           <div className="flex items-center gap-2.5">
             <div
               className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
@@ -321,7 +324,7 @@ function CharacterCard({
             </span>
           </div>
         )}
-        </Link>
+        </ListDetailLink>
         {canTrash && (
           <div className="absolute top-0 right-0">
             <CharacterTrashMenu

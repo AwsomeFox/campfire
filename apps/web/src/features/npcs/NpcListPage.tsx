@@ -4,7 +4,9 @@
  * DM can inline-create (name + role); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Location, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -22,6 +24,7 @@ export default function NpcListPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
 
   const [npcs, setNpcs] = useState<Npc[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
@@ -188,7 +191,7 @@ export default function NpcListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {npcs.map((npc) => (
-              <Link
+              <ListDetailLink
                 key={npc.id}
                 to={`/c/${id}/npcs/${npc.id}`}
                 className="cf-card cf-card-hover p-3.5 space-y-2"
@@ -216,7 +219,7 @@ export default function NpcListPage() {
                     <span className="text-[11px] text-slate-400 ml-auto">{locationName(npc.locationId)}</span>
                   )}
                 </div>
-              </Link>
+              </ListDetailLink>
             ))}
           </div>
         )}

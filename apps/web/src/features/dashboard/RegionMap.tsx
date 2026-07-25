@@ -7,6 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { Link } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
 import type { Attachment, Campaign, GenerateMapParams, GeneratedMapResult, Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -590,7 +591,7 @@ export function RegionMap({
                   data-testid={`map-pin-${loc.id}`}
                   onPointerDown={(e) => onPinPointerDown(e, loc.id)}
                 >
-                  <Link
+                  <ListDetailLink
                     to={`/c/${campaignId}/locations/${loc.id}`}
                     onClick={(e) => {
                       // Block navigation during pointer drag or in-progress keyboard move
@@ -615,7 +616,7 @@ export function RegionMap({
                     >
                       {STATUS_GLYPH[loc.status]} {loc.name}
                     </span>
-                  </Link>
+                  </ListDetailLink>
                 </div>
               );
             })}
@@ -632,7 +633,7 @@ export function RegionMap({
               const suffix = ` ${STATUS_GLYPH[loc.status]}`;
               return (
                 <g key={loc.id} transform={`translate(${x}, ${y})`}>
-                  <Link to={`/c/${campaignId}/locations/${loc.id}`}>
+                  <ListDetailLink to={`/c/${campaignId}/locations/${loc.id}`}>
                     <circle
                       r={glowR}
                       style={{ fill: STATUS_COLOR[loc.status] }}
@@ -654,7 +655,7 @@ export function RegionMap({
                       {loc.name}
                       {suffix}
                     </text>
-                  </Link>
+                  </ListDetailLink>
                 </g>
               );
             })}
@@ -665,7 +666,7 @@ export function RegionMap({
       {unpinned.length > 0 && (
         <div className="flex flex-wrap gap-2" style={{ padding: '0 14px 10px' }}>
           {unpinned.map((loc) => (
-            <Link
+            <ListDetailLink
               key={loc.id}
               to={`/c/${campaignId}/locations/${loc.id}`}
               className="cf-chip"
@@ -675,7 +676,7 @@ export function RegionMap({
               }}
             >
               {STATUS_GLYPH[loc.status]} {loc.name}
-            </Link>
+            </ListDetailLink>
           ))}
         </div>
       )}
