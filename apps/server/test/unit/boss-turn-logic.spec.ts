@@ -41,8 +41,9 @@ function combatant(id: number, initiative: number | null): Combatant {
     tokenY: null,
     tokenSize: 'medium',
     tokenHiddenByFog: false,
-    turnState: { ...EMPTY_TURN_STATE },
+    turnState: { ...EMPTY_TURN_STATE, used: { ...EMPTY_TURN_STATE.used } },
     activeEffects: [],
+    conditionInstances: [],
     legendaryActions: null,
   };
 }
