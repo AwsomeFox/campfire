@@ -806,6 +806,24 @@ function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before physical/manual roll provenance (issue #673):
+ * `dice_rolls` gained `source` (rolled|manual), optional `actor`, and optional `natural20`.
+ * Existing rows default to `rolled` — their meaning is unchanged.
+ */
+function migrateDiceRollsTableForManualProvenance(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dice_rolls'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(dice_rolls)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('source')) sqlite.exec("ALTER TABLE dice_rolls ADD COLUMN source TEXT NOT NULL DEFAULT 'rolled'");
+  if (!has('actor')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN actor TEXT');
+  if (!has('natural20')) sqlite.exec('ALTER TABLE dice_rolls ADD COLUMN natural20 INTEGER');
+}
+
+/**
  * Migration for DBs created before soft-delete / trash (issue #116): the trashable
  * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
  * means the row is in the trash (excluded from normal reads, restorable). Idempotent
@@ -2423,6 +2441,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
+  { name: '0085_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
 ];
 
 /**

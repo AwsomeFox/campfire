@@ -19,6 +19,7 @@ import { SessionZeroModule } from '../session-zero/session-zero.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { CommentsModule } from '../comments/comments.module';
 import { RevisionsModule } from '../revisions/revisions.module';
+import { RollsModule } from '../rolls/rolls.module';
 import { ExportService } from './export.service';
 import { ExportController } from './export.controller';
 
@@ -44,6 +45,7 @@ import { ExportController } from './export.controller';
     InventoryModule,
     CommentsModule,
     RevisionsModule,
+    RollsModule,
   ],
   controllers: [ExportController],
   providers: [ExportService],

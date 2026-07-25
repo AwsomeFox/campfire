@@ -1,6 +1,7 @@
 import type { DiceRoll } from '@campfire/schema';
 import type { TFunction } from 'i18next';
 import { d20Flavor, d20FlourishI18nKey } from '../../lib/d20Flavor';
+import { isManualDiceRoll } from './physicalRollForm';
 
 /** Visual dice feed: named log landmark; polite speech uses the app announcer. */
 export const DICE_LOG_LIVE_REGION = {
@@ -39,6 +40,24 @@ export function advanceDiceRollAnnouncements(
 /** Roller-attributed spoken form shared by the announcer and unit specs. */
 export function formatDiceRollAnnouncement(roll: DiceRoll, t: TFunction): string {
   const roller = roll.rollerName?.trim() || roll.rollerUserId;
+  if (isManualDiceRoll(roll)) {
+    const who = roll.actor?.trim() || roller;
+    const checkSaid =
+      roll.dc != null
+        ? roll.success
+          ? t('dice.announceSuccess', { dc: roll.dc })
+          : t('dice.announceFail', { dc: roll.dc })
+        : '';
+    const natSaid =
+      roll.natural20 != null ? t('dice.announcePhysicalNatural', { natural: roll.natural20 }) : '';
+    const body = t('dice.announcePhysicalRoll', {
+      label: roll.label ? `${roll.label} ` : '',
+      total: roll.total,
+      natural: natSaid,
+      check: checkSaid,
+    });
+    return t('dice.announceRemoteRoll', { roller: who, body });
+  }
   const flavor = d20Flavor(roll);
   const flourishKey = d20FlourishI18nKey(flavor);
   const flourish = flourishKey ? t(flourishKey) : '';

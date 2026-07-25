@@ -28,6 +28,12 @@ import {
   formatDiceRollAnnouncementBatch,
   type DiceRollAnnouncementCursor,
 } from './diceLogAccessibility';
+import { diceRollDisplayActor, diceRollSummaryLine, isManualDiceRoll, showRolledDice } from './diceRollDisplay';
+import {
+  EMPTY_PHYSICAL_ROLL_FORM,
+  parsePhysicalRollForm,
+  type PhysicalRollFormFields,
+} from './physicalRollForm';
 import {
   clearLocalDiceAnnouncements,
   rememberLocalDiceAnnouncement,
@@ -51,7 +57,9 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const { canMemberWrite } = useCampaignAccessFor(campaignId);
   const limit = compact ? 4 : 8;
   const [expr, setExpr] = useState('1d20');
+  const [physical, setPhysical] = useState<PhysicalRollFormFields>(EMPTY_PHYSICAL_ROLL_FORM);
   const [rolling, setRolling] = useState(false);
+  const [loggingPhysical, setLoggingPhysical] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rolls, setRolls] = useState<DiceRoll[]>([]);
   // Id of the roll the local user just made — only that total tumbles in, so
@@ -64,6 +72,11 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
   const [retention, setRetention] = useState<number | null | undefined>(undefined);
   const announce = useAnnounce();
   const exprId = useId();
+  const physicalTotalId = useId();
+  const physicalLabelId = useId();
+  const physicalActorId = useId();
+  const physicalNaturalId = useId();
+  const physicalDcId = useId();
   const rollAnnouncementRef = useRef<{
     campaignId: number;
     cursor: DiceRollAnnouncementCursor;
@@ -199,6 +212,64 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
     await submitExpr(expr);
   }
 
+  const prependRoll = useCallback(
+    (result: DiceRoll) => {
+      const batch = formatDiceRollAnnouncementBatch([result], t);
+      if (batch) {
+        rememberLocalDiceAnnouncement(campaignId, result.id);
+        announce(batch, {
+          dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
+        });
+      }
+      setRolls((prev) => {
+        rollsCampaignIdRef.current = campaignId;
+        const next = [result, ...prev.filter((r) => r.id !== result.id)].slice(0, limit);
+        const previous = rollAnnouncementRef.current;
+        const cursor = previous?.campaignId === campaignId ? previous.cursor : null;
+        const advanced = advanceDiceRollAnnouncements(next, cursor);
+        rollAnnouncementRef.current = { campaignId, cursor: advanced.cursor };
+        return next;
+      });
+      setJustRolledId(result.id);
+    },
+    [campaignId, limit, announce, t],
+  );
+
+  const submitPhysical = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      const parsed = parsePhysicalRollForm(physical);
+      if (!parsed.ok) {
+        const message = t(
+          parsed.error === 'totalRequired'
+            ? 'dice.physicalErrorTotalRequired'
+            : parsed.error === 'totalInvalid'
+              ? 'dice.physicalErrorTotalInvalid'
+              : parsed.error === 'natural20Invalid'
+                ? 'dice.physicalErrorNatural20Invalid'
+                : 'dice.physicalErrorDcInvalid',
+        );
+        setError(message);
+        announce(message, { assertive: true });
+        return;
+      }
+      setLoggingPhysical(true);
+      setError(null);
+      try {
+        const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll/manual`, parsed.payload);
+        prependRoll(result);
+        setPhysical(EMPTY_PHYSICAL_ROLL_FORM);
+      } catch (err) {
+        const message = err instanceof ApiError ? err.message : t('dice.physicalRollError');
+        setError(message);
+        announce(message, { assertive: true });
+      } finally {
+        setLoggingPhysical(false);
+      }
+    },
+    [physical, campaignId, prependRoll, announce, t],
+  );
+
   return (
     <Card className="space-y-2.5">
       <span className="card-kicker">{compact ? t('dice.dice') : t('dice.diceLog')}</span>
@@ -225,6 +296,76 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
               </Btn>
             </form>
           </details>
+          <details className="dice-physical" data-testid="physical-roll-form">
+            <summary className="text-muted" style={{ fontSize: 11.5, cursor: 'pointer' }}>
+              {t('dice.physicalRollSummary')}
+            </summary>
+            <p className="text-muted m-0" style={{ fontSize: 11, marginTop: 8 }}>
+              {t('dice.physicalRollHint')}
+            </p>
+            <form onSubmit={submitPhysical} className="flex gap-2 items-end flex-wrap" style={{ marginTop: 8 }}>
+              <div className="field" style={{ flex: '0 1 72px', minWidth: 64 }}>
+                <label htmlFor={physicalTotalId}>{t('dice.physicalTotal')}</label>
+                <TextInput
+                  id={physicalTotalId}
+                  inputMode="numeric"
+                  aria-label={t('dice.physicalTotalLabel')}
+                  value={physical.total}
+                  onChange={(e) => setPhysical((p) => ({ ...p, total: e.target.value }))}
+                  required
+                />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: compact ? 90 : 110 }}>
+                <label htmlFor={physicalLabelId}>{t('dice.physicalLabel')}</label>
+                <TextInput
+                  id={physicalLabelId}
+                  aria-label={t('dice.physicalLabel')}
+                  placeholder={t('dice.physicalLabelPlaceholder')}
+                  value={physical.label}
+                  onChange={(e) => setPhysical((p) => ({ ...p, label: e.target.value }))}
+                />
+              </div>
+              <div className="field" style={{ flex: 1, minWidth: compact ? 90 : 110 }}>
+                <label htmlFor={physicalActorId}>{t('dice.physicalActor')}</label>
+                <TextInput
+                  id={physicalActorId}
+                  aria-label={t('dice.physicalActor')}
+                  placeholder={t('dice.physicalActorPlaceholder')}
+                  value={physical.actor}
+                  onChange={(e) => setPhysical((p) => ({ ...p, actor: e.target.value }))}
+                />
+              </div>
+              <div className="field" style={{ flex: '0 1 72px', minWidth: 64 }}>
+                <label htmlFor={physicalNaturalId}>{t('dice.physicalNatural20')}</label>
+                <TextInput
+                  id={physicalNaturalId}
+                  inputMode="numeric"
+                  aria-label={t('dice.physicalNatural20')}
+                  placeholder={t('dice.physicalNatural20Placeholder')}
+                  value={physical.natural20}
+                  onChange={(e) => setPhysical((p) => ({ ...p, natural20: e.target.value }))}
+                />
+              </div>
+              <div className="field" style={{ flex: '0 1 56px', minWidth: 48 }}>
+                <label htmlFor={physicalDcId}>{t('dice.physicalDc')}</label>
+                <TextInput
+                  id={physicalDcId}
+                  inputMode="numeric"
+                  aria-label={t('dice.physicalDc')}
+                  placeholder={t('dice.physicalDcPlaceholder')}
+                  value={physical.dc}
+                  onChange={(e) => setPhysical((p) => ({ ...p, dc: e.target.value }))}
+                />
+              </div>
+              <Btn
+                type="submit"
+                className={compact ? '!min-h-0 !py-2 text-xs' : undefined}
+                disabled={loggingPhysical || !physical.total.trim()}
+              >
+                {loggingPhysical ? t('dice.physicalSubmitting') : t('dice.physicalSubmit')}
+              </Btn>
+            </form>
+          </details>
         </>
       ) : (
         <p className="text-muted m-0" style={{ fontSize: 11.5 }}>
@@ -244,9 +385,11 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
           </p>
         ) : (
           rolls.map((r) => {
-            const flavor = d20Flavor(r);
-            const fresh = r.id === justRolledId;
+            const manual = isManualDiceRoll(r);
+            const flavor = manual ? null : d20Flavor(r);
+            const fresh = r.id === justRolledId && !manual;
             const totalClass = d20TotalClasses(flavor, fresh);
+            const summary = diceRollSummaryLine(r, t('dice.physicalExpr'));
             return (
             <div
               key={r.id}
@@ -255,18 +398,23 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
             >
               <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, display: 'flex', gap: 8, alignItems: 'baseline', overflow: 'hidden' }}>
                 <span className="text-muted" style={{ fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {r.rollerName || r.rollerUserId}
+                  {diceRollDisplayActor(r)}
                 </span>
                 <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {r.label ? `${r.label}: ` : ''}
-                  <bdi>
-                    {r.expr}
-                    {r.dc != null ? ` vs DC ${r.dc}` : ''}
-                  </bdi>
+                  <bdi>{summary}</bdi>
                 </span>
               </span>
-              <RolledDice rolls={r.rolls} kept={r.kept} />
-              {r.terms && <RolledTerms terms={r.terms} />}
+              {manual && (
+                <span
+                  className="text-muted"
+                  style={{ fontSize: 9.5, fontWeight: 600, flex: 'none', letterSpacing: '0.04em', textTransform: 'uppercase' }}
+                  title={t('dice.physicalRollHint')}
+                >
+                  {t('dice.physicalBadge')}
+                </span>
+              )}
+              {showRolledDice(r) && <RolledDice rolls={r.rolls} kept={r.kept} />}
+              {!manual && r.terms && <RolledTerms terms={r.terms} />}
               {fresh && flavor === 'crit' && (
                 <span className="cf-crit-spark" aria-hidden="true" style={{ fontSize: compact ? 12 : 14, color: 'var(--cf-crit)', flex: 'none' }}>
                   ✦

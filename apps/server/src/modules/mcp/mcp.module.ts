@@ -27,6 +27,7 @@ import { TimelineModule } from '../timeline/timeline.module';
 import { CommentsModule } from '../comments/comments.module';
 import { UsersModule } from '../users/users.module';
 import { RevisionsModule } from '../revisions/revisions.module';
+import { RollsModule } from '../rolls/rolls.module';
 import { McpToolsService } from './mcp-tools';
 import { McpController } from './mcp.controller';
 
@@ -61,6 +62,7 @@ import { McpController } from './mcp.controller';
     CommentsModule,
     UsersModule,
     RevisionsModule,
+    RollsModule,
   ],
   controllers: [McpController],
   providers: [McpToolsService],

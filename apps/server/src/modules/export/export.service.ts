@@ -25,6 +25,7 @@ import { SessionZeroService } from '../session-zero/session-zero.service';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { RevisionsService } from '../revisions/revisions.service';
+import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
 import type { RequestUser } from '../../common/user.types';
 import {
   archiveDisplayStem,
@@ -96,6 +97,7 @@ export class ExportService {
     private readonly supportPreferences: SupportPreferencesService,
     private readonly inventory: InventoryService,
     private readonly revisions: RevisionsService,
+    private readonly rolls: RollsService,
   ) {}
 
   /** Archive-relative path an attachment's bytes live at inside a zip export. */
@@ -144,6 +146,7 @@ export class ExportService {
       revisionList,
       scheduledSessionList,
       sessionAttendanceList,
+      diceRollList,
     ] = await Promise.all([
       this.campaigns.getOrThrow(campaignId),
       this.quests.listForCampaignWithObjectives(campaignId, role),
@@ -173,6 +176,8 @@ export class ExportService {
       // Issue #436: planned game nights (with RSVPs) and per-session attendance.
       this.scheduling.listForCampaign(campaignId),
       this.sessions.listAttendanceForCampaign(campaignId),
+      // Issue #673: shared dice log (including physical/manual entries) travels with export.
+      this.rolls.listForCampaign(campaignId, DEFAULT_DICE_ROLLS_RETENTION),
     ]);
 
     // Attachment manifest (issue #87): the export used to reference attachment ids
@@ -265,6 +270,7 @@ export class ExportService {
       // Issue #436: schedules + RSVPs and session attendance round-trip on import.
       scheduledSessions: scheduledSessionList,
       sessionAttendance: sessionAttendanceList,
+      diceRolls: diceRollList,
       // Issue #1078: AI seat + scribe config (DM-authored steering, NOT runtime counters or provider keys).
       aiSeat: aiSeatRow
         ? {
@@ -513,6 +519,7 @@ export class ExportService {
           ]
         : [];
     writeFile('audit.md', this.auditMarkdown(data.audit, auditTruncated));
+    writeFile('dice-rolls.md', this.diceRollsMarkdown(data.diceRolls));
 
     const proposalAlloc: Array<{ stem: string; filename: string }> = [];
     for (const p of [...data.proposals].sort((a, b) => a.id - b.id)) {
@@ -561,6 +568,7 @@ export class ExportService {
       comments: { kind: 'markdown-folder', path: 'comments/' },
       members: { kind: 'markdown-file', path: 'members.md' },
       audit: { kind: 'markdown-file', path: 'audit.md' },
+      diceRolls: { kind: 'markdown-file', path: 'dice-rolls.md' },
       auditMeta: {
         kind: 'embedded',
         path: 'audit.md',
@@ -616,6 +624,7 @@ export class ExportService {
       comments: data.comments.length,
       members: data.members.length,
       audit: data.audit.length,
+      diceRolls: data.diceRolls.length,
       proposals: data.proposals.length,
       encounters: data.encounters.length,
       factions: data.factions.length,
@@ -1245,6 +1254,29 @@ export class ExportService {
     for (const m of [...members].sort((a, b) => a.id - b.id)) {
       lines.push(
         `| ${typedRecordId('member', m.id)} | ${this.mdCell(m.displayName || m.username || m.userId)} | ${this.mdCell(m.role)} | ${m.characterId != null ? typedRecordId('character', m.characterId) : '_'} | ${m.disabled ? 'yes' : 'no'} |`,
+      );
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private diceRollsMarkdown(rolls: ExportData['diceRolls']): string {
+    const lines = [
+      '# Dice log',
+      '',
+      '_Shared campaign dice log, including physical/manual entries logged at the table (issue #673)._',
+      '',
+    ];
+    if (!rolls.length) {
+      lines.push('_none_', '');
+      return lines.join('\n');
+    }
+    lines.push('| When | Who | Kind | Label | Total | DC | Natural d20 |', '| --- | --- | --- | --- | ---: | ---: | ---: |');
+    for (const r of rolls) {
+      const who = this.mdCell(r.actor?.trim() || r.rollerName?.trim() || r.rollerUserId);
+      const kind = r.source === 'manual' ? 'physical' : 'rolled';
+      lines.push(
+        `| ${r.createdAt} | ${who} | ${kind} | ${this.mdCell(r.label ?? '')} | ${r.total} | ${r.dc ?? ''} | ${r.natural20 ?? ''} |`,
       );
     }
     lines.push('');

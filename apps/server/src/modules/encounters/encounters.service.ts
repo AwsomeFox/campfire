@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -52,6 +52,7 @@ type EncounterReopenInput = z.infer<typeof EncounterReopen>;
 type CombatantCreateInput = z.infer<typeof CombatantCreate>;
 type CombatantUpdateInput = z.infer<typeof CombatantUpdate>;
 type RollRequestInput = z.infer<typeof RollRequest>;
+type ManualRollRequestInput = z.infer<typeof ManualRollRequest>;
 
 /**
  * better-sqlite3 throws a synchronous Error with `.code` set to one of the
@@ -4125,6 +4126,53 @@ export class EncountersService {
       detail:
         `${result.label ? `${result.label}: ` : ''}${result.expr} = ${result.total}` +
         (result.dc != null ? ` vs DC ${result.dc} (${result.success ? 'success' : 'fail'})` : ''),
+    });
+
+    return persisted;
+  }
+
+  /**
+   * Records a paper-table / physical roll honestly (issue #673): the DM (or any member)
+   * logs the total a player reported without Campfire fabricating dice, keep/drop, or
+   * crit/fumble flavor. Optional label, actor attribution, natural d20, and DC travel
+   * with the entry into the shared feed, export, and recap source material.
+   */
+  async logPhysicalRollForCampaign(
+    campaignId: number,
+    input: ManualRollRequestInput,
+    user: RequestUser,
+    role: Role,
+  ): Promise<DiceRoll> {
+    const label = input.label?.trim();
+    const actor = input.actor?.trim();
+    const result: RollResult = {
+      expr: PHYSICAL_ROLL_EXPR,
+      rolls: [],
+      total: input.total,
+      source: 'manual',
+    };
+    if (label) result.label = label;
+    if (actor) result.actor = actor;
+    if (typeof input.natural20 === 'number') result.natural20 = input.natural20;
+    if (typeof input.dc === 'number') {
+      result.dc = input.dc;
+      result.success = input.total >= input.dc;
+    }
+    const persisted = await this.rolls.record(campaignId, result, user);
+
+    const who = actor || user.name;
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'dice.roll',
+      entityType: null,
+      entityId: null,
+      campaignId,
+      detail:
+        `physical roll logged for ${who}: ` +
+        `${label ? `${label} ` : ''}= ${input.total}` +
+        (input.natural20 != null ? ` (nat ${input.natural20})` : '') +
+        (input.dc != null ? ` vs DC ${input.dc} (${result.success ? 'success' : 'fail'})` : ''),
     });
 
     return persisted;

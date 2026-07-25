@@ -125,6 +125,7 @@ import { ScribeService } from '../scribe/scribe.service';
 import { filterHidden } from '../../common/redact';
 import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
+import { RollsService, DEFAULT_DICE_ROLLS_RETENTION } from '../rolls/rolls.service';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -359,6 +360,7 @@ export class McpToolsService {
     private readonly scribe: ScribeService,
     private readonly users: UsersService,
     private readonly revisions: RevisionsService,
+    private readonly rolls: RollsService,
     private readonly actionResolver: ActionResolverService,
   ) {}
 
@@ -868,6 +870,17 @@ export class McpToolsService {
         const source = {
           resolvedInbox: resolvedInbox.map((n) => ({ body: n.body, resolvedNote: n.resolvedNote, entityName: n.entityName })),
           encounters: encounters.map((e) => ({ name: e.name, status: e.status, combatants: e.combatants, events: eventsByEncounter.get(e.id) ?? [] })),
+          diceRolls: (await this.rolls.listForCampaign(campaignId as number, DEFAULT_DICE_ROLLS_RETENTION)).map((r) => ({
+            label: r.label,
+            actor: r.actor,
+            rollerName: r.rollerName,
+            total: r.total,
+            dc: r.dc,
+            success: r.success,
+            natural20: r.natural20,
+            source: r.source,
+            createdAt: r.createdAt,
+          })),
         };
         return {
           template: RECAP_TEMPLATE,
@@ -875,7 +888,7 @@ export class McpToolsService {
           sourceMaterial: source,
           guidance:
             'Rewrite `draft` into a finished recap in the DM\'s voice, then call add_session_recap (or update_session ' +
-            'for an existing session). Delete the "Threads resolved this session" source-notes appendix before publishing.',
+            'for an existing session). Delete the "Threads resolved this session" and "Dice log highlights" source appendices before publishing.',
         };
       },
     );
