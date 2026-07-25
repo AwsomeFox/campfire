@@ -26,6 +26,7 @@ function aoe(partial: Partial<AoeTemplate> & Pick<AoeTemplate, 'shape'>): AoeTem
     sizeFt: 10,
     angleDeg: 0,
     color: null,
+    declaredByUserId: null,
     ...partial,
   };
 }

@@ -1141,6 +1141,9 @@ export const ScheduledSessionListPage = z.object({
 });
 export type ScheduledSessionListPage = z.infer<typeof ScheduledSessionListPage>;
 
+// Fog-of-war visibility helpers shared by server redaction and the web VTT (issue #465).
+export * from './fog-visibility';
+
 // Schedule temporal windows (issue #818) — shared by server next-session logic and the web UI.
 export * from './scheduleWindow';
 
@@ -5688,6 +5691,9 @@ export const AoeTemplate = z.object({
   sizeFt: z.number().positive().max(1000),
   angleDeg: z.number().min(-360).max(360).default(0),
   color: z.string().max(24).nullable().default(null),
+  // Optional owner for player-declared templates (issue #465). DM/AI templates omit this;
+  // the declaring player still sees their template in unrevealed fog.
+  declaredByUserId: z.string().min(1).max(120).nullable().default(null),
 });
 export type AoeTemplate = z.infer<typeof AoeTemplate>;
 

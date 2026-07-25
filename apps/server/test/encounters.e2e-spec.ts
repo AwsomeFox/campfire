@@ -3067,6 +3067,82 @@ describe('encounters — issue #40: VTT grid, token size & fog of war (e2e)', ()
       expect(res.status).toBe(400);
     });
   });
+
+  describe('issue #465: AoE template fog secrecy', () => {
+    const darkAoe = { id: 'dark-circle', shape: 'circle' as const, x: 10, y: 10, sizeFt: 20, angleDeg: 0, color: null };
+    const litAoe = { id: 'lit-cone', shape: 'cone' as const, x: 80, y: 80, sizeFt: 15, angleDeg: 90, color: null };
+    const ownedAoe = {
+      id: 'player-fireball',
+      shape: 'circle' as const,
+      x: 12,
+      y: 12,
+      sizeFt: 20,
+      angleDeg: 0,
+      color: null,
+      declaredByUserId: 'dev:p-1',
+    };
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({
+          fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] },
+          aoe: [darkAoe, litAoe, ownedAoe],
+        });
+    });
+
+    it('the DM still receives every AoE template', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      expect(res.body.aoe.map((t: { id: string }) => t.id).sort()).toEqual(['dark-circle', 'lit-cone', 'player-fireball']);
+    });
+
+    it('a player does NOT receive AoE templates in unrevealed fog', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(res.body.aoe.map((t: { id: string }) => t.id)).toEqual(['lit-cone', 'player-fireball']);
+    });
+
+    it('another player does not see a peer-declared template in unrevealed fog', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set('x-dev-user', 'p-2').set('x-dev-role', 'player');
+      expect(res.body.aoe.map((t: { id: string }) => t.id)).toEqual(['lit-cone']);
+    });
+
+    it('revealing the dark corner exposes the hidden template to every player', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 100, h: 100 }] } });
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(res.body.aoe.map((t: { id: string }) => t.id).sort()).toEqual(['dark-circle', 'lit-cone', 'player-fireball']);
+    });
+
+    it('moving an AoE into unrevealed fog hides it from players on the next read', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server)
+        .patch(`/api/v1/encounters/${encounterId}`)
+        .set(dm)
+        .send({
+          fog: { enabled: true, revealed: [{ x: 60, y: 60, w: 40, h: 40 }] },
+          aoe: [{ ...litAoe, x: 15, y: 15 }],
+        });
+      const res = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(res.body.aoe).toEqual([]);
+    });
+
+    it('clearing the aoe array removes templates for every role', async () => {
+      const server = ctx.app.getHttpServer();
+      await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ aoe: [] });
+      const dmRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm);
+      const playerRes = await request(server).get(`/api/v1/encounters/${encounterId}`).set(player);
+      expect(dmRes.body.aoe).toEqual([]);
+      expect(playerRes.body.aoe).toEqual([]);
+    });
+  });
 });
 
 // Issue #865 — an equivalent encounter PATCH is a read-equivalent no-op. The conditional
