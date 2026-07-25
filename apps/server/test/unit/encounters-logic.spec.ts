@@ -5,6 +5,7 @@ import {
   sortCombatants,
   turnIndexFor,
   advanceTurn,
+  retreatTurn,
   shouldSkipTurnOnAdvance,
   hpBandFor,
   applyCombatantHp,
@@ -304,6 +305,35 @@ describe('encounters — advanceTurn skips dead/downed (issue #610)', () => {
     expect(result.currentCombatantId).toBeNull();
     expect(result.round).toBe(2);
     expect(result.skipped).toEqual([{ id: 1, name: 'c1', round: 2 }]);
+  });
+});
+
+describe('encounters — retreatTurn skips dead/downed (issue #610)', () => {
+  it('undoes an advance that skipped a defeated combatant', () => {
+    const order = [
+      combatant({ id: 1, hpCurrent: 10, hpMax: 10 }),
+      combatant({ id: 2, hpCurrent: 0, hpMax: 10 }),
+      combatant({ id: 3, hpCurrent: 8, hpMax: 10 }),
+    ];
+    const advanced = advanceTurn(order, 1, 1);
+    expect(advanced.currentCombatantId).toBe(3);
+    const undone = retreatTurn(order, advanced.currentCombatantId, advanced.round);
+    expect(undone.currentCombatantId).toBe(1);
+    expect(undone.round).toBe(1);
+  });
+
+  it('skips backward over multiple defeated combatants', () => {
+    const order = [
+      combatant({ id: 1, hpCurrent: 10, hpMax: 10 }),
+      combatant({ id: 2, hpCurrent: 0, hpMax: 10 }),
+      combatant({ id: 3, hpCurrent: 0, hpMax: 10 }),
+    ];
+    const advanced = advanceTurn(order, 1, 1);
+    expect(advanced.currentCombatantId).toBe(1);
+    expect(advanced.round).toBe(2);
+    const undone = retreatTurn(order, advanced.currentCombatantId, advanced.round);
+    expect(undone.currentCombatantId).toBe(1);
+    expect(undone.round).toBe(1);
   });
 });
 

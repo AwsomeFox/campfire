@@ -619,12 +619,30 @@ export function retreatTurn(
   if (currentIdx < 0) {
     return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: sorted[0].id, skipped: [] };
   }
-  let prevIdx = currentIdx - 1;
+
+  let prevIdx = currentIdx;
   let prevRound = round;
-  if (prevIdx < 0) {
-    prevIdx = count - 1;
-    prevRound = Math.max(1, round - 1);
+
+  const stepBackward = () => {
+    prevIdx -= 1;
+    if (prevIdx < 0) {
+      prevIdx = count - 1;
+      prevRound = Math.max(1, prevRound - 1);
+    }
+  };
+
+  stepBackward();
+
+  let steps = 0;
+  while (steps < count && shouldSkipTurnOnAdvance(sorted[prevIdx])) {
+    stepBackward();
+    steps += 1;
   }
+
+  if (steps >= count || shouldSkipTurnOnAdvance(sorted[prevIdx])) {
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: null, skipped: [] };
+  }
+
   return { turnIndex: prevIdx, round: prevRound, currentCombatantId: sorted[prevIdx].id, skipped: [] };
 }
 
