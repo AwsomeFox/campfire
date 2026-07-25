@@ -33,7 +33,38 @@
       "sendCheck": "Couldn't send the check request.",
       "rollCheck": "Couldn't roll the check.",
       "resolveAction": "Couldn't resolve that action.",
-      "applyAction": "Couldn't apply that action."
+      "applyAction": "Couldn't apply that action.",
+      "loadAftermath": "Couldn't load the aftermath workflow.",
+      "dismissAftermath": "Couldn't defer the aftermath panel."
+    },
+    "aftermath": {
+      "title": "Aftermath",
+      "loading": "Loading post-encounter hand-offs…",
+      "unavailable": "Aftermath isn't available.",
+      "intro": "Review the fight, then hand off loot, XP, quest updates, and a recap draft while it is still fresh.",
+      "deferredHint": "Deferred — reopen when you are ready to distribute loot, award XP, or draft the recap.",
+      "remindLater": "Remind me later",
+      "saving": "Saving…",
+      "show": "Show aftermath",
+      "outcome": "Outcome",
+      "recapDraft": "Recap draft",
+      "recapDraftAria": "Recap draft seeded from this encounter",
+      "copyRecapDraft": "Copy recap draft",
+      "recapHandoffHint": "Opens the session recap editor with this draft pre-filled.",
+      "viewCombatLog": "View combat log",
+      "writeRecap": "Write recap",
+      "writeRecapHint": "Open the recap editor with this draft.",
+      "awardXp": "Award XP",
+      "awardXpHint": "Open the party XP form.",
+      "awardXpSuggestedHint": "Open the party XP form ({{amount}} each suggested).",
+      "distributeLoot": "Distribute loot",
+      "distributeLootHint": "Party treasury and inventory.",
+      "updateQuest": "Update quest",
+      "updateQuestHint": "Open the linked quest objectives.",
+      "openSession": "Open linked session",
+      "openSessionHint": "Review session details and recap.",
+      "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} adjusted total).",
+      "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
     }
   }
 }

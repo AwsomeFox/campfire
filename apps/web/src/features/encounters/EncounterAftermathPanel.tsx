@@ -3,9 +3,10 @@
  * and hand-off links to loot, XP, quest, and session recap surfaces.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import type { EncounterAftermath } from '@campfire/schema';
-import { api, API } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextArea } from '../../components/ui';
 import { CopyControl } from '../../components/CopyControl';
 import { storeEncounterAftermathRecap } from './encounterAftermathHandoff';
@@ -16,6 +17,7 @@ type Props = {
 };
 
 export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
+  const { t } = useTranslation();
   const [aftermath, setAftermath] = useState<EncounterAftermath | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -28,13 +30,13 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
       const data = await api.get<EncounterAftermath>(`${API}/encounters/${encounterId}/aftermath`);
       setAftermath(data);
       setCollapsed(data.dismissedAt != null);
-    } catch {
-      setError("Couldn't load the aftermath workflow.");
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.loadAftermath' }));
       setAftermath(null);
     } finally {
       setLoading(false);
     }
-  }, [encounterId]);
+  }, [encounterId, t]);
 
   useEffect(() => {
     void load();
@@ -46,8 +48,8 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
       await api.post(`${API}/encounters/${encounterId}/aftermath/dismiss`, {});
       setCollapsed(true);
       setAftermath((prev) => (prev ? { ...prev, dismissedAt: new Date().toISOString() } : prev));
-    } catch {
-      setError("Couldn't defer the aftermath panel.");
+    } catch (err) {
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.dismissAftermath' }));
     } finally {
       setDismissing(false);
     }
@@ -61,9 +63,9 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
     return (
       <Card density="comfortable" aria-labelledby="encounter-aftermath-heading">
         <span id="encounter-aftermath-heading" className="text-sm font-bold text-white">
-          Aftermath
+          {t('encounters.aftermath.title')}
         </span>
-        <p className="text-xs text-slate-400 m-0">Loading post-encounter hand-offs…</p>
+        <p className="text-xs text-slate-400 m-0">{t('encounters.aftermath.loading')}</p>
       </Card>
     );
   }
@@ -72,10 +74,10 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
     return (
       <Card density="comfortable" aria-labelledby="encounter-aftermath-heading">
         <span id="encounter-aftermath-heading" className="text-sm font-bold text-white">
-          Aftermath
+          {t('encounters.aftermath.title')}
         </span>
         <p className="text-xs text-rose-400 m-0" role="alert">
-          {error ?? "Aftermath isn't available."}
+          {error ?? t('encounters.aftermath.unavailable')}
         </p>
       </Card>
     );
@@ -86,13 +88,13 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
       <Card density="comfortable" className="space-y-2" aria-labelledby="encounter-aftermath-heading">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h2 id="encounter-aftermath-heading" className="text-sm font-bold text-white m-0">
-            Aftermath
+            {t('encounters.aftermath.title')}
           </h2>
           <Btn type="button" className="btn btn-secondary min-h-9" onClick={() => setCollapsed(false)}>
-            Show aftermath
+            {t('encounters.aftermath.show')}
           </Btn>
         </div>
-        <p className="text-xs text-slate-400 m-0">Deferred — reopen when you are ready to distribute loot, award XP, or draft the recap.</p>
+        <p className="text-xs text-slate-400 m-0">{t('encounters.aftermath.deferredHint')}</p>
       </Card>
     );
   }
@@ -101,11 +103,11 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
   const gridCols = handoffs.questPath && handoffs.sessionPath ? 'sm:grid-cols-2 lg:grid-cols-3' : handoffs.questPath || handoffs.sessionPath ? 'sm:grid-cols-2' : 'sm:grid-cols-2';
 
   return (
-    <Card density="comfortable" className="space-y-4" role="region" aria-label="Aftermath" aria-labelledby="encounter-aftermath-heading">
+    <Card density="comfortable" className="space-y-4" role="region" aria-label={t('encounters.aftermath.title')} aria-labelledby="encounter-aftermath-heading">
       <div className="space-y-1">
         <div className="flex items-start justify-between gap-2 flex-wrap">
           <h2 id="encounter-aftermath-heading" className="text-sm font-bold text-white m-0">
-            Aftermath
+            {t('encounters.aftermath.title')}
           </h2>
           <Btn
             type="button"
@@ -113,17 +115,15 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
             onClick={() => void dismiss()}
             disabled={dismissing}
           >
-            {dismissing ? 'Saving…' : 'Remind me later'}
+            {dismissing ? t('encounters.aftermath.saving') : t('encounters.aftermath.remindLater')}
           </Btn>
         </div>
-        <p className="text-xs text-slate-400 m-0">
-          Review the fight, then hand off loot, XP, quest updates, and a recap draft while it is still fresh.
-        </p>
+        <p className="text-xs text-slate-400 m-0">{t('encounters.aftermath.intro')}</p>
       </div>
 
       <section aria-labelledby="encounter-aftermath-outcome-heading" className="space-y-2">
         <h3 id="encounter-aftermath-outcome-heading" className="text-xs font-bold uppercase tracking-wide text-slate-400 m-0">
-          Outcome
+          {t('encounters.aftermath.outcome')}
         </h3>
         <div className="flex gap-4 flex-wrap text-[13px]">
           <span>
@@ -147,33 +147,38 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
         </div>
         {xp.supported && xp.suggestedPerCharacter != null && (
           <p className="text-xs text-slate-400 m-0">
-            Suggested award: <b>{xp.suggestedPerCharacter} XP</b> each ({xp.difficultyLabel},{' '}
-            {xp.suggestedPartyTotal} adjusted total).
+            {t('encounters.aftermath.xpSuggested', {
+              amount: xp.suggestedPerCharacter,
+              label: xp.difficultyLabel,
+              total: xp.suggestedPartyTotal,
+            })}
           </p>
         )}
         {!xp.supported && (
-          <p className="text-xs text-slate-400 m-0">XP guidance: {xp.difficultyLabel} — award manually for this ruleset.</p>
+          <p className="text-xs text-slate-400 m-0">
+            {t('encounters.aftermath.xpManual', { label: xp.difficultyLabel })}
+          </p>
         )}
       </section>
 
       <section aria-labelledby="encounter-aftermath-recap-heading" className="space-y-2">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <h3 id="encounter-aftermath-recap-heading" className="text-xs font-bold uppercase tracking-wide text-slate-400 m-0">
-            Recap draft
+            {t('encounters.aftermath.recapDraft')}
           </h3>
-          <CopyControl text={aftermath.recapDraft} label="Copy recap draft" />
+          <CopyControl text={aftermath.recapDraft} label={t('encounters.aftermath.copyRecapDraft')} />
         </div>
         <TextArea
           readOnly
           value={aftermath.recapDraft}
           rows={8}
           className="font-mono text-xs min-h-[8rem]"
-          aria-label="Recap draft seeded from this encounter"
+          aria-label={t('encounters.aftermath.recapDraftAria')}
         />
         <p className="text-[11px] text-muted m-0">
-          Opens the session recap editor with this draft pre-filled.{' '}
+          {t('encounters.aftermath.recapHandoffHint')}{' '}
           <Link to={handoffs.encounterLogPath} className="link-button">
-            View combat log
+            {t('encounters.aftermath.viewCombatLog')}
           </Link>
         </p>
       </section>
@@ -184,31 +189,31 @@ export function EncounterAftermathPanel({ campaignId, encounterId }: Props) {
           onClick={primeRecapNavigation}
           className="btn btn-primary min-w-0 min-h-11 flex-col !items-start text-left"
         >
-          <span className="font-semibold">Write recap</span>
-          <span className="text-[11px] text-muted font-normal">Open the recap editor with this draft.</span>
+          <span className="font-semibold">{t('encounters.aftermath.writeRecap')}</span>
+          <span className="text-[11px] text-muted font-normal">{t('encounters.aftermath.writeRecapHint')}</span>
         </Link>
         <Link to={handoffs.awardXpPath} className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left">
-          <span className="font-semibold">Award XP</span>
+          <span className="font-semibold">{t('encounters.aftermath.awardXp')}</span>
           <span className="text-[11px] text-muted font-normal">
             {xp.suggestedPerCharacter != null
-              ? `Open the party XP form (${xp.suggestedPerCharacter} each suggested).`
-              : 'Open the party XP form.'}
+              ? t('encounters.aftermath.awardXpSuggestedHint', { amount: xp.suggestedPerCharacter })
+              : t('encounters.aftermath.awardXpHint')}
           </span>
         </Link>
         <Link to={handoffs.inventoryPath} className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left">
-          <span className="font-semibold">Distribute loot</span>
-          <span className="text-[11px] text-muted font-normal">Party treasury and inventory.</span>
+          <span className="font-semibold">{t('encounters.aftermath.distributeLoot')}</span>
+          <span className="text-[11px] text-muted font-normal">{t('encounters.aftermath.distributeLootHint')}</span>
         </Link>
         {handoffs.questPath && (
           <Link to={handoffs.questPath} className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left">
-            <span className="font-semibold">Update quest</span>
-            <span className="text-[11px] text-muted font-normal">Open the linked quest objectives.</span>
+            <span className="font-semibold">{t('encounters.aftermath.updateQuest')}</span>
+            <span className="text-[11px] text-muted font-normal">{t('encounters.aftermath.updateQuestHint')}</span>
           </Link>
         )}
         {handoffs.sessionPath && (
           <Link to={handoffs.sessionPath} className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left">
-            <span className="font-semibold">Open linked session</span>
-            <span className="text-[11px] text-muted font-normal">Review session details and recap.</span>
+            <span className="font-semibold">{t('encounters.aftermath.openSession')}</span>
+            <span className="text-[11px] text-muted font-normal">{t('encounters.aftermath.openSessionHint')}</span>
           </Link>
         )}
       </nav>
