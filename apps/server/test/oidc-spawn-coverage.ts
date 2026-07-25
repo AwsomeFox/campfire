@@ -8,6 +8,8 @@ import libCoverage from 'istanbul-lib-coverage';
 
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const MERGE_WORKER = path.join(__dirname, 'oidc-v8-merge-worker.cjs');
+/** Absolute path to oidc.service.ts — used by coverage-threshold guard (#556). */
+export const OIDC_SERVICE_SOURCE = path.join(SERVER_ROOT, 'src', 'modules', 'auth', 'oidc.service.ts');
 
 /** Temp dir where spawned `node dist/main.js` children write NODE_V8_COVERAGE JSON. */
 let coverageDir: string | undefined;
@@ -44,6 +46,26 @@ function coverageGlobal(): typeof global {
   return Function('return this')() as typeof global;
 }
 
+function isOidcServiceCoverageKey(file: string): boolean {
+  return file === OIDC_SERVICE_SOURCE || file.endsWith(`${path.sep}oidc.service.ts`);
+}
+
+/** v8-to-istanbul adds an `all` field that can confuse istanbul source-map remapping. */
+function sanitizeSpawnCoverageEntry(entry: FileCoverageData): FileCoverageData {
+  const { all: _all, ...rest } = entry as FileCoverageData & { all?: unknown };
+  return rest;
+}
+
+function selectOidcServiceCoverage(incoming: CoverageMapData): CoverageMapData {
+  const selected: CoverageMapData = {};
+  for (const [file, entry] of Object.entries(incoming)) {
+    if (isOidcServiceCoverageKey(file)) {
+      selected[file] = sanitizeSpawnCoverageEntry(entry);
+    }
+  }
+  return selected;
+}
+
 function applyMergedCoverage(incoming: CoverageMapData): void {
   const globalObject = coverageGlobal() as typeof global & {
     __coverage__?: CoverageMapData;
@@ -53,12 +75,10 @@ function applyMergedCoverage(incoming: CoverageMapData): void {
   }
   const coverageMap = libCoverage.createCoverageMap(globalObject.__coverage__);
   coverageMap.merge(incoming);
-  for (const file of coverageMap.files()) {
-    if (file in incoming || file in globalObject.__coverage__) {
-      globalObject.__coverage__[file] = coverageMap
-        .fileCoverageFor(file)
-        .toJSON() as FileCoverageData;
-    }
+  for (const file of Object.keys(incoming)) {
+    globalObject.__coverage__[file] = coverageMap
+      .fileCoverageFor(file)
+      .toJSON() as FileCoverageData;
   }
 }
 
@@ -87,9 +107,8 @@ export function mergePendingChildV8Coverage(): void {
   const pending = pendingBlobBasenames();
   if (pending.length === 0) return;
 
-  const incoming = mergeCoverageDirInSubprocess(coverageDir);
-  const keys = Object.keys(incoming);
-  if (keys.length > 0) {
+  const incoming = selectOidcServiceCoverage(mergeCoverageDirInSubprocess(coverageDir));
+  if (Object.keys(incoming).length > 0) {
     applyMergedCoverage(incoming);
   }
   for (const name of pending) {
@@ -110,9 +129,6 @@ export function cleanupChildV8CoverageDir(): void {
   coverageDir = undefined;
   mergedBlobBasenames.clear();
 }
-
-/** Absolute path to oidc.service.ts — used by coverage-threshold guard (#556). */
-export const OIDC_SERVICE_SOURCE = path.join(SERVER_ROOT, 'src', 'modules', 'auth', 'oidc.service.ts');
 
 /** file:// URL form jest/istanbul sometimes uses on Windows. */
 export function oidcServiceSourceKeys(): string[] {
