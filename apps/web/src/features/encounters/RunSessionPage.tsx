@@ -1204,9 +1204,6 @@ export default function RunSessionPage() {
     if (el) combatantRowRefs.current.set(combatantId, el);
     else combatantRowRefs.current.delete(combatantId);
   }, []);
-  useEffect(() => {
-    combatantRowRefs.current.clear();
-  }, [eid]);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
     const el = combatantRowRefs.current.get(currentCombatantId);
