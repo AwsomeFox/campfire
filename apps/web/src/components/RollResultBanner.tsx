@@ -20,16 +20,16 @@ export function RollResultBanner({ roll, onDismiss }: { roll: DiceRoll; onDismis
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-semibold truncate cf-name-reveal" title={roll.label || roll.expr} aria-label={roll.label || roll.expr}>{roll.label || roll.expr}</p>
         <p className="text-[11px] text-slate-500 flex items-center gap-1.5">
-          <span>{roll.expr}</span>
+          <bdi>{roll.expr}</bdi>
           <RolledDice rolls={roll.rolls} kept={roll.kept} fontSize={11} />
           {roll.terms && <RolledTerms terms={roll.terms} fontSize={11} />}
           {crit && <span style={{ color: totalColor }}>nat 20!</span>}
           {fumble && <span style={{ color: totalColor }}>nat 1</span>}
         </p>
       </div>
-      <span className="font-heading leading-none" style={{ fontSize: 26, color: totalColor }}>
+      <bdi className="font-heading leading-none" style={{ fontSize: 26, color: totalColor }}>
         {roll.total}
-      </span>
+      </bdi>
       <button
         type="button"
         aria-label="Dismiss roll result"

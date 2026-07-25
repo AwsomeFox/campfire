@@ -165,7 +165,7 @@ export class RollsService implements OnApplicationBootstrap {
    * AUTOINCREMENT ids are monotonic, so id order == insertion order: to keep
    * the newest N rows we find the id of the (N+1)th-newest row and delete
    * everything at or below it. Scanning per-campaign ids is cheap thanks to
-   * `idx_dice_rolls_campaign`, and we only do work at all for campaigns that
+   * `idx_dice_rolls_campaign_id_desc`, and we only do work at all for campaigns that
    * are actually over-cap.
    *
    * Returns the number of rows deleted, so callers (and tests) can observe

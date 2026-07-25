@@ -6,6 +6,67 @@ const authorPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'author-1' };
 const otherPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'other-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
+type DiscussionComment = {
+  id: number;
+  body: string;
+  parentId: number | null;
+  authorUserId?: string;
+  editedBy?: string | null;
+  deletedAt?: string | null;
+};
+
+type DiscussionPage = {
+  items: Array<{
+    root: DiscussionComment;
+    replies: DiscussionComment[];
+    replyCount: number;
+    replyHasMore: boolean;
+    replyNextCursor: string | null;
+  }>;
+  total: number;
+  totalComments: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  limit: number;
+};
+
+function flattenDiscussion(page: DiscussionPage) {
+  return page.items.flatMap((t) => [t.root, ...t.replies]);
+}
+
+function discussionHasId(page: DiscussionPage, id: number) {
+  return flattenDiscussion(page).some((c) => c.id === id);
+}
+
+function discussionFindById(page: DiscussionPage, id: number) {
+  return flattenDiscussion(page).find((c) => c.id === id);
+}
+
+async function findCommentInDiscussion(
+  server: import('http').Server,
+  campaignId: number,
+  query: Record<string, string | number>,
+  id: number,
+  headers: Record<string, string>,
+) {
+  let cursor: string | null | undefined;
+  do {
+    const res = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/comments`)
+      .query({ ...query, ...(cursor ? { cursor } : {}) })
+      .set(headers);
+    expect(res.status).toBe(200);
+    const found = discussionFindById(res.body, id);
+    if (found) return found;
+    cursor = res.body.hasMore ? res.body.nextCursor : null;
+  } while (cursor);
+  return undefined;
+}
+
+function discussionBodies(page: DiscussionPage) {
+  return flattenDiscussion(page).map((c) => c.body);
+}
+
 describe('comments / threaded discussion (e2e)', () => {
   let ctx: TestAppContext;
   let campaignId: number;
@@ -51,7 +112,7 @@ describe('comments / threaded discussion (e2e)', () => {
       .query({ entityType: 'session', entityId: sessionId })
       .set(authorPlayer);
     expect(listRes.status).toBe(200);
-    expect(listRes.body.some((c: { id: number }) => c.id === createRes.body.id)).toBe(true);
+    expect(discussionHasId(listRes.body, createRes.body.id)).toBe(true);
   });
 
   it('member visibility: all campaign members see the thread', async () => {
@@ -67,7 +128,7 @@ describe('comments / threaded discussion (e2e)', () => {
         .query({ entityType: 'session', entityId: sessionId })
         .set(headers);
       expect(res.status).toBe(200);
-      expect(res.body.some((c: { body: string }) => c.body === 'A shared discussion post')).toBe(true);
+      expect(discussionBodies(res.body).some((body) => body === 'A shared discussion post')).toBe(true);
     }
   });
 
@@ -421,11 +482,12 @@ describe('comments / threaded discussion (e2e)', () => {
         .query({ entityType: 'session', entityId: sessionId })
         .set(otherPlayer);
       expect(list.status).toBe(200);
-      const ids = list.body.map((c: { id: number }) => c.id);
+      const ids = flattenDiscussion(list.body).map((c) => c.id);
       expect(ids).toContain(parentId);
       expect(ids).toContain(replyId);
-      const tombInList = list.body.find((c: { id: number }) => c.id === parentId);
-      expect(tombInList.body).toBe('[deleted]');
+      const tombInList = discussionFindById(list.body, parentId);
+      expect(tombInList).toBeDefined();
+      expect(tombInList!.body).toBe('[deleted]');
     });
 
     it('a DM moderating tombstones the root the same way (replies preserved)', async () => {
@@ -595,9 +657,9 @@ describe('comments / threaded discussion (e2e)', () => {
         .query({ entityType: 'session', entityId: sessionId })
         .set(otherPlayer);
       expect(thread.status).toBe(200);
-      const tombstonedRoot = thread.body.find((c: { id: number }) => c.id === parentId);
-      expect(tombstonedRoot.body).toBe('[deleted]');
-      expect(thread.body.map((c: { id: number }) => c.id)).toContain(reply.body.id);
+      const tombstonedRoot = discussionFindById(thread.body, parentId);
+      expect(tombstonedRoot?.body).toBe('[deleted]');
+      expect(flattenDiscussion(thread.body).map((c) => c.id)).toContain(reply.body.id);
     });
 
     it('restore does NOT bump updatedAt (no false "edited" badge)', async () => {
@@ -724,13 +786,15 @@ describe('comments / threaded discussion (e2e)', () => {
       expect(read.body.editedAt).not.toBeNull();
 
       // And via the thread list (the path the UI renders from).
-      const list = await request(server)
-        .get(`/api/v1/campaigns/${campaignId}/comments`)
-        .query({ entityType: 'session', entityId: sessionId })
-        .set(authorPlayer);
-      const inList = list.body.find((c: { id: number }) => c.id === id);
-      expect(inList.editedBy).toBe('dev:dm-1');
-      expect(inList.authorUserId).toBe('dev:other-1');
+      const inList = await findCommentInDiscussion(
+        server,
+        campaignId,
+        { entityType: 'session', entityId: sessionId },
+        id,
+        authorPlayer,
+      );
+      expect(inList?.editedBy).toBe('dev:dm-1');
+      expect(inList?.authorUserId).toBe('dev:other-1');
     });
 
     it('audits a moderator edit distinctly (actor=DM, detail flags it; self-edit has no such detail)', async () => {
@@ -842,7 +906,7 @@ describe('comments / threaded discussion (e2e)', () => {
         .query({ entityType: 'quest', entityId: hiddenQuestId })
         .set(dm);
       expect(list.status).toBe(200);
-      expect(list.body.some((c: { body: string }) => c.body === 'DM-only plotting on a hidden quest')).toBe(true);
+      expect(discussionBodies(list.body).some((body) => body === 'DM-only plotting on a hidden quest')).toBe(true);
 
       const create = await request(server)
         .post(`/api/v1/campaigns/${campaignId}/comments`)
@@ -877,5 +941,98 @@ describe('comments / threaded discussion (e2e)', () => {
       .set(authorPlayer)
       .send({ ...anchor(), body: 'ok', bogus: true });
     expect(res.status).toBe(400);
+  });
+
+  // ── issue #609: paginate by root thread, bounded reply previews ─────────────
+  describe('issue #609 — root-thread pagination', () => {
+    let paginatedSessionId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const sess = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/sessions`)
+        .set(dm)
+        .send({ title: 'Pagination Session', recap: 'For thread paging tests.' });
+      paginatedSessionId = sess.body.id;
+    });
+
+    function paginatedAnchor() {
+      return { entityType: 'session' as const, entityId: paginatedSessionId };
+    }
+
+    it('returns a paginated page with totals and bounded reply previews', async () => {
+      const server = ctx.app.getHttpServer();
+      const roots: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const root = await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/comments`)
+          .set(authorPlayer)
+          .send({ ...paginatedAnchor(), body: `Root ${i}` });
+        roots.push(root.body.id);
+        for (let r = 0; r < 4; r++) {
+          await request(server)
+            .post(`/api/v1/campaigns/${campaignId}/comments`)
+            .set(otherPlayer)
+            .send({ ...paginatedAnchor(), body: `Root ${i} reply ${r}`, parentId: roots[i] });
+        }
+      }
+
+      const page1 = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ ...paginatedAnchor(), limit: 2 })
+        .set(authorPlayer);
+      expect(page1.status).toBe(200);
+      expect(page1.body.items).toHaveLength(2);
+      expect(page1.body.total).toBe(3);
+      expect(page1.body.totalComments).toBe(15);
+      expect(page1.body.hasMore).toBe(true);
+      expect(typeof page1.body.nextCursor).toBe('string');
+      expect(page1.body.items[0].replyCount).toBe(4);
+      expect(page1.body.items[0].replies).toHaveLength(3);
+      expect(page1.body.items[0].replyHasMore).toBe(true);
+      expect(typeof page1.body.items[0].replyNextCursor).toBe('string');
+
+      const page2 = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query({ ...paginatedAnchor(), limit: 2, cursor: page1.body.nextCursor })
+        .set(authorPlayer);
+      expect(page2.status).toBe(200);
+      expect(page2.body.items).toHaveLength(1);
+      expect(page2.body.hasMore).toBe(false);
+      expect(page2.body.nextCursor).toBeNull();
+    });
+
+    it('loads additional replies without splitting roots across pages', async () => {
+      const server = ctx.app.getHttpServer();
+      const root = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/comments`)
+        .set(authorPlayer)
+        .send({ ...paginatedAnchor(), body: 'Root with many replies' });
+      const rootId = root.body.id;
+      for (let r = 0; r < 5; r++) {
+        await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/comments`)
+          .set(otherPlayer)
+          .send({ ...paginatedAnchor(), body: `Extra reply ${r}`, parentId: rootId });
+      }
+
+      const listed = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments`)
+        .query(paginatedAnchor())
+        .set(authorPlayer);
+      const thread = listed.body.items.find((t: { root: { id: number } }) => t.root.id === rootId);
+      expect(thread.replies).toHaveLength(3);
+      expect(thread.replyHasMore).toBe(true);
+
+      const more = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/comments/${rootId}/replies`)
+        .query({ ...paginatedAnchor(), cursor: thread.replyNextCursor })
+        .set(authorPlayer);
+      expect(more.status).toBe(200);
+      expect(more.body.items.length).toBeGreaterThanOrEqual(2);
+      expect(more.body.replyCount).toBe(5);
+      const bodies = [...thread.replies, ...more.body.items].map((c: { body: string }) => c.body);
+      expect(bodies).toContain('Extra reply 4');
+    });
   });
 });

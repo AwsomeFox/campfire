@@ -60,20 +60,26 @@ describe('list pagination (e2e, issue #71)', () => {
     it('?limit honours the cap and stays newest-first', async () => {
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/sessions?limit=2`).set(dm);
       expect(res.status).toBe(200);
-      const numbers = (res.body as Array<{ number: number }>).map((s) => s.number);
+      expect(res.body.items).toHaveLength(2);
+      const numbers = (res.body.items as Array<{ number: number }>).map((s) => s.number);
       expect(numbers).toEqual([5, 4]); // newest (highest number) first
+      expect(res.body.total).toBe(5);
+      expect(res.body.hasMore).toBe(true);
     });
 
     it('?offset pages through the ordered result without overlap', async () => {
       const page1 = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/sessions?limit=2&offset=0`).set(dm);
       const page2 = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/sessions?limit=2&offset=2`).set(dm);
-      expect((page1.body as Array<{ number: number }>).map((s) => s.number)).toEqual([5, 4]);
-      expect((page2.body as Array<{ number: number }>).map((s) => s.number)).toEqual([3, 2]);
+      expect((page1.body.items as Array<{ number: number }>).map((s) => s.number)).toEqual([5, 4]);
+      expect((page2.body.items as Array<{ number: number }>).map((s) => s.number)).toEqual([3, 2]);
+      expect(page2.body.hasMore).toBe(true);
+      expect(page2.body.nextCursor).toBeUndefined();
     });
 
-    it('?offset without limit returns the remaining rows', async () => {
+    it('?offset without limit returns the remaining rows in a page object', async () => {
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/sessions?offset=3`).set(dm);
-      expect((res.body as Array<{ number: number }>).map((s) => s.number)).toEqual([2, 1]);
+      expect((res.body.items as Array<{ number: number }>).map((s) => s.number)).toEqual([2, 1]);
+      expect(res.body.hasMore).toBe(false);
     });
 
     it('no limit/offset returns every session (opt-in — backward compatible)', async () => {
@@ -91,10 +97,11 @@ describe('list pagination (e2e, issue #71)', () => {
       expect(res.status).toBe(400);
     });
 
-    it('an over-max limit is clamped (not an error) and returns all rows', async () => {
+    it('an over-max limit is clamped (not an error) and returns a full first page', async () => {
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/sessions?limit=99999`).set(dm);
       expect(res.status).toBe(200);
-      expect(res.body).toHaveLength(5);
+      expect(res.body.items).toHaveLength(5);
+      expect(res.body.hasMore).toBe(false);
     });
   });
 

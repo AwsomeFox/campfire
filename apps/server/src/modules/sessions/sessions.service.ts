@@ -1,13 +1,14 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, desc, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, ne, sql, count } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, SessionListItem, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams } from '@campfire/schema';
+import type { Session, SessionListItem, SessionListPage, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { notDeleted } from '../../common/soft-delete';
 import { applyPage } from '../../common/pagination';
+import { clampSessionsListLimit, sessionsListOffset } from './sessions-pagination';
 import { redactSecret, redactSecrets } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
@@ -163,6 +164,60 @@ export class SessionsService {
       updatedAt: r.updatedAt,
     }));
     return redactSecrets(items, role);
+  }
+
+  /**
+   * Paginated session log (issue #612): newest-first with total/hasMore. Used by
+   * SessionsPage so a five-year table history never loads in one response.
+   */
+  async listPageForCampaign(
+    campaignId: number,
+    role: Role,
+    opts?: { limit?: number; offset?: number },
+  ): Promise<SessionListPage> {
+    const limit = clampSessionsListLimit(opts?.limit);
+    const offset = sessionsListOffset(opts?.offset);
+    const where = and(eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt));
+
+    const [{ value: total }] = await this.db.select({ value: count() }).from(sessions).where(where);
+
+    let q = this.db
+      .select({
+        id: sessions.id,
+        campaignId: sessions.campaignId,
+        number: sessions.number,
+        title: sessions.title,
+        playedAt: sessions.playedAt,
+        recapExcerpt: sql<string>`substr(${sessions.recap}, 1, 400)`,
+        dmSecret: sessions.dmSecret,
+        createdAt: sessions.createdAt,
+        updatedAt: sessions.updatedAt,
+      })
+      .from(sessions)
+      .where(where)
+      .orderBy(desc(sessions.number))
+      .$dynamic();
+    q = applyPage(q, { limit, offset });
+    const rows = await q;
+    const items: SessionListItem[] = rows.map((r) => ({
+      id: r.id,
+      campaignId: r.campaignId,
+      number: r.number,
+      title: r.title,
+      playedAt: r.playedAt,
+      recapExcerpt: excerpt(r.recapExcerpt ?? ''),
+      dmSecret: r.dmSecret,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }));
+    const redacted = redactSecrets(items, role);
+    return {
+      items: redacted,
+      total,
+      hasMore: offset + redacted.length < total,
+      limit,
+      offset,
+    };
   }
 
   /**

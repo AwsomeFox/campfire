@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -52,7 +53,6 @@ import {
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
@@ -1242,10 +1242,20 @@ export default function RunSessionPage() {
   }, []);
   useLayoutEffect(() => {
     if (encounter?.status !== 'running' || currentCombatantId == null) return;
-    const el = combatantRowRefs.current.get(currentCombatantId);
-    if (!el) return;
     const frame = requestAnimationFrame(() => {
-      el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+      requestAnimationFrame(() => {
+        const el =
+          combatantRowRefs.current.get(currentCombatantId) ??
+          document.querySelector<HTMLElement>(
+            `[data-testid="combatant-row-${currentCombatantId}"][data-current-turn="true"]`,
+          );
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const inView = rect.bottom > 0 && rect.top < window.innerHeight;
+        if (inView) return;
+        const targetTop = window.scrollY + rect.top - (window.innerHeight - rect.height) / 2;
+        window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+      });
     });
     return () => cancelAnimationFrame(frame);
   }, [encounter?.status, currentCombatantId]);
@@ -1298,18 +1308,11 @@ export default function RunSessionPage() {
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
-      <div>
-        <Btn
-          ghost
-          className="!min-h-0 !py-1.5 text-xs"
-          onClick={() => {
-            setActionError(null);
-            navigate(`/c/${cid}/encounters`);
-          }}
-        >
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/encounters`}
+        defaultLabel="← Back to encounters"
+      />
 
       {(loadError || actionError) && (
         <ErrorNote

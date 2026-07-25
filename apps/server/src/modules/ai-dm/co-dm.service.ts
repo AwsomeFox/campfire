@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -16,10 +17,11 @@ import {
   EncounterGenerate,
   GenerateMapParams,
   normalizeMapTheme,
+  StoryBeatProposalCreate,
 } from '@campfire/schema';
 import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats } from '../../db/schema';
+import { aiDmSeats, storyArcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -39,7 +41,7 @@ const DRAFT_MAX_TOKENS = 4096;
 const TARGET_ENTITY_TYPE: Record<CoDmDraftTarget, ProposableEntityType> = {
   npc: 'npc',
   location: 'location',
-  beat: 'quest', // a story beat / next objective is filed as a quest (#27)
+  beat: 'story_beat',
   quest: 'quest', // a direct quest draft (#1056)
   faction: 'faction', // a faction draft (#1056)
   recap: 'session', // a session recap is filed as a session
@@ -113,6 +115,16 @@ export class CoDmService {
     await this.aiDm.assertWithinServerTokenCap();
 
     const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
+    if (input.target === 'beat' && input.arcId != null) {
+      const [arc] = await this.db
+        .select({ campaignId: storyArcs.campaignId })
+        .from(storyArcs)
+        .where(eq(storyArcs.id, input.arcId))
+        .limit(1);
+      if (!arc || arc.campaignId !== campaignId) {
+        throw new BadRequestException(`Story arc ${input.arcId} does not belong to this campaign`);
+      }
+    }
     const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);
 
     // Issue #564: the executable model derives ONLY from the effective provider config
@@ -163,7 +175,7 @@ export class CoDmService {
 
     // Turn the provider text into validated proposal payloads for the target's entity type.
     const entityType = TARGET_ENTITY_TYPE[input.target];
-    const payloads = this.toPayloads(input.target, narration, count);
+    const payloads = this.toPayloads(input.target, narration, count, { arcId: input.arcId });
 
     // Attribute the proposal to the AI seat + model, not the triggering DM (issue #313).
     // The label reflects the model that actually served the draft when a provider is
@@ -260,7 +272,12 @@ export class CoDmService {
    * the approved generation is reproducible. Other targets require a JSON draft (recap falls
    * back to using the raw text as the recap body).
    */
-  private toPayloads(target: CoDmDraftTarget, narration: string, count: number): Record<string, unknown>[] {
+  private toPayloads(
+    target: CoDmDraftTarget,
+    narration: string,
+    count: number,
+    opts?: { arcId?: number },
+  ): Record<string, unknown>[] {
     const parsed = extractJson(narration);
 
     switch (target) {
@@ -278,7 +295,7 @@ export class CoDmService {
         return items
           .filter((it): it is Record<string, unknown> => it !== null && typeof it === 'object' && !Array.isArray(it))
           .slice(0, count)
-          .map((raw) => this.validate(target, raw));
+          .map((raw) => this.validate(target, raw, opts));
       }
       case 'recap': {
         const obj = firstObject(parsed);
@@ -293,7 +310,11 @@ export class CoDmService {
   }
 
   /** Normalize + strict-shape a raw draft object into the stored proposal payload. */
-  private validate(target: CoDmDraftTarget, raw: Record<string, unknown>): Record<string, unknown> {
+  private validate(
+    target: CoDmDraftTarget,
+    raw: Record<string, unknown>,
+    opts?: { arcId?: number },
+  ): Record<string, unknown> {
     try {
       switch (target) {
         case 'npc':
@@ -301,11 +322,10 @@ export class CoDmService {
         case 'location':
           return LocationCreate.parse(raw) as Record<string, unknown>;
         case 'beat':
-          // A "beat" is filed as a quest: map common narrative fields onto quest fields.
-          return QuestCreate.parse({
+          return StoryBeatProposalCreate.parse({
             title: raw.title ?? raw.name ?? 'Untitled beat',
             body: raw.body ?? raw.summary ?? raw.description ?? '',
-            ...(typeof raw.dmSecret === 'string' ? { dmSecret: raw.dmSecret } : {}),
+            ...(opts?.arcId != null ? { arcId: opts.arcId } : {}),
           }) as Record<string, unknown>;
         case 'quest':
           return QuestCreate.parse({
@@ -360,7 +380,7 @@ const DRAFT_JSON_SHAPE: Record<CoDmDraftTarget, string> = {
   npc: '{"name": string (required), "role"?: string, "disposition"?: string, "body"?: string, "dmSecret"?: string}',
   location:
     '{"name": string (required), "kind"?: string, "body"?: string, "dmSecret"?: string}',
-  beat: '{"title": string (required), "body"?: string (markdown), "dmSecret"?: string}',
+  beat: '{"title": string (required), "body"?: string (markdown)}',
   quest:
     '{"title": string (required), "body"?: string (markdown), "reward"?: string, "status"?: "available"|"active"|"completed"|"failed", "dmSecret"?: string}',
   faction:
