@@ -573,6 +573,7 @@ describe('ai-dm driver — provider streaming failure unlocks composers (#1046)'
     expect(res.body.stopReason).toBe('provider_error');
 
     expect(events.some((e) => e.type === 'turn.start')).toBe(true);
+    expect(events.some((e) => e.type === 'turn.error')).toBe(true);
     const end = events.find((e) => e.type === 'turn.end');
     expect(end).toBeDefined();
     expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
@@ -659,5 +660,143 @@ describe('ai-dm driver — stream idle timeout recovery (#1063)', () => {
     expect(again.status).not.toBe(409);
     expect(again.status).toBe(201);
     expect(again.body.stopReason).toBe('complete');
+  });
+});
+
+/**
+ * Issue #560 — provider failures must emit terminal turn.error/end, meter partial usage when
+ * reported, record usage as unknown (never zero-by-assumption) otherwise, and offer retry +
+ * continue-without-AI recovery levers.
+ */
+describe('ai-dm driver — provider failure termination + partial usage (#560)', () => {
+  let h: AiEvalHarness;
+
+  beforeAll(async () => {
+    h = await createAiEvalHarness({ model: 'driver-provider-failure-model' });
+    await h.enableExperimental();
+  });
+
+  beforeEach(() => {
+    h.resetMock();
+  });
+
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('failure before output emits turn.error/end, marks usage unknown, and offers recovery levers', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Failure Before Output');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const seatBefore = await h.getSeat(campaignId);
+    const usedBefore = seatBefore.body.tokensUsed as number;
+
+    const streamSvc = h.ctx.app.get(AiDmStreamService);
+    const events: AiDmStreamEvent[] = [];
+    const sub = streamSvc.streamFor(campaignId).subscribe((e) => events.push(e));
+
+    h.script({
+      text: 'Never delivered.',
+      throwAfterChunks: 0,
+      throwError: new AiProviderError('transport', 'mock: connection reset', { provider: 'mock' }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'Hello?' });
+    sub.unsubscribe();
+
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+
+    const err = events.find((e) => e.type === 'turn.error');
+    expect(err && err.type === 'turn.error' && err.tokensUsageUnknown).toBe(true);
+    const end = events.find((e) => e.type === 'turn.end');
+    expect(end && end.type === 'turn.end' && end.stopReason).toBe('provider_error');
+    expect(end && end.type === 'turn.end' && end.tokensUsageUnknown).toBe(true);
+
+    const session = await h.getDriverSession(campaignId);
+    expect(session.body.stuck?.reason).toBe('provider_error');
+    expect(session.body.levers).toEqual(expect.arrayContaining(['retry', 'continue_without_ai']));
+
+    const seatAfter = await h.getSeat(campaignId);
+    expect(seatAfter.body.tokensUsed).toBe(usedBefore);
+  });
+
+  it('meters partial usage after partial streamed text', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Failure Partial Text');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const seatBefore = await h.getSeat(campaignId);
+    const usedBefore = seatBefore.body.tokensUsed as number;
+
+    h.script({
+      text: 'The mist thickens around you…',
+      streamChunks: 4,
+      throwAfterChunks: 1,
+      throwError: new AiProviderError('server', 'mock: upstream HTTP 500', { provider: 'mock', status: 500 }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'We press on.' });
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+    expect(res.body.tokensUsed).toBeGreaterThan(0);
+
+    const seatAfter = await h.getSeat(campaignId);
+    expect(seatAfter.body.tokensUsed).toBeGreaterThan(usedBefore);
+  });
+
+  it('meters reported usage when failure happens after a usage frame', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Failure After Usage');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const seatBefore = await h.getSeat(campaignId);
+    const usedBefore = seatBefore.body.tokensUsed as number;
+
+    h.script({
+      text: 'A short line.',
+      usage: { promptTokens: 12, completionTokens: 8, totalTokens: 20 },
+      throwAfterUsage: true,
+      throwError: new AiProviderError('server', 'mock: truncated stream', { provider: 'mock' }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'Look around.' });
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+    expect(res.body.tokensUsed).toBe(20);
+
+    const seatAfter = await h.getSeat(campaignId);
+    expect(seatAfter.body.tokensUsed - usedBefore).toBe(20);
+  });
+
+  it('meters estimated usage when failure happens during tool-call fragments', async () => {
+    const campaignId = await h.createCampaign('Driver Provider Failure Tool Call');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script({
+      text: '',
+      toolCalls: [{ id: 'call_1', name: 'roll_dice', arguments: { expr: '1d20' } }],
+      throwDuringToolCall: true,
+      throwError: new AiProviderError('invalid_request', 'mock: malformed tool stream', { provider: 'mock' }),
+    });
+
+    const res = await h.sendMessage(campaignId, { input: 'Roll initiative.' });
+    expect(res.status).toBe(201);
+    expect(res.body.stopReason).toBe('provider_error');
+    expect(res.body.tokensUsed).toBeGreaterThan(0);
+  });
+
+  it('continue-without-ai lets a DM take human control after provider_error', async () => {
+    const campaignId = await h.createCampaign('Driver Continue Without AI');
+    await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    h.script({
+      throwAfterChunks: 0,
+      throwError: new AiProviderError('transport', 'mock: offline', { provider: 'mock' }),
+    });
+    await h.sendMessage(campaignId, { input: 'Any action.' });
+
+    const cont = await h.lever(campaignId, 'continue-without-ai');
+    expect(cont.status).toBe(201);
+    expect(cont.body.state).toBe('human_control');
+    expect(cont.body.stuck).toBeNull();
   });
 });

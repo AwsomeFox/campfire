@@ -19,6 +19,7 @@ import type {
   AiToolCall,
   AiToolSchema,
   AiGenerateResult,
+  AiUsage,
 } from '../ai-dm/providers/ai-provider';
 import { AiProviderError } from '../ai-dm/providers/errors';
 import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
@@ -1128,6 +1129,8 @@ export class AiDriverService {
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
+    let providerError: AiProviderError | undefined;
+    let tokensUsageUnknown = false;
 
     try {
       for (let step = 0; step < maxSteps; step++) {
@@ -1191,7 +1194,7 @@ export class AiDriverService {
 
           const maxTokens = Math.min(perStepCap, currentRemaining);
           steps = stepNumber;
-          const { text, result, aborted } = await this.streamStep(campaignId, provider, session, {
+          const step = await this.streamStep(campaignId, provider, session, {
             system,
             messages,
             // Issue #564: the executable model derives ONLY from the effective provider
@@ -1200,6 +1203,30 @@ export class AiDriverService {
             maxTokens,
             tools: toolSchemas,
           });
+
+          if (!step.ok) {
+            const resolved = resolveProviderStepUsage(step.text, step.result);
+            let metered: { seat: AiDmSeat; tokensUsed: number; budgetRemaining: number } | undefined;
+            if (!resolved.unknown && resolved.tokens > 0) {
+              metered = await this.aiDm.meterTurn(campaignId, resolved.tokens, {
+                actor,
+                action: 'ai-dm.driver.turn',
+                detail: `step ${stepNumber} provider_error model=${execModel} +${resolved.tokens} tokens (partial) by ${triggeredBy.id}`,
+                model: step.result?.model || execModel,
+              });
+            }
+            return {
+              kind: 'provider_error' as const,
+              seat: metered?.seat ?? currentSeat,
+              budgetRemaining: metered?.budgetRemaining ?? currentRemaining,
+              text: step.text,
+              error: step.error,
+              usageUnknown: resolved.unknown,
+              metered,
+            };
+          }
+
+          const { text, result, aborted } = step;
 
           // Meter this step's REAL usage before releasing the mutex, including
           // a completed/partial stream that was frozen before narration/tool
@@ -1269,6 +1296,25 @@ export class AiDriverService {
           if (spend.text) finalNarration = spend.text;
           break;
         }
+        if (spend.kind === 'provider_error') {
+          latestSeat = spend.metered?.seat ?? spend.seat;
+          budgetRemaining = spend.metered?.budgetRemaining ?? spend.budgetRemaining;
+          totalTokens += spend.metered?.tokensUsed ?? 0;
+          stopReason = 'provider_error';
+          providerError = spend.error;
+          tokensUsageUnknown = spend.usageUnknown;
+          if (spend.text) finalNarration = spend.text;
+          const detail = spend.error?.message ?? 'provider error';
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.provider_error',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `${detail} (triggered by ${triggeredBy.id})`,
+          });
+          break;
+        }
 
         const { text, result, metered } = spend;
         totalTokens += metered.tokensUsed;
@@ -1327,11 +1373,13 @@ export class AiDriverService {
         if (step === maxSteps - 1) stopReason = 'max_steps';
       }
     } catch (err) {
-      // Provider throw / idle timeout (#1046 / #1063): if streamStep throws, do NOT rethrow
+      // Provider throw / idle timeout (#1046 / #1063 / #560): if streamStep throws, do NOT rethrow
       // past `finally` — that would skip `turn.end` and leave every SSE client's composer
       // locked forever, even though the seat slot is released. Catch here so we still emit
-      // turn.end with provider_error and park the ladder in awaiting_players for recovery.
+      // turn.error/turn.end with provider_error and park the ladder in awaiting_players for recovery.
       stopReason = 'provider_error';
+      tokensUsageUnknown = true;
+      providerError = err instanceof AiProviderError ? err : undefined;
       const detail = err instanceof Error ? err.message : String(err);
       this.logger.error(`AI DM provider failure on campaign ${campaignId}: ${detail}`, err instanceof Error ? err.stack : undefined);
       await this.audit.log({
@@ -1382,7 +1430,30 @@ export class AiDriverService {
       triggeredBy,
     });
 
-    this.stream.emit({ type: 'turn.end', campaignId, stopReason, steps, tokensUsed: totalTokens, budgetRemaining });
+    if (stopReason === 'provider_error') {
+      this.stream.emit({
+        type: 'turn.error',
+        campaignId,
+        stopReason: 'provider_error',
+        code: providerError?.kind ?? 'unknown',
+        message: providerError?.message ?? describeStuck('provider_error'),
+        retryable: providerError?.retryable ?? true,
+        steps,
+        tokensUsed: totalTokens,
+        ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+        budgetRemaining,
+      });
+    }
+
+    this.stream.emit({
+      type: 'turn.end',
+      campaignId,
+      stopReason,
+      steps,
+      tokensUsed: totalTokens,
+      ...(tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+      budgetRemaining,
+    });
 
     this.drainQueue(campaignId).catch(err => this.logger.error('Queue drain failed', err));
 
@@ -1445,9 +1516,14 @@ export class AiDriverService {
     provider: AiProvider,
     session: AiDmSessionState,
     req: { system: string; messages: AiMessage[]; model: string; maxTokens: number; tools: AiToolSchema[] },
-  ): Promise<{ text: string; result: AiGenerateResult | undefined; aborted: boolean }> {
+  ): Promise<
+    | { ok: true; text: string; result: AiGenerateResult | undefined; aborted: boolean }
+    | { ok: false; text: string; result: AiGenerateResult | undefined; error: AiProviderError }
+  > {
     let text = '';
     let result: AiGenerateResult | undefined;
+    let streamUsage: AiUsage | undefined;
+    const toolAcc = new Map<number, { id?: string; name?: string; args: string }>();
     let aborted = false;
     const ac = new AbortController();
     const idleMs = DRIVER_STREAM_IDLE_TIMEOUT_MS;
@@ -1468,6 +1544,46 @@ export class AiDriverService {
           }),
         );
       }, idleMs);
+    };
+    const partialResult = (): AiGenerateResult | undefined => {
+      const partialToolCalls =
+        toolAcc.size > 0
+          ? [...toolAcc.entries()]
+              .sort((a, b) => a[0] - b[0])
+              .map(([idx, entry]) => {
+                let args: Record<string, unknown> = {};
+                if (entry.args) {
+                  try {
+                    const parsed = JSON.parse(entry.args);
+                    if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>;
+                  } catch {
+                    args = {};
+                  }
+                }
+                return {
+                  id: entry.id || `call_${idx}`,
+                  name: entry.name ?? '',
+                  arguments: args,
+                };
+              })
+          : [];
+      if (result) {
+        const merged =
+          result.text || !text
+            ? result
+            : { ...result, text };
+        return partialToolCalls.length > 0 && merged.toolCalls.length === 0
+          ? { ...merged, toolCalls: partialToolCalls }
+          : merged;
+      }
+      if (!text && !streamUsage && partialToolCalls.length === 0) return undefined;
+      return {
+        text,
+        toolCalls: partialToolCalls,
+        usage: streamUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        finishReason: 'unknown',
+        model: req.model,
+      };
     };
     armIdle();
     try {
@@ -1493,17 +1609,31 @@ export class AiDriverService {
         if (ev.type === 'text') {
           text += ev.delta;
           this.stream.emit({ type: 'narration.delta', campaignId, text: ev.delta });
+        } else if (ev.type === 'usage') {
+          streamUsage = ev.usage;
+        } else if (ev.type === 'tool_call') {
+          const entry = toolAcc.get(ev.index) ?? { args: '' };
+          if (ev.id) entry.id = ev.id;
+          if (ev.name) entry.name = ev.name;
+          if (ev.argumentsDelta) entry.args += ev.argumentsDelta;
+          toolAcc.set(ev.index, entry);
         } else if (ev.type === 'done') {
           result = ev.result;
         }
       }
+    } catch (err) {
+      const partial = partialResult();
+      if (err instanceof AiProviderError) {
+        return { ok: false, text, result: partial, error: err };
+      }
+      throw err;
     } finally {
       // Idle timer must not outlive the step — clear only when the stream completes or aborts.
       clearIdle();
     }
     // A provider that only streamed deltas (no `done`) still yields its text.
     if (result && !result.text && text) result = { ...result, text };
-    return { text, result, aborted };
+    return { ok: true, text, result, aborted };
   }
 
   /**
@@ -1876,7 +2006,11 @@ export class AiDriverService {
       case 'human_control':
         return ['handback'];
       case 'awaiting_players':
-        // The full recovery set — the table must never be without a way forward.
+        // Provider failures (#560) surface retry + continue-without-AI first; the full recovery
+        // set remains so the table is never without a way forward.
+        if (session.stuck?.reason === 'provider_error') {
+          return ['retry', 'continue_without_ai', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
+        }
         return ['retry', 'nudge', 'flag', 'vote', 'rules_lookup', 'request_takeover', 'pause'];
       case 'running':
       default:
@@ -2028,6 +2162,31 @@ export class AiDriverService {
       detail: hint ? `nudge with hint by ${user.id}` : `retry by ${user.id}`,
     });
     return this.runTurn(campaignId, user, input);
+  }
+
+  /**
+   * Continue without the AI after a provider failure (#560). DMs grant themselves the acting-DM
+   * seat immediately; players file an advisory takeover request for a DM to grant.
+   */
+  async continueWithoutAi(campaignId: number, user: RequestUser, role: Role = 'player'): Promise<AiDmSessionState> {
+    const session = this.ensureSession(campaignId);
+    if (session.state !== 'awaiting_players' || session.stuck?.reason !== 'provider_error') {
+      throw new ConflictException(
+        'Continue without AI is only offered after an AI provider failure. Retry the turn or use another recovery lever.',
+      );
+    }
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'ai-dm.driver.continue_without_ai',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: `continue without AI requested by ${user.id}`,
+    });
+    if (roleAtLeast(role, 'dm')) {
+      return this.grantTakeover(campaignId, user, user.id, 'Continuing without AI after provider failure.', role);
+    }
+    return this.requestTakeover(campaignId, user, role);
   }
 
   /**
@@ -2296,6 +2455,7 @@ export class AiDriverService {
     session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
     session.status = 'paused'; // freeze the AI seat while a human holds it
     session.state = 'human_control';
+    session.stuck = null; // human control supersedes the stuck ladder (#560)
     session.takeoverRequestedBy = null;
     session.levers = this.leversFor(session);
     await this.audit.log({
@@ -2645,6 +2805,26 @@ export function summarizeToolArgs(args: Record<string, unknown> | undefined | nu
     parts.push(entry);
   }
   return parts.join(', ');
+}
+
+/**
+ * Resolve billable tokens for a provider step that failed mid-stream (#560). Uses reported
+ * provider usage when available; otherwise estimates from partial output. When neither is
+ * available, returns `unknown: true` so callers never assume zero usage.
+ */
+export function resolveProviderStepUsage(
+  text: string,
+  result: AiGenerateResult | undefined,
+): { tokens: number; unknown: boolean } {
+  const reported = result?.usage?.totalTokens ?? 0;
+  if (reported > 0) return { tokens: reported, unknown: false };
+  const outputText = text || result?.text || '';
+  const toolCalls = result?.toolCalls ?? [];
+  if (outputText.length > 0 || toolCalls.length > 0) {
+    const outputChars = outputText.length + JSON.stringify(toolCalls).length;
+    return { tokens: Math.max(1, Math.ceil(outputChars / 4)), unknown: false };
+  }
+  return { tokens: 0, unknown: true };
 }
 
 /**

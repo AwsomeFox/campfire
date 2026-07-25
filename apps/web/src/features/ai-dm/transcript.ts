@@ -37,12 +37,16 @@ export interface PlayerEntry {
   at: string;
 }
 
-/** Metadata closing a DM bubble at `turn.end`. */
+/** Metadata closing a DM bubble at `turn.end` / `turn.error`. */
 export interface DmTurnMeta {
   stopReason: string;
   steps: number;
   tokensUsed: number;
   budgetRemaining: number;
+  /** Provider failure with no meterable usage (#560). */
+  tokensUsageUnknown?: boolean;
+  /** Player-readable provider failure detail when stopReason is provider_error (#560). */
+  errorMessage?: string;
 }
 
 /**
@@ -214,23 +218,27 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       return { entries: next };
     }
 
+    case 'turn.error':
     case 'turn.end': {
       const idx = openBubbleIndex(entries);
       if (idx === -1) return state;
       const bubble = entries[idx] as DmEntry;
       const next = entries.slice();
+      const meta: DmTurnMeta = {
+        stopReason: event.stopReason,
+        steps: event.steps,
+        tokensUsed: event.tokensUsed,
+        budgetRemaining: event.budgetRemaining,
+        ...(event.tokensUsageUnknown ? { tokensUsageUnknown: true } : {}),
+        ...(event.type === 'turn.error' ? { errorMessage: event.message } : {}),
+      };
       next[idx] = {
         ...bubble,
         // Commit any trailing live deltas that never got a repairing message.
         committed: bubble.live ? [...bubble.committed, bubble.live] : bubble.committed,
         live: '',
         status: 'done',
-        meta: {
-          stopReason: event.stopReason,
-          steps: event.steps,
-          tokensUsed: event.tokensUsed,
-          budgetRemaining: event.budgetRemaining,
-        },
+        meta,
       };
       return { entries: next };
     }

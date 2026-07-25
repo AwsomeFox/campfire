@@ -95,7 +95,7 @@ export interface AiEvalHarness {
   /** POST a stuck-ladder lever (#314): nudge/flag/vote/rules-lookup/request-takeover/grant-takeover/handback/resume. */
   lever(
     campaignId: number,
-    lever: 'nudge' | 'flag' | 'vote' | 'rules-lookup' | 'request-takeover' | 'grant-takeover' | 'handback' | 'resume',
+    lever: 'nudge' | 'flag' | 'vote' | 'rules-lookup' | 'request-takeover' | 'grant-takeover' | 'handback' | 'resume' | 'continue-without-ai',
     body?: Record<string, unknown>,
     headers?: Record<string, string>,
   ): Promise<request.Response>;
