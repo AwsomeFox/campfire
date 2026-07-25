@@ -1565,8 +1565,6 @@ export default function RunSessionPage() {
         </div>
       )}
 
-<<<<<<< HEAD
-=======
       {/* AI-DM driver dock (#427): transcript + composer + recovery without leaving tracker. */}
       {liveActivity.mode === 'driver' && encounter && (
         <EncounterAiDriverPanel
@@ -1578,8 +1576,6 @@ export default function RunSessionPage() {
         />
       )}
 
-      {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
->>>>>>> origin/main
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
       )}
