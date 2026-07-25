@@ -4,6 +4,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { RoleAccessModule } from '../membership/role-access.module';
 import { NotesModule } from '../notes/notes.module';
 import { EncountersModule } from '../encounters/encounters.module';
+import { RollsModule } from '../rolls/rolls.module';
 import { ProposalRecordsModule } from '../proposals/proposal-records.module';
 import { AiProviderConfigModule } from '../ai-provider-config/ai-provider-config.module';
 import { AiDmModule } from '../ai-dm/ai-dm.module';
@@ -27,6 +28,7 @@ import { SessionZeroModule } from '../session-zero/session-zero.module';
     RoleAccessModule,
     NotesModule,
     EncountersModule,
+    RollsModule,
     ProposalRecordsModule,
     AiProviderConfigModule,
     AiDmModule,

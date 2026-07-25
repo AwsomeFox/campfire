@@ -73,4 +73,26 @@ describe('sessions — buildRecapDraft', () => {
     const s = source({ encounters: [encounter('A', 'ended', ['X'])] });
     expect(buildRecapDraft(s)).toBe(buildRecapDraft(s));
   });
+
+  it('appends dice log highlights including physical rolls (issue #673)', () => {
+    const draft = buildRecapDraft(
+      source({
+        diceRolls: [
+          {
+            label: 'Perception',
+            actor: 'Scout',
+            rollerName: 'DM',
+            total: 19,
+            dc: 15,
+            success: true,
+            natural20: 17,
+            source: 'manual',
+            createdAt: '2026-07-23T12:00:00.000Z',
+          },
+        ],
+      }),
+    );
+    expect(draft).toContain('## Dice log highlights');
+    expect(draft).toContain('Scout: Perception physical 19 vs DC 15 — pass (nat 17)');
+  });
 });

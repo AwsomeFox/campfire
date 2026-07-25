@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { and, asc, desc, eq, inArray, ne, sql, count } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SessionCreate, SessionUpdate, RECAP_TEMPLATE } from '@campfire/schema';
-import type { Session, SessionListItem, SessionListPage, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams } from '@campfire/schema';
+import type { Session, SessionListItem, SessionListPage, SessionAttendee, Role, Note, EncounterWithCombatants, EncounterEvent, PageParams, DiceRoll } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { sessions, sessionAttendees, characters, campaigns } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -57,6 +57,9 @@ export interface RecapDraftSource {
   // fight, not just who was in it. Optional so pure buildRecapDraft callers/tests that only
   // seed the roster line stay valid; assembled sources (scribe + draft_session_recap) carry it.
   encounters: (Pick<EncounterWithCombatants, 'name' | 'status' | 'combatants'> & { events?: EncounterEvent[] })[];
+  // Issue #673: paper-table / physical rolls logged during play — honest totals without
+  // fabricated dice — so recap drafts can mention notable off-screen checks.
+  diceRolls?: Pick<DiceRoll, 'label' | 'actor' | 'rollerName' | 'total' | 'dc' | 'success' | 'natural20' | 'source' | 'createdAt'>[];
 }
 
 /** One line summarising an encounter for the Recap section seed. */
@@ -64,6 +67,16 @@ function encounterLine(e: RecapDraftSource['encounters'][number]): string {
   const foes = e.combatants.filter((c) => c.kind === 'monster').map((c) => c.name);
   const foeText = foes.length ? ` vs ${foes.join(', ')}` : '';
   return `- ${e.name}${foeText}`;
+}
+
+function diceRollLine(r: NonNullable<RecapDraftSource['diceRolls']>[number]): string {
+  const who = r.actor?.trim() || r.rollerName?.trim() || 'Unknown';
+  const label = r.label?.trim() ? `${r.label.trim()} ` : '';
+  const nat = r.natural20 != null ? ` (nat ${r.natural20})` : '';
+  const dc =
+    r.dc != null ? ` vs DC ${r.dc}${r.success != null ? (r.success ? ' — pass' : ' — fail') : ''}` : '';
+  const kind = r.source === 'manual' ? 'physical' : 'rolled';
+  return `- ${who}: ${label}${kind} ${r.total}${dc}${nat}`;
 }
 
 /**
@@ -96,6 +109,16 @@ export function buildRecapDraft(source: RecapDraftSource): string {
       '<!-- Source notes (from resolved player inbox items) — weave the relevant ones into the recap, then delete this block. -->\n' +
       '## Threads resolved this session\n\n' +
       threads.join('\n') +
+      '\n';
+  }
+
+  const rolls = source.diceRolls ?? [];
+  if (rolls.length) {
+    draft +=
+      '\n\n---\n\n' +
+      '<!-- Dice log (including physical/off-screen rolls) — weave notable results into the recap, then delete this block. -->\n' +
+      '## Dice log highlights\n\n' +
+      rolls.map(diceRollLine).join('\n') +
       '\n';
   }
   return draft;
