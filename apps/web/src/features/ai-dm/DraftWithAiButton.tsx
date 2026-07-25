@@ -122,12 +122,15 @@ export function DraftWithAiButton({
       {showTrigger && (
         <Btn
           ghost
-          className={className}
-          onClick={() => setOpen(true)}
+          className={`${className}${disabled ? ' opacity-50 cursor-not-allowed' : ''}`}
+          onClick={() => {
+            if (disabled) return;
+            setOpen(true);
+          }}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-controls={dialogId}
-          disabled={disabled}
+          aria-disabled={disabled || undefined}
           title={disabled ? disabledTitle : undefined}
         >
           <GameIcon slug="sparkles" size={12} className="inline align-text-bottom mr-1" />{label}

@@ -217,7 +217,8 @@ export default function StorylinesPage() {
     return map;
   }, [arcs]);
 
-  const hasStoryContent = arcs.length > 0;
+  // Disable the header affordance while arcs are loading or once any arc exists (#1307).
+  const disableHeaderDraft = loading || arcs.length > 0;
 
   const createArc = async () => {
     const title = newArcTitle.trim();
@@ -274,7 +275,7 @@ export default function StorylinesPage() {
           campaignId={cid}
           target="beat"
           label="Draft a beat with AI"
-          disabled={hasStoryContent}
+          disabled={disableHeaderDraft}
           disabledTitle="Use the per-arc Draft beat with AI button once you have story arcs."
         />
       </div>

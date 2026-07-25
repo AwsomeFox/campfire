@@ -16,7 +16,7 @@ test.describe('Storylines draft-a-beat IA (issue #639 / #1307)', () => {
       await page.goto(`/c/${campaignId}/storylines`);
 
       const headerTrigger = page.getByRole('button', { name: 'Draft a beat with AI' });
-      await expect(headerTrigger).toBeDisabled();
+      await expect(headerTrigger).toHaveAttribute('aria-disabled', 'true');
       await expect(headerTrigger).toHaveAttribute(
         'title',
         'Use the per-arc Draft beat with AI button once you have story arcs.',
@@ -27,7 +27,9 @@ test.describe('Storylines draft-a-beat IA (issue #639 / #1307)', () => {
       await page.getByRole('button', { name: '+ New arc' }).click();
       await expect(page.getByRole('heading', { name: arcTitle, level: 2 })).toBeVisible();
 
-      const arcTrigger = page.getByRole('button', { name: 'Draft beat with AI' });
+      const arcTrigger = page
+        .getByLabel(arcTitle, { exact: true })
+        .getByRole('button', { name: 'Draft beat with AI' });
       await expect(arcTrigger).toBeVisible();
       await arcTrigger.click();
       const dialog = page.getByRole('dialog', { name: 'Draft a story beat with AI' });

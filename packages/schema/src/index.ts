@@ -4756,7 +4756,7 @@ export const CoDmDraftRequest = z.object({
   target: CoDmDraftTarget,
   // Free-text brief for the model, e.g. "a shady fence tied to the thieves guild".
   prompt: z.string().min(1).max(20_000),
-  // How many drafts to produce (npc/location/beat only; ignored for recap/encounter/map).
+  // How many drafts to produce (npc/location/beat/quest/faction; ignored for recap/encounter/map).
   count: z.number().int().min(1).max(10).optional(),
   // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
   arcId: Id.optional(),

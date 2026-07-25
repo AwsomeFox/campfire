@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -20,7 +21,7 @@ import {
 } from '@campfire/schema';
 import type { CoDmDraftRequest, CoDmDraftResult, CoDmDraftTarget, Proposal, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { aiDmSeats } from '../../db/schema';
+import { aiDmSeats, storyArcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { auditActor, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -114,6 +115,16 @@ export class CoDmService {
     await this.aiDm.assertWithinServerTokenCap();
 
     const count = MULTI_TARGETS.has(input.target) ? input.count ?? 1 : 1;
+    if (input.target === 'beat' && input.arcId != null) {
+      const [arc] = await this.db
+        .select({ campaignId: storyArcs.campaignId })
+        .from(storyArcs)
+        .where(eq(storyArcs.id, input.arcId))
+        .limit(1);
+      if (!arc || arc.campaignId !== campaignId) {
+        throw new BadRequestException(`Story arc ${input.arcId} does not belong to this campaign`);
+      }
+    }
     const maxTokens = Math.min(DRAFT_MAX_TOKENS, remaining);
 
     // Issue #564: the executable model derives ONLY from the effective provider config

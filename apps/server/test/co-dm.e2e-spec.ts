@@ -128,6 +128,21 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
     expect(after.body.beats[0].body).toContain('city gate');
   });
 
+  it('rejects beat drafts that target an arc from another campaign', async () => {
+    const otherCampaignId = await h.createCampaign('Other Campaign');
+    await h.configureSeat(otherCampaignId, { model: 'eval-model', tokenBudget: 1_000_000 });
+    const otherArc = await request(h.server)
+      .post(`/api/v1/campaigns/${otherCampaignId}/arcs`)
+      .set(dm)
+      .send({ title: 'Foreign arc' });
+    expect(otherArc.status).toBe(201);
+
+    h.script({ text: JSON.stringify({ title: 'Sneaky beat', body: 'Should not land.' }) });
+    const res = await draft({ target: 'beat', prompt: 'the next beat', arcId: otherArc.body.id });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('does not belong to this campaign');
+  });
+
   it('drafts an encounter (reusing #304) — proposal carries seeded params; approve creates it', async () => {
     const before = await request(h.server).get(`/api/v1/campaigns/${campaignId}/encounters`).set(dm);
     const beforeCount = before.body.length;

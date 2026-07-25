@@ -217,6 +217,13 @@ export class ProposalsService {
             if (resolvedArcId == null) {
               const arc = await this.storylines.createArc(campaignId, { title: 'Story arc' }, user, role);
               resolvedArcId = arc.id;
+            } else {
+              const arc = await this.storylines.getArcRowOrThrow(resolvedArcId);
+              if (arc.campaignId !== campaignId) {
+                throw new BadRequestException(
+                  `Story arc ${resolvedArcId} does not belong to campaign ${campaignId}`,
+                );
+              }
             }
             return this.storylines.addBeat(resolvedArcId, beatInput, user, role);
           },
