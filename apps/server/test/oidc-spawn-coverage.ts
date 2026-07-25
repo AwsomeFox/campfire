@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { CoverageMapData, FileCoverageData } from 'istanbul-lib-coverage';
-import libCoverage from 'istanbul-lib-coverage';
 
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const MERGE_WORKER = path.join(__dirname, 'oidc-v8-merge-worker.cjs');
@@ -73,12 +72,10 @@ function applyMergedCoverage(incoming: CoverageMapData): void {
   if (!globalObject.__coverage__) {
     globalObject.__coverage__ = {};
   }
-  const coverageMap = libCoverage.createCoverageMap(globalObject.__coverage__);
-  coverageMap.merge(incoming);
-  for (const file of Object.keys(incoming)) {
-    globalObject.__coverage__[file] = coverageMap
-      .fileCoverageFor(file)
-      .toJSON() as FileCoverageData;
+  // Replace per-file entries wholesale — merging v8-to-istanbul into babel-istanbul
+  // produces incompatible structures that break source-map replay (column -1).
+  for (const [file, entry] of Object.entries(incoming)) {
+    globalObject.__coverage__[file] = entry;
   }
 }
 
