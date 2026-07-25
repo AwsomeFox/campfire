@@ -943,6 +943,8 @@ export const encounters = sqliteTable('encounters', {
   // the DM reveals it. Added by migration on older DBs (see db/db.module.ts).
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   endedAt: text('ended_at'),
+  // Issue #473: DM deferred the post-encounter aftermath panel (idempotent resume).
+  aftermathDismissedAt: text('aftermath_dismissed_at'),
   // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),

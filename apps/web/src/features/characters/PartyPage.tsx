@@ -70,6 +70,7 @@ export default function PartyPage() {
   // remains available from the campaign Trash. Only one undo is outstanding at a time.
   const [pendingUndo, setPendingUndo] = useState<Character | null>(null);
   const awardXpRequested = searchParams.get('action') === 'award-xp';
+  const suggestedXpAmount = searchParams.get('amount');
   // Keep the URL authoritative so Back/Forward closes and reopens the deep-linked
   // form instead of leaving local state out of sync with browser history.
   const awarding = canDmWrite && awardXpRequested;
@@ -174,6 +175,7 @@ export default function PartyPage() {
         <AwardXpForm
           campaignId={id}
           characters={characters}
+          initialAmount={suggestedXpAmount}
           onCancel={() => setAwardingOpen(false)}
           onAwarded={() => {
             setAwardingOpen(false);
@@ -411,16 +413,22 @@ function QuickHp({ character, onChange }: { character: Character; onChange: () =
 function AwardXpForm({
   campaignId,
   characters,
+  initialAmount,
   onCancel,
   onAwarded,
 }: {
   campaignId: number;
   characters: Character[];
+  initialAmount?: string | null;
   onCancel: () => void;
   onAwarded: () => void;
 }) {
   const amountInputRef = useRef<HTMLInputElement>(null);
-  const [amount, setAmount] = useState('');
+  const [amount, setAmount] = useState(() => {
+    if (!initialAmount) return '';
+    const n = Number(initialAmount);
+    return Number.isInteger(n) && n >= 1 ? String(n) : '';
+  });
   const [includeNonActive, setIncludeNonActive] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(
     () => new Set(characters.filter((character) => character.status === 'active').map((character) => character.id)),

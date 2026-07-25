@@ -1137,6 +1137,33 @@ export class McpToolsService {
 
     this.tool(
       server,
+      'get_encounter_aftermath',
+      'DM only: post-encounter aftermath workflow (issue #473). For an ENDED encounter, returns outcome tallies, a ' +
+        'recap draft seeded from the combat log, adapter-aware XP guidance, and deep-link hand-offs to loot/treasury, ' +
+        'quest objectives, and session recap surfaces. Read-only.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.getAftermath(encounterId as number, role);
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'dismiss_encounter_aftermath',
+      'DM only: defer/skip the post-encounter aftermath panel (issue #473). Idempotent — safe to retry. Cleared when the encounter is reopened.',
+      { encounterId: Id.describe('Encounter id — from list_encounters') },
+      async ({ encounterId }) => {
+        const row = await this.encounters.getRowOrThrow(encounterId as number);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.encounters.dismissAftermath(encounterId as number, user, role);
+      },
+    );
+
+    this.tool(
+      server,
       'list_encounter_events',
       'List an encounter\'s persistent combat log (issue #1068) — the round-by-round event trail of damage, healing, ' +
         'conditions, deaths, rolls, turns, notes, and DM overrides/corrections, in chronological (insertion) order. ' +

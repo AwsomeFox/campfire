@@ -54,6 +54,7 @@ import {
   shouldInvalidateInlineCharacters,
 } from './inlineCharacterCards';
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
+import { EncounterAftermathPanel } from './EncounterAftermathPanel';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
 import { useAuth } from '../../app/auth';
@@ -1548,9 +1549,8 @@ export default function RunSessionPage() {
         </div>
       )}
 
-      {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
       {canDmWrite && encounter.status === 'ended' && (
-        <EncounterNextSteps campaignId={cid} sessionId={encounter.sessionId} />
+        <EncounterAftermathPanel campaignId={cid} encounterId={eid} />
       )}
 
       <EncounterLinks
@@ -5031,7 +5031,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
   }, [events]);
 
   return (
-    <Card className="space-y-2">
+    <Card className="space-y-2" id="combat-log">
       <h2 id={headingId} className="card-kicker" style={{ margin: 0 }}>Combat log</h2>
       <div
         ref={logRef}
@@ -5094,84 +5094,6 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
           </ol>
         )}
       </div>
-    </Card>
-  );
-}
-
-function EndedSummary({ encounter }: { encounter: EncounterWithCombatants }) {
-  // Issue #492: split the old "Fallen" tally — dead/defeated vs downed (dying/stable PCs).
-  const { dead, downed, survivors } = endedSummaryTallies(encounter.combatants);
-  return (
-    <Card>
-      <span className="card-kicker">Summary</span>
-      <div className="flex gap-4 flex-wrap" style={{ fontSize: 13.5 }}>
-        <span>
-          Rounds: <b>{encounter.round}</b>
-        </span>
-        <span>
-          Dead: <b>{dead.length}</b>
-          {dead.length > 0 && <span className="text-muted"> ({dead.map((c) => c.name).join(', ')})</span>}
-        </span>
-        <span>
-          Downed: <b>{downed.length}</b>
-          {downed.length > 0 && <span className="text-muted"> ({downed.map((c) => c.name).join(', ')})</span>}
-        </span>
-        <span>
-          Survivors: <b>{survivors.length}</b>
-        </span>
-      </div>
-    </Card>
-  );
-}
-
-/**
- * A deliberately small hand-off into existing post-session surfaces. This is not an
- * aftermath workflow: it stores no state and creates no new domain actions. Links are
- * DM-only because recap authoring and party-wide XP awards are DM capabilities, and a
- * session-specific destination is only rendered when the encounter actually has one.
- */
-function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; sessionId: number | null }) {
-  const sessionsPath = `/c/${campaignId}/sessions`;
-  const recapPath =
-    sessionId == null
-      ? `${sessionsPath}?action=new-recap`
-      : `${sessionsPath}?session=${sessionId}&action=edit-recap`;
-
-  return (
-    <Card density="comfortable" className="space-y-3" aria-labelledby="encounter-next-heading">
-      <div className="space-y-1">
-        <h2 id="encounter-next-heading" className="text-sm font-bold text-white m-0">
-          Next
-        </h2>
-        <p className="text-xs text-slate-400 m-0">Wrap up the table while the encounter is still fresh.</p>
-      </div>
-      <nav
-        aria-label="Post-encounter next steps"
-        className={`grid grid-cols-1 gap-2 ${sessionId == null ? 'sm:grid-cols-2' : 'sm:grid-cols-3'}`}
-      >
-        <Link to={recapPath} className="btn btn-primary min-w-0 min-h-11 flex-col !items-start text-left">
-          <span className="font-semibold">Write recap</span>
-          <span className="text-[11px] text-muted font-normal">
-            {sessionId == null ? 'Create a session recap.' : 'Edit the linked session recap.'}
-          </span>
-        </Link>
-        <Link
-          to={`/c/${campaignId}/party?action=award-xp`}
-          className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left"
-        >
-          <span className="font-semibold">Award XP</span>
-          <span className="text-[11px] text-muted font-normal">Open the party XP form.</span>
-        </Link>
-        {sessionId != null && (
-          <Link
-            to={`${sessionsPath}?session=${sessionId}`}
-            className="btn btn-secondary min-w-0 min-h-11 flex-col !items-start text-left"
-          >
-            <span className="font-semibold">Open linked session</span>
-            <span className="text-[11px] text-muted font-normal">Review its details and recap.</span>
-          </Link>
-        )}
-      </nav>
     </Card>
   );
 }

@@ -40,7 +40,8 @@ import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
 import { localDateInputValue, millisecondsUntilNextLocalDate } from '../../lib/dateOnly';
 import {
-  assertMutationTarget,
+  consumeEncounterAftermathRecap,
+} from '../encounters/encounterAftermathHandoff';
   decideRouteBoundCommit,
   mutationsEnabledForRoute,
   RouteBoundLoadSequencer,
@@ -84,6 +85,11 @@ export default function SessionsPage() {
 
   const selectedId = searchParams.get('session');
   const recapAction = searchParams.get('action');
+  const fromEncounterId = Number(searchParams.get('fromEncounter'));
+  const aftermathRecapSeed =
+    Number.isFinite(fromEncounterId) && fromEncounterId > 0
+      ? consumeEncounterAftermathRecap(cid, fromEncounterId)
+      : null;
   const tab: 'log' | 'schedule' = searchParams.get('tab') === 'schedule' ? 'schedule' : 'log';
   const { secondaryAction: draftAction, draftDialog } = usePageHeaderDraftWithAi({
     campaignId: cid,
@@ -581,6 +587,7 @@ export default function SessionsPage() {
               session={selected}
               campaignId={cid}
               startEditing={recapAction === 'edit-recap'}
+              seedRecap={aftermathRecapSeed}
               onEditActionHandled={clearRecapAction}
               onBack={backToList}
               onChange={load}
@@ -601,6 +608,7 @@ export default function SessionsPage() {
             <AddRecapForm
               campaignId={cid}
               nextNumber={nextNumber()}
+              seedRecap={aftermathRecapSeed}
               onCreated={(created) => {
                 setShowAddForm(false);
                 setSearchParams(
@@ -645,6 +653,7 @@ function SessionDetail({
   session,
   campaignId,
   startEditing,
+  seedRecap,
   onEditActionHandled,
   onBack,
   onChange,
@@ -655,6 +664,8 @@ function SessionDetail({
   campaignId: number;
   /** Open the existing recap editor when arriving from a post-encounter deep link. */
   startEditing: boolean;
+  /** Recap body seeded from an encounter aftermath hand-off (issue #473). */
+  seedRecap?: string | null;
   /** Removes the one-shot URL action after save/cancel so refresh does not reopen it. */
   onEditActionHandled: () => void;
   onBack: () => void;
@@ -717,12 +728,14 @@ function SessionDetail({
         setTitleDraft(decision.record.title);
         setDateDraft(toDateInputValue(decision.record.playedAt));
         setRecap(decision.record.recap);
-        setRecapDraft(decision.record.recap);
+        const seededRecap =
+          seedRecap && startEditing && !decision.record.recap.trim() ? seedRecap : decision.record.recap;
+        setRecapDraft(seededRecap);
         setRecapBaseline(
           recapEditorDraftFromSession({
             title: decision.record.title,
             playedAt: decision.record.playedAt,
-            recap: decision.record.recap,
+            recap: seededRecap,
           }),
         );
         setLoadedUpdatedAt(decision.record.updatedAt);
@@ -1564,11 +1577,13 @@ function ShareRow({
 function AddRecapForm({
   campaignId,
   nextNumber,
+  seedRecap,
   onCreated,
   onCancel,
 }: {
   campaignId: number;
   nextNumber: number;
+  seedRecap?: string | null;
   onCreated: (session: Session) => void;
   onCancel?: () => void;
 }) {
@@ -1578,7 +1593,7 @@ function AddRecapForm({
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
   const dateWasEdited = useRef(false);
   const dateFieldFocusedRef = useRef(false);
-  const [recap, setRecap] = useState('');
+  const [recap, setRecap] = useState(() => seedRecap ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});

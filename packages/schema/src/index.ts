@@ -67,6 +67,8 @@ export type Role = z.infer<typeof Role>;
 export const Id = z.number().int().positive();
 export const IsoDate = z.string(); // ISO-8601, server-assigned
 
+export * from './encounter-aftermath';
+
 const timestamps = {
   createdAt: IsoDate,
   updatedAt: IsoDate,

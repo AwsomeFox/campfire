@@ -1108,6 +1108,18 @@ function migrateEncountersTableForHidden(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE encounters ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
+function migrateEncountersTableForAftermathDismissed(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'aftermath_dismissed_at')) return;
+
+  sqlite.exec('ALTER TABLE encounters ADD COLUMN aftermath_dismissed_at TEXT');
+}
+
 /** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
 function migrateEncountersTableForBossTurnPhase(sqlite: Database.Database): void {
   const hasEncountersTable = sqlite
@@ -2658,6 +2670,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
   { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
+  { name: '0098_encounters_aftermath_dismissed', run: migrateEncountersTableForAftermathDismissed },
 ];
 
 /**
