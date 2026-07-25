@@ -2008,6 +2008,22 @@ function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): vo
 }
 
 /**
+ * Issue #423: `combatants.condition_instances` stores structured condition instances
+ * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
+ * Plain nullable ADD COLUMN — no table rebuild.
+ */
+function migrateCombatantsTableForConditionInstances(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'condition_instances')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN condition_instances TEXT');
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2423,6 +2439,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
+  { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
 ];
 
 /**

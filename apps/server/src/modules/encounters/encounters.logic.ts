@@ -12,6 +12,7 @@ import type {
   Combatant,
   CombatantKind,
   CombatantTurnState,
+  ConditionInstance,
   DeathState,
   DifficultyBand,
   EncounterDifficulty,
@@ -694,6 +695,88 @@ export function tickEffectsAtTurnEnd(effects: ActiveEffect[]): EffectTickResult 
   return { kept, expired };
 }
 
+export interface ConditionTickResult {
+  kept: ConditionInstance[];
+  expired: ConditionInstance[];
+}
+
+/**
+ * Tick a combatant's condition instances at turn end (issue #423).
+ */
+export function tickConditionInstancesAtTurnEnd(instances: ConditionInstance[]): ConditionTickResult {
+  const kept: ConditionInstance[] = [];
+  const expired: ConditionInstance[] = [];
+  for (const c of instances) {
+    if (c.roundsRemaining === null || c.timing === 'start-of-turn') {
+      kept.push(c);
+      continue;
+    }
+    const remaining = c.roundsRemaining - 1;
+    if (remaining <= 0) {
+      expired.push(c);
+    } else {
+      kept.push({ ...c, roundsRemaining: remaining });
+    }
+  }
+  return { kept, expired };
+}
+
+/**
+ * Tick a combatant's condition instances at turn start (issue #423).
+ */
+export function tickConditionInstancesAtTurnStart(instances: ConditionInstance[]): ConditionTickResult {
+  const kept: ConditionInstance[] = [];
+  const expired: ConditionInstance[] = [];
+  for (const c of instances) {
+    if (c.roundsRemaining === null || c.timing !== 'start-of-turn') {
+      kept.push(c);
+      continue;
+    }
+    const remaining = c.roundsRemaining - 1;
+    if (remaining <= 0) {
+      expired.push(c);
+    } else {
+      kept.push({ ...c, roundsRemaining: remaining });
+    }
+  }
+  return { kept, expired };
+}
+
+export interface ConcentrationCascadeResult {
+  updatedCombatants: Map<number, ConditionInstance[]>;
+  removed: { combatantId: number; condition: ConditionInstance }[];
+}
+
+/**
+ * When a combatant loses concentration, remove all concentration-linked condition instances
+ * (isConcentration === true && sourceCombatantId === casterCombatantId) across all combatants in the fight (issue #423).
+ */
+export function cascadeConcentrationLoss(
+  combatants: Array<{ id: number; conditionInstances: ConditionInstance[] }>,
+  casterCombatantId: number,
+): ConcentrationCascadeResult {
+  const updatedCombatants = new Map<number, ConditionInstance[]>();
+  const removed: { combatantId: number; condition: ConditionInstance }[] = [];
+
+  for (const combatant of combatants) {
+    const kept: ConditionInstance[] = [];
+    let changed = false;
+    for (const cond of combatant.conditionInstances ?? []) {
+      if (cond.isConcentration && cond.sourceCombatantId === casterCombatantId) {
+        removed.push({ combatantId: combatant.id, condition: cond });
+        changed = true;
+      } else {
+        kept.push(cond);
+      }
+    }
+    if (changed) {
+      updatedCombatants.set(combatant.id, kept);
+    }
+  }
+
+  return { updatedCombatants, removed };
+}
+
 /** Minimal combatant slice the prompt derivation reads (avoids importing the full domain type). */
 export interface TurnPromptCombatant {
   id: number;
@@ -701,14 +784,13 @@ export interface TurnPromptCombatant {
   kind: CombatantKind;
   deathState: DeathState;
   activeEffects: ActiveEffect[];
+  conditionInstances?: ConditionInstance[];
   turnState: CombatantTurnState;
 }
 
 /**
- * Derive the START-of-turn prompts for a combatant (issue #413): a death save for a dying PC,
- * an ongoing-damage tick, a regeneration heal, and any start-of-turn repeat save. Pure and
- * name-safe (message never embeds another combatant's hidden identity). Ongoing HP ticks are
- * surfaced as prompts (not auto-applied) so the DM/owner stays in control of the roll/amount.
+ * Derive the START-of-turn prompts for a combatant (issue #413, #423): a death save for a dying PC,
+ * ongoing damage/regen, and start-of-turn repeat saves for active effects and condition instances.
  */
 export function deriveStartTurnPrompts(c: TurnPromptCombatant): TurnPrompt[] {
   const prompts: TurnPrompt[] = [];
@@ -759,6 +841,21 @@ export function deriveStartTurnPrompts(c: TurnPromptCombatant): TurnPrompt[] {
         message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name}.`,
         effectId: e.id,
       });
+    }
+  }
+  if (c.conditionInstances) {
+    for (const cond of c.conditionInstances) {
+      if (cond.saveTiming === 'start-of-turn' && cond.saveAbility) {
+        prompts.push({
+          id: `repeat-save-cond:start:${c.id}:${cond.id}`,
+          kind: 'repeat-save',
+          timing: 'start',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: `Repeat ${cond.saveAbility}${cond.saveDc != null ? ` DC ${cond.saveDc}` : ''} save against ${cond.name}.`,
+          effectId: cond.id,
+        });
+      }
     }
   }
   return prompts;
@@ -815,6 +912,32 @@ export function deriveEndTurnPrompts(c: TurnPromptCombatant, slots: readonly Act
           combatantName: c.name,
           message: `Repeat ${e.saveAbility}${e.saveDc != null ? ` DC ${e.saveDc}` : ''} save against ${e.name} (save ends).`,
           effectId: e.id,
+        });
+      }
+    }
+  }
+  if (c.conditionInstances) {
+    for (const cond of c.conditionInstances) {
+      if (cond.roundsRemaining !== null && cond.roundsRemaining <= 1) {
+        prompts.push({
+          id: `expiring-cond:${c.id}:${cond.id}`,
+          kind: 'expiring-effect',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: `Condition ${cond.name}${cond.stacks > 1 ? ` (×${cond.stacks})` : ''} expires at the end of this turn.`,
+          effectId: cond.id,
+        });
+      }
+      if (cond.saveTiming === 'end-of-turn' && cond.saveAbility) {
+        prompts.push({
+          id: `repeat-save-cond:end:${c.id}:${cond.id}`,
+          kind: 'repeat-save',
+          timing: 'end',
+          combatantId: c.id,
+          combatantName: c.name,
+          message: `Repeat ${cond.saveAbility}${cond.saveDc != null ? ` DC ${cond.saveDc}` : ''} save against ${cond.name} (save ends).`,
+          effectId: cond.id,
         });
       }
     }

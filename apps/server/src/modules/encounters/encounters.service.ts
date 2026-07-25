@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter } from '@campfire/schema';
 import { z as zod } from 'zod';
 import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -24,6 +24,7 @@ import {
   advanceTurn,
   applyCombatantHp,
   buildEncounterRoster,
+  cascadeConcentrationLoss,
   crToXp,
   deriveEncounterRosterWarnings,
   deriveEndTurnPrompts,
@@ -34,6 +35,8 @@ import {
   resetTurnStateForStart,
   retreatTurn,
   sortCombatants,
+  tickConditionInstancesAtTurnEnd,
+  tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
   turnIndexFor,
   UNKNOWN_COMBATANT_LABEL,
@@ -159,11 +162,45 @@ function combatantToDomain(row: typeof combatants.$inferSelect): Combatant {
     tokenY: row.tokenY,
     tokenSize: row.tokenSize as TokenSize,
     tokenHiddenByFog: false,
-    // Issue #413: current-turn workspace state. Corrupt/legacy JSON degrades to the
-    // defaults (EMPTY_TURN_STATE / []) rather than failing the whole combatant read.
+    // Issue #413, #423: current-turn workspace state, active effects, and condition instances.
     turnState: parseTurnState(row.turnState),
     activeEffects: parseActiveEffects(row.activeEffects),
+    conditionInstances: parseConditionInstances(row.conditionInstances, fromJsonText<string[]>(row.conditions, [])),
   };
+}
+
+/** Parse stored condition instances JSON or synthesize default instances from legacy conditions array (issue #423). */
+function parseConditionInstances(text: string | null, stringConditions: string[] = []): ConditionInstance[] {
+  let instances: ConditionInstance[] = [];
+  if (text != null) {
+    const parsed = zod.array(ConditionInstance).safeParse(fromJsonText<unknown>(text, null));
+    if (parsed.success) instances = parsed.data;
+  }
+  if (stringConditions.length > 0) {
+    const existingNames = new Set(instances.map((i) => i.name.toLowerCase()));
+    for (const name of stringConditions) {
+      if (!existingNames.has(name.toLowerCase())) {
+        instances.push({
+          id: `cond_${Math.random().toString(36).slice(2, 10)}`,
+          name,
+          ruleEntryId: null,
+          source: null,
+          sourceCombatantId: null,
+          durationRounds: null,
+          roundsRemaining: null,
+          timing: 'none',
+          saveTiming: 'none',
+          saveDc: null,
+          saveAbility: null,
+          isConcentration: false,
+          stacks: 1,
+          notes: '',
+          custom: false,
+        });
+      }
+    }
+  }
+  return instances;
 }
 
 /**

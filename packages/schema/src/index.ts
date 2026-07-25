@@ -379,6 +379,15 @@ export const SpellSlotLevel = z.object({
 });
 export type SpellSlotLevel = z.infer<typeof SpellSlotLevel>;
 
+/** Bounded resource pool on a character sheet (issue #422). */
+export const CharacterResource = z.object({
+  max: z.number().int().min(0).max(100),
+  used: z.number().int().min(0).max(100).default(0),
+  name: z.string().max(80).optional(),
+  recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']).optional(),
+});
+export type CharacterResource = z.infer<typeof CharacterResource>;
+
 export const Character = z.object({
   id: Id,
   campaignId: Id,
@@ -423,6 +432,7 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
+  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -2402,6 +2412,52 @@ export interface RuleSystemAdapter {
    * identical by construction and no surface reinvents proficiency math.
    */
   buildCheckCatalog?(character: CheckCatalogCharacter): RollCheckDefinition[];
+  /** Standard system resource vocabulary for this rule system (issue #422). */
+  readonly resources?: readonly AdapterResourceDef[];
+}
+
+/** Standard system resource pool definition (issue #422). */
+export const AdapterResourceDef = z.object({
+  key: z.string().min(1).max(80),
+  name: z.string().min(1).max(80),
+  recharge: z.enum(['short-rest', 'long-rest', 'refocus', 'dawn', 'turn-start', 'special']),
+  defaultMax: z.number().int().min(0).max(100).optional(),
+});
+export type AdapterResourceDef = z.infer<typeof AdapterResourceDef>;
+
+/**
+ * Resolves the combined resource vocabulary for a character under a rule system adapter (issue #422).
+ * Combines system-standard resource definitions (from the adapter) and custom character resources.
+ */
+export function resourceVocabularyForAdapter(
+  adapter: RuleSystemAdapter,
+  character?: { resources?: Record<string, { max?: number; used?: number; name?: string; recharge?: string }> },
+): AdapterResourceDef[] {
+  const result: AdapterResourceDef[] = [];
+  const seenKeys = new Set<string>();
+
+  if (adapter.resources) {
+    for (const r of adapter.resources) {
+      result.push(r);
+      seenKeys.add(r.key);
+    }
+  }
+
+  if (character?.resources) {
+    for (const [key, res] of Object.entries(character.resources)) {
+      if (!seenKeys.has(key)) {
+        result.push({
+          key,
+          name: res.name || key,
+          recharge: (res.recharge as AdapterResourceDef['recharge']) || 'long-rest',
+          defaultMax: res.max,
+        });
+        seenKeys.add(key);
+      }
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -2457,6 +2513,13 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  resources: [
+    { key: 'hitDice', name: 'Hit Dice', recharge: 'long-rest' },
+    { key: 'rage', name: 'Rage', recharge: 'long-rest' },
+    { key: 'actionSurge', name: 'Action Surge', recharge: 'short-rest' },
+    { key: 'kiPoints', name: 'Focus / Ki Points', recharge: 'short-rest' },
+    { key: 'recharge', name: 'Recharge Feature', recharge: 'turn-start' },
+  ],
   // 5e caps character level at 20 (PHB). The cap lives here, not hardcoded in `levelUp`, so a
   // non-5e system enforces its own ceiling (issue #535): 13th Age (10), an uncapped OSR game, etc.
   maxLevel: 20,
@@ -3460,6 +3523,10 @@ export const Pf2eAdapter: Pf2eRuleSystemAdapter = {
     return Math.floor((score - 10) / 2);
   },
   initiativeDie: 20,
+  resources: [
+    { key: 'focusPoints', name: 'Focus Points', recharge: 'refocus', defaultMax: 3 },
+    { key: 'hitDice', name: 'Hit Dice / Stamina', recharge: 'long-rest' },
+  ],
   // PF2e characters cap at level 20 (Core Rulebook), the same ceiling as 5e.
   maxLevel: 20,
   // PF2e awards 1,000 XP per level; cumulative total at level n is (n-1)×1,000 (issue #441).
@@ -6201,6 +6268,43 @@ export const ActiveEffect = z.object({
 export type ActiveEffect = z.infer<typeof ActiveEffect>;
 
 /**
+ * One structured condition instance on a combatant (issue #423). Carries source/rule-entry provenance,
+ * duration/expiry timing, repeat saves, concentration link, stack count, notes, and custom condition flag.
+ * Kept in dual-sync with combatant.conditions (string[]) for complete backward compatibility.
+ */
+export const ConditionInstance = z.object({
+  id: z.string().min(1).max(40),
+  name: z.string().min(1).max(120),
+  ruleEntryId: Id.nullable().default(null),
+  source: z.string().max(160).nullable().default(null),
+  sourceCombatantId: Id.nullable().default(null),
+  durationRounds: z.number().int().nonnegative().nullable().default(null),
+  roundsRemaining: z.number().int().nonnegative().nullable().default(null),
+  timing: EffectTiming.default('none'),
+  saveTiming: EffectTiming.default('none'),
+  saveDc: z.number().int().nullable().default(null),
+  saveAbility: z.string().max(24).nullable().default(null),
+  isConcentration: z.boolean().default(false),
+  stacks: z.number().int().min(1).max(99).default(1),
+  notes: z.string().max(300).default(''),
+  custom: z.boolean().default(false),
+});
+export type ConditionInstance = z.infer<typeof ConditionInstance>;
+
+/**
+ * Derive string condition names from a list of condition instances.
+ */
+export function deriveConditionNames(instances: readonly ConditionInstance[]): string[] {
+  const set = new Set<string>();
+  for (const c of instances) {
+    if (c.name.trim().length > 0) {
+      set.add(c.name.trim());
+    }
+  }
+  return [...set];
+}
+
+/**
  * Per-turn action-economy + resource tracking on a combatant (issue #413). `used` counts
  * consumption against the adapter's {@link ActionEconomyModel} slot keys (e.g. `{ action: 1,
  * bonus: 0 }`); `movementUsedFt` is feet moved this turn; `concentration` names the effect the
@@ -6308,6 +6412,8 @@ export const Combatant = z.object({
   // Structured active effects with duration + save timing (issue #413), alongside the
   // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
   activeEffects: z.array(ActiveEffect).max(50).default([]),
+  // Structured condition instances with source, duration, saves, concentration link, stacks (issue #423).
+  conditionInstances: z.array(ConditionInstance).max(50).default([]),
 });
 export type Combatant = z.infer<typeof Combatant>;
 
@@ -6362,6 +6468,11 @@ export const CombatantUpdate = z.object({
   deathSaveRoll: z.number().int().min(1).max(20).optional(),
   addConditions: z.array(z.string().max(40)).optional(),
   removeConditions: z.array(z.string().max(40)).optional(),
+  // Structured condition instance mutations (issue #423)
+  addConditionInstance: ConditionInstance.optional(),
+  removeConditionInstanceId: z.string().min(1).max(40).optional(),
+  updateConditionInstance: ConditionInstance.optional(),
+  conditionInstances: z.array(ConditionInstance).max(50).optional(),
   // Nullable so a mistaken value can be cleared back to the unrolled state (issue
   // #715): `initiative: null` writes NULL onto the row (distinguished from omitting
   // the field, which leaves it unchanged). DM only, enforced server-side. A cleared
