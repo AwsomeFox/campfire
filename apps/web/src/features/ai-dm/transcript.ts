@@ -225,7 +225,7 @@ function applyStream(state: TranscriptState, event: AiDmStreamEvent): Transcript
       const bubble = entries[idx] as DmEntry;
       const next = entries.slice();
       const meta: DmTurnMeta = {
-        stopReason: event.type === 'turn.error' ? event.stopReason : event.stopReason,
+        stopReason: event.stopReason,
         steps: event.steps,
         tokensUsed: event.tokensUsed,
         budgetRemaining: event.budgetRemaining,

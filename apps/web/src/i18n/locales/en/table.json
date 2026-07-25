@@ -14,7 +14,8 @@
 
     "tokenBudget": "Token budget",
     "tokensUsedOf": "{{used}} / {{budget}} tokens",
-    "tokensUsedInline": "{{count}} tokens",
+    "tokensUsedInline_one": "{{formatted}} token",
+    "tokensUsedInline_other": "{{formatted}} tokens",
     "tokensUnknown": "usage unknown",
     "noBudget": "No budget",
 

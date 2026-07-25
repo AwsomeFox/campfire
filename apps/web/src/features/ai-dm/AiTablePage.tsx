@@ -897,7 +897,10 @@ function TranscriptRow({
               {entry.meta.stopReason} · {entry.meta.steps} steps ·{' '}
               {entry.meta.tokensUsageUnknown
                 ? t('table.tokensUnknown')
-                : t('table.tokensUsedInline', { count: entry.meta.tokensUsed.toLocaleString() })}{' '}
+                : t('table.tokensUsedInline', {
+                    count: entry.meta.tokensUsed,
+                    formatted: entry.meta.tokensUsed.toLocaleString(),
+                  })}{' '}
               · {entry.meta.budgetRemaining.toLocaleString()} left
               {entry.meta.errorMessage ? (
                 <span className="block mt-1 text-rose-400/90">{entry.meta.errorMessage}</span>
