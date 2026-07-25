@@ -20,6 +20,8 @@ import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
+import { EntitySecrecyControls } from '../../components/EntitySecrecyControls';
+import { buildNpcRevealPreview } from '../../components/entityRevealPreview';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { GameIcon } from '../../components/GameIcon';
 import { IconPicker } from '../../components/IconPicker';
@@ -84,7 +86,6 @@ export default function NpcPage() {
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pendingUndo, setPendingUndo] = useState(false);
-  const [togglingHidden, setTogglingHidden] = useState(false);
   // Optimistic-concurrency guard (#157/#233): a stale save 409s instead of clobbering a
   // co-DM's or a connected AI's interleaved edit. `conflict` shows a Reload-latest
   // affordance; `historyNonce` refetches the edit-history panel after each save.
@@ -166,20 +167,6 @@ export default function NpcPage() {
   function cancelEdit() {
     setEditing(false);
     setProposeMode(false);
-  }
-
-  // Entity-level secrecy (issue #42): reveal/hide the whole NPC from players.
-  async function toggleHidden() {
-    if (!npc) return;
-    setTogglingHidden(true);
-    try {
-      const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: !npc.hidden });
-      setNpc(updated);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't change visibility.");
-    } finally {
-      setTogglingHidden(false);
-    }
   }
 
   async function save() {
@@ -313,6 +300,15 @@ export default function NpcPage() {
 
   if (!npc) return null;
 
+  const revealPreview = buildNpcRevealPreview({
+    name: npc.name,
+    role: npc.role,
+    body: npc.body,
+    factionName,
+    locationName,
+    connectedQuestTitles: connectedQuests.map((q) => q.title),
+  });
+
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('npc', npc.id)}>
       <DetailPageWayfinding
@@ -366,15 +362,20 @@ export default function NpcPage() {
             {isDm && npc.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden from players</span></Chip>}
             {canDmWrite && (
               <div className="flex gap-2 ml-auto">
-                <Btn
-                  ghost
-                  className="!min-h-0 !py-1.5 text-xs"
-                  disabled={togglingHidden}
-                  onClick={toggleHidden}
-                  title={npc.hidden ? 'Make this NPC visible to players' : 'Hide this NPC from players'}
-                >
-                  {togglingHidden ? '…' : npc.hidden ? <><GameIcon slug="eyeball" size={12} className="inline align-text-bottom" /> Reveal</> : <><GameIcon slug="sight-disabled" size={12} className="inline align-text-bottom" /> Hide</>}
-                </Btn>
+                <EntitySecrecyControls
+                  entityKind="npc"
+                  entityName={npc.name}
+                  hidden={npc.hidden}
+                  preview={revealPreview}
+                  onReveal={async () => {
+                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: false });
+                    setNpc(updated);
+                  }}
+                  onUndoReveal={async () => {
+                    const updated = await api.patch<Npc>(`${API}/npcs/${id}`, { hidden: true });
+                    setNpc(updated);
+                  }}
+                />
                 <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={startEdit}>
                   ✎ Edit
                 </Btn>
