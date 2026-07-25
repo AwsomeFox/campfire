@@ -1,5 +1,4 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,6 +8,7 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
+  oidcSpawnCoverageEnabled,
 } from './oidc-spawn-coverage';
 
 /**
@@ -153,19 +153,22 @@ async function spawnAppOnce(
     else env[key] = value;
   }
 
-  const child: ChildProcessByStdio<null, Readable, Readable> = spawn('node', [SERVER_DIST_ENTRY], {
+  const collectSpawnCoverage = oidcSpawnCoverageEnabled();
+  const child = spawn('node', [SERVER_DIST_ENTRY], {
     cwd: path.resolve(__dirname, '..'),
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: collectSpawnCoverage ? ['ignore', 'ignore', 'ignore'] : ['ignore', 'pipe', 'pipe'],
   });
 
   let output = '';
-  child.stdout.on('data', (chunk) => {
-    output += chunk.toString();
-  });
-  child.stderr.on('data', (chunk) => {
-    output += chunk.toString();
-  });
+  if (!collectSpawnCoverage) {
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+  }
 
   type ExitInfo = { code: number | null; signal: NodeJS.Signals | null };
   const exitState: { current: ExitInfo | null } = { current: null };

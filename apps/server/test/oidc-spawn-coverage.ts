@@ -24,6 +24,11 @@ function jestCollectingCoverage(): boolean {
   );
 }
 
+/** Whether OIDC spawn coverage forwarding is active for this jest run. */
+export function oidcSpawnCoverageEnabled(): boolean {
+  return jestCollectingCoverage();
+}
+
 /** Env overlay for spawnApp — forwards NODE_V8_COVERAGE when jest runs with --coverage. */
 export function childV8CoverageEnv(): Record<string, string | undefined> {
   if (!jestCollectingCoverage()) return {};
@@ -50,6 +55,7 @@ function applyMergedCoverage(incoming: CoverageMapData): void {
 async function mergeCoverageDirInSubprocess(dir: string): Promise<CoverageMapData> {
   const { stdout } = await execFileAsync(process.execPath, [MERGE_WORKER, dir], {
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
   });
   return JSON.parse(stdout || '{}') as CoverageMapData;
 }
