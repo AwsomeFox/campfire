@@ -202,7 +202,7 @@ export function NotesQuickRail({
       </form>
       {dest === 'private' && (
         <div className="flex items-center gap-2 flex-wrap pt-1">
-          <span className="text-[11px] text-slate-500">Attach to:</span>
+          <span className="text-[11px] text-secondary">Attach to:</span>
           <EntityPicker campaignId={campaignId} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
         </div>
       )}

@@ -64,12 +64,12 @@ export function DetailPageWayfinding({
               <Link to={segment.to} state={returnState} className="hover:text-amber-400">
                 {segment.label}
               </Link>
-              <span className="text-slate-600" aria-hidden>
+              <span className="text-secondary" aria-hidden>
                 ›
               </span>
             </span>
           ))}
-          <span className="text-slate-500">{currentLabel}</span>
+          <span className="text-secondary">{currentLabel}</span>
         </nav>
       )}
     </div>

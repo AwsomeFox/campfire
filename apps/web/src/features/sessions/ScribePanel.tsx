@@ -201,7 +201,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
 
       {expanded && (
         <div {...panelDisclosure.regionProps} className="space-y-3">
-          <p className="text-[11.5px] text-slate-500 m-0">
+          <p className="text-[11.5px] text-secondary m-0">
             Drafts a session recap from resolved inbox notes and encounters that were run, and files it as a{' '}
             <strong>pending proposal</strong> for you to review — nothing is ever published automatically.
           </p>
@@ -238,7 +238,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
           )}
 
           {!isDm && config && (
-            <p className="text-[11px] text-slate-600 m-0">
+            <p className="text-[11px] text-secondary m-0">
               Post-session: {config.postSession ? 'on' : 'off'} · Cron: {config.cron ? 'on' : 'off'} · Budget per run:{' '}
               {config.budgetPerRun.toLocaleString()} tokens
             </p>
@@ -276,7 +276,7 @@ function OutcomeNote({ outcome, onDismiss }: { outcome: Outcome; onDismiss: () =
             {outcome.hrefLabel || 'View'}
           </Link>
         )}
-        <button type="button" className="text-xs text-slate-500 hover:text-white" onClick={onDismiss}>
+        <button type="button" className="text-xs text-secondary hover:text-white" onClick={onDismiss}>
           Dismiss
         </button>
       </div>
@@ -332,7 +332,7 @@ function ConfigForm({
         <input type="checkbox" className="mt-0.5" checked={postSession} onChange={(e) => setPostSession(e.target.checked)} />
         <span>
           <span className="block text-[12.5px] font-semibold">Post-session sweep</span>
-          <span className="block text-[11px] text-slate-500">
+          <span className="block text-[11px] text-secondary">
             Auto-draft a recap once a scheduled session's end time has passed. Off by default.
           </span>
         </span>
@@ -341,14 +341,14 @@ function ConfigForm({
         <input type="checkbox" className="mt-0.5" checked={cron} onChange={(e) => setCron(e.target.checked)} />
         <span>
           <span className="block text-[12.5px] font-semibold">Cron sweep</span>
-          <span className="block text-[11px] text-slate-500">
+          <span className="block text-[11px] text-secondary">
             Include this campaign in the periodic background sweep, when a server admin has one running. It never
             duplicates a recap — a pending or unchanged draft is skipped.
           </span>
         </span>
       </label>
       <div className="space-y-1">
-        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide" htmlFor="scribe-budget">
+        <label className="text-xs font-bold text-secondary uppercase tracking-wide" htmlFor="scribe-budget">
           Budget per run
         </label>
         <input
@@ -360,7 +360,7 @@ function ConfigForm({
           onChange={(e) => setBudgetPerRun(e.target.value)}
           style={{ maxWidth: 160 }}
         />
-        <p className="text-[11px] text-slate-500 m-0">
+        <p className="text-[11px] text-secondary m-0">
           Max output tokens for one run — further clamped by the AI DM seat's remaining budget.
         </p>
       </div>
@@ -401,7 +401,7 @@ function JobHistory({ campaignId, jobs }: { campaignId: number; jobs: ScribeJob[
               </Link>
             )}
             {job.detail && (
-              <span className="text-slate-600 text-[11px] w-full basis-full">{job.detail}</span>
+              <span className="text-secondary text-[11px] w-full basis-full">{job.detail}</span>
             )}
           </li>
         );
@@ -437,7 +437,7 @@ function PreviewModal({
         onClick={(e) => e.stopPropagation()}
       >
         <p className="dialog-title">Recap preview</p>
-        <p className="text-[11.5px] text-slate-500 m-0">
+        <p className="text-[11.5px] text-secondary m-0">
           A draft only — nothing has been filed yet. "File as proposal" runs the scribe once more to produce the
           version that lands in your proposals queue.
         </p>

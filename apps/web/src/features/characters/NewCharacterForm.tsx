@@ -113,7 +113,7 @@ export function NewCharacterForm({
 
       {ddbAllowed && (
         <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
-          <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Import from D&amp;D Beyond</span>
+          <span className="text-xs font-bold text-secondary uppercase tracking-wide">Import from D&amp;D Beyond</span>
           <div className="flex gap-2">
             <TextInput
               aria-label="D&D Beyond character id or URL"
@@ -126,12 +126,12 @@ export function NewCharacterForm({
               {importing ? 'Importing…' : 'Import'}
             </Btn>
           </div>
-          <p className="text-xs text-slate-500">Public sheets import as complete, active characters.</p>
+          <p className="text-xs text-secondary">Public sheets import as complete, active characters.</p>
         </div>
       )}
 
       {ddbAllowed && (
-        <div className="flex items-center gap-2 text-xs text-slate-600">
+        <div className="flex items-center gap-2 text-xs text-secondary">
           <span className="h-px flex-1 bg-slate-700/60" />
           or create in Campfire
           <span className="h-px flex-1 bg-slate-700/60" />
@@ -139,7 +139,7 @@ export function NewCharacterForm({
       )}
 
       <fieldset className="space-y-2">
-        <legend className="text-xs font-bold text-slate-500 uppercase tracking-wide">How do you want to start?</legend>
+        <legend className="text-xs font-bold text-secondary uppercase tracking-wide">How do you want to start?</legend>
         <div className="flex flex-col gap-2 sm:flex-row">
           <label className="flex flex-1 cursor-pointer items-start gap-2 rounded-md border border-slate-700/60 p-3 text-sm text-slate-300 has-[:checked]:border-amber-600/60">
             <input
@@ -195,7 +195,7 @@ export function NewCharacterForm({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Level</span>
+            <span className="text-xs font-bold text-secondary uppercase tracking-wide">Level</span>
             <TextInput
               type="number"
               min={1}
@@ -212,7 +212,7 @@ export function NewCharacterForm({
         {path === 'template' && templatesAtLevel.length > 0 && (
           <div className="space-y-2">
             <label className="block space-y-1">
-              <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Template</span>
+              <span className="text-xs font-bold text-secondary uppercase tracking-wide">Template</span>
               <select
                 className="w-full rounded-md border border-slate-700/60 bg-slate-900/60 px-3 py-2 text-sm text-white"
                 aria-label="Starter template"
@@ -240,7 +240,7 @@ export function NewCharacterForm({
         )}
 
         {path === 'blank' && (
-          <p className="text-xs text-slate-500 rounded-md border border-dashed border-slate-700/50 p-2">
+          <p className="text-xs text-secondary rounded-md border border-dashed border-slate-700/50 p-2">
             This creates a <strong className="text-slate-400">draft</strong> with no ability scores, AC, or HP. Open the sheet to
             complete the checklist, then set status to Active when ready for encounters.
           </p>

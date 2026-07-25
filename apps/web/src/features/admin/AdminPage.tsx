@@ -49,7 +49,7 @@ const QUICK_LINKS: Array<{ to: string; icon: string; label: string; hint: string
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="cf-inset p-2.5">
-      <p className="text-[10px] uppercase tracking-widest text-slate-500">{label}</p>
+      <p className="text-[10px] uppercase tracking-widest text-secondary">{label}</p>
       <p className="text-sm font-bold text-white truncate" title={value}>
         {value}
       </p>
@@ -79,7 +79,7 @@ function StorageSummaryCard() {
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-2">
         <h2 className="font-bold text-white text-sm">Storage</h2>
-        <Link to="/admin/storage" className="text-[11px] text-slate-500 hover:text-white">
+        <Link to="/admin/storage" className="text-[11px] text-secondary hover:text-white">
           manage →
         </Link>
       </div>
@@ -120,7 +120,7 @@ function RecentAuditCard() {
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-2">
         <h2 className="font-bold text-white text-sm">Recent admin activity</h2>
-        <Link to="/admin/audit" className="text-[11px] text-slate-500 hover:text-white">
+        <Link to="/admin/audit" className="text-[11px] text-secondary hover:text-white">
           full log →
         </Link>
       </div>
@@ -128,19 +128,19 @@ function RecentAuditCard() {
       {!entries ? (
         <Skeleton lines={3} />
       ) : entries.length === 0 ? (
-        <p className="text-xs text-slate-500">No server-wide admin actions logged yet.</p>
+        <p className="text-xs text-secondary">No server-wide admin actions logged yet.</p>
       ) : (
         <ul className="divide-y divide-slate-800">
           {entries.map((e) => (
             <li key={e.id} className="py-1.5 flex items-center justify-between gap-3 text-xs">
               <span className="text-slate-300 truncate flex items-center gap-1.5">
                 <code className="text-[11px] text-amber-400">{e.action}</code>
-                <span className="text-slate-500"> · {e.actor}</span>
+                <span className="text-secondary"> · {e.actor}</span>
                 {/* #526: badge the actor's role so a privileged server-admin action
                     stands out from a campaign-DM's in the overview feed. */}
                 <ActorRoleBadge role={e.actorRole} />
               </span>
-              <span className="text-slate-600 whitespace-nowrap">{new Date(e.createdAt).toLocaleString()}</span>
+              <span className="text-secondary whitespace-nowrap">{new Date(e.createdAt).toLocaleString()}</span>
             </li>
           ))}
         </ul>
@@ -163,7 +163,7 @@ function QuickLinksCard() {
             <span className="leading-none text-[var(--color-accent)]"><GameIcon slug={l.icon} size={20} /></span>
             <span>
               <span className="block text-sm font-semibold text-white">{l.label}</span>
-              <span className="block text-[11px] text-slate-500">{l.hint}</span>
+              <span className="block text-[11px] text-secondary">{l.hint}</span>
             </span>
           </Link>
         ))}

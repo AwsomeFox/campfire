@@ -402,7 +402,7 @@ export function IconPicker({
             )}
           </div>
 
-          <p className="text-[11px] text-[var(--color-neutral-600)] leading-snug">
+          <p className="text-[11px] text-secondary leading-snug">
             Icons from {ICON_SOURCE_NAME}, {ICON_LICENSE}. See{' '}
             <a href="/credits" className="hover:underline" style={{ color: 'var(--color-accent)' }}>
               Credits

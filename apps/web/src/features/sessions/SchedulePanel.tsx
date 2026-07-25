@@ -566,7 +566,7 @@ function ScheduleItem({
         <div className="flex items-center gap-2 flex-wrap">
           <span
             id={rsvpLegendId}
-            className="text-[11px] font-bold text-slate-500 uppercase tracking-wide"
+            className="text-[11px] font-bold text-secondary uppercase tracking-wide"
           >
             {RSVP_GROUP_LEGEND}
           </span>
@@ -595,7 +595,7 @@ function ScheduleItem({
           <div className="space-y-1">
             <label
               htmlFor={noteFieldId}
-              className="text-[11px] font-bold text-slate-500 uppercase tracking-wide block"
+              className="text-[11px] font-bold text-secondary uppercase tracking-wide block"
             >
               {RSVP_NOTE_LABEL}
             </label>

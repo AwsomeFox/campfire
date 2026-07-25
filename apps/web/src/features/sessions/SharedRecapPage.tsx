@@ -86,9 +86,9 @@ export default function SharedRecapPage() {
             <span className="text-muted text-xs">{formatDate(recap.playedAt)}</span>
           </div>
           <Card>
-            {recap.recap ? <Markdown>{recap.recap}</Markdown> : <p className="text-sm text-slate-600">No recap written yet.</p>}
+            {recap.recap ? <Markdown>{recap.recap}</Markdown> : <p className="text-sm text-secondary">No recap written yet.</p>}
           </Card>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-secondary">
             Shared from a Campfire campaign. This page is read-only — no account needed.
           </p>
         </div>

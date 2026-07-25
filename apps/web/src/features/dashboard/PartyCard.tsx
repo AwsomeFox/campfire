@@ -45,12 +45,11 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                 display: 'flex',
                 alignItems: 'center',
                 gap: 10,
-                color: 'var(--color-text)',
+                color: isActive ? 'var(--color-text)' : 'var(--color-text-disabled)',
                 textDecoration: 'none',
                 cursor: 'pointer',
                 padding: '6px 0',
                 minHeight: 44,
-                opacity: isActive ? 1 : 0.6,
               }}
             >
               <span
@@ -75,7 +74,7 @@ export function PartyCard({ campaignId, characters }: { campaignId: number; char
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
                     {!isActive && <StatusTag status={c.status} />}
                   </span>
-                  <span className="text-muted" style={{ fontSize: 'var(--type-meta)', flex: 'none' }}>
+                  <span className={isActive ? 'text-muted' : 'text-disabled'} style={{ fontSize: 'var(--type-meta)', flex: 'none' }}>
                     {c.hpCurrent}/{c.hpMax}
                   </span>
                 </span>

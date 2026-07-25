@@ -379,7 +379,7 @@ export default function CharacterPage() {
                 const mod = score === null ? null : adapter.abilityModifier(score);
                 return (
                   <div key={k} className="cf-inset text-center py-2.5 px-1.5">
-                    <p className="text-[length:var(--type-label)] tracking-wide text-slate-500">{k}</p>
+                    <p className="text-[length:var(--type-label)] tracking-wide text-secondary">{k}</p>
                     <p className="text-xl font-heading my-0.5">{score ?? '—'}</p>
                     <p className="text-[length:var(--type-meta)]" style={{ color: 'var(--color-accent-300)' }}>
                       {mod === null ? '—' : signed(mod)}
@@ -412,10 +412,10 @@ export default function CharacterPage() {
                 {character.hpMax > 0 ? (
                   <>
                     {character.hpCurrent}
-                    <span className="text-base text-slate-500"> / {character.hpMax} HP</span>
+                    <span className="text-base text-secondary"> / {character.hpMax} HP</span>
                   </>
                 ) : (
-                  <span className="text-base text-slate-500">HP not set</span>
+                  <span className="text-base text-secondary">HP not set</span>
                 )}
               </span>
               {character.hpMax > 0 && (
@@ -547,7 +547,7 @@ export default function CharacterPage() {
                 <p className="card-kicker mb-0">Inventory</p>
                 <span className="tag tag-neutral">soon</span>
               </div>
-              <p className="text-xs text-slate-500">Item tracking arrives with the Compendium — no inventory API yet.</p>
+              <p className="text-xs text-secondary">Item tracking arrives with the Compendium — no inventory API yet.</p>
             </Card>
           </section>
 
@@ -586,11 +586,11 @@ export default function CharacterPage() {
                   className="h-24 w-24 rounded-full object-cover border border-[var(--color-neutral-700)]"
                 />
               ) : (
-                <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-[var(--color-neutral-600)]">
+                <span className="h-24 w-24 rounded-full border border-dashed border-[var(--color-neutral-700)] flex items-center justify-center text-[length:var(--type-label)] text-secondary">
                   Portrait
                 </span>
               )}
-              {canEdit && <span className="text-[length:var(--type-label)] text-slate-500">Click or drop to change</span>}
+              {canEdit && <span className="text-[length:var(--type-label)] text-secondary">Click or drop to change</span>}
             </Card>
           </section>
           <section
@@ -1061,7 +1061,7 @@ function XpCard({
       <div className="flex items-center gap-3.5 flex-wrap">
         <span className="font-heading text-[34px] leading-none">
           {character.xp.toLocaleString()}
-          <span className="text-base text-slate-500">
+          <span className="text-base text-secondary">
             {supported && nextThreshold != null ? ` / ${nextThreshold.toLocaleString()} XP` : ' XP'}
           </span>
         </span>
@@ -1071,7 +1071,7 @@ function XpCard({
           </div>
         )}
       </div>
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-secondary">
         {atCap
           ? capLabel
           : !supported
@@ -1086,7 +1086,7 @@ function XpCard({
               control is not an unnamed spinbutton/textbox. type="text" +
               inputMode="numeric" (issue #633) preserves locale digits. */}
           <div className="space-y-1">
-            <label htmlFor={xpFieldId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+            <label htmlFor={xpFieldId} className="block text-[10px] font-bold uppercase tracking-wide text-secondary">
               {XP_AWARD_LABEL}
             </label>
             <input
@@ -1107,7 +1107,7 @@ function XpCard({
               className="cf-input !min-h-0 !w-24 text-sm"
               style={{ minHeight: 44, padding: '4px 10px' }}
             />
-            <p id={xpHelpId} className="text-[11px] text-slate-500 m-0 max-w-[16rem]">
+            <p id={xpHelpId} className="text-[11px] text-secondary m-0 max-w-[16rem]">
               {XP_AWARD_HELP}
             </p>
             {amountError && (
@@ -1140,7 +1140,7 @@ function XpCard({
           <p className="text-sm font-bold text-white">
             Level {character.level} → {character.level + 1}
           </p>
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-secondary">
             Set the new max HP (currently {character.hpMax}) — hit points gained are added to current HP too.
           </p>
           <div className="flex gap-2 items-center flex-wrap">
@@ -1234,7 +1234,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
     <Card className="space-y-2" data-testid="character-saving-throws">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Saving throws</p>
-        <span className="text-[11px] text-slate-500">proficiency {signed(pb)}</span>
+        <span className="text-[11px] text-secondary">proficiency {signed(pb)}</span>
         <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
           {rollModeSummary(mode)}
         </span>
@@ -1260,7 +1260,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                 title={`Roll ${k} save (${signed(mod)}) · ${rollModeSummary(mode)}`}
                 aria-label={`Roll ${k} save (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
-                <p className="text-[10px] tracking-wide text-slate-500">{k}</p>
+                <p className="text-[10px] tracking-wide text-secondary">{k}</p>
                 <p className="text-[15px] mt-0.5 font-semibold">{signed(mod)}</p>
               </button>
               {canEdit ? (
@@ -1271,7 +1271,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
                   aria-pressed={proficient}
                   aria-label={saveProficiencyLabel(k, proficient)}
                   className="absolute top-1 right-1"
-                  style={{ background: 'transparent', border: 0, padding: 2, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  style={{ background: 'transparent', border: 0, padding: 2, lineHeight: 1, fontSize: 10, cursor: busy ? 'default' : 'pointer', color: proficient ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   title={proficient ? `Remove ${k} save proficiency` : `Add ${k} save proficiency`}
                 >
                   <span aria-hidden="true">{proficient ? '●' : '○'}</span>
@@ -1287,7 +1287,7 @@ function SavingThrowsCard({ character, canEdit, onChange, onError, adapter, roll
           );
         })}
       </div>
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         Tap a save to roll a d20{canEdit ? '; tap the ● to toggle proficiency' : ''}. Pick a mode above; shift-click for a one-tap advantage, alt-click for disadvantage.
       </p>
     </Card>
@@ -1324,7 +1324,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
     <Card className="space-y-2" data-testid="character-skills">
       <div className="flex items-center gap-2 flex-wrap">
         <p className="card-kicker mb-0">Skills</p>
-        <span className="text-[11px] text-slate-500">
+        <span className="text-[11px] text-secondary">
           tap a skill to roll{canEdit ? '; tap the ○/●/★ to cycle proficiency' : ''}
         </span>
         <span className="ml-auto cf-roll-mode-status" role="status" aria-live="polite" style={{ fontSize: 11, color: 'var(--color-accent-300)' }}>
@@ -1352,7 +1352,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                   aria-label={skillProficiencyLabel(name, rank ?? 'none')}
                   aria-pressed={rank != null}
                   className="w-4 shrink-0 text-center"
-                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: busy ? 'default' : 'pointer', color: rank ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   title={rank === undefined ? `Mark ${name} proficient` : rank === 'proficient' ? `Mark ${name} expertise` : `Clear ${name} proficiency`}
                 >
                   <span aria-hidden="true">{marker}</span>
@@ -1360,7 +1360,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
               ) : (
                 <span
                   className="w-4 shrink-0 text-center"
-                  style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}
+                  style={{ color: rank ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}
                   aria-hidden
                 >
                   {marker}
@@ -1376,7 +1376,7 @@ function SkillsCard({ character, canEdit, onChange, onError, adapter, roller }: 
                 aria-label={`Roll ${name} (${signed(mod)}) with ${rollModeSummary(mode).toLowerCase()}`}
               >
                 <span className="flex-1 text-left truncate">{name}</span>
-                <span className="text-[10px] text-slate-500">{ability}</span>
+                <span className="text-[10px] text-secondary">{ability}</span>
                 <span className="w-8 text-right font-semibold">{signed(mod)}</span>
               </button>
             </div>
@@ -1511,7 +1511,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
         />
       )}
       {character.actions.length === 0 && !adding && (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-secondary">
           No actions yet{canEdit ? ' — add attacks, spells, and features to roll them straight from the sheet' : ''}.
         </p>
       )}
@@ -1589,7 +1589,7 @@ function ActionsCard({ character, canEdit, onChange, onError, roller }: SheetCar
                     ))}
                 </div>
               )}
-              {action.notes && <p className="text-[11px] text-slate-500 mt-0.5">{action.notes}</p>}
+              {action.notes && <p className="text-[11px] text-secondary mt-0.5">{action.notes}</p>}
             </div>
             {canEdit && (
               <div className="flex items-center gap-1 shrink-0">
@@ -1874,7 +1874,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
           <div className="grid gap-2.5" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(64px, 1fr))' }}>
             {SPELL_LEVELS.map((lvl) => (
               <div key={lvl} className="space-y-1">
-                <label className="text-[10px] text-slate-500 font-bold uppercase">Lv {lvl}</label>
+                <label className="text-[10px] text-secondary font-bold uppercase">Lv {lvl}</label>
                 {/* type="text" + inputMode="numeric" (issue #633): preserves
                     locale grouping for the localized parser. */}
                 <TextInput
@@ -1903,7 +1903,7 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
           </div>
         </div>
       ) : levels.length === 0 ? (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-secondary">
           No spell slots configured{canEdit ? ' — set per-level maxima with “Edit slots”' : ''}.
         </p>
       ) : (
@@ -1913,15 +1913,15 @@ function SpellSlotsCard({ character, canEdit, onChange, onError }: SheetCardProp
             const available = Math.max(0, slot.max - slot.used);
             return (
               <div key={lvl} className="flex items-center gap-2.5 flex-wrap">
-                <span className="text-[11px] text-slate-500 font-bold uppercase w-9">Lv {lvl}</span>
+                <span className="text-[11px] text-secondary font-bold uppercase w-9">Lv {lvl}</span>
                 <span className="tracking-[3px] text-[15px] leading-none" aria-label={`${available} of ${slot.max} slots available`}>
                   {Array.from({ length: slot.max }, (_, i) => (
-                    <span key={i} style={{ color: i < available ? 'var(--color-accent-300)' : 'var(--color-neutral-600)' }}>
+                    <span key={i} style={{ color: i < available ? 'var(--color-accent-300)' : 'var(--color-text-disabled)' }}>
                       {i < available ? '●' : '○'}
                     </span>
                   ))}
                 </span>
-                <span className="text-[11px] text-slate-500">
+                <span className="text-[11px] text-secondary">
                   {available}/{slot.max}
                 </span>
                 {canEdit && (
@@ -2212,7 +2212,7 @@ function StoryBody({
       {character.notes ? (
         <Markdown>{character.notes}</Markdown>
       ) : (
-        <p className="text-sm text-slate-500 italic">No story written yet.</p>
+        <p className="text-sm text-secondary italic">No story written yet.</p>
       )}
       {canEdit && (
         <Btn
@@ -2270,7 +2270,7 @@ function DmSecretCard({
           setDraft('');
           setEditing(true);
         }}
-        className="text-xs text-slate-500 hover:text-slate-300 text-left"
+        className="text-xs text-secondary hover:text-[var(--color-neutral-300)] text-left"
       >
         + DM notes
       </button>
@@ -2306,7 +2306,7 @@ function DmSecretCard({
               setDraft(character.dmSecret);
               setEditing(true);
             }}
-            className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+            className="text-[10px] text-secondary hover:text-[var(--color-neutral-300)] shrink-0"
           >
             ✎ edit
           </button>
@@ -2398,10 +2398,10 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
     return (
       <div className="flex justify-between gap-2">
         <span className="text-muted">D&amp;D Beyond</span>
-        <span className="text-right text-slate-500">
+        <span className="text-right text-secondary">
           Created manually
           {canEdit && (
-            <span className="block text-[11px] text-slate-600">
+            <span className="block text-[11px] text-secondary">
               Import from a public sheet on the party page.
             </span>
           )}
@@ -2420,7 +2420,7 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
       <span className="text-muted">D&amp;D Beyond</span>
       <span className="text-right min-w-0">
         <span className="block">Imported from D&amp;D Beyond</span>
-        <span className="block text-[11px] text-slate-500">
+        <span className="block text-[11px] text-secondary">
           One-time import — not synced.{' '}
           {/* Selectable target must contain exactly `text` (raw id) — not a
               prefixed label — so manual recovery after a clipboard failure
@@ -2435,7 +2435,7 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
                 href={DDB_CHARACTER_URL(sourceId)}
                 target="_blank"
                 rel="noopener noreferrer nofollow"
-                className="underline hover:text-slate-300"
+                className="underline hover:text-[var(--color-neutral-300)]"
               >
                 Source sheet ↗
               </a>
@@ -2449,7 +2449,7 @@ function DdbProvenanceRow({ ddbId, canEdit }: { ddbId: string | null; canEdit: b
               title="Copy D&D Beyond character id"
               showFailureMessage={false}
               unstyled
-              className="underline hover:text-slate-300 ml-1"
+              className="underline hover:text-[var(--color-neutral-300)] ml-1"
               style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
               successAnnouncement="D&D Beyond character id copied to clipboard."
               failureAnnouncement="Copy failed. Clipboard blocked — copy the id manually."

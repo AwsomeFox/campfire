@@ -1678,7 +1678,7 @@ const SCREEN_CSS = `
 .cf-objs li.done { color: var(--color-neutral-500); text-decoration: line-through; }
 .cf-obj-mark { color: var(--color-accent); flex: none; }
 .cf-obj-text { min-width: 0; }
-.cf-objs li.done .cf-obj-mark { color: var(--color-neutral-600); }
+.cf-objs li.done .cf-obj-mark { color: var(--color-text-decorative); }
 
 /* NPCs */
 .cf-npc-head {

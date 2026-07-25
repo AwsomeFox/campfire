@@ -429,7 +429,7 @@ export function RevisionHistoryPanel({
     <Card density="default">
       <button
         type="button"
-        className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-wide text-slate-500"
+        className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-wide text-secondary"
         {...buttonProps}
       >
         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
@@ -455,7 +455,7 @@ export function RevisionHistoryPanel({
               <Skeleton lines={3} />
             </div>
           ) : loadError && revisions.length === 0 ? null : revisions.length === 0 ? (
-            <p className="text-sm text-slate-600">No earlier versions yet — edits are recorded here from now on.</p>
+            <p className="text-sm text-secondary">No earlier versions yet — edits are recorded here from now on.</p>
           ) : (
             <ul className="divide-y divide-slate-800" aria-label={`${label} versions`}>
               {revisions.map((revision) => {

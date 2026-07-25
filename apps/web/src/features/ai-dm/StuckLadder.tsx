@@ -191,7 +191,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
               </p>
               {/* Server's player-readable detail — verbatim. */}
               <p className="text-sm text-[var(--color-neutral-200)] mt-0.5">{session.stuck.detail}</p>
-              <p className="text-[11px] text-[var(--color-neutral-600)] mt-1">
+              <p className="text-[11px] text-secondary mt-1">
                 {t('ladder.stuckSince', { time: new Date(session.stuck.since).toLocaleTimeString(), turn: session.stuck.turn })}
               </p>
             </div>
@@ -204,7 +204,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
               onLever={(l) => onLever(l)}
             />
           ) : (
-            <p className="text-xs text-[var(--color-neutral-600)]">{t('ladder.viewerStuckHint')}</p>
+            <p className="text-xs text-secondary">{t('ladder.viewerStuckHint')}</p>
           )}
         </div>
       )}
@@ -245,7 +245,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
       {/* ---- Ambient table-tools bar (healthy play) ---- */}
       {showToolbar && (
         <div className="cf-inset p-2 flex flex-wrap items-center gap-2">
-          <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)] px-1">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-secondary px-1">
             {t('ladder.tableTools')}
           </span>
           <LeverBar
@@ -390,7 +390,7 @@ function VoteCard({
       >
         <div style={{ width: `${pct}%`, height: '100%', background: 'var(--color-accent)' }} />
       </div>
-      <p className="text-[11px] text-[var(--color-neutral-600)]">
+      <p className="text-[11px] text-secondary">
         {t('ladder.voteTally', { yes, threshold: vote.threshold, no })}
       </p>
       {myBallot !== undefined && (

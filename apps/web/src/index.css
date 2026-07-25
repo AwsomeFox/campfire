@@ -29,6 +29,13 @@
   --color-neutral-400: #b2b6ca;
   --color-neutral-500: #9397ab;
   --color-neutral-600: #75798c;
+  /* Semantic text roles — contrast-safe on every opaque/mixed shell background
+     (issue #593). Normal essential copy uses secondary/timestamp (4.5:1);
+     disabled/decorative may sit at the large/non-text floor (3:1). */
+  --color-text-secondary: #9da1b5;
+  --color-text-timestamp: #9da1b5;
+  --color-text-disabled: #8e92a6;
+  --color-text-decorative: #868a9e;
   --color-neutral-700: #595d6c;
   --color-neutral-800: #3f424d;
   --color-neutral-900: #292b31;
@@ -130,8 +137,8 @@
   --cf-border-dim: color-mix(in srgb, #e9e9ed 10%, transparent);
   --cf-ink: var(--color-text);
   --cf-ink-strong: #ffffff;
-  --cf-dim: var(--color-neutral-400);
-  --cf-faint: var(--color-neutral-500);
+  --cf-dim: var(--color-text-secondary);
+  --cf-faint: var(--color-text-secondary);
   /* Semantic accents — Nocturne's blurple stands in for the old amber
      primary; status colors keep the same hues Nocturne implies via tags. */
   --cf-accent: var(--color-accent);
@@ -242,6 +249,12 @@ body {
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Semantic text utilities (issue #593) — prefer these over raw neutral/slate steps. */
+.text-secondary { color: var(--color-text-secondary); }
+.text-timestamp { color: var(--color-text-timestamp); }
+.text-disabled { color: var(--color-text-disabled); }
+.text-decorative { color: var(--color-text-decorative); }
 
 
 /* Login information architecture (#862): one source order at every size —
@@ -624,7 +637,7 @@ body {
   font-weight: 600;
 }
 .reading-option small {
-  color: var(--color-neutral-400);
+  color: var(--color-text-secondary);
   font-size: var(--type-label);
   line-height: 1.35;
 }
@@ -2029,7 +2042,7 @@ a:hover .cf-name-reveal {
 .cf-page-header__subtitle {
   font-weight: 400;
   font-size: 0.875rem;
-  color: var(--color-neutral-500, #64748b);
+  color: var(--color-text-secondary);
 }
 .cf-page-header__actions {
   display: flex;

@@ -217,7 +217,7 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <p className="reading-supporting text-slate-600 pb-4">
+      <p className="reading-supporting text-secondary pb-4">
         Players can tick objectives and edit their own character; viewers can read and leave notes.
       </p>
     </div>
