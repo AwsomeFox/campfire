@@ -37,7 +37,7 @@ test.describe('campaign nav IA (#643)', () => {
     ]);
   });
 
-  test('player Manage group only exposes my proposals', () => {
+  test('player Manage group exposes my proposals and your data', () => {
     const groups = buildCampaignNavGroups(t, 7, {
       isDm: false,
       aiDriverActive: false,
@@ -46,7 +46,10 @@ test.describe('campaign nav IA (#643)', () => {
       trashCount: 0,
     });
     const manage = groups.find((g) => g.key === 'manage');
-    expect(manage?.items).toEqual([{ key: 'proposals', label: 'nav.myProposals', to: '/c/7/proposals' }]);
+    expect(manage?.items).toEqual([
+      { key: 'proposals', label: 'nav.myProposals', to: '/c/7/proposals' },
+      { key: 'membership', label: 'nav.yourData', to: '/c/7/members' },
+    ]);
     expect(groups.find((g) => g.key === 'prepare')?.items.some((i) => i.key === 'storylines')).toBe(false);
   });
 
