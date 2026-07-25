@@ -122,7 +122,9 @@ test.describe('semantic reading preferences', () => {
 
     await page.goto(`/c/${fixture.campaignId}/characters/${fixture.navigation.characterId}`);
     expect((await typography(page.locator('.reading-surface').first())).fontSize).toBe(18);
-    expect((await typography(page.locator('.cf-btn').first())).fontSize).toBeLessThan(18);
+    // DetailPageWayfinding's return link uses legacy `.btn` (not `cf-btn`); the seed
+    // character is DM-managed so edit controls are hidden for the player fixture.
+    expect((await typography(page.locator('.btn').first())).fontSize).toBeLessThan(18);
 
     // 1280px at 200% browser zoom has a 640 CSS-pixel layout viewport.
     await page.setViewportSize({ width: 640, height: 800 });
