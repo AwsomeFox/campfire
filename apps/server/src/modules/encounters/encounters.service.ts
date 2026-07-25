@@ -37,6 +37,7 @@ import {
   resetTurnStateForStart,
   retreatEncounterTurn,
   sortCombatants,
+  sortEncountersForList,
   tickConditionInstancesAtTurnEnd,
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
@@ -862,7 +863,12 @@ export class EncountersService {
    * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
    * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
    */
-  async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
+  async listForCampaign(
+    campaignId: number,
+    status?: EncounterStatus,
+    viewerRole?: Role,
+    q?: string,
+  ): Promise<Encounter[]> {
     const conditions = [
       eq(encounters.campaignId, campaignId),
       notDeleted(encounters.deletedAt),
@@ -877,27 +883,18 @@ export class EncountersService {
     let list = rows.map(encounterToDomain);
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
-    const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
-    // One authoritative live fight (issue #744): when listing 'running' encounters, pin
-    // the campaign's activeEncounterId to the front so consumers (Dashboard / Player
-    // Display / AI Table) that take the first result follow the authoritative fight rather
-    // than an arbitrary DB ordering. With the Start/Reopen transactional guard there is at
-    // most one running encounter anyway; this is the deterministic tiebreaker for any
-    // legacy drift and a no-op otherwise.
-    if (status === 'running' && visible.length > 1) {
-      const activeId = await this.findLiveEncounter(campaignId);
-      if (activeId) {
-        list = visible.sort((a, b) => {
-          if (a.id === activeId.id) return -1;
-          if (b.id === activeId.id) return 1;
-          return 0;
-        });
-      } else {
-        list = visible;
-      }
-    } else {
-      list = visible;
+    list = viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    const folded = q !== undefined ? foldForSearch(q.trim()) : '';
+    if (folded) {
+      list = list.filter((enc) => foldedIncludes(enc.name, folded));
     }
+    const runningCount = list.filter((enc) => enc.status === 'running').length;
+    let pinActiveId: number | null = null;
+    if (runningCount > 1) {
+      const active = await this.findLiveEncounter(campaignId);
+      pinActiveId = active?.id ?? null;
+    }
+    list = sortEncountersForList(list, { pinActiveId });
     return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
   }
 

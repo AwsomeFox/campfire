@@ -1,7 +1,7 @@
 /**
  * Encounter list — /c/:campaignId/encounters.
  */
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
@@ -9,7 +9,7 @@ import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScro
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
+import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip, TextInput } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
   ENCOUNTER_CREATE_PREFIX,
@@ -44,6 +44,19 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
   ended: 'tag tag-outline',
 };
 
+type StatusFilter = 'all' | EncounterStatus;
+
+const STATUS_FILTERS: StatusFilter[] = ['all', 'preparing', 'running', 'ended'];
+
+function encounterListUrl(campaignId: number, status: StatusFilter, query: string): string {
+  const params = new URLSearchParams();
+  if (status !== 'all') params.set('status', status);
+  const trimmed = query.trim();
+  if (trimmed) params.set('q', trimmed);
+  const qs = params.toString();
+  return `${API}/campaigns/${campaignId}/encounters${qs ? `?${qs}` : ''}`;
+}
+
 export default function EncounterListPage() {
   const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
@@ -56,7 +69,17 @@ export default function EncounterListPage() {
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [creating, setCreating] = useState(() => searchParams.get('action') === 'new');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const filtersActive = statusFilter !== 'all' || debouncedSearch.trim() !== '';
 
   const closeCreating = useCallback(() => {
     setCreating(false);
@@ -84,20 +107,29 @@ export default function EncounterListPage() {
   });
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError(null);
     try {
-      const data = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters`);
+      const data = await api.get<Encounter[]>(encounterListUrl(id, statusFilter, debouncedSearch));
       setEncounters(data);
     } catch (err) {
       setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.load' }));
     } finally {
       setLoading(false);
     }
-  }, [id, t]);
+  }, [id, statusFilter, debouncedSearch, t]);
 
   useEffect(() => {
     if (Number.isFinite(id)) void load();
   }, [id, load]);
+
+  const statusMessage = useMemo(() => {
+    if (loading) return '';
+    if (encounters.length === 0) {
+      return filtersActive ? t('encounters.list.noResults') : t('encounters.empty.title');
+    }
+    return t('encounters.list.resultCount', { count: encounters.length });
+  }, [encounters.length, filtersActive, loading, t]);
 
   if (!Number.isFinite(id)) {
     return (
@@ -140,6 +172,40 @@ export default function EncounterListPage() {
         <NewEncounterForm campaignId={id} onCancel={closeCreating} />
       )}
 
+      <div className="space-y-3" data-testid="encounter-list-filters">
+        <TextInput
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t('encounters.list.searchPlaceholder')}
+          aria-label={t('encounters.list.searchPlaceholder')}
+          className="w-full"
+        />
+        <div className="flex gap-1.5 flex-wrap" role="radiogroup" aria-label={t('encounters.list.filterStatus')}>
+          {STATUS_FILTERS.map((filter) => {
+            const checked = statusFilter === filter;
+            const label = filter === 'all' ? t('encounters.list.filterAll') : encounterStatusLabel(filter, t);
+            return (
+              <button
+                key={filter}
+                type="button"
+                role="radio"
+                aria-checked={checked}
+                data-testid={`encounter-status-filter-${filter}`}
+                onClick={() => setStatusFilter(filter)}
+                className={checked ? 'tag tag-accent' : 'tag tag-neutral'}
+                style={{ cursor: 'pointer', border: 0, font: 'inherit', fontSize: 11, minHeight: 30 }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {statusMessage}
+        </div>
+      </div>
+
       {loading ? (
         <Card>
           <Skeleton lines={4} />
@@ -147,8 +213,14 @@ export default function EncounterListPage() {
       ) : encounters.length === 0 ? (
         <EmptyState
           icon="crossed-swords"
-          title={t('encounters.empty.title')}
-          hint={isDm ? t('encounters.empty.hintDm') : t('encounters.empty.hintPlayer')}
+          title={filtersActive ? t('encounters.list.noResults') : t('encounters.empty.title')}
+          hint={
+            filtersActive
+              ? undefined
+              : isDm
+                ? t('encounters.empty.hintDm')
+                : t('encounters.empty.hintPlayer')
+          }
         />
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>

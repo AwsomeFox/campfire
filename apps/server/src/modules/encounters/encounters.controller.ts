@@ -116,16 +116,21 @@ export class CampaignEncountersController {
   @Get()
   @ApiOperation({ summary: 'List encounters in a campaign', description: 'Requires campaign membership.' })
   @ApiQuery({ name: 'status', required: false, enum: ['preparing', 'running', 'ended'], description: 'Filter to a single encounter status.' })
-  @ApiResponse({ status: 200, description: 'Encounters in the campaign.' })
+  @ApiQuery({ name: 'q', required: false, type: String, description: 'Unicode-aware case-folded substring search over encounter name (issue #490).' })
+  @ApiResponse({ status: 200, description: 'Encounters in the campaign, sorted running → preparing → ended then by updatedAt desc.' })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @Query('status') status: EncounterStatus | undefined,
+    @Query('q') q: string | undefined,
     @CurrentUser() user: RequestUser,
   ) {
+    if (status !== undefined && status !== 'preparing' && status !== 'running' && status !== 'ended') {
+      throw new BadRequestException("status must be one of: 'preparing', 'running', 'ended'");
+    }
     // The caller's role drives entity-level secrecy (issue #262): a non-DM never sees a
     // hidden (prepared, not-yet-sprung) encounter in the list.
     const role = await this.access.requireMember(user, campaignId);
-    return this.encounters.listForCampaign(campaignId, status, role);
+    return this.encounters.listForCampaign(campaignId, status, role, q);
   }
 }
 
