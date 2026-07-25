@@ -44,6 +44,10 @@
     "increaseQtyAria": "Increase {{name}} quantity",
     "moveAria": "Move {{name}}",
     "deleteAria": "Delete {{name}}",
+    "characterSheet": {
+      "partyStashLink": "View party stash",
+      "emptyHint": "Nothing on {{name}}'s person yet."
+    },
     "errors": {
       "load": "Couldn't load the inventory.",
       "updateTreasury": "Couldn't update the treasury.",

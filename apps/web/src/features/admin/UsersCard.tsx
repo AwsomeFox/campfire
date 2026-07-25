@@ -27,7 +27,7 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
   return (
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-3">
-        <h2 className="font-bold text-white text-sm">Users</h2>
+        <h2 className="font-bold text-white text-sm">All accounts</h2>
         <Btn
           type="button"
           className="!min-h-0 !py-1.5 text-xs"
