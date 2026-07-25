@@ -177,6 +177,10 @@ export const router = createBrowserRouter(
             element: lazyPage(() => import('../features/admin/MembersPage')),
           },
           {
+            path: '/c/:campaignId/audit',
+            element: lazyPage(() => import('../features/admin/CampaignAuditPage')),
+          },
+          {
             path: '/c/:campaignId/proposals',
             element: lazyPage(() => import('../features/proposals/ProposalsPage')),
           },

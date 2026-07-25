@@ -758,6 +758,10 @@ export class CampaignsService {
         const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
         if (aid != null) attachmentIds.add(aid);
       }
+      for (const n of npcRows) {
+        const aid = n.portraitUrl ? historicalAvatarAttachmentId(n.portraitUrl) : null;
+        if (aid != null) attachmentIds.add(aid);
+      }
       for (const c of commentRows) {
         const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
         if (aid != null) attachmentIds.add(aid);
@@ -1015,6 +1019,10 @@ export class CampaignsService {
         const aid = c.portraitUrl ? historicalAvatarAttachmentId(c.portraitUrl) : null;
         if (aid != null) attachmentSrcIds.add(aid);
       }
+      for (const n of npcRows) {
+        const aid = n.portraitUrl ? historicalAvatarAttachmentId(n.portraitUrl) : null;
+        if (aid != null) attachmentSrcIds.add(aid);
+      }
       for (const c of commentRows) {
         const aid = c.characterAvatarUrl ? historicalAvatarAttachmentId(c.characterAvatarUrl) : null;
         if (aid != null) attachmentSrcIds.add(aid);
@@ -1126,6 +1134,53 @@ export class CampaignsService {
         factionMap.set(f.id, row.id);
       }
 
+      // Issue #524/#435: recreate attachment rows (portraits + maps) under the clone.
+      // Bytes publish after the tx commits via copyAttachmentBytes. Done before npcs
+      // and characters so their portraitUrl refs can be remapped to the fresh ids.
+      const attMap = new Map<number, number>();
+      for (const a of attachmentAttRows) {
+        const [row] = tx
+          .insert(attachments)
+          .values({
+            campaignId: cloneId,
+            uploaderUserId: a.uploaderUserId,
+            kind: a.kind,
+            filename: a.filename,
+            mime: a.mime,
+            size: a.size,
+            hidden: a.hidden,
+            state: ATTACHMENT_STATE_COMMITTED,
+            createdAt: ts,
+            updatedAt: ts,
+          })
+          .returning()
+          .all();
+        attMap.set(a.id, row.id);
+        pendingAttachmentCopies.push({
+          srcCampaignId: id,
+          dstCampaignId: cloneId,
+          srcAttachmentId: a.id,
+          dstAttachmentId: row.id,
+          mime: a.mime,
+        });
+      }
+      /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
+      const remapClonedPortraitUrl = (url: string | null): string | null => {
+        if (url == null) return null;
+        const remapped = remapAttachmentFileUrl(url, attMap);
+        if (remapped != null) return remapped;
+        if (historicalAvatarAttachmentId(url) != null) return null;
+        return url;
+      };
+      const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
+        const safe = safeHistoricalAvatarUrl(url);
+        if (!safe) return null;
+        const remapped = remapAttachmentFileUrl(safe, attMap);
+        if (remapped != null) return remapped;
+        if (historicalAvatarAttachmentId(safe) != null) return null;
+        return safe;
+      };
+
       const npcMap = new Map<number, number>();
       for (const n of npcRows) {
         const [row] = tx
@@ -1139,6 +1194,7 @@ export class CampaignsService {
             factionId: n.factionId != null ? (factionMap.get(n.factionId) ?? null) : null,
             body: n.body,
             dmSecret: n.dmSecret,
+            portraitUrl: remapClonedPortraitUrl(n.portraitUrl),
             hidden: n.hidden, // entity-level secrecy (issue #42) is preserved on clone
             createdAt: ts,
             updatedAt: ts,
@@ -1186,52 +1242,6 @@ export class CampaignsService {
           .values({ questId, text: o.text, done: template ? false : o.done, sortOrder: o.sortOrder })
           .run();
       }
-
-      // Issue #524/#435: recreate attachment rows (portraits + maps) under the clone.
-      // Bytes publish after the tx commits via copyAttachmentBytes.
-      const attMap = new Map<number, number>();
-      for (const a of attachmentAttRows) {
-        const [row] = tx
-          .insert(attachments)
-          .values({
-            campaignId: cloneId,
-            uploaderUserId: a.uploaderUserId,
-            kind: a.kind,
-            filename: a.filename,
-            mime: a.mime,
-            size: a.size,
-            hidden: a.hidden,
-            state: ATTACHMENT_STATE_COMMITTED,
-            createdAt: ts,
-            updatedAt: ts,
-          })
-          .returning()
-          .all();
-        attMap.set(a.id, row.id);
-        pendingAttachmentCopies.push({
-          srcCampaignId: id,
-          dstCampaignId: cloneId,
-          srcAttachmentId: a.id,
-          dstAttachmentId: row.id,
-          mime: a.mime,
-        });
-      }
-      /** Attachment URL → remapped clone URL; keep safe non-attachment (HTTPS) portraits. */
-      const remapClonedPortraitUrl = (url: string | null): string | null => {
-        if (url == null) return null;
-        const remapped = remapAttachmentFileUrl(url, attMap);
-        if (remapped != null) return remapped;
-        if (historicalAvatarAttachmentId(url) != null) return null;
-        return url;
-      };
-      const remapClonedHistoricalAvatarUrl = (url: unknown): string | null => {
-        const safe = safeHistoricalAvatarUrl(url);
-        if (!safe) return null;
-        const remapped = remapAttachmentFileUrl(safe, attMap);
-        if (remapped != null) return remapped;
-        if (historicalAvatarAttachmentId(safe) != null) return null;
-        return safe;
-      };
 
       const charMap = new Map<number, number>();
       const sessionMap = new Map<number, number>();
@@ -2103,6 +2113,9 @@ export class CampaignsService {
             factionId: factionSrc != null ? (factionMap.get(factionSrc) ?? null) : null,
             body: str(n.body),
             dmSecret: str(n.dmSecret),
+            // Remapped to the freshly imported portrait attachment when a ZIP import
+            // carried its bytes; null for a JSON-only import (source route wouldn't resolve).
+            portraitUrl: remapPortraitUrl(n.portraitUrl),
             // #754: missing hidden on import → DM-only (same as create default).
             hidden: hiddenOf(n.hidden),
             createdAt: ts,

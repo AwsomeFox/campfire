@@ -354,6 +354,8 @@ export const ActionUndoToken = z.object({
   encounterId: z.number().int(),
   actorCombatantId: z.number().int(),
   actionName: z.string().default(''),
+  /** Combat-log chain id for the apply being reversed (issue #426). */
+  chainId: z.string().max(64).nullable().default(null),
   targets: z.array(ActionUndoTarget).default([]),
   costSlot: z.string().default(''),
   costCount: z.number().int().min(0).default(0),

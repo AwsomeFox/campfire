@@ -9,6 +9,9 @@ import {
   ActionTargetAllow,
   ActionUndoToken,
   DND5E_ADAPTER_ID,
+  EncounterEventMetadata,
+  EncounterEventPerformedBy,
+  EncounterEventPhase,
   ResolvedTarget,
   Role,
   UsableAction,
@@ -485,6 +488,154 @@ export class ActionResolverService {
     });
   }
 
+  /** Issue #426: attribute the human/token actor who committed an action chain. */
+  private performedByFrom(user: RequestUser, role: Role): EncounterEventPerformedBy {
+    const userId = user.tokenContext ? `token:${user.tokenContext.name}` : user.id;
+    const kind = user.id.startsWith('ai-dm') ? 'ai' : 'human';
+    return { userId, role, kind };
+  }
+
+  private targetMetadata(t: ResolvedTarget): EncounterEventMetadata {
+    const damageSummary =
+      t.damage.length > 0
+        ? t.damage.map((d) => `${d.amount} ${d.type || 'untyped'}${d.applied !== 'normal' ? ` (${d.applied})` : ''}`).join(', ')
+        : undefined;
+    return {
+      outcome: t.outcome,
+      naturalRoll: t.naturalRoll,
+      attackTotal: t.attackTotal,
+      saveTotal: t.saveTotal,
+      vsValue: t.vsValue,
+      saveDc: t.saveDc,
+      degree: t.degree ?? undefined,
+      damageSummary,
+      playerText: t.playerText || undefined,
+      dmText: t.dmText || undefined,
+    };
+  }
+
+  private rulingDetail(t: ResolvedTarget): string {
+    if (t.playerText.trim()) return t.playerText.trim();
+    if (t.outcome === 'miss') return 'missed';
+    if (t.outcome === 'crit') return 'critical hit';
+    if (t.outcome === 'hit') return 'hit';
+    if (t.outcome === 'success') return 'saved';
+    if (t.outcome === 'failure') return 'failed save';
+    return t.outcome;
+  }
+
+  /** Persist a correlated action chain (issue #426). parentIndex references prior insert positions. */
+  private persistActionChain(
+    encounter: typeof encounters.$inferSelect,
+    round: number,
+    actor: typeof combatants.$inferSelect,
+    chainId: string,
+    performedBy: EncounterEventPerformedBy,
+    ruleSystem: string,
+    resolution: ActionResolution,
+    consequenceLogs: Array<{
+      type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed';
+      target?: string;
+      targetId?: number;
+      detail: string;
+    }>,
+  ): void {
+    type ChainEntry = {
+      type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed' | 'roll';
+      phase: EncounterEventPhase;
+      target?: string;
+      targetId?: number;
+      detail: string;
+      metadata?: EncounterEventMetadata;
+      parentIndex?: number;
+    };
+
+    const entries: ChainEntry[] = [
+      {
+        type: 'note',
+        phase: 'declare',
+        detail: `used ${resolution.actionName}`,
+        metadata: {
+          actionName: resolution.actionName,
+          mode: resolution.mode,
+          playerText: resolution.playerSummary || undefined,
+          dmText: resolution.dmSummary || undefined,
+          ruleSystem,
+        },
+      },
+    ];
+
+    for (const t of resolution.targets) {
+      const rulingIndex = entries.length;
+      entries.push({
+        type: 'roll',
+        phase: 'ruling',
+        target: t.name,
+        targetId: t.combatantId,
+        detail: this.rulingDetail(t),
+        parentIndex: 0,
+        metadata: { actionName: resolution.actionName, mode: resolution.mode, ruleSystem, ...this.targetMetadata(t) },
+      });
+      for (const l of consequenceLogs) {
+        if (l.targetId !== t.combatantId) continue;
+        entries.push({
+          type: l.type,
+          phase: 'consequence',
+          target: l.target,
+          targetId: l.targetId,
+          detail: l.detail,
+          parentIndex: rulingIndex,
+          metadata: { actionName: resolution.actionName, mode: resolution.mode },
+        });
+      }
+    }
+
+    if (resolution.costSlot && resolution.costCount > 0) {
+      entries.push({
+        type: 'resource_changed',
+        phase: 'resource',
+        detail: `spent ${resolution.costCount} ${resolution.costSlot}`,
+        parentIndex: 0,
+        metadata: { actionName: resolution.actionName, costSlot: resolution.costSlot, costCount: resolution.costCount, ruleSystem },
+      });
+    }
+    if (resolution.spellLevelSpent > 0) {
+      entries.push({
+        type: 'resource_changed',
+        phase: 'resource',
+        detail: `spent level-${resolution.spellLevelSpent} spell slot`,
+        parentIndex: 0,
+        metadata: { actionName: resolution.actionName, spellLevelSpent: resolution.spellLevelSpent, ruleSystem },
+      });
+    }
+
+    const insertedIds: number[] = [];
+    for (const entry of entries) {
+      const parentEventId = entry.parentIndex != null ? (insertedIds[entry.parentIndex] ?? null) : null;
+      const row = this.db
+        .insert(encounterEvents)
+        .values({
+          encounterId: encounter.id,
+          round,
+          type: entry.type,
+          actor: actor.name,
+          actorId: actor.id,
+          target: entry.target ?? null,
+          targetId: entry.targetId ?? null,
+          detail: entry.detail,
+          chainId,
+          parentEventId,
+          phase: entry.phase,
+          performedByJson: JSON.stringify(performedBy),
+          metadataJson: entry.metadata && Object.keys(entry.metadata).length > 0 ? JSON.stringify(entry.metadata) : null,
+          createdAt: nowIso(),
+        })
+        .returning()
+        .get();
+      insertedIds.push(row.id);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Apply (atomic) + undo
   // -------------------------------------------------------------------------
@@ -529,14 +680,14 @@ export class ActionResolverService {
     role: Role,
   ): ActionUndoToken {
     const round = encounter.round;
+    const chainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const performedBy = this.performedByFrom(user, role);
+    const ruleSystem = this.adapterForCampaign(encounter.campaignId).id;
     const undoTargets: ActionUndoToken['targets'] = [];
     let concentrationBefore: string | null = null;
-    const logs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
+    const consequenceLogs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
-      // Log a single structured 'note' for the action use, attributed to the actor.
-      logs.push({ type: 'note', detail: `used ${resolution.actionName}` });
-
       for (const t of resolution.targets) {
         const fresh = tx.select().from(combatants).where(eq(combatants.id, t.combatantId)).limit(1).all()[0];
         if (!fresh) continue;
@@ -624,12 +775,12 @@ export class ActionResolverService {
 
         // Combat-log lines (name-free detail; deltas only — never a monster's exact HP).
         const poolDelta = result.hpCurrent + result.hpTemp - (fresh.hpCurrent + fresh.hpTemp);
-        if (poolDelta < 0) logs.push({ type: 'damage', target: fresh.name, targetId: fresh.id, detail: `took ${-poolDelta} damage` });
-        else if (poolDelta > 0) logs.push({ type: 'heal', target: fresh.name, targetId: fresh.id, detail: `healed ${poolDelta} HP` });
-        for (const c of conditions) if (!conditionsBefore.includes(c)) logs.push({ type: 'condition', target: fresh.name, targetId: fresh.id, detail: `gained ${c}` });
-        if (result.deathState === 'dead' && fresh.deathState !== 'dead') logs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'died' });
+        if (poolDelta < 0) consequenceLogs.push({ type: 'damage', target: fresh.name, targetId: fresh.id, detail: `took ${-poolDelta} damage` });
+        else if (poolDelta > 0) consequenceLogs.push({ type: 'heal', target: fresh.name, targetId: fresh.id, detail: `healed ${poolDelta} HP` });
+        for (const c of conditions) if (!conditionsBefore.includes(c)) consequenceLogs.push({ type: 'condition', target: fresh.name, targetId: fresh.id, detail: `gained ${c}` });
+        if (result.deathState === 'dead' && fresh.deathState !== 'dead') consequenceLogs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'died' });
         else if ((fresh.kind === 'monster' || fresh.kind === 'npc') && result.hpCurrent <= 0 && fresh.hpCurrent > 0)
-          logs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'dropped to 0 HP' });
+          consequenceLogs.push({ type: 'death', target: fresh.name, targetId: fresh.id, detail: 'dropped to 0 HP' });
       }
 
       // Spend the actor's resources: action-economy slot, spell slot, concentration.
@@ -661,23 +812,8 @@ export class ActionResolverService {
       }
     });
 
-    // Persist combat-log events after commit (a log failure must not roll back the apply).
-    for (const l of logs) {
-      this.db
-        .insert(encounterEvents)
-        .values({
-          encounterId: encounter.id,
-          round,
-          type: l.type,
-          actor: actor.name,
-          actorId: actor.id,
-          target: l.target ?? null,
-          targetId: l.targetId ?? null,
-          detail: l.detail,
-          createdAt: nowIso(),
-        })
-        .run();
-    }
+    // Persist correlated combat-log chain after commit (a log failure must not roll back the apply).
+    this.persistActionChain(encounter, round, actor, chainId, performedBy, ruleSystem, resolution, consequenceLogs);
 
     void this.audit
       .log({
@@ -697,6 +833,7 @@ export class ActionResolverService {
       encounterId: encounter.id,
       actorCombatantId: actor.id,
       actionName: resolution.actionName,
+      chainId,
       targets: undoTargets,
       costSlot: resolution.costSlot,
       costCount: resolution.costCount,
@@ -779,6 +916,8 @@ export class ActionResolverService {
       }
     });
 
+    const undoChainId = `chain-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const performedBy = this.performedByFrom(user, role);
     this.db
       .insert(encounterEvents)
       .values({
@@ -790,6 +929,11 @@ export class ActionResolverService {
         target: null,
         targetId: null,
         detail: `undid ${token.actionName}`,
+        chainId: undoChainId,
+        parentEventId: null,
+        phase: 'undo',
+        performedByJson: JSON.stringify(performedBy),
+        metadataJson: token.chainId ? JSON.stringify({ actionName: token.actionName, undoOfChainId: token.chainId }) : JSON.stringify({ actionName: token.actionName }),
         createdAt: nowIso(),
       })
       .run();

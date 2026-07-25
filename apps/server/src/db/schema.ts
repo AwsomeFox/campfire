@@ -268,6 +268,7 @@ export const npcs = sqliteTable('npcs', {
   factionId: integer('faction_id'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  portraitUrl: text('portrait_url'),
   // Slug of a bundled game-icons.net entity icon (issue #302), or '' for none.
   // Nullable/absent in older DBs pre-migration; see migrateNpcsTableForIconSlug().
   iconSlug: text('icon_slug').notNull().default(''),
@@ -1322,5 +1323,10 @@ export const encounterEvents = sqliteTable('encounter_events', {
   actorId: integer('actor_id'),
   targetId: integer('target_id'),
   detail: text('detail').notNull().default(''),
+  chainId: text('chain_id'),
+  parentEventId: integer('parent_event_id'),
+  phase: text('phase'),
+  performedByJson: text('performed_by_json'),
+  metadataJson: text('metadata_json'),
   createdAt: text('created_at').notNull(),
 });

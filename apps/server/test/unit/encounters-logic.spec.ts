@@ -792,6 +792,11 @@ describe('encounters — redactEncounterEventsForViewer (issue #869)', () => {
       actorId: null,
       targetId: null,
       detail: '',
+      chainId: null,
+      parentEventId: null,
+      phase: null,
+      performedBy: null,
+      metadata: {},
       createdAt: '2026-07-23T00:00:00.000Z',
       ...over,
     };
@@ -857,5 +862,22 @@ describe('encounters — redactEncounterEventsForViewer (issue #869)', () => {
     const [redacted] = redactEncounterEventsForViewer(events, combatants, new Set([99]));
     expect(redacted.target).toBe(UNKNOWN_COMBATANT_LABEL);
     expect(redacted.detail).toBe('took 4 damage');
+  });
+
+  it('strips DM-only metadata from hidden NPC ruling events (issue #426)', () => {
+    const events = [
+      ev({
+        id: 1,
+        type: 'roll',
+        target: 'The Traitor',
+        targetId: 10,
+        phase: 'ruling',
+        detail: 'hit',
+        metadata: { playerText: 'The Traitor was hit', dmText: 'The Traitor AC 14 vs 18' },
+      }),
+    ];
+    const [redacted] = redactEncounterEventsForViewer(events, combatants, new Set([99]));
+    expect(redacted.metadata?.dmText).toBeUndefined();
+    expect(redacted.metadata?.playerText).toContain(UNKNOWN_COMBATANT_LABEL);
   });
 });
