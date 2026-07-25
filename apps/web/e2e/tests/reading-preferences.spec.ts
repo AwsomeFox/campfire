@@ -121,8 +121,13 @@ test.describe('semantic reading preferences', () => {
     expect(recapType.lineHeight).toBe(31.5);
 
     await page.goto(`/c/${fixture.campaignId}/characters/${fixture.navigation.characterId}`);
-    expect((await typography(page.locator('.reading-surface').first())).fontSize).toBe(18);
-    expect((await typography(page.locator('.cf-btn').first())).fontSize).toBeLessThan(18);
+    const characterReading = page.locator('.reading-surface').first();
+    await expect(characterReading).toBeVisible();
+    expect((await typography(characterReading)).fontSize).toBe(18);
+    // DetailPageWayfinding (#652) exposes the return control as `.btn`, not `.cf-btn`.
+    const characterControl = page.locator('.btn').first();
+    await expect(characterControl).toBeVisible();
+    expect((await typography(characterControl)).fontSize).toBeLessThan(18);
 
     // 1280px at 200% browser zoom has a 640 CSS-pixel layout viewport.
     await page.setViewportSize({ width: 640, height: 800 });
