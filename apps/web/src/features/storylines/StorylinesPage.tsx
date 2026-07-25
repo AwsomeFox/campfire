@@ -217,6 +217,9 @@ export default function StorylinesPage() {
     return map;
   }, [arcs]);
 
+  // Disable the header affordance while arcs are loading or once any arc exists (#1307).
+  const disableHeaderDraft = loading || arcs.length > 0;
+
   const createArc = async () => {
     const title = newArcTitle.trim();
     if (!title || busy) return;
@@ -264,12 +267,17 @@ export default function StorylinesPage() {
         </span>
         <div style={{ flex: 1 }} />
         {/*
-          Issue #639: beats are a Storylines entity, so "Draft a beat with AI" lives
-          here — on the surface that owns the content type — not on Quests. The button
-          self-gates (DM + AI-DM seat enabled, co_dm/driver mode), so it renders for the
-          only audience that can ever use it on this DM-only page.
+          Issue #639 / #1307: beats are a Storylines entity. The header affordance is for
+          initial full-story drafting when no arcs exist yet; once a story is underway,
+          draft per-arc from each arc card instead.
         */}
-        <DraftWithAiButton campaignId={cid} target="beat" label="Draft a beat with AI" />
+        <DraftWithAiButton
+          campaignId={cid}
+          target="beat"
+          label="Draft a beat with AI"
+          disabled={disableHeaderDraft}
+          disabledTitle="Use the per-arc Draft beat with AI button once you have story arcs."
+        />
       </div>
 
       <p className="text-muted" style={{ margin: '-6px 0 0', fontSize: 12 }}>
@@ -617,6 +625,15 @@ function ArcCard({
           >
             Delete
           </button>
+        )}
+        {canDmWrite && (
+          <DraftWithAiButton
+            campaignId={cid}
+            target="beat"
+            arcId={arc.id}
+            label="Draft beat with AI"
+            className="!min-h-0 !py-1 text-xs"
+          />
         )}
       </div>
 
