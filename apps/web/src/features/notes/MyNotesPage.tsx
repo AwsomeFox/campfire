@@ -442,7 +442,7 @@ export default function MyNotesPage() {
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-sm"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-secondary hover:text-[var(--color-neutral-300)] text-sm"
             aria-label="Clear search"
           >
             ✕
@@ -465,11 +465,11 @@ export default function MyNotesPage() {
             </Btn>
           </form>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[11px] text-slate-500">Attach to:</span>
+            <span className="text-[11px] text-secondary">Attach to:</span>
             <EntityPicker campaignId={cid} onChange={setAttach} resetKey={attachResetKey} disabled={saving} />
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="inline-flex items-center gap-1 text-[11px] text-slate-500"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to:</span>
+            <span className="inline-flex items-center gap-1 text-[11px] text-secondary"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> Whisper to:</span>
             <select
               value={whisperTo}
               onChange={(e) => setWhisperTo(e.target.value)}
@@ -504,7 +504,7 @@ export default function MyNotesPage() {
         <div className="space-y-5">
           <section className="space-y-3">
             {mine.length > 0 && sharedWithMe.length > 0 && (
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Mine</p>
+              <p className="text-[11px] font-bold text-secondary uppercase tracking-wide">Mine</p>
             )}
             {mine.map((note) => (
               <NoteCard
@@ -530,7 +530,7 @@ export default function MyNotesPage() {
 
           {sharedWithMe.length > 0 && (
             <section className="space-y-3">
-              <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wide">Shared with me</p>
+              <p className="text-[11px] font-bold text-secondary uppercase tracking-wide">Shared with me</p>
               {sharedWithMe.map((note) => (
                 <NoteCard key={note.id} campaignId={cid} note={note} editable={false} myUserId={myUserId} members={members} />
               ))}
@@ -550,7 +550,7 @@ export default function MyNotesPage() {
             ))}
 
           {notes.length > 0 && (
-            <p className="text-[11px] text-slate-500 m-0" aria-live="polite">
+            <p className="text-[11px] text-secondary m-0" aria-live="polite">
               {loading
                 ? t('notes.loading')
                 : hasMore || total > notes.length
@@ -575,7 +575,7 @@ export default function MyNotesPage() {
         </div>
       )}
 
-      <p className="text-[11px] text-slate-600">
+      <p className="text-[11px] text-secondary">
         Notes are per-user: the DM cannot read private notes (API-enforced). Sharing a note with the DM notifies them
         (it shows in their notification bell) and lands under their &quot;Shared with me&quot;; shared-with-party notes
         appear on entity pages for everyone. A <GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} className="inline align-text-bottom" /> whisper reaches exactly one player (plus the DM) — the per-player
@@ -759,7 +759,7 @@ function NoteCard({
             ) : (
               <>
                 <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label}</span></Chip>
-                <span className="text-[11px] text-slate-500">from {liveNote.authorName || liveNote.authorUserId}</span>
+                <span className="text-[11px] text-secondary">from {liveNote.authorName || liveNote.authorUserId}</span>
               </>
             )}
             <div className="ml-auto flex items-center gap-2">
@@ -768,14 +768,14 @@ function NoteCard({
                   <GameIcon slug={entityIcon[liveNote.entityType]} size={12} /> {entityLabel(liveNote)}
                 </Link>
               )}
-              <span className="text-[11px] text-slate-600">{timeAgo(liveNote.createdAt)}</span>
+              <span className="text-[11px] text-timestamp">{timeAgo(liveNote.createdAt)}</span>
               {editable && (
-                <button onClick={beginEdit} className="text-[11px] text-slate-500 hover:text-amber-300" data-testid={`note-edit-${liveNote.id}`}>
+                <button onClick={beginEdit} className="text-[11px] text-secondary hover:text-amber-300" data-testid={`note-edit-${liveNote.id}`}>
                   edit
                 </button>
               )}
               {editable && (
-                <button onClick={onDelete} className="text-[11px] text-slate-500 hover:text-rose-400">
+                <button onClick={onDelete} className="text-[11px] text-secondary hover:text-rose-400">
                   delete
                 </button>
               )}
@@ -1015,7 +1015,7 @@ function NoteEditor({
             );
           })}
         </div>
-        <p id={visHelpId} className="text-[11px] text-slate-500 m-0">
+        <p id={visHelpId} className="text-[11px] text-secondary m-0">
           {NOTE_VISIBILITY_HELP[draft.visibility]}
           {willNotify ? ' Sharing or retargeting will notify the new audience.' : ' Typo fixes do not re-notify.'}
         </p>
@@ -1061,9 +1061,9 @@ function NoteEditor({
           </p>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1 min-w-0">
-              <p className="text-[10px] uppercase tracking-wide text-slate-500 m-0">Your draft</p>
+              <p className="text-[10px] uppercase tracking-wide text-secondary m-0">Your draft</p>
               <Markdown className="text-slate-200 text-sm break-words">{compare.draft.body}</Markdown>
-              <p className="text-[11px] text-slate-500 m-0">
+              <p className="text-[11px] text-secondary m-0">
                 {visMeta[compare.draft.visibility].label}
                 {compare.draft.visibility === 'whisper' && compare.draft.recipientUserId
                   ? ` → ${compare.draft.recipientUserId}`
@@ -1074,9 +1074,9 @@ function NoteEditor({
               </p>
             </div>
             <div className="space-y-1 min-w-0">
-              <p className="text-[10px] uppercase tracking-wide text-slate-500 m-0">Latest on server</p>
+              <p className="text-[10px] uppercase tracking-wide text-secondary m-0">Latest on server</p>
               <Markdown className="text-slate-200 text-sm break-words">{compare.server.body}</Markdown>
-              <p className="text-[11px] text-slate-500 m-0">
+              <p className="text-[11px] text-secondary m-0">
                 {visMeta[compare.server.visibility].label}
                 {compare.server.visibility === 'whisper' && compare.server.recipientUserId
                   ? ` → ${compare.server.recipientUserId}`
@@ -1104,7 +1104,7 @@ function NoteEditor({
 
       <div className="flex items-center gap-2 flex-wrap justify-end w-full">
         {statusLabel && (
-          <span className="text-[11px] text-slate-500 mr-auto" aria-live="polite">
+          <span className="text-[11px] text-secondary mr-auto" aria-live="polite">
             {statusLabel}
           </span>
         )}

@@ -300,14 +300,14 @@ export default function ProposalsPage() {
 
       {history.length > 0 && (
         <section className="space-y-2">
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">History</p>
+          <p className="text-[10px] font-bold text-secondary uppercase tracking-wide">History</p>
           {history.map((p) => (
             <HistoryRow key={p.id} proposal={p} />
           ))}
         </section>
       )}
 
-      <p className="text-[11px] text-slate-600">
+      <p className="text-[11px] text-secondary">
         Future AI-DM mode uses this exact queue: story beats, generated NPCs, and maps all arrive as proposals. An
         env flag can allow trusted DM-scoped tokens to write directly (audited).
       </p>
@@ -546,7 +546,7 @@ function ProposalCard({
             spellCheck={false}
           />
           {editError && <p className="text-[11px] text-red-400 m-0">{editError}</p>}
-          <p className="text-[10px] text-slate-600 m-0">Edit the proposed payload (JSON) before approving.</p>
+          <p className="text-[10px] text-secondary m-0">Edit the proposed payload (JSON) before approving.</p>
         </div>
       ) : (
         <DiffView payload={proposal.payload} snapshot={proposal.snapshot} />
@@ -563,7 +563,7 @@ function ProposalCard({
 
       <div className="flex items-center gap-2 justify-end flex-wrap">
         {canResolve && (
-        <button type="button" className="text-[11px] text-slate-500 hover:text-white mr-auto" onClick={onToggle}>
+        <button type="button" className="text-[11px] text-secondary hover:text-white mr-auto" onClick={onToggle}>
           {expanded ? 'Hide note field' : '+ note'}
         </button>
         )}
@@ -572,7 +572,7 @@ function ProposalCard({
         {canEdit && (
           <button
             type="button"
-            className="text-[11px] text-slate-500 hover:text-white"
+            className="text-[11px] text-secondary hover:text-white"
             onClick={() => (editing ? setEditing(false) : startEdit())}
           >
             {editing ? 'Cancel edit' : 'Edit payload'}
@@ -594,7 +594,7 @@ function ProposalCard({
 /** Delete proposals carry no payload — show the snapshot of what would be removed. */
 function DeleteView({ snapshot }: { snapshot: Record<string, unknown> | null }) {
   if (snapshot === null) {
-    return <p className="text-xs text-slate-500">This entity will be permanently deleted.</p>;
+    return <p className="text-xs text-secondary">This entity will be permanently deleted.</p>;
   }
   const entries = Object.entries(snapshot).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && v.length === 0));
   return (
@@ -607,7 +607,7 @@ function DeleteView({ snapshot }: { snapshot: Record<string, unknown> | null }) 
           style={i > 0 ? { borderTop: '1px solid var(--color-divider)' } : undefined}
         >
           <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
-          <span className="line-through text-slate-500 whitespace-pre-wrap break-all">{formatValue(value)}</span>
+          <span className="line-through text-secondary whitespace-pre-wrap break-all">{formatValue(value)}</span>
         </div>
       ))}
     </div>
@@ -617,7 +617,7 @@ function DeleteView({ snapshot }: { snapshot: Record<string, unknown> | null }) 
 function DiffView({ payload, snapshot }: { payload: Record<string, unknown>; snapshot: Record<string, unknown> | null }) {
   const entries = Object.entries(payload);
   if (entries.length === 0) {
-    return <p className="text-xs text-slate-500">No fields in this proposal.</p>;
+    return <p className="text-xs text-secondary">No fields in this proposal.</p>;
   }
   // `snapshot` is the entity's state captured at propose time (update proposals only —
   // null for creates and for proposals recorded before the server grew snapshots), so
@@ -636,14 +636,14 @@ function DiffView({ payload, snapshot }: { payload: Record<string, unknown>; sna
           >
             <span className="text-muted w-[86px] shrink-0 text-[11px]">{key}</span>
             {hasBefore && !unchanged && (
-              <span className="line-through text-slate-500 whitespace-pre-wrap break-all shrink-0 max-w-[45%]">
+              <span className="line-through text-secondary whitespace-pre-wrap break-all shrink-0 max-w-[45%]">
                 {formatValue(snapshot[key])}
               </span>
             )}
             <span style={{ color: 'var(--color-accent-300)' }} className="whitespace-pre-wrap break-all">
               {unchanged ? formatValue(value) : `→ ${formatValue(value)}`}
             </span>
-            {unchanged && <span className="text-[10px] text-slate-600 shrink-0">unchanged</span>}
+            {unchanged && <span className="text-[10px] text-secondary shrink-0">unchanged</span>}
           </div>
         );
       })}
@@ -727,7 +727,7 @@ function MyProposalsView({ campaignId }: { campaignId: number }) {
         <>
           {pending.length > 0 && (
             <section className="space-y-3">
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Pending</p>
+              <p className="text-[10px] font-bold text-secondary uppercase tracking-wide">Pending</p>
               {pending.map((p) => (
                 <MyProposalCard
                   key={p.id}
@@ -741,7 +741,7 @@ function MyProposalsView({ campaignId }: { campaignId: number }) {
           )}
           {resolved.length > 0 && (
             <section className="space-y-2">
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Resolved</p>
+              <p className="text-[10px] font-bold text-secondary uppercase tracking-wide">Resolved</p>
               {resolved.map((p) => (
                 <HistoryRow key={p.id} proposal={p} />
               ))}
@@ -810,7 +810,7 @@ function HistoryRow({ proposal }: { proposal: Proposal }) {
       <p className="text-sm text-slate-400 m-0">
         <EntityTitle slug={iconFor(proposal.entityType)}>{proposalTitle(proposal)}</EntityTitle>{' '}
         {isAiProposal(proposal) && <Chip variant="ai" className="mx-1"><span className="inline-flex items-center gap-1"><GameIcon slug="robot-golem" size={12} /> AI</span></Chip>}
-        <span className="text-slate-600">· {proposal.proposer}</span>
+        <span className="text-secondary">· {proposal.proposer}</span>
       </p>
       <span className={`tag ${approved ? 'tag-accent' : 'tag-neutral'}`}>{label}</span>
     </Card>

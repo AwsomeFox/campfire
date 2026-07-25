@@ -36,7 +36,7 @@ export function AuditLogCard() {
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-2">
         <h2 className="font-bold text-white text-sm">Admin audit log</h2>
-        <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={() => void load()}>
+        <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={() => void load()}>
           refresh
         </button>
       </div>
@@ -44,7 +44,7 @@ export function AuditLogCard() {
       {!entries ? (
         <Skeleton lines={3} />
       ) : entries.length === 0 ? (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-secondary">
           No server-wide admin actions logged yet. Creating or disabling users, changing settings, and installing
           rule packs will show up here.
         </p>
@@ -52,7 +52,7 @@ export function AuditLogCard() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-[10px] uppercase text-slate-500 text-left">
+              <tr className="text-[10px] uppercase text-secondary text-left">
                 <th className="py-2 pr-4 font-bold">When</th>
                 <th className="pr-4 font-bold">Actor</th>
                 <th className="pr-4 font-bold">Action</th>
@@ -74,14 +74,14 @@ export function AuditLogCard() {
                   <td className="pr-4">
                     <code className="text-[11px] text-amber-400">{e.action}</code>
                   </td>
-                  <td className="pr-4 text-slate-400 break-all">{e.detail || <span className="text-slate-600">—</span>}</td>
+                  <td className="pr-4 text-slate-400 break-all">{e.detail || <span className="text-secondary">—</span>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         Server-wide actions only — per-campaign history lives on each campaign. A <span style={{ color: 'rgb(252 211 77)' }}>Server admin</span> badge marks a privileged operator action; <span>DM</span> marks a campaign-DM acting here.
       </p>
     </Card>

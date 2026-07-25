@@ -330,7 +330,7 @@ export default function InboxPage() {
         return (
           <>
             {active.items.length > 0 && (
-              <p className="text-[11px] text-slate-500 m-0" aria-live="polite">
+              <p className="text-[11px] text-secondary m-0" aria-live="polite">
                 {active.hasMore || active.total > active.items.length
                   ? t('notes.inboxShowingOf', { shown: active.items.length, total: active.total })
                   : t('notes.showingAll', { count: active.items.length })}
@@ -391,7 +391,7 @@ function ResolvedItem({ campaignId, item }: { campaignId: number; item: Note }) 
         {item.resolvedNote ? (
           <p className="text-xs text-slate-400 m-0">{item.resolvedNote}</p>
         ) : (
-          !item.entityType && <p className="text-xs text-slate-500 m-0">{t('notes.noResolutionNote')}</p>
+          !item.entityType && <p className="text-xs text-secondary m-0">{t('notes.noResolutionNote')}</p>
         )}
       </div>
     </Card>
@@ -531,7 +531,7 @@ function InboxItem({
             )}
           </div>
           <div className="flex items-center justify-between pt-1 gap-2 flex-wrap">
-            <p className="text-[11px] text-slate-500">
+            <p className="text-[11px] text-secondary">
               {t('notes.resolvePreamble')}{linkType && linkId !== '' ? t('notes.resolveLinked') : t('notes.resolveNote')}.
             </p>
             <div className="flex gap-2 shrink-0">

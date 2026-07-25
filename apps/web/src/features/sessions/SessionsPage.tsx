@@ -901,7 +901,7 @@ function SessionDetail({
   return (
     <div className="reading-surface space-y-3" style={{ maxWidth: 720 }} {...entityTargetProps('session', session.id)}>
       <div>
-        <button onClick={onBack} className="text-xs text-slate-500 hover:text-slate-300 lg:hidden mb-1 block">
+        <button onClick={onBack} className="text-xs text-secondary hover:text-[var(--color-neutral-300)] lg:hidden mb-1 block">
           ← Back to sessions
         </button>
       </div>
@@ -1077,7 +1077,7 @@ function SessionDetail({
           ) : recap ? (
             <Markdown>{recap}</Markdown>
           ) : (
-            <p className="text-sm text-slate-600">No recap written yet.</p>
+            <p className="text-sm text-secondary">No recap written yet.</p>
           )}
         </Card>
       )}
@@ -1252,7 +1252,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
   return (
     <Card className="space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Who played</span>
+        <span className="text-xs font-bold text-secondary uppercase tracking-wide">Who played</span>
         <div className="flex-1" />
         {canDmWrite && !editing && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEditing}>
@@ -1266,7 +1266,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
       {editing ? (
         <div className="space-y-2">
           {roster.length === 0 ? (
-            <p className="text-sm text-slate-600">No characters in this campaign yet.</p>
+            <p className="text-sm text-secondary">No characters in this campaign yet.</p>
           ) : (
             <div className="flex flex-wrap gap-1.5">
               {roster.map((c) => {
@@ -1305,7 +1305,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
           ))}
         </div>
       ) : (
-        <p className="text-sm text-slate-600">Attendance not recorded.</p>
+        <p className="text-sm text-secondary">Attendance not recorded.</p>
       )}
     </Card>
   );
@@ -1459,7 +1459,7 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
       {loading ? (
         <Skeleton lines={2} />
       ) : shares.length === 0 ? (
-        <p className="text-sm text-slate-600 m-0">No active links.</p>
+        <p className="text-sm text-secondary m-0">No active links.</p>
       ) : (
         <ul className="m-0 p-0 space-y-2" style={{ listStyle: 'none' }}>
           {shares.map((s) => (

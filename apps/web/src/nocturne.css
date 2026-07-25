@@ -25,6 +25,11 @@
   --color-neutral-400: #b2b6ca;
   --color-neutral-500: #9397ab;
   --color-neutral-600: #75798c;
+  /* Semantic text roles — contrast-safe on shell backgrounds (issue #593). */
+  --color-text-secondary: #9da1b5;
+  --color-text-timestamp: #9da1b5;
+  --color-text-disabled: #8e92a6;
+  --color-text-decorative: #868a9e;
   --color-neutral-700: #595d6c;
   --color-neutral-800: #3f424d;
   --color-neutral-900: #292b31;
@@ -132,9 +137,9 @@ img { display: block; max-width: 100%; }
 figure { margin: 0; }
 figcaption {
   font-size: var(--type-meta); margin-top: var(--space-1);
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: var(--color-text-secondary);
 }
-.text-muted { color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.text-muted { color: var(--color-text-secondary); }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 /* Programmatic entity deep links should remain visibly located even when the

@@ -86,7 +86,7 @@ function ConnectAiBlock({ token }: { token?: string }) {
     <div className="cf-inset p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Connect your AI</p>
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-[11px] text-slate-500">MCP endpoint</span>
+        <span className="text-[11px] text-secondary">MCP endpoint</span>
         <code id={mcpId} className="text-xs text-slate-300 font-mono break-all flex-1 min-w-0">{mcpUrl}</code>
         <CopyControl text={mcpUrl} selectTargetId={mcpId} className="!min-h-0 !py-1.5 text-xs" />
       </div>
@@ -96,7 +96,7 @@ function ConnectAiBlock({ token }: { token?: string }) {
         </code>
         <CopyControl text={command} selectTargetId={commandId} className="!min-h-0 !py-1.5 text-xs" />
       </div>
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         {token
           ? 'This command has your new token baked in — copy it now, it will not be shown again.'
           : 'Swap <TOKEN> for a token created above (or use the one-time command shown right after creating one).'}
@@ -155,7 +155,7 @@ export function TokensCard() {
     <Card className="space-y-3">
       <div className="flex items-center justify-between border-b border-slate-700 pb-3">
         <h2 className="font-bold text-white text-sm">
-          API tokens <span className="text-slate-500 font-normal">(REST + MCP)</span>
+          API tokens <span className="text-secondary font-normal">(REST + MCP)</span>
         </h2>
         <Btn
           className="!min-h-0 !py-1.5 text-xs"
@@ -224,7 +224,7 @@ function TokenRow({ token, onRevoke }: { token: ApiToken; onRevoke: () => void }
           <span className={`cf-chip ${WRITE_SCOPE_CHIP[token.writeScope]} ml-1`}>{WRITE_SCOPE_LABEL[token.writeScope]}</span>{' '}
           <span className="cf-chip cf-chip-private ml-1">{campaignBadge}</span>
         </p>
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           {token.tokenPrefix}•••• · last used {token.lastUsedAt ? timeAgo(token.lastUsedAt) : 'never'}
         </p>
       </div>
@@ -340,8 +340,8 @@ function NewTokenForm({
           ))}
         </select>
       </div>
-      <p className="text-[11px] text-slate-500">{SCOPE_HELP[scope]}</p>
-      <p className="text-[11px] text-slate-500">{WRITE_SCOPE_HELP[writeScope]}</p>
+      <p className="text-[11px] text-secondary">{SCOPE_HELP[scope]}</p>
+      <p className="text-[11px] text-secondary">{WRITE_SCOPE_HELP[writeScope]}</p>
       {writeScope === 'direct' && (
         <p className="text-[11px] text-rose-400 font-semibold">
           ⚠ Direct writes apply immediately with no human review. Confirm this
@@ -349,7 +349,7 @@ function NewTokenForm({
         </p>
       )}
       <div className="flex items-center gap-2 justify-end">
-        {!name.trim() && <p className="text-[11px] text-slate-500 mr-auto">Name your token to enable Create.</p>}
+        {!name.trim() && <p className="text-[11px] text-secondary mr-auto">Name your token to enable Create.</p>}
         <Btn type="button" ghost className="!min-h-0 !py-1.5 text-xs" onClick={onCancel} disabled={saving}>
           Cancel
         </Btn>
@@ -377,7 +377,7 @@ function NewTokenReveal({ created, onClose }: { created: ApiTokenCreated; onClos
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
           <GameIcon slug="key" size={12} className="inline align-text-bottom mr-1" />{created.apiToken.name} — shown once
         </p>
-        <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={onClose}>
+        <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={onClose}>
           dismiss
         </button>
       </div>

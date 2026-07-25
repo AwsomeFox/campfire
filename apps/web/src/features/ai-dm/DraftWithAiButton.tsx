@@ -241,7 +241,7 @@ function DraftWithAiModal({
           </div>
           <button
             type="button"
-            className="text-slate-500 hover:text-white text-lg leading-none disabled:opacity-50"
+            className="text-secondary hover:text-white text-lg leading-none disabled:opacity-50"
             onClick={onClose}
             aria-label="Close AI drafting dialog"
             disabled={busy}

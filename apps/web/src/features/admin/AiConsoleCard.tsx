@@ -112,7 +112,7 @@ export function AiConsoleCard() {
         <Skeleton lines={4} />
       ) : (
         <>
-          <p className="text-[11px] text-slate-500">
+          <p className="text-[11px] text-secondary">
             Opt in, cap spend, watch usage, and stop everything with one switch. The kill switch pauses{' '}
             <strong>all</strong> AI server-wide instantly — no new turn can start while it&apos;s off.
           </p>
@@ -121,7 +121,7 @@ export function AiConsoleCard() {
           <div className="cf-inset p-3.5 flex items-center justify-between gap-3 flex-wrap">
             <div>
               <p className="text-sm font-semibold text-white">Server-wide AI</p>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-[11px] text-secondary">
                 {ov.killSwitchEnabled
                   ? 'AI is enabled. Turn this off to pause every campaign immediately.'
                   : 'AI is paused server-wide. Turn on to opt the server in.'}
@@ -185,9 +185,9 @@ function UsageSummary({ ov }: { ov: AiConsoleOverview }) {
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="cf-inset p-3">
-      <p className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">{label}</p>
+      <p className="text-[10px] uppercase tracking-widest text-secondary font-bold">{label}</p>
       <p className="text-lg font-extrabold text-white leading-tight">{value}</p>
-      {sub && <p className="text-[10px] text-slate-600">{sub}</p>}
+      {sub && <p className="text-[10px] text-secondary">{sub}</p>}
     </div>
   );
 }
@@ -229,13 +229,13 @@ function CapsEditor({
   return (
     <div className="cf-inset p-3.5 space-y-2">
       <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Budgets &amp; cost caps</p>
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         A server-wide <strong>hard</strong> token cap across every campaign. 0 = unlimited. Once the total metered
         tokens reach it, new turns are refused with a clear reason (per-campaign budgets are set per row below).
       </p>
       <div className="flex items-end gap-2 flex-wrap">
         <label className="block">
-          <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Server token cap</span>
+          <span className="text-[10px] uppercase tracking-widest text-secondary font-bold">Server token cap</span>
           <TextInput
             className="!min-h-0 !py-2 text-sm mt-1 w-40"
             type="number"
@@ -264,7 +264,7 @@ function ProviderDefaultSection({ ov, onChanged }: { ov: AiConsoleOverview; onCh
             : 'Not set'}
         </span>
       </div>
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         One set of credentials, one bill. This is the server default every campaign falls back to unless a DM sets a
         per-campaign override. The API key is <strong>write-only</strong> — it is never shown back, only its last 4
         digits. Setting it here is all a DM needs to run AI (no per-campaign key required).
@@ -386,7 +386,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
   const rows = ov.usage.byCampaign;
   if (rows.length === 0) {
     return (
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         No campaign has configured an AI-DM seat yet. Once a DM enables one, its usage and budget show up here.
       </p>
     );
@@ -397,7 +397,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-[10px] uppercase text-slate-500 text-left">
+            <tr className="text-[10px] uppercase text-secondary text-left">
               <th className="py-2 pr-4 font-bold">Campaign</th>
               <th className="pr-4 font-bold">Model</th>
               <th className="pr-4 font-bold">Seat</th>
@@ -411,7 +411,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
               return (
                 <tr key={r.campaignId}>
                   <td className="py-2 pr-4 font-semibold text-white">{r.campaignName}</td>
-                  <td className="pr-4 text-slate-400">{r.model || <span className="text-slate-600">—</span>}</td>
+                  <td className="pr-4 text-slate-400">{r.model || <span className="text-secondary">—</span>}</td>
                   <td className="pr-4">
                     <span className={`cf-chip ${r.enabled ? 'cf-chip-completed' : 'cf-chip-private'}`}>
                       {r.enabled ? 'On' : 'Off'}
@@ -428,7 +428,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
         </table>
       </div>
       {ov.usage.byModel.length > 0 && (
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           By model:{' '}
           {ov.usage.byModel.map((m, i) => (
             <span key={m.model || `_${i}`}>
@@ -438,7 +438,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
           ))}
         </p>
       )}
-      <p className="text-[11px] text-slate-600">
+      <p className="text-[11px] text-secondary">
         Set a campaign&apos;s budget from its own AI-DM settings, or raise the server cap above. Usage aggregates the
         per-turn metering.
       </p>
@@ -472,7 +472,7 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
         </Btn>
       </div>
       {results && results.length === 0 && (
-        <p className="text-[11px] text-slate-500">No AI provider is configured yet.</p>
+        <p className="text-[11px] text-secondary">No AI provider is configured yet.</p>
       )}
       {results && results.length > 0 && (
         <ul className="space-y-1">
@@ -482,8 +482,8 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
               <span className="text-slate-300">
                 {r.scope === 'server' ? 'Server default' : r.campaignName}
               </span>
-              <span className="text-slate-600">·</span>
-              <span className="text-slate-500">
+              <span className="text-secondary">·</span>
+              <span className="text-secondary">
                 {r.providerType} / {r.model || '—'}
               </span>
               {!r.ok && r.error && <span className="text-rose-400/80 truncate">— {r.error}</span>}

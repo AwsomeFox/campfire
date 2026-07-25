@@ -107,7 +107,7 @@ export function MembershipIntegrityCard({ users }: { users: User[] }) {
       )}
 
       {report && report.repairs.length > 0 && (
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           Migration repair history: {report.repairs.length} row{report.repairs.length === 1 ? '' : 's'} recorded.
         </p>
       )}

@@ -203,7 +203,7 @@ export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
               {roleLabel}
             </span>
             <span className="text-slate-400">{expiryLabel(invite.expiresAt)}</span>
-            <span className="text-slate-500">·</span>
+            <span className="text-secondary">·</span>
             <span className="text-slate-400">{remainingLabel(invite)}</span>
             {statusLabel && (
               <span className="text-rose-400 font-semibold">{statusLabel}</span>

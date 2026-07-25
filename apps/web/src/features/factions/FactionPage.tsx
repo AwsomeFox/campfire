@@ -314,7 +314,7 @@ export default function FactionPage() {
           <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
             <div className="space-y-4 min-w-0">
               <Card>
-                {faction.body ? <Markdown>{faction.body}</Markdown> : <p className="text-sm text-slate-500 italic">No description yet.</p>}
+                {faction.body ? <Markdown>{faction.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
               {faction.goals && (
@@ -359,7 +359,7 @@ export default function FactionPage() {
                         className="cf-inset cf-card-hover p-3"
                       >
                         <p className="flex items-center gap-1.5 text-sm font-bold text-amber-400"><GameIcon slug="hooded-figure" size={13} /> {npc.name}</p>
-                        {npc.role && <p className="text-[11.5px] text-slate-500 truncate">{npc.role}</p>}
+                        {npc.role && <p className="text-[11.5px] text-secondary truncate">{npc.role}</p>}
                       </a>
                     ))}
                   </div>

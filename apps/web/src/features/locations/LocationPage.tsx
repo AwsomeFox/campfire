@@ -617,7 +617,7 @@ export default function LocationPage() {
                       </span>
                       <div className="flex items-end gap-2">
                         <div className="space-y-0.5">
-                          <label htmlFor="pin-x-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                          <label htmlFor="pin-x-input" className="text-[9px] text-secondary font-bold uppercase">
                             Horizontal position (%)
                           </label>
                           <TextInput
@@ -633,7 +633,7 @@ export default function LocationPage() {
                           />
                         </div>
                         <div className="space-y-0.5">
-                          <label htmlFor="pin-y-input" className="text-[9px] text-slate-500 font-bold uppercase">
+                          <label htmlFor="pin-y-input" className="text-[9px] text-secondary font-bold uppercase">
                             Vertical position (%)
                           </label>
                           <TextInput
@@ -655,14 +655,14 @@ export default function LocationPage() {
                           {pinSaving ? '…' : 'Save'}
                         </Btn>
                       </div>
-                      <p id="pin-position-help" className="text-[9px] text-slate-500 m-0">
+                      <p id="pin-position-help" className="text-[9px] text-secondary m-0">
                         0% = left/top edge, 100% = right/bottom edge
                       </p>
                     </Card>
                   )}
                 </div>
 
-                {location.body ? <Markdown>{location.body}</Markdown> : <p className="text-sm text-slate-500 italic">No description yet.</p>}
+                {location.body ? <Markdown>{location.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
               {isDm && location.dmSecret && <DmPanel>{location.dmSecret}</DmPanel>}
