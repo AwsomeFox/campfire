@@ -12,11 +12,6 @@ import {
 } from '@campfire/schema';
 
 describe('fog editor (issue #472)', () => {
-  const base: FogState = {
-    enabled: true,
-    revealed: [{ x: 10, y: 10, w: 40, h: 40 }],
-  };
-
   it('appendFogReveal enables fog and adds a rectangle', () => {
     const next = appendFogReveal(null, { x: 0, y: 0, w: 20, h: 20 });
     expect(next.enabled).toBe(true);

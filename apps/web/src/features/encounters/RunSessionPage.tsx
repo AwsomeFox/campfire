@@ -2022,13 +2022,6 @@ function clampGridPercent(value: number): number {
   return Math.max(1, Math.min(100, value));
 }
 
-/** Normalize two drag corners (percent) into a positive-size {x,y,w,h} rectangle. */
-function rectFromCorners(a: { x: number; y: number }, b: { x: number; y: number }): { x: number; y: number; w: number; h: number } {
-  const x = Math.min(a.x, b.x);
-  const y = Math.min(a.y, b.y);
-  return { x, y, w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
-}
-
 type MapTool = 'move' | 'measure' | 'reveal' | 'erase' | 'select' | 'ping' | 'calibrate';
 
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
