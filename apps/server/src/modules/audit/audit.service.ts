@@ -1,10 +1,12 @@
 import { Inject, Injectable, type OnApplicationBootstrap } from '@nestjs/common';
-import { and, count, desc, eq, gt, isNull, lt, lte, sql } from 'drizzle-orm';
-import type { AuditActorRole } from '@campfire/schema';
+import { and, count, desc, eq, gt, isNull, lt, lte, sql, type SQL } from 'drizzle-orm';
+import type { AuditActorRole, AuditListPage } from '@campfire/schema';
 import { getRequestId } from '../../common/request-context';
+import { buildCursorListPage } from '../../common/cursor-pagination';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { auditLog } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { clampAuditListLimit, decodeAuditCursor } from './audit-pagination';
 
 /**
  * #74: how long audit rows are retained before the background sweep prunes them.
@@ -222,14 +224,18 @@ export class AuditService implements OnApplicationBootstrap {
     campaignId: number,
     limit = 100,
     offset = 0,
-    filters: { sinceId?: number; sinceTs?: string; action?: string; entityType?: string; requestId?: string } = {},
+    filters: {
+      sinceId?: number;
+      sinceTs?: string;
+      untilTs?: string;
+      action?: string;
+      entityType?: string;
+      entityId?: number;
+      actor?: string;
+      requestId?: string;
+    } = {},
   ) {
-    const conditions = [eq(auditLog.campaignId, campaignId)];
-    if (filters.sinceId != null) conditions.push(gt(auditLog.id, filters.sinceId));
-    if (filters.sinceTs != null && filters.sinceTs !== '') conditions.push(gt(auditLog.createdAt, filters.sinceTs));
-    if (filters.action != null && filters.action !== '') conditions.push(eq(auditLog.action, filters.action));
-    if (filters.entityType != null && filters.entityType !== '') conditions.push(eq(auditLog.entityType, filters.entityType));
-    if (filters.requestId != null && filters.requestId !== '') conditions.push(eq(auditLog.requestId, filters.requestId));
+    const conditions = this.campaignAuditConditions(campaignId, filters);
     return this.db
       .select()
       .from(auditLog)
@@ -237,6 +243,73 @@ export class AuditService implements OnApplicationBootstrap {
       .orderBy(desc(auditLog.id))
       .limit(limit)
       .offset(offset);
+  }
+
+  /**
+   * Cursor-paginated campaign audit list (issue #443). Newest-first by id; continue with
+   * `cursor` from a previous `nextCursor`. All filters compose (AND).
+   */
+  async listForCampaignPage(
+    campaignId: number,
+    opts: {
+      limit?: number;
+      cursor?: string;
+      sinceId?: number;
+      sinceTs?: string;
+      untilTs?: string;
+      action?: string;
+      entityType?: string;
+      entityId?: number;
+      actor?: string;
+      requestId?: string;
+    } = {},
+  ): Promise<AuditListPage> {
+    const limit = clampAuditListLimit(opts.limit);
+    const cursor = decodeAuditCursor(opts.cursor);
+    const baseConds = this.campaignAuditConditions(campaignId, opts);
+    const pageConds = [...baseConds];
+    if (cursor) pageConds.push(lt(auditLog.id, cursor.i));
+
+    const [countRows, fetched] = await Promise.all([
+      this.db
+        .select({ value: count() })
+        .from(auditLog)
+        .where(and(...baseConds)),
+      this.db
+        .select()
+        .from(auditLog)
+        .where(and(...pageConds))
+        .orderBy(desc(auditLog.id))
+        .limit(limit + 1),
+    ]);
+
+    const total = countRows[0]?.value ?? 0;
+    return buildCursorListPage(fetched, limit, total, (last) => ({ v: 1, m: 'id', i: last.id })) as AuditListPage;
+  }
+
+  private campaignAuditConditions(
+    campaignId: number,
+    filters: {
+      sinceId?: number;
+      sinceTs?: string;
+      untilTs?: string;
+      action?: string;
+      entityType?: string;
+      entityId?: number;
+      actor?: string;
+      requestId?: string;
+    },
+  ): SQL[] {
+    const conditions: SQL[] = [eq(auditLog.campaignId, campaignId)];
+    if (filters.sinceId != null) conditions.push(gt(auditLog.id, filters.sinceId));
+    if (filters.sinceTs != null && filters.sinceTs !== '') conditions.push(gt(auditLog.createdAt, filters.sinceTs));
+    if (filters.untilTs != null && filters.untilTs !== '') conditions.push(lte(auditLog.createdAt, filters.untilTs));
+    if (filters.action != null && filters.action !== '') conditions.push(eq(auditLog.action, filters.action));
+    if (filters.entityType != null && filters.entityType !== '') conditions.push(eq(auditLog.entityType, filters.entityType));
+    if (filters.entityId != null) conditions.push(eq(auditLog.entityId, filters.entityId));
+    if (filters.actor != null && filters.actor !== '') conditions.push(eq(auditLog.actor, filters.actor));
+    if (filters.requestId != null && filters.requestId !== '') conditions.push(eq(auditLog.requestId, filters.requestId));
+    return conditions;
   }
 
   /**

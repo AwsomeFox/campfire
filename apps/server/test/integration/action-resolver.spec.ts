@@ -176,15 +176,28 @@ describe('action resolver (real SQLite, service layer)', () => {
     const hpAfter = orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent;
     if (target.outcome === 'hit' || target.outcome === 'crit') {
       expect(hpAfter).toBe(60 - target.totalDamage);
-      // A combat-log damage event was written.
       const events = orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all();
       expect(events.some((e) => e.type === 'damage')).toBe(true);
+      // Issue #426: correlated action chain with declaration, ruling, and consequences.
+      const chainIds = [...new Set(events.map((e) => e.chainId).filter(Boolean))];
+      expect(chainIds).toHaveLength(1);
+      const chainEvents = events.filter((e) => e.chainId === chainIds[0]);
+      expect(chainEvents.some((e) => e.phase === 'declare')).toBe(true);
+      expect(chainEvents.some((e) => e.phase === 'ruling')).toBe(true);
+      expect(chainEvents.some((e) => e.phase === 'consequence' && e.type === 'damage')).toBe(true);
+      expect(res.undoToken!.chainId).toBe(chainIds[0]);
     } else {
       expect(hpAfter).toBe(60); // miss
     }
-    // Undo restores HP exactly.
+    // Undo restores HP exactly and appends a linked correction chain.
     service.undo(encounterId, res.undoToken!, alice, 'player');
     expect(orm.select().from(combatants).where(eq(combatants.id, drake)).get()!.hpCurrent).toBe(60);
+    const afterUndo = orm.select().from(encounterEvents).where(eq(encounterEvents.encounterId, encounterId)).all();
+    const correction = afterUndo.find((e) => e.phase === 'undo');
+    expect(correction).toBeDefined();
+    if (correction?.metadataJson && res.undoToken?.chainId) {
+      expect(JSON.parse(correction.metadataJson).undoOfChainId).toBe(res.undoToken.chainId);
+    }
   });
 
   it('save-for-half + fire resistance both apply on a successful save (DC 1 → always succeeds)', () => {

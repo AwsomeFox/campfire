@@ -477,6 +477,80 @@ describe('campaign search + mentions (e2e, issue #64)', () => {
   });
 });
 
+describe('campaign search session recap indexing (e2e, issue #442)', () => {
+  let ctx: TestAppContext;
+  let campaignId: number;
+  let longRecapSessionId: number;
+  const lateCodeword = 'ZephyrbaneCodeword442';
+  const replacementCodeword = 'MoonshardCodeword442';
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    const server = ctx.app.getHttpServer();
+    campaignId = (await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Recap Search Camp' })).body.id;
+
+    const padding = 'Opening narration. '.repeat(40); // well past the 400-char list excerpt cap
+    const recap = `${padding}The party finally confronted ${lateCodeword} at the vault door.`;
+    const created = await request(server)
+      .post(`/api/v1/campaigns/${campaignId}/sessions`)
+      .set(dm)
+      .send({ number: 1, title: 'Vault Finale', recap });
+    longRecapSessionId = created.body.id;
+  });
+
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('finds terms deep in a long recap, not just the opening excerpt', async () => {
+    const res = await request(ctx.app.getHttpServer())
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(lateCodeword)}`)
+      .set(player);
+    expect(res.status).toBe(200);
+    const hit = (res.body.results as Result[]).find((r) => r.type === 'session' && r.id === longRecapSessionId);
+    expect(hit).toBeTruthy();
+    expect(hit!.matchedField).toBe('recap');
+    expect(hit!.snippet).toContain(lateCodeword);
+    expect(hit!.snippet).not.toMatch(/^Opening narration/);
+  });
+
+  it('updates search results when the recap is edited', async () => {
+    const server = ctx.app.getHttpServer();
+    const padding = 'Revised opening. '.repeat(40);
+    const updatedRecap = `${padding}They sealed the pact with ${replacementCodeword}.`;
+
+    const patch = await request(server)
+      .patch(`/api/v1/sessions/${longRecapSessionId}`)
+      .set(dm)
+      .send({ recap: updatedRecap });
+    expect(patch.status).toBe(200);
+
+    const oldRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(lateCodeword)}`)
+      .set(dm);
+    expect(oldRes.body.results.some((r: Result) => r.type === 'session' && r.id === longRecapSessionId)).toBe(false);
+
+    const newRes = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(replacementCodeword)}`)
+      .set(player);
+    const hit = (newRes.body.results as Result[]).find((r) => r.type === 'session' && r.id === longRecapSessionId);
+    expect(hit).toBeTruthy();
+    expect(hit!.matchedField).toBe('recap');
+    expect(hit!.snippet).toContain(replacementCodeword);
+  });
+
+  it('drops trashed sessions from search immediately', async () => {
+    const server = ctx.app.getHttpServer();
+    const del = await request(server).delete(`/api/v1/sessions/${longRecapSessionId}`).set(dm);
+    expect(del.status).toBe(200);
+
+    const res = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/search?q=${encodeURIComponent(replacementCodeword)}`)
+      .set(dm);
+    expect(res.body.results.some((r: Result) => r.type === 'session' && r.id === longRecapSessionId)).toBe(false);
+  });
+});
+
 describe('campaign search role boundaries (e2e, real cookie sessions, issue #843)', () => {
   let ctx: TestAppContext;
   let dmAgent: ReturnType<typeof request.agent>;

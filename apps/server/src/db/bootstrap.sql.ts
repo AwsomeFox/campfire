@@ -1031,6 +1031,11 @@ CREATE TABLE IF NOT EXISTS encounter_events (
   actor_id INTEGER,
   target_id INTEGER,
   detail TEXT NOT NULL DEFAULT '',
+  chain_id TEXT,
+  parent_event_id INTEGER,
+  phase TEXT,
+  performed_by_json TEXT,
+  metadata_json TEXT,
   created_at TEXT NOT NULL
 );
 

@@ -2064,6 +2064,26 @@ function migrateEncounterEventsTableForCombatantIds(sqlite: Database.Database): 
 }
 
 /**
+ * Issue #426: combat-log action provenance — chain_id, parent_event_id, phase,
+ * performed_by_json, metadata_json. Plain nullable ADD COLUMNs; existing rows
+ * remain valid flat events. Fresh DBs never hit this path (BOOTSTRAP_SQL).
+ */
+function migrateEncounterEventsTableForProvenance(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounter_events'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounter_events)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('chain_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN chain_id TEXT');
+  if (!has('parent_event_id')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN parent_event_id INTEGER');
+  if (!has('phase')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN phase TEXT');
+  if (!has('performed_by_json')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN performed_by_json TEXT');
+  if (!has('metadata_json')) sqlite.exec('ALTER TABLE encounter_events ADD COLUMN metadata_json TEXT');
+}
+
+/**
  * Issue #466: `combatants.sheet_synced_updated_at` stores the character.updatedAt
  * CAS token from the last acknowledged sheet↔combatant HP sync. Plain nullable
  * ADD COLUMN — no table rebuild. Fresh DBs never hit this path (BOOTSTRAP_SQL).
@@ -2617,6 +2637,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
   { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
+  { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
 ];
 
 /**

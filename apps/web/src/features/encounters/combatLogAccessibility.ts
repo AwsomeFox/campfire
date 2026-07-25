@@ -9,6 +9,45 @@ export interface CombatLogAnnouncementAdvance {
   appendedEvents: EncounterEvent[];
 }
 
+/** Group consecutive events sharing a chainId (issue #426). Ungrouped events are singleton chains. */
+export interface CombatLogChain {
+  chainId: string | null;
+  events: EncounterEvent[];
+}
+
+export function groupCombatLogEvents(events: readonly EncounterEvent[]): CombatLogChain[] {
+  const chains: CombatLogChain[] = [];
+  for (const event of events) {
+    const last = chains[chains.length - 1];
+    if (event.chainId && last?.chainId === event.chainId) last.events.push(event);
+    else chains.push({ chainId: event.chainId ?? null, events: [event] });
+  }
+  return chains;
+}
+
+/** Concise summary for a correlated action chain; falls back to the first event. */
+export function formatCombatLogChainSummary(chain: CombatLogChain): string {
+  if (chain.events.length === 0) return 'Combat log updated';
+  const declare = chain.events.find((e) => e.phase === 'declare') ?? chain.events[0];
+  const actor = declare.actor?.trim();
+  const actionName = declare.metadata?.actionName?.trim();
+  if (actor && actionName) return `${actor}: used ${actionName}`;
+  return formatCombatLogEventSummary(declare);
+}
+
+/** Expandable detail lines for a chain (player-safe text preferred). */
+export function formatCombatLogChainDetails(chain: CombatLogChain): string[] {
+  const lines: string[] = [];
+  for (const event of chain.events) {
+    if (event.phase === 'declare') continue;
+    const text = event.metadata?.playerText?.trim() || event.detail.trim();
+    if (!text) continue;
+    const prefix = event.target?.trim() ? `${event.target}: ` : '';
+    lines.push(`${prefix}${text}`);
+  }
+  return lines;
+}
+
 function punctuate(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return '';

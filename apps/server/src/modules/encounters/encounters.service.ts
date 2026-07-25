@@ -2,9 +2,9 @@ import { BadRequestException, ConflictException, ForbiddenException, Inject, Inj
 import { and, eq, gt, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
-import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
+import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -271,6 +271,11 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
     actorId: row.actorId ?? null,
     targetId: row.targetId ?? null,
     detail: row.detail,
+    chainId: row.chainId ?? null,
+    parentEventId: row.parentEventId ?? null,
+    phase: (row.phase as EncounterEventPhase | null) ?? null,
+    performedBy: row.performedByJson ? (JSON.parse(row.performedByJson) as EncounterEventPerformedBy) : null,
+    metadata: row.metadataJson ? (JSON.parse(row.metadataJson) as EncounterEventMetadata) : {},
     createdAt: row.createdAt,
   };
 }
@@ -303,9 +308,7 @@ function redactMonsterHp(c: Combatant): Combatant {
 /** True if a combatant's token centre lies inside any revealed fog rectangle (issue #40). */
 function tokenInRevealedRegion(c: Combatant, fog: FogState): boolean {
   if (c.tokenX == null || c.tokenY == null) return true; // unplaced — nothing on the map to hide
-  const x = c.tokenX;
-  const y = c.tokenY;
-  return fog.revealed.some((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+  return pointInRevealedRegion(c.tokenX, c.tokenY, fog);
 }
 
 /**
@@ -660,6 +663,11 @@ export class EncountersService {
       actorId?: number | null;
       targetId?: number | null;
       detail?: string;
+      chainId?: string | null;
+      parentEventId?: number | null;
+      phase?: EncounterEventPhase | null;
+      performedBy?: EncounterEventPerformedBy | null;
+      metadata?: EncounterEventMetadata;
     },
   ): Promise<void> {
     await this.db.insert(encounterEvents).values({
@@ -671,6 +679,11 @@ export class EncountersService {
       actorId: fields.actorId ?? null,
       targetId: fields.targetId ?? null,
       detail: fields.detail ?? '',
+      chainId: fields.chainId ?? null,
+      parentEventId: fields.parentEventId ?? null,
+      phase: fields.phase ?? null,
+      performedByJson: fields.performedBy ? JSON.stringify(fields.performedBy) : null,
+      metadataJson: fields.metadata && Object.keys(fields.metadata).length > 0 ? JSON.stringify(fields.metadata) : null,
       createdAt: nowIso(),
     });
   }
@@ -957,7 +970,7 @@ export class EncountersService {
    * gets monster HP replaced with a coarse band. Omit it (or pass `dm`) only for
    * DM-facing returns — the DM always sees exact HP.
    */
-  async getWithCombatantsOrThrow(id: number, viewerRole?: Role): Promise<EncounterWithCombatants> {
+  async getWithCombatantsOrThrow(id: number, viewerRole?: Role, viewerUserId?: string): Promise<EncounterWithCombatants> {
     const row = await this.getRowOrThrow(id);
     // Entity-level secrecy (issue #262): a hidden encounter (DM prep) must be
     // indistinguishable from a nonexistent one for a non-DM — 404 (not 403), so its
@@ -1032,8 +1045,30 @@ export class EncountersService {
     list = enrichCombatantsWithLegendaryPools(list, statblocks);
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
+    // Issue #465: AoE templates in unrevealed fog leak origin/shape/dimensions to players
+    // (and render above the fog overlay client-side). Filter server-side for non-DMs using
+    // the same concealment rules as token redaction; player-declared templates stay visible
+    // to their owner via declaredByUserId.
+    let aoe = redactedDomain.aoe ?? [];
+    if (viewerRole !== undefined && viewerRole !== 'dm') {
+      const fog = parseFog(row.fog);
+      const invalidFog = row.fog !== null && fog === null;
+      const ownFogConceals = !invalidFog && fogConcealsPixels(fog);
+      const siblingProtects =
+        !invalidFog &&
+        !ownFogConceals &&
+        row.mapAttachmentId != null &&
+        (await this.attachmentsService.isFogProtectedEncounterMap(row.mapAttachmentId, row.campaignId));
+      if (invalidFog || siblingProtects) {
+        const concealAll: FogState = { enabled: true, revealed: [] };
+        aoe = filterAoeTemplatesForViewer(aoe, concealAll, { viewerUserId });
+      } else if (fog?.enabled) {
+        aoe = filterAoeTemplatesForViewer(aoe, fog, { viewerUserId });
+      }
+    }
     return {
       ...redactedDomain,
+      aoe,
       combatants: list,
       ...(hpSyncConflicts && hpSyncConflicts.length > 0 ? { hpSyncConflicts } : {}),
     };

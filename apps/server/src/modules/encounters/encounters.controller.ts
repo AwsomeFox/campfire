@@ -193,7 +193,7 @@ export class EncountersController {
     // The caller's role drives issue #43 redaction: a non-DM viewer gets monster
     // HP as a coarse band, never exact numbers.
     const role = await this.access.requireMember(user, row.campaignId);
-    return this.encounters.getWithCombatantsOrThrow(id, role);
+    return this.encounters.getWithCombatantsOrThrow(id, role, user.id);
   }
 
   @Get(':id/map')
