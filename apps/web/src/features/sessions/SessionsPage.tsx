@@ -22,7 +22,7 @@ import { useProtectedForm } from '../../lib/useProtectedForm';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
+import { Card, Btn, TextInput, TextArea, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
@@ -1070,7 +1070,7 @@ function SessionDetail({
       ) : (
         <Card>
           {recapLoading ? (
-            <p className="text-sm text-slate-600">Loading recap…</p>
+            <Skeleton lines={4} label="Loading recap…" />
           ) : recap ? (
             <Markdown>{recap}</Markdown>
           ) : (
@@ -1241,7 +1241,9 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
     }
   }
 
-  if (loading || !attendanceReady) return null;
+  if (loading || !attendanceReady) {
+    return <SkeletonConditionalRegion preset="attendance" />;
+  }
 
   return (
     <Card className="space-y-2">

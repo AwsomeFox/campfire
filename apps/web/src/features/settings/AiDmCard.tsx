@@ -16,6 +16,7 @@
 import { useEffect, useState } from 'react';
 import type { AiDmMode, AiDmSeat, AiProviderEffectiveView } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
+import { SkeletonCard } from '../../components/ui';
 import { AI_DM_BUDGET_INPUT_ID, AI_DM_BUDGET_SECTION_ID } from './aiDmBudgetIds';
 import { ProviderForm } from './ProviderForm';
 
@@ -82,12 +83,7 @@ export default function AiDmCard({ campaignId }: { campaignId: number }) {
   }, [campaignId]);
 
   if (loading && !seat) {
-    return (
-      <div className="card elev-sm">
-        <span className="card-kicker">AI Dungeon Master</span>
-        <p className="text-muted" style={{ margin: 0, fontSize: 11.5 }}>Loading…</p>
-      </div>
-    );
+    return <SkeletonCard sections={3} lines={2} label="Loading AI DM settings…" />;
   }
 
   if (loadError && !seat) {

@@ -5,6 +5,7 @@
 import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { GameIcon } from './GameIcon';
 import { chipClass, type ChipVariant } from './chipVariants';
+import { SKELETON_TEST_IDS } from './loadingSkeletonState';
 export type { ChipVariant } from './chipVariants';
 
 export function Card({ children, className = '', ...props }: HTMLAttributes<HTMLElement> & { children: ReactNode }) {
@@ -140,19 +141,162 @@ export function EmptyState({
   );
 }
 
-export function Skeleton({ lines = 3 }: { lines?: number }) {
-  // Bars stay visible when animate-pulse is frozen under reduced motion (#594).
+/** Shared pulse bar — stays painted when animate-pulse is frozen under reduced motion (#594). */
+function SkeletonBar({
+  width = '100%',
+  className = 'h-3',
+}: {
+  width?: string;
+  className?: string;
+}) {
   return (
-    <div className="space-y-2" role="status" aria-busy="true" data-testid="skeleton">
-      <span className="sr-only">Loading…</span>
+    <div
+      className={`rounded animate-pulse bg-[var(--color-neutral-800)] ${className}`}
+      style={{ width }}
+      aria-hidden="true"
+    />
+  );
+}
+
+function SkeletonStatus({
+  children,
+  testId,
+  label = 'Loading…',
+  className = 'space-y-2',
+}: {
+  children: ReactNode;
+  testId?: string;
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={className}
+      role="status"
+      aria-busy="true"
+      {...(testId ? { 'data-testid': testId } : {})}
+    >
+      <span className="sr-only">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+/** Inline text-block placeholder — existing default across list/detail pages. */
+export function Skeleton({ lines = 3, label }: { lines?: number; label?: string }) {
+  return (
+    <SkeletonStatus testId={SKELETON_TEST_IDS.inline} label={label}>
       {Array.from({ length: lines }, (_, i) => (
-        <div
-          key={i}
-          className="h-3 rounded animate-pulse bg-[var(--color-neutral-800)]"
-          style={{ width: `${85 - i * 15}%` }}
-          aria-hidden="true"
-        />
+        <SkeletonBar key={i} width={`${85 - i * 15}%`} />
       ))}
+    </SkeletonStatus>
+  );
+}
+
+/** Alias for call sites that want the issue #677 vocabulary explicitly. */
+export const SkeletonInline = Skeleton;
+
+/** Route-level lazy-page placeholder — preserves page title + body geometry. */
+export function SkeletonRoute({ lines = 5 }: { lines?: number }) {
+  return (
+    <div className="max-w-4xl mx-auto px-4 mt-8" data-testid={SKELETON_TEST_IDS.route}>
+      <SkeletonStatus label="Loading page…" className="space-y-3">
+        <SkeletonBar width="38%" className="h-5" />
+        {Array.from({ length: lines }, (_, i) => (
+          <SkeletonBar key={i} width={`${92 - i * 10}%`} />
+        ))}
+      </SkeletonStatus>
+    </div>
+  );
+}
+
+/** Card-shaped placeholder — kicker/header row + body lines inside a real card shell. */
+export function SkeletonCard({
+  lines = 4,
+  sections = 1,
+  label,
+}: {
+  lines?: number;
+  sections?: number;
+  label?: string;
+}) {
+  return (
+    <section className="cf-card p-5" data-testid={SKELETON_TEST_IDS.card}>
+      <SkeletonStatus label={label} className="space-y-4">
+        {Array.from({ length: sections }, (_, section) => (
+          <div key={section} className={section > 0 ? 'space-y-2 pt-3 border-t border-[var(--color-neutral-800)]' : 'space-y-2'}>
+            <SkeletonBar width="32%" className="h-2.5" />
+            {Array.from({ length: lines }, (_, i) => (
+              <SkeletonBar key={i} width={`${88 - i * 12}%`} />
+            ))}
+          </div>
+        ))}
+      </SkeletonStatus>
+    </section>
+  );
+}
+
+export type SkeletonConditionalPreset = 'scribe' | 'attendance' | 'provider-form';
+
+/**
+ * Geometry-preserving shell for async gates (#677). Reserves the footprint of a
+ * region that may never mount (AI seat off) so slow networks do not shift the
+ * page while the gate is still resolving.
+ */
+export function SkeletonConditionalRegion({
+  preset,
+  label,
+}: {
+  preset: SkeletonConditionalPreset;
+  label?: string;
+}) {
+  if (preset === 'scribe') {
+    return (
+      <section className="cf-card p-5 space-y-3" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
+        <SkeletonStatus label={label ?? 'Loading AI scribe…'} className="flex items-center gap-2 flex-wrap">
+          <SkeletonBar width="18px" className="h-[18px]" />
+          <SkeletonBar width="88px" className="h-3.5" />
+          <SkeletonBar width="120px" className="h-5" />
+          <div className="flex-1" />
+          <SkeletonBar width="52px" className="h-7" />
+        </SkeletonStatus>
+      </section>
+    );
+  }
+
+  if (preset === 'attendance') {
+    return (
+      <section className="cf-card p-5 space-y-2" data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
+        <SkeletonStatus label={label ?? 'Loading attendance…'} className="space-y-2">
+          <div className="flex items-center gap-2">
+            <SkeletonBar width="84px" className="h-3" />
+            <div className="flex-1" />
+            <SkeletonBar width="96px" className="h-7" />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <SkeletonBar width="72px" className="h-6 rounded-full" />
+            <SkeletonBar width="64px" className="h-6 rounded-full" />
+            <SkeletonBar width="80px" className="h-6 rounded-full" />
+          </div>
+        </SkeletonStatus>
+      </section>
+    );
+  }
+
+  return (
+    <div data-testid={SKELETON_TEST_IDS['conditional-region']} data-skeleton-preset={preset}>
+      <SkeletonStatus label={label ?? 'Loading provider settings…'} className="space-y-3">
+        <div className="flex gap-2 flex-wrap">
+          <SkeletonBar width="120px" className="h-9" />
+          <SkeletonBar width="min(100%, 220px)" className="h-9 flex-1" />
+        </div>
+        <SkeletonBar width="min(100%, 280px)" className="h-9" />
+        <SkeletonBar width="min(100%, 320px)" className="h-9" />
+        <div className="flex gap-2">
+          <SkeletonBar width="108px" className="h-8" />
+          <SkeletonBar width="120px" className="h-8" />
+        </div>
+      </SkeletonStatus>
     </div>
   );
 }
