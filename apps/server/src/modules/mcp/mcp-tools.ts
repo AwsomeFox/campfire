@@ -1385,11 +1385,19 @@ export class McpToolsService {
       server,
       'list_timeline',
       'List a campaign\'s in-world timeline events in narrative order (DM-controlled sortIndex, then id). Requires ' +
-        'membership; dmSecret is stripped and hidden events are dropped WHOLESALE for non-DM callers.',
-      { campaignId: CampaignIdArg },
-      async ({ campaignId }) => {
+        'membership; dmSecret is stripped and hidden events are dropped WHOLESALE for non-DM callers. Returns a ' +
+        'bounded page (`items`, `total`, `hasMore`, `nextCursor`); pass `cursor` from a previous `nextCursor` to continue.',
+      {
+        campaignId: CampaignIdArg,
+        limit: LimitArg(200, 50),
+        cursor: z.string().max(512).optional().describe("Opaque cursor from a previous page's nextCursor."),
+      },
+      async ({ campaignId, limit, cursor }) => {
         const role = await this.access.requireMember(user, campaignId as number);
-        return this.timeline.listEvents(campaignId as number, role);
+        return this.timeline.listEventsPage(campaignId as number, role, {
+          limit: limit as number | undefined,
+          cursor: cursor as string | undefined,
+        });
       },
     );
 
