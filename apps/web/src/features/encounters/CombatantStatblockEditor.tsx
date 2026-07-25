@@ -3,6 +3,7 @@
  * Used in the add-combatant manual tab and inline on existing manual monsters.
  */
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { CharacterAction, CombatantStatblock } from '@campfire/schema';
 import {
   COMBATANT_STATBLOCK_HELP,
@@ -26,6 +27,7 @@ export function CombatantStatblockEditor({
   onChange: (next: CombatantStatblock) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const statblock = useMemo(() => value ?? defaultCombatantStatblock(), [value]);
 
   const patch = (partial: Partial<CombatantStatblock>) => onChange({ ...statblock, ...partial });
