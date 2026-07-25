@@ -6,6 +6,7 @@ import {
 } from '@campfire/schema';
 import { useAuthStatus } from '../../app/AuthStatusGate';
 import { joinPublicBase } from '../../lib/public-base';
+import { BrandMark } from '../../components/BrandMark';
 
 interface RecoveryCopy {
   title: string;
@@ -59,25 +60,6 @@ const RECOVERY_COPY: Record<OidcRecoveryCategory, RecoveryCopy> = {
 const GENERIC_COPY = RECOVERY_COPY.client_token_failure;
 const SUPPORT_REFERENCE = /^[A-F0-9]{16}$/;
 
-function FlameMark() {
-  return (
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path
-        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
-        stroke="var(--color-accent)"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M5 21l14-3M19 21L5 18"
-        stroke="var(--color-neutral-600)"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
 function safeRecoveryDetails(search: string): { copy: RecoveryCopy; reference: string | null } {
   const params = new URLSearchParams(search);
   const parsedCategory = OidcRecoveryCategorySchema.safeParse(params.get('category'));
@@ -111,7 +93,7 @@ export function OidcRecoveryPage() {
         aria-describedby="oidc-recovery-body oidc-recovery-hint"
         style={{ maxWidth: 480, padding: 'clamp(24px, 7vw, 38px)', gap: 16 }}
       >
-        <FlameMark />
+        <BrandMark />
         <div className="flex flex-col gap-2">
           <p className="text-muted" style={{ margin: 0, fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
             Campfire sign-in
