@@ -683,6 +683,16 @@ export const Quest = z.object({
   // `hidden` to DM-only (issue #754) — pass false only for an intentional public create.
   hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
+  // Encounters linked to this quest (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
   ...timestamps,
 });
 export type Quest = z.infer<typeof Quest>;
@@ -931,6 +941,16 @@ export const Location = z.object({
   mapY: z.number().nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Encounters linked to this location (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
   // Landmark/portrait image (issue #1324). Nullable URL to an attachment; absent
   // falls back to the status-colored map pin placeholder.
   portraitUrl: z.string().max(500).nullable().default(null),
@@ -949,6 +969,16 @@ export const Session = z.object({
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
+  // Encounters linked to this session (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
@@ -4245,6 +4275,22 @@ export const RuleSearchPage = z.object({
 });
 export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
+// ---------- encounter link metadata (issue #480) ----------
+/** Role-safe resolved label for an encounter's location/quest/session link. */
+export const EncounterLinkMeta = z.object({
+  id: Id,
+  label: z.string(),
+});
+export type EncounterLinkMeta = z.infer<typeof EncounterLinkMeta>;
+
+/** Compact backlink from a location/quest/session to a linked encounter. */
+export const EncounterBacklink = z.object({
+  id: Id,
+  name: z.string().min(1).max(120),
+  status: z.enum(['preparing', 'running', 'ended']),
+});
+export type EncounterBacklink = z.infer<typeof EncounterBacklink>;
+
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an
 // AI drafting a recap or "the story so far" to SEE that combat happened, where/why/
@@ -4260,6 +4306,10 @@ export const EncounterDigest = z.object({
   locationId: Id.nullable(),
   questId: Id.nullable(),
   sessionId: Id.nullable(),
+  // Role-safe resolved link labels (issue #480).
+  locationLink: EncounterLinkMeta.nullable().optional(),
+  questLink: EncounterLinkMeta.nullable().optional(),
+  sessionLink: EncounterLinkMeta.nullable().optional(),
   combatantCount: z.number().int().nonnegative(),
   // Issue #625: the "down" tally used to sum EVERY combatant at 0 HP / dead — including
   // every dead monster — which inflated a glance at the summary. It now counts only
@@ -5838,6 +5888,10 @@ export const Encounter = z.object({
   // from every non-DM read (list/get/difficulty) until the DM reveals it (hidden=false).
   hidden: z.boolean().default(false),
   endedAt: IsoDate.nullable().default(null),
+  // Role-safe resolved link labels (issue #480) — present on list/get/summary reads.
+  locationLink: EncounterLinkMeta.nullable().optional(),
+  questLink: EncounterLinkMeta.nullable().optional(),
+  sessionLink: EncounterLinkMeta.nullable().optional(),
   ...timestamps,
 });
 export type Encounter = z.infer<typeof Encounter>;

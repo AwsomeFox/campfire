@@ -160,8 +160,8 @@ test.describe('confirm dialog pending labels — slow requests (issue #793)', ()
     );
 
     await page.goto(encounterUrl());
-    // The row control is an icon button whose accessible name is "✕"; title carries the label.
-    await page.getByTitle('Remove combatant').first().click();
+    // The row control exposes a contextual accessible name (not the decorative ✕ glyph).
+    await page.getByRole('button', { name: /Remove .+/ }).first().click();
     const dialog = page.getByRole('dialog', { name: 'Remove this combatant from the encounter?' });
     await dialog.getByRole('button', { name: 'Remove', exact: true }).click();
     await started;
