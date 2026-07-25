@@ -4,13 +4,14 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { CampaignSummary, Encounter } from '@campfire/schema';
+import type { CampaignSummary } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
 import { useCampaigns } from '../../app/CampaignContext';
 import { useCampaignAccessError } from '../../app/useCampaignAccessError';
+import { useLiveEncounter } from '../../app/LiveEncounterContext';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { StatusHeader } from './StatusHeader';
 import { InstallHintBanner } from './InstallHintBanner';
@@ -48,7 +49,6 @@ export default function DashboardPage() {
   const projectionRef = useRef(projection);
   projectionRef.current = projection;
   const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
-  const [liveEncounterProjection, setLiveEncounterProjection] = useState<{ campaignId: number; data: Encounter | null } | null>(null);
   const [summaryStale, setSummaryStale] = useState(false);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const requestSequence = useRef(0);
@@ -57,7 +57,7 @@ export default function DashboardPage() {
 
   const summary = projection?.campaignId === id ? projection.data : null;
   const error = failure?.campaignId === id ? failure.message : null;
-  const liveEncounter = liveEncounterProjection?.campaignId === id ? liveEncounterProjection.data : null;
+  const liveEncounter = useLiveEncounter();
 
   const load = useCallback(async () => {
     const requestId = ++requestSequence.current;
@@ -94,22 +94,6 @@ export default function DashboardPage() {
   // cards have no SSE event, so poll them ~5s and pause when the tab is hidden.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(id));
 
-  // Check for a running encounter to surface a "Live" chip.
-  // Best-effort: an empty/failed lookup just means no chip, not a page error.
-  const refreshLiveEncounter = useCallback(async () => {
-    if (!Number.isFinite(id)) return;
-    try {
-      const running = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters?status=running`);
-      if (activeCampaignId.current === id) setLiveEncounterProjection({ campaignId: id, data: running[0] ?? null });
-    } catch {
-      if (activeCampaignId.current === id) setLiveEncounterProjection({ campaignId: id, data: null });
-    }
-  }, [id]);
-
-  useEffect(() => {
-    if (summary) void refreshLiveEncounter();
-  }, [summary, refreshLiveEncounter]);
-
   // One campaign stream invalidates each affected authoritative read. Scheduling
   // events refetch the whole dashboard projection; this is also the reconnect
   // catch-up path for anything changed while this tab was offline (#790).
@@ -117,18 +101,14 @@ export default function DashboardPage() {
     onEvent: useCallback((event) => {
       if (event.type === 'schedule.updated') {
         void load();
-      } else if (event.type === 'encounter.updated' || event.type === 'encounter.deleted') {
-        void refreshLiveEncounter();
       }
-    }, [load, refreshLiveEncounter]),
+    }, [load]),
     onReconnect: useCallback(() => {
       void load();
-      void refreshLiveEncounter();
-    }, [load, refreshLiveEncounter]),
+    }, [load]),
     onStreamRecovery: useCallback(() => {
       void load();
-      void refreshLiveEncounter();
-    }, [load, refreshLiveEncounter]),
+    }, [load]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
 

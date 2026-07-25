@@ -271,7 +271,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const refreshCount = useCallback((force = false): Promise<void> => {
     if (userId === undefined || !storageKey || !lockName || !isDocumentActive()) return Promise.resolve();
-    if (countRequestRef.current) return countRequestRef.current.promise;
+    if (countRequestRef.current) {
+      if (!force) return countRequestRef.current.promise;
+      cancelCountRequest();
+    }
 
     const stored = readStoredSnapshot();
     if (!force && stored && Date.now() - stored.refreshedAt < POLL_MS) {
