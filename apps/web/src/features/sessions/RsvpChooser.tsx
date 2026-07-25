@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Session RSVP segmented radiogroup (issue #645).
  *
@@ -20,6 +21,7 @@ export type RsvpChooserProps = {
 const ORDER = rsvpOptions();
 
 export function RsvpChooser({ value, onChange, disabled = false, ...rest }: RsvpChooserProps) {
+  useTranslation();
   const labelledBy = rest['aria-labelledby'];
   const refs = useRef<Partial<Record<RsvpStatus, HTMLButtonElement | null>>>({});
 

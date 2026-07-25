@@ -14,6 +14,7 @@ import {
   CampaignPurge,
   CampaignUpdate,
   CAMPAIGN_CLONE_PREVIEW_FORMAT_VERSION,
+  NarrationLanguage,
 } from '@campfire/schema';
 import type { Campaign, CampaignClonePreview, CampaignSummary, Role, TrashedEntity } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
@@ -255,6 +256,7 @@ function toDomain(row: typeof campaigns.$inferSelect): Campaign {
     requireDmTurnConfirmation: row.requireDmTurnConfirmation,
     publicRecapSharingEnabled: row.publicRecapSharingEnabled,
     publicInvitesEnabled: row.publicInvitesEnabled,
+    narrationLanguage: (row.narrationLanguage ?? 'en') as Campaign['narrationLanguage'],
     sessionCount: row.sessionCount,
     ruleSystem: row.ruleSystem,
     mapAttachmentId: row.mapAttachmentId,
@@ -455,6 +457,7 @@ export class CampaignsService {
         // Brand-new campaigns that start archived cannot accept joins until the
         // DM both unarchives and deliberately re-enables invites (#857).
         publicInvitesEnabled: (input.status ?? 'active') === 'active',
+        narrationLanguage: input.narrationLanguage ?? 'en',
         sessionCount: 0,
         ruleSystem: input.ruleSystem ?? '',
         mapAttachmentId: input.mapAttachmentId ?? null,
@@ -994,6 +997,7 @@ export class CampaignsService {
           requireDmTurnConfirmation: source.requireDmTurnConfirmation,
           publicRecapSharingEnabled: source.publicRecapSharingEnabled,
           publicInvitesEnabled: source.publicInvitesEnabled,
+          narrationLanguage: source.narrationLanguage ?? 'en',
           sessionCount: template ? 0 : source.sessionCount,
           ruleSystem: source.ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows exist (#435)
@@ -1708,6 +1712,8 @@ export class CampaignsService {
       const [pack] = await this.db.select({ id: rulePacks.id }).from(rulePacks).where(eq(rulePacks.slug, ruleSystemSrc)).limit(1);
       if (pack) ruleSystem = ruleSystemSrc;
     }
+    const narrationLanguageParsed = NarrationLanguage.safeParse(campaignSrc.narrationLanguage);
+    const narrationLanguage = narrationLanguageParsed.success ? narrationLanguageParsed.data : 'en';
 
     const locationRows = asArr(doc.locations);
     const npcRows = asArr(doc.npcs);
@@ -1841,6 +1847,7 @@ export class CampaignsService {
           // enabled default. Explicitly disabled campaigns stay disabled.
           publicRecapSharingEnabled: campaignSrc.publicRecapSharingEnabled !== false,
           publicInvitesEnabled: campaignSrc.publicInvitesEnabled !== false,
+          narrationLanguage,
           sessionCount: Math.max(0, intOr(campaignSrc.sessionCount, 0)),
           ruleSystem,
           mapAttachmentId: null, // remapped below once attachment rows have fresh ids

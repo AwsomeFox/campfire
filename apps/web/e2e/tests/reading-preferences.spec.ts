@@ -124,8 +124,9 @@ test.describe('semantic reading preferences', () => {
     const characterReading = page.locator('.reading-surface').first();
     await expect(characterReading).toBeVisible();
     expect((await typography(characterReading)).fontSize).toBe(18);
-    // Player fixture views a DM-owned nav character (read-only): edit Btn/cf-btn controls are
-    // hidden, but DetailPageWayfinding's back link still uses legacy `.btn`.
+    // Issue #646: inactive tabpanels are hidden, so Build-only edit controls are not
+    // visible on the default Play tab. Player fixture views a DM-owned nav character
+    // (read-only); DetailPageWayfinding's back link still uses legacy `.btn`.
     const characterControl = page.locator('.btn').first();
     await expect(characterControl).toBeVisible();
     expect((await typography(characterControl)).fontSize).toBeLessThan(18);

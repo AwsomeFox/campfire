@@ -6,9 +6,10 @@
  * mirrored here so read-only rows don't render controls).
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams } from 'react-router-dom';
 import type { Character, InventoryItem, Treasury } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaignEvents } from '../../lib/useCampaignEvents';
@@ -19,12 +20,6 @@ import { Field } from '../../components/Field';
 import {
   INVENTORY_ADD_PREFIX,
   INVENTORY_FIELD,
-  INVENTORY_NAME_HELP,
-  INVENTORY_NAME_LABEL,
-  INVENTORY_NOTES_HELP,
-  INVENTORY_NOTES_LABEL,
-  INVENTORY_OWNER_HELP,
-  INVENTORY_OWNER_LABEL,
 } from '../../components/formFieldLabels';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
@@ -35,24 +30,23 @@ import { defaultItemIconSlug, itemIconSlug, COIN_ICON, COIN_COLORS } from '../..
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
 
-const COINS = [
-  { key: 'pp', label: 'Platinum' },
-  { key: 'gp', label: 'Gold' },
-  { key: 'ep', label: 'Electrum' },
-  { key: 'sp', label: 'Silver' },
-  { key: 'cp', label: 'Copper' },
+const COIN_KEYS = [
+  { key: 'pp', labelKey: 'inventory.coins.pp' },
+  { key: 'gp', labelKey: 'inventory.coins.gp' },
+  { key: 'ep', labelKey: 'inventory.coins.ep' },
+  { key: 'sp', labelKey: 'inventory.coins.sp' },
+  { key: 'cp', labelKey: 'inventory.coins.cp' },
 ] as const;
-type CoinKey = (typeof COINS)[number]['key'];
+type CoinKey = (typeof COIN_KEYS)[number]['key'];
 
 /** Add-item quantity bounds (issue #459). Schema allows any non-negative int; the
  *  form exposes a practical max via help text + parseLocalizedInteger. */
 const ITEM_QTY_MIN = 0;
 const ITEM_QTY_MAX = 1_000_000;
 const ITEM_QTY_STEP = 1;
-const ITEM_QTY_HELP =
-  `Whole number from ${ITEM_QTY_MIN.toLocaleString('en-US')} to ${ITEM_QTY_MAX.toLocaleString('en-US')}, step ${ITEM_QTY_STEP}.`;
 
 export default function InventoryPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const { me } = useAuth();
@@ -84,7 +78,7 @@ export default function InventoryPage() {
       setTreasury(coins);
       setCharacters(chars);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the inventory.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     } finally {
       setLoading(false);
     }
@@ -159,14 +153,14 @@ export default function InventoryPage() {
     }
     const knownIds = new Set(characters.map((c) => c.id));
     const orphans = items.filter((i) => i.ownerType === 'character' && (i.characterId == null || !knownIds.has(i.characterId)));
-    if (orphans.length > 0) groups.push({ character: null, label: 'Unassigned', items: orphans });
+    if (orphans.length > 0) groups.push({ character: null, label: t('inventory.unassigned'), items: orphans });
     return groups;
   }, [items, characters]);
 
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -174,11 +168,11 @@ export default function InventoryPage() {
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       <PageHeader
-        title="Inventory"
+        title={t('inventory.title')}
         primaryAction={
           canEdit && !adding ? (
             <Btn type="button" className="cf-page-header__action" onClick={() => setAdding(true)}>
-              + Add item
+              {t('inventory.addItem')}
             </Btn>
           ) : undefined
         }
@@ -217,19 +211,21 @@ export default function InventoryPage() {
           {items.length === 0 && !adding ? (
             <EmptyState
               icon="backpack"
-              title="No loot yet"
-              hint={canEdit ? 'Add the party\'s first item with "+ Add item".' : 'Nothing has been logged by the party yet.'}
+              title={t('inventory.noLootTitle')}
+              hint={canEdit ? t('inventory.noLootHintDm') : t('inventory.noLootHintPlayer')}
             />
           ) : (
             <>
               <ItemSection
-                title="Party stash"
+                key="party-stash"
+                title={t('inventory.partyStash')}
                 icon="backpack"
                 items={partyItems}
                 characters={characters}
                 writableOwners={writableOwners}
                 canEditItem={canEditItem}
                 onChanged={load}
+                partyStashTitle={t('inventory.partyStash')}
               />
               {characterGroups.map((group) => (
                 <ItemSection
@@ -241,6 +237,7 @@ export default function InventoryPage() {
                   writableOwners={writableOwners}
                   canEditItem={canEditItem}
                   onChanged={load}
+                  partyStashTitle={t('inventory.partyStash')}
                 />
               ))}
             </>
@@ -286,6 +283,7 @@ function TreasuryCard({
   onChanged: (t: Treasury) => void;
   remoteEpoch: number;
 }) {
+  const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [values, setValues] = useState<Record<CoinKey, string>>({ pp: '', gp: '', ep: '', sp: '', cp: '' });
   // The row version the edit form snapshotted from — sent as the CAS token on save.
@@ -345,7 +343,7 @@ function TreasuryCard({
     | { ok: false; errors: Partial<Record<CoinKey, string>> } {
     const out = { pp: 0, gp: 0, ep: 0, sp: 0, cp: 0 } as Record<CoinKey, number>;
     const errors: Partial<Record<CoinKey, string>> = {};
-    for (const { key } of COINS) {
+    for (const { key } of COIN_KEYS) {
       const parsed = parseLocalizedInteger(values[key], formatLocale, { min: 0 });
       if (parsed.ok) {
         out[key] = parsed.value;
@@ -365,7 +363,7 @@ function TreasuryCard({
   // contaminate the changed-coin set with coins the DM never touched.
   function buildSet(base: Record<CoinKey, number>, intended: Record<CoinKey, number>): Partial<Record<CoinKey, number>> {
     const set: Partial<Record<CoinKey, number>> = {};
-    for (const { key } of COINS) {
+    for (const { key } of COIN_KEYS) {
       if (intended[key] !== base[key]) set[key] = intended[key];
     }
     return set;
@@ -424,7 +422,7 @@ function TreasuryCard({
           // The follow-up GET itself failed — fall through to the generic error.
         }
       }
-      setError(err instanceof ApiError ? err.message : "Couldn't update the treasury.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateTreasury' }));
     } finally {
       setSaving(false);
     }
@@ -443,18 +441,18 @@ function TreasuryCard({
     } catch (err) {
       // A negative-going spend surfaces the server's plain message ("Treasury cannot
       // go negative…"); other errors fall back to the generic string.
-      setError(err instanceof ApiError ? err.message : "Couldn't adjust the treasury.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.adjustTreasury' }));
     }
   }
 
   return (
     <Card className="space-y-3">
       <div className="flex items-center gap-2">
-        <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="coins" size={16} /> Party treasury</h2>
+        <h2 className="flex items-center gap-2 font-bold text-white text-sm"><GameIcon slug="coins" size={16} /> {t('inventory.partyTreasury')}</h2>
         <div className="flex-1" />
         {canEdit && !editing && (
           <Btn ghost className="!min-h-0 !py-1 text-xs" onClick={startEdit}>
-            Edit
+            {t('common.edit')}
           </Btn>
         )}
       </div>
@@ -463,21 +461,19 @@ function TreasuryCard({
         <form onSubmit={save} className="space-y-3">
           {stale && (
             <p className="text-sm rounded-md p-2" style={{ background: 'var(--color-neutral-800)', color: 'var(--color-amber, #f59e0b)' }}>
-              Another player changed the treasury since you opened this editor. Reload fresh values before saving to avoid overwriting their change.
+              {t('inventory.staleTreasury')}
               <Btn
                 ghost
                 type="button"
                 className="!min-h-0 !py-0.5 !px-2 text-xs ml-2"
                 onClick={() => {
-                  // Drop the editor and re-open against the latest snapshot the
-                  // page already refetched on the SSE tick.
                   setError(null);
                   setConflict(null);
                   setEditing(false);
                   startEdit();
                 }}
               >
-                Reload
+                {t('inventory.reload')}
               </Btn>
             </p>
           )}
@@ -491,10 +487,11 @@ function TreasuryCard({
               parsed.ok ? parsed.values[key] : editBase[key];
             return (
             <div className="text-sm rounded-md p-2 space-y-1" style={{ background: 'var(--color-neutral-800)' }}>
-              <p className="text-amber-400 font-semibold">Another player changed the treasury since you loaded.</p>
-              <p className="text-slate-400">Fresh values shown below — reapply your change against them?</p>
+              <p className="text-amber-400 font-semibold">{t('inventory.conflictTitle')}</p>
+              <p className="text-slate-400">{t('inventory.conflictHint')}</p>
               <div className="grid grid-cols-5 gap-2 pt-1">
-                {COINS.map(({ key, label }) => {
+                {COIN_KEYS.map(({ key, labelKey }) => {
+                  const label = t(labelKey);
                   const fresh = conflict[key];
                   const intent = intentFor(key);
                   // Only show the reapply arrow for a coin the DM ACTUALLY edited
@@ -515,14 +512,11 @@ function TreasuryCard({
             );
           })()}
           <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
-            {COINS.map(({ key, label }) => (
+            {COIN_KEYS.map(({ key, labelKey }) => {
+              const label = t(labelKey);
+              return (
               <label key={key} className="space-y-1">
                 <span className="block text-[11px] text-slate-500 uppercase tracking-wide">{label}</span>
-                {/* type="text" + inputMode="numeric" (issue #633): a type="number"
-                    field silently strips locale grouping separators (en "1,234"
-                    → "", de "1.234" → "1") before our parser ever sees them, so
-                    the localized parse path is bypassed. A text field with a
-                    numeric IME hint hands us the raw, locale-correct string. */}
                 <TextInput
                   type="text"
                   inputMode="numeric"
@@ -530,8 +524,6 @@ function TreasuryCard({
                   aria-invalid={fieldErrors[key] != null}
                   onChange={(e) => {
                     setValues((v) => ({ ...v, [key]: e.target.value }));
-                    // Clear this coin's error as the DM retypes; a fresh error
-                    // is computed on the next save attempt.
                     setFieldErrors((fe) => (fe[key] ? { ...fe, [key]: undefined } : fe));
                   }}
                 />
@@ -539,24 +531,27 @@ function TreasuryCard({
                   <span className="block text-[11px] text-rose-400">{fieldErrors[key]}</span>
                 )}
               </label>
-            ))}
+              );
+            })}
           </div>
           <div className="flex gap-2 justify-end">
             <Btn ghost type="button" onClick={() => setEditing(false)} disabled={saving}>
-              Cancel
+              {t('common.cancel')}
             </Btn>
             <Btn type="submit" disabled={saving}>
-              {conflict ? 'Reapply' : saving ? 'Saving…' : 'Save'}
+              {conflict ? t('inventory.reapply') : saving ? t('common.saving') : t('common.save')}
             </Btn>
           </div>
         </form>
       ) : (
         <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
-          {COINS.map(({ key, label }) => (
+          {COIN_KEYS.map(({ key, labelKey }) => {
+            const label = t(labelKey);
+            return (
             <div key={key} className="text-center rounded-md py-2" style={{ background: 'var(--color-neutral-800)' }}>
               <div className="flex items-center justify-center gap-1.5">
                 <span className="inline-flex shrink-0" style={{ color: COIN_COLORS[key] }}>
-                  <GameIcon slug={COIN_ICON} size={16} title={`${label} coins`} />
+                  <GameIcon slug={COIN_ICON} size={16} title={t('inventory.coinCoinsAria', { label })} />
                 </span>
                 <p className="text-lg font-extrabold text-white leading-none">{treasury[key]}</p>
               </div>
@@ -570,7 +565,7 @@ function TreasuryCard({
                     className="!min-h-0 !py-0.5 !px-2 text-xs"
                     onClick={() => void quickDelta(key, -1)}
                     disabled={treasury[key] <= 0}
-                    aria-label={`Spend one ${label}`}
+                    aria-label={t('inventory.spendOne', { label })}
                   >
                     −
                   </Btn>
@@ -578,14 +573,15 @@ function TreasuryCard({
                     ghost
                     className="!min-h-0 !py-0.5 !px-2 text-xs"
                     onClick={() => void quickDelta(key, +1)}
-                    aria-label={`Add one ${label}`}
+                    aria-label={t('inventory.addOne', { label })}
                   >
                     +
                   </Btn>
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>
@@ -600,6 +596,7 @@ function ItemSection({
   writableOwners,
   canEditItem,
   onChanged,
+  partyStashTitle,
 }: {
   title: string;
   icon: string;
@@ -608,15 +605,17 @@ function ItemSection({
   writableOwners: Character[];
   canEditItem: (item: InventoryItem) => boolean;
   onChanged: () => void;
+  partyStashTitle: string;
 }) {
-  if (items.length === 0 && title !== 'Party stash') return null;
+  const { t } = useTranslation();
+  if (items.length === 0 && title !== partyStashTitle) return null;
   return (
     <Card className="space-y-2">
       <h2 className="flex items-center gap-2 font-bold text-white text-sm">
         <GameIcon slug={icon} size={16} /> {title}
       </h2>
       {items.length === 0 ? (
-        <p className="text-sm text-slate-500">Empty.</p>
+        <p className="text-sm text-slate-500">{t('inventory.empty')}</p>
       ) : (
         <ul className="divide-y" style={{ borderColor: 'var(--color-neutral-800)' }}>
           {items.map((item) => (
@@ -653,6 +652,7 @@ function ItemRow({
   writableOwners: Character[];
   onChanged: () => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -673,7 +673,7 @@ function ItemRow({
       onChanged();
       return updated;
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update the item.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.updateItem' }));
       return null;
     } finally {
       setBusy(false);
@@ -684,7 +684,7 @@ function ItemRow({
   async function adjustQty(delta: number) {
     const updated = await patch({ qtyDelta: delta, idempotencyKey: newIdempotencyKey() });
     if (updated) {
-      announce(`${updated.name} quantity is now ${updated.qty}.`);
+      announce(t('inventory.qtyAnnouncement', { name: updated.name, qty: updated.qty }));
     }
   }
 
@@ -695,7 +695,7 @@ function ItemRow({
       await api.delete(`${API}/inventory/${committed.id}`);
       onChanged();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't delete the item.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.deleteItem' }));
     } finally {
       setBusy(false);
     }
@@ -724,8 +724,8 @@ function ItemRow({
           type="button"
           onClick={() => setPickingIcon(true)}
           disabled={busy}
-          title={hasOverride ? `Icon: ${getIcon(iconSlug)?.name ?? 'custom'} — click to change` : 'Auto icon — click to override'}
-          aria-label={`Change icon for ${committed.name}`}
+          title={hasOverride ? t('inventory.iconTitleOverride', { name: getIcon(iconSlug)?.name ?? 'custom' }) : t('inventory.iconTitleAuto')}
+          aria-label={t('inventory.iconAriaChange', { name: committed.name })}
           className="shrink-0 mt-0.5 text-[var(--color-accent)] hover:text-[var(--color-accent-700)]"
         >
           <GameIcon slug={iconSlug} size={22} title={committed.name} />
@@ -750,7 +750,7 @@ function ItemRow({
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy || committed.qty <= 0}
             onClick={() => void adjustQty(-1)}
-            aria-label={`Decrease ${committed.name} quantity`}
+            aria-label={t('inventory.decreaseQtyAria', { name: committed.name })}
           >
             −
           </Btn>
@@ -759,7 +759,7 @@ function ItemRow({
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy}
             onClick={() => void adjustQty(1)}
-            aria-label={`Increase ${committed.name} quantity`}
+            aria-label={t('inventory.increaseQtyAria', { name: committed.name })}
           >
             +
           </Btn>
@@ -769,16 +769,16 @@ function ItemRow({
             value={currentOwnerValue}
             disabled={busy}
             onChange={(e) => onMove(e.target.value)}
-            aria-label={`Move ${committed.name}`}
+            aria-label={t('inventory.moveAria', { name: committed.name })}
           >
-            <option value="party">Party stash</option>
+            <option value="party">{t('inventory.partyStash')}</option>
             {writableOwners.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
               </option>
             ))}
             {committed.ownerType === 'character' && committed.characterId != null && !writableOwners.some((c) => c.id === committed.characterId) && (
-              <option value={String(committed.characterId)}>(current owner)</option>
+              <option value={String(committed.characterId)}>{t('inventory.currentOwner')}</option>
             )}
           </select>
           <Btn
@@ -787,7 +787,7 @@ function ItemRow({
             className="!min-h-0 !py-0.5 !px-2 text-xs"
             disabled={busy}
             onClick={() => void remove()}
-            aria-label={`Delete ${committed.name}`}
+            aria-label={t('inventory.deleteAria', { name: committed.name })}
           >
             ✕
           </Btn>
@@ -820,6 +820,7 @@ function AddItemForm({
   onCancel: () => void;
   onCreated: () => void;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState('');
   const [qty, setQty] = useState('1');
   const [owner, setOwner] = useState('party');
@@ -833,6 +834,11 @@ function AddItemForm({
   // rather than silently defaulting to 1.
   const [qtyError, setQtyError] = useState<string | null>(null);
   const formatLocale = useFormattingLocale();
+  const qtyHelp = t('inventory.quantityHelp', {
+    min: ITEM_QTY_MIN.toLocaleString(formatLocale ?? 'en-US'),
+    max: ITEM_QTY_MAX.toLocaleString(formatLocale ?? 'en-US'),
+    step: ITEM_QTY_STEP,
+  });
 
   // Live preview: the DM's explicit pick, else the name-derived default so they
   // see what the row will show before saving.
@@ -868,7 +874,7 @@ function AddItemForm({
       await api.post(`${API}/campaigns/${campaignId}/inventory`, body);
       onCreated();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add the item.");
+      setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.addItem' }));
     } finally {
       setSaving(false);
     }
@@ -876,30 +882,25 @@ function AddItemForm({
 
   return (
     <Card className="space-y-3" data-testid="inventory-add-item">
-      <h2 className="font-bold text-white text-sm">Add item</h2>
+      <h2 className="font-bold text-white text-sm">{t('inventory.addItemTitle')}</h2>
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
       <form onSubmit={submit} className="space-y-3">
         <div className="grid grid-cols-[1fr_7.5rem] gap-3 items-start">
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.name}
-            label={INVENTORY_NAME_LABEL}
+            label={t('inventory.fields.name.label')}
             value={name}
             onChange={(e) => setName(e.target.value)}
             autoFocus
             required
-            help={INVENTORY_NAME_HELP}
-            placeholder="Torch, rope, healing potion…"
+            help={t('inventory.fields.name.help')}
+            placeholder={t('inventory.fields.name.placeholder')}
           />
-          {/* Labeled quantity (issue #459/#886): Field primitive, constraint
-              help, and contextual error announcement. type="text" +
-              inputMode="numeric" (issue #633) keeps locale grouping / non-ASCII
-              digits intact for parseLocalizedInteger — type="number" would strip
-              or mis-handle them before submit parsing (same pattern as treasury). */}
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.qty}
-            label="Quantity"
+            label={t('inventory.quantity')}
             type="text"
             inputMode="numeric"
             min={ITEM_QTY_MIN}
@@ -907,7 +908,7 @@ function AddItemForm({
             step={ITEM_QTY_STEP}
             value={qty}
             error={qtyError}
-            help={ITEM_QTY_HELP}
+            help={qtyHelp}
             onChange={(e) => {
               setQty(e.target.value);
               setQtyError(null);
@@ -919,12 +920,12 @@ function AddItemForm({
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.owner}
             as="select"
-            label={INVENTORY_OWNER_LABEL}
+            label={t('inventory.fields.owner.label')}
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
-            help={INVENTORY_OWNER_HELP}
+            help={t('inventory.fields.owner.help')}
           >
-            <option value="party">Party stash</option>
+            <option value="party">{t('inventory.partyStash')}</option>
             {owners.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {c.name}
@@ -934,11 +935,11 @@ function AddItemForm({
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.notes}
-            label={INVENTORY_NOTES_LABEL}
+            label={t('inventory.fields.notes.label')}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            help={INVENTORY_NOTES_HELP}
-            placeholder="Notes"
+            help={t('inventory.fields.notes.help')}
+            placeholder={t('inventory.notesPlaceholder')}
             optional
           />
         </div>
@@ -947,21 +948,21 @@ function AddItemForm({
             <GameIcon slug={previewSlug} size={24} title={getIcon(previewSlug)?.name} />
           </span>
           <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setPickingIcon(true)}>
-            {iconSlug ? 'Change icon' : 'Choose icon'}
+            {iconSlug ? t('inventory.changeIcon') : t('inventory.chooseIcon')}
           </Btn>
           {iconSlug && (
             <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={() => setIconSlug('')}>
-              Auto
+              {t('inventory.autoIcon')}
             </Btn>
           )}
-          {!iconSlug && <span className="text-[11px] text-slate-500">Auto from name</span>}
+          {!iconSlug && <span className="text-[11px] text-slate-500">{t('inventory.autoFromName')}</span>}
         </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>
-            Cancel
+            {t('common.cancel')}
           </Btn>
           <Btn type="submit" disabled={saving || !name.trim()}>
-            {saving ? 'Adding…' : 'Add'}
+            {saving ? t('inventory.adding') : t('inventory.add')}
           </Btn>
         </div>
       </form>
