@@ -521,7 +521,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
             type="button"
             onClick={clearAll}
             className="text-muted"
-            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, marginLeft: 'auto' }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 11.5, marginInlineStart: 'auto' }}
           >
             {t('dice.clear')}
           </button>
@@ -539,8 +539,8 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
           {rolling ? t('dice.rolling') : exprs.length === 0 ? t('dice.roll') : t('dice.rollExpr', { preview: previewText(pool, modifier, advMode) })}
         </Btn>
         {feedback && (
-          <div style={{ textAlign: 'right', flex: 'none' }}>
-            <div
+          <div style={{ textAlign: 'end', flex: 'none' }}>
+            <bdi
               style={{
                 fontFamily: 'var(--font-heading)',
                 fontSize: compact ? 22 : 28,
@@ -549,7 +549,7 @@ export function DiceTray({ onSubmitExpr, rolling, campaignId, compact = false }:
               }}
             >
               {feedback.total}
-            </div>
+            </bdi>
             <div className="text-muted" style={{ fontSize: 10, display: 'flex', gap: 4, justifyContent: 'flex-end', alignItems: 'baseline' }}>
               <span>{feedback.label}</span>
               <RolledDice rolls={feedback.rolls} kept={feedback.kept} fontSize={10} />

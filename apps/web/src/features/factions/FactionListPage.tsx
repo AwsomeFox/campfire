@@ -6,7 +6,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams, Link } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Faction } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -23,6 +25,7 @@ export default function FactionListPage() {
   const id = Number(campaignId);
   const navigate = useNavigate();
   const { isDm, canDmWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
 
   const [factions, setFactions] = useState<Faction[]>([]);
   const [loading, setLoading] = useState(true);
@@ -151,7 +154,7 @@ export default function FactionListPage() {
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))' }}>
             {factions.map((faction) => (
-              <Link
+              <ListDetailLink
                 key={faction.id}
                 to={`/c/${id}/factions/${faction.id}`}
                 className="cf-card cf-card-hover p-3.5 space-y-2"
@@ -172,7 +175,7 @@ export default function FactionListPage() {
                   {isDm && faction.hidden && <Chip variant="failed"><span className="inline-flex items-center gap-1"><GameIcon slug="sight-disabled" size={12} /> Hidden</span></Chip>}
                   {isDm && faction.dmSecret && <Chip variant="proposal">DM secret</Chip>}
                 </div>
-              </Link>
+              </ListDetailLink>
             ))}
           </div>
         )}

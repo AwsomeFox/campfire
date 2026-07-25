@@ -42,13 +42,13 @@ test.describe('sign out (issue #506)', () => {
     await signInAsDm(page);
     await page.goto(`/c/${campaignId}`);
     // Prove we're authed in a campaign with DM-only chrome visible before sign-out.
-    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
+    await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
 
     await page.getByRole('button', { name: 'Sign out' }).click();
 
     await page.waitForURL('**/login');
     // Protected DOM is gone — the DM-only sidebar section no longer exists anywhere in the page.
-    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('DM', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 
     // Accessible confirmation: focus lands on the heading, and the assertive
@@ -69,7 +69,7 @@ test.describe('sign out (issue #506)', () => {
     const { campaignId } = seed();
     await signInAsDm(page);
     await page.goto(`/c/${campaignId}`);
-    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
+    await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
 
     await page.getByRole('button', { name: 'Sign out' }).click();
     await page.waitForURL('**/login');
@@ -79,14 +79,14 @@ test.describe('sign out (issue #506)', () => {
     // bounce to /login rather than render the prior account's campaign data.
     await page.goto(`/c/${campaignId}`);
     await page.waitForURL('**/login');
-    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('DM', { exact: true })).toHaveCount(0);
   });
 
   test('a failed /auth/logout server call still clears client state and redirects', async ({ page }) => {
     const { campaignId } = seed();
     await signInAsDm(page);
     await page.goto(`/c/${campaignId}`);
-    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
+    await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
 
     await page.route('**/api/v1/auth/logout', async (route) => {
       await route.fulfill({ status: 500, json: { message: 'Simulated server failure' } });
@@ -97,7 +97,7 @@ test.describe('sign out (issue #506)', () => {
     // Client-side state clears and the redirect happens regardless of the
     // server error — there is nothing left client-side to roll back.
     await page.waitForURL('**/login');
-    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('DM', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   });
 
@@ -105,7 +105,7 @@ test.describe('sign out (issue #506)', () => {
     const { campaignId } = seed();
     await signInAsDm(page);
     await page.goto(`/c/${campaignId}`);
-    await expect(page.getByText('Dungeon master', { exact: true })).toBeVisible();
+    await expect(page.getByText('DM', { exact: true }).first()).toBeVisible();
 
     // SPA-navigate to preferences first (full page.goto would remount AuthProvider
     // and our gated /me would freeze the splash). Then hold the next refresh()/me.
@@ -148,7 +148,7 @@ test.describe('sign out (issue #506)', () => {
     releaseMe();
     await lateMe;
     await expect(page).toHaveURL(/\/login/);
-    await expect(page.getByText('Dungeon master', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('DM', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   });
 });
