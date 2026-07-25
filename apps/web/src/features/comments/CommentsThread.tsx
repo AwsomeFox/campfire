@@ -1,9 +1,10 @@
 /**
  * Threaded discussion (issue #123). Renders the comment thread for any campaign
- * entity (session/recap today; wired to reuse the entityType/entityId convention
- * for quests/npcs/locations later) plus a compose box. Comments are visible to
- * every campaign member; author-or-DM may edit/delete. One level of threading:
- * top-level comments, with replies nested one deep.
+ * entity (quest, NPC, location, session, character, campaign, encounter, faction)
+ * via EntityDiscussion on each supported detail surface (issue #439). Comments are
+ * visible only to campaign members who can see the anchored entity (hidden/secret
+ * entities and undiscovered locations return 404 for non-DMs); author-or-DM may
+ * edit/delete. One level of threading: top-level comments, with replies nested one deep.
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Character, Comment, CommentReplyPage, CommentThread, CommentThreadPage, EntityType } from '@campfire/schema';
@@ -257,8 +258,12 @@ export function CommentsThread({
   }
 
   return (
-    <section className="space-y-3" aria-labelledby={`discussion-${entityType}-${entityId}`}>
-      <h3 id={`discussion-${entityType}-${entityId}`} className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
+    <section
+      id={`discussion-${entityType}-${entityId}`}
+      className="space-y-3"
+      aria-labelledby={`discussion-heading-${entityType}-${entityId}`}
+    >
+      <h3 id={`discussion-heading-${entityType}-${entityId}`} className="text-sm font-bold text-slate-400 uppercase tracking-wide flex items-center gap-2">
         Discussion
         {totalComments > 0 && <span className="tag">{totalComments}</span>}
       </h3>
