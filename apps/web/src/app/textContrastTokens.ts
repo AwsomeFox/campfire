@@ -37,7 +37,7 @@ export const TEXT_CONTRAST_MIXED_BACKGROUNDS: ReadonlyArray<{
   { id: 'dm-panel', base: 'surface', tint: '#9184d9', percent: 7 },
   { id: 'accent-chip', base: 'surface', tint: '#9184d9', percent: 16 },
   { id: 'reading-checked', base: 'surface', tint: '#9184d9', percent: 10 },
-  { id: 'tabbar', base: 'surface', tint: '#232532', percent: 94 },
+  { id: 'tabbar', base: 'app', tint: '#232532', percent: 94 },
   { id: 'prose-row', base: 'surface', tint: '#e9e9ed', percent: 6 },
 ];
 
@@ -113,7 +113,9 @@ export function verifySemanticTextContrast(
     const fg = values[token];
     for (const backgroundId of ROLE_CONTRAST_BACKGROUNDS[meta.role]) {
       const hex = byId.get(backgroundId);
-      if (!hex) continue;
+      if (!hex) {
+        throw new Error(`Unknown contrast background id "${backgroundId}" for ${token}`);
+      }
       const ratio = contrastRatio(fg, hex);
       if (ratio < meta.floor) {
         failures.push({ token, background: backgroundId, ratio, floor: meta.floor });
