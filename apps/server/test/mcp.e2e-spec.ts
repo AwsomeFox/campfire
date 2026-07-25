@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
 import { startFakeOpen5e, type FakeOpen5e } from './fake-open5e';
 import { startFakeDdb, PUBLIC_DDB_CHARACTER_ID, type FakeDdb } from './fake-ddb';
+import { MCP_TOOL_NAMES } from '../src/modules/mcp/mcp-catalog';
 
 interface TextContent {
   type: 'text';
@@ -22,6 +23,7 @@ const TINY_PNG = Buffer.from(
   'hex',
 );
 
+<<<<<<< HEAD
 const ALL_TOOLS = [
   // read
   'list_campaigns',
@@ -238,6 +240,9 @@ const ALL_TOOLS = [
   'hide_attachment',
   'delete_attachment',
 ];
+=======
+const ALL_TOOLS = [...MCP_TOOL_NAMES];
+>>>>>>> origin/main
 
 describe('mcp endpoint (e2e, real sessions + PATs)', () => {
   let ctx: TestAppContext;

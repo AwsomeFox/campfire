@@ -73,6 +73,12 @@
       "openSessionHint": "Review session details and recap.",
       "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} adjusted total).",
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
+    },
+    "driver": {
+      "toggle": "AI Driver",
+      "panelLabel": "AI Driver controls",
+      "transcriptLabel": "Driver transcript",
+      "openTable": "Open full table"
     }
   }
 }

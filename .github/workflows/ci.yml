@@ -91,6 +91,7 @@ jobs:
       # Issue #432: every version surface (workspace package.json, docs, and the
       # historically-hardcoded auth/MCP/OpenAPI leftovers) must agree.
       - run: npm run check:version
+      - run: npm run check:mcp-catalog
       - run: npm run check:i18n
       - run: npm run lint
       - run: npm run typecheck

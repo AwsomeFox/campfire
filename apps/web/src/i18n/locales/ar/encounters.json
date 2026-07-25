@@ -41,6 +41,7 @@
       "sendCheck": "Couldn't send the check request.",
       "rollCheck": "Couldn't roll the check.",
       "resolveAction": "Couldn't resolve that action.",
+<<<<<<< HEAD
       "applyAction": "Couldn't apply that action.",
       "loadAftermath": "Couldn't load the aftermath workflow.",
       "dismissAftermath": "Couldn't defer the aftermath panel."
@@ -73,6 +74,15 @@
       "openSessionHint": "Review session details and recap.",
       "xpSuggested": "Suggested award: {{amount}} XP each ({{label}}, {{total}} adjusted total).",
       "xpManual": "XP guidance: {{label}} — award manually for this ruleset."
+=======
+      "applyAction": "Couldn't apply that action."
+    },
+    "driver": {
+      "toggle": "AI Driver",
+      "panelLabel": "AI Driver controls",
+      "transcriptLabel": "Driver transcript",
+      "openTable": "Open full table"
+>>>>>>> origin/main
     }
   }
 }
