@@ -1118,6 +1118,9 @@ export const inventoryItems = sqliteTable('inventory_items', {
   iconSlug: text('icon_slug').notNull().default(''), // optional game-icons override (issue #307)
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+  // Soft-delete tombstone (issue #551): NULL == live; ISO timestamp == trashed.
+  deletedAt: text('deleted_at'),
+  deletedBy: text('deleted_by'),
 });
 
 // Issue #782: per-action idempotency for inventory quantity writes. A client-generated

@@ -1296,6 +1296,27 @@ function migrateInventoryItemsTableForIconSlug(sqlite: Database.Database): void 
 }
 
 /**
+ * Migration for DBs created before inventory items could be soft-deleted (issue #551):
+ * `inventory_items.deleted_at` and `inventory_items.deleted_by` didn't exist. Plain
+ * nullable ADD COLUMNs — same idiom as the other soft-delete migrations (0031/0045).
+ * Existing items default to NULL (live); new DBs already have the columns.
+ */
+function migrateInventoryItemsTableForSoftDelete(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_items'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(inventory_items)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'deleted_at')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN deleted_at TEXT');
+  }
+  if (!columns.some((c) => c.name === 'deleted_by')) {
+    sqlite.exec('ALTER TABLE inventory_items ADD COLUMN deleted_by TEXT');
+  }
+}
+
+/**
  * Migration for DBs created before the AI-DM operating mode (issue #311): the
  * `ai_dm_seats.mode` column didn't exist. Plain NOT NULL DEFAULT 'off' ADD COLUMN —
  * no table rebuild needed, same shape as the icon_slug migrations above. Existing
@@ -2594,7 +2615,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
   { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
-  { name: '0094_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
+  { name: '0094_inventory_items_soft_delete', run: migrateInventoryItemsTableForSoftDelete },
+  { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
 ];
 
 /**

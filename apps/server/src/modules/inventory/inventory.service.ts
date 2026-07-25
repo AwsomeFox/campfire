@@ -1,11 +1,12 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { z } from 'zod';
 import { InventoryItemCreate, InventoryItemUpdate, TreasuryPatch } from '@campfire/schema';
 import type { InventoryItem, Treasury, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { inventoryItems, inventoryQtyIdempotency, partyTreasury, characters } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { AuditService } from '../audit/audit.service';
 import { CampaignEventsService } from '../events/campaign-events.service';
 import { auditActor } from '../../common/user.types';
@@ -57,6 +58,8 @@ function toDomain(row: typeof inventoryItems.$inferSelect): InventoryItem {
     iconSlug: row.iconSlug,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    deletedAt: row.deletedAt ?? null,
+    deletedBy: row.deletedBy ?? null,
   };
 }
 
@@ -83,12 +86,26 @@ export class InventoryService {
   // ---------- items ----------
 
   async listForCampaign(campaignId: number): Promise<InventoryItem[]> {
-    const rows = await this.db.select().from(inventoryItems).where(eq(inventoryItems.campaignId, campaignId));
+    const rows = await this.db
+      .select()
+      .from(inventoryItems)
+      .where(and(eq(inventoryItems.campaignId, campaignId), notDeleted(inventoryItems.deletedAt)));
     return rows.map(toDomain);
   }
 
-  async getRowOrThrow(id: number) {
-    const [row] = await this.db.select().from(inventoryItems).where(eq(inventoryItems.id, id)).limit(1);
+  async listTrashForCampaign(campaignId: number): Promise<InventoryItem[]> {
+    const rows = await this.db
+      .select()
+      .from(inventoryItems)
+      .where(and(eq(inventoryItems.campaignId, campaignId), isNotNull(inventoryItems.deletedAt)))
+      .orderBy(desc(inventoryItems.deletedAt));
+    return rows.map(toDomain);
+  }
+
+  async getRowOrThrow(id: number, opts?: { includeDeleted?: boolean }) {
+    const conditions = [eq(inventoryItems.id, id)];
+    if (!opts?.includeDeleted) conditions.push(notDeleted(inventoryItems.deletedAt));
+    const [row] = await this.db.select().from(inventoryItems).where(and(...conditions)).limit(1);
     if (!row) throw new NotFoundException(`Item ${id} not found`);
     return row;
   }
@@ -111,16 +128,16 @@ export class InventoryService {
     const [row] = await this.db
       .select({ id: characters.id, ownerUserId: characters.ownerUserId })
       .from(characters)
-      .where(and(eq(characters.id, characterId), eq(characters.campaignId, campaignId)))
+      .where(and(eq(characters.id, characterId), eq(characters.campaignId, campaignId), notDeleted(characters.deletedAt)))
       .limit(1);
-    if (!row) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
-    return row;
+    return row ?? null;
   }
 
   /**
    * Who may write an item (controller has already required player+):
-   *  - dm: anything
-   *  - player: the party stash, or items on a character they own
+   *  - dm: anything, including items whose character has been deleted
+   *  - player: the party stash, or items on a live character they own
+   * Returns the resolved character row when relevant, or null for party/deleted owners.
    */
   private async assertCanWriteOwner(
     ownerType: 'party' | 'character',
@@ -128,17 +145,25 @@ export class InventoryService {
     campaignId: number,
     user: RequestUser,
     role: Role,
-  ): Promise<void> {
+  ): Promise<{ id: number; ownerUserId: string | null } | null> {
+    if (ownerType === 'party') {
+      if (characterId != null) throw new BadRequestException('Party items cannot have a characterId');
+      return null;
+    }
     const character = await this.validateOwner(ownerType, characterId, campaignId);
-    if (role === 'dm' || ownerType === 'party') return;
-    if (character && character.ownerUserId === user.id) return;
+    if (role === 'dm') return character;
+    if (!character) throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+    if (character.ownerUserId === user.id) return character;
     throw new ForbiddenException('Only dm or the owning player may manage this character\'s items');
   }
 
   async create(campaignId: number, input: InventoryItemCreateInput, user: RequestUser, role: Role): Promise<InventoryItem> {
     const ownerType = input.ownerType ?? 'party';
     const characterId = input.characterId ?? null;
-    await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    const character = await this.assertCanWriteOwner(ownerType, characterId, campaignId, user, role);
+    if (ownerType === 'character' && character == null) {
+      throw new BadRequestException(`characterId ${characterId} does not exist in this campaign`);
+    }
 
     const ts = nowIso();
     const [row] = await this.db
@@ -187,7 +212,10 @@ export class InventoryService {
           : existing.characterId;
     const moved = finalOwnerType !== existing.ownerType || finalCharacterId !== existing.characterId;
     if (moved) {
-      await this.assertCanWriteOwner(finalOwnerType, finalCharacterId, existing.campaignId, user, role);
+      const destCharacter = await this.assertCanWriteOwner(finalOwnerType, finalCharacterId, existing.campaignId, user, role);
+      if (finalOwnerType === 'character' && destCharacter == null) {
+        throw new BadRequestException(`characterId ${finalCharacterId} does not exist in this campaign`);
+      }
     }
 
     // Issue #782: quantity writes — atomic delta (preferred) or absolute CAS set.
@@ -245,7 +273,12 @@ export class InventoryService {
           }
         }
 
-        const [fresh] = tx.select().from(inventoryItems).where(eq(inventoryItems.id, id)).limit(1).all();
+        const [fresh] = tx
+          .select()
+          .from(inventoryItems)
+          .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
+          .limit(1)
+          .all();
         if (!fresh) throw new NotFoundException(`Item ${id} not found`);
 
         const ts = nowIso();
@@ -272,10 +305,13 @@ export class InventoryService {
             ? sql`${inventoryItems.updatedAt} = ${input.expectedUpdatedAt}`
             : undefined;
 
+        const updateConditions = [eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)];
+        if (casCondition !== undefined) updateConditions.push(casCondition);
+
         const updated = tx
           .update(inventoryItems)
           .set(update)
-          .where(casCondition !== undefined ? and(eq(inventoryItems.id, id), casCondition) : eq(inventoryItems.id, id))
+          .where(and(...updateConditions))
           .returning()
           .all();
 
@@ -372,7 +408,7 @@ export class InventoryService {
     return committed;
   }
 
-  async remove(id: number, user: RequestUser, role: Role): Promise<void> {
+  async remove(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
     const existing = await this.getRowOrThrow(id);
     await this.assertCanWriteOwner(
       existing.ownerType as 'party' | 'character',
@@ -381,15 +417,126 @@ export class InventoryService {
       user,
       role,
     );
-    await this.db.delete(inventoryItems).where(eq(inventoryItems.id, id));
+
+    const ts = nowIso();
+    const actor = auditActor(user);
+    const snapshot = {
+      name: existing.name,
+      qty: existing.qty,
+      notes: existing.notes,
+      iconSlug: existing.iconSlug,
+      ownerType: existing.ownerType,
+      characterId: existing.characterId,
+    };
+
+    const [row] = await this.db
+      .update(inventoryItems)
+      .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts })
+      .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
+      .returning();
+    if (!row) {
+      // Another request already tombstoned this item — treat as already deleted
+      // rather than overwriting the existing tombstone or logging a duplicate.
+      throw new ConflictException('Item is already deleted');
+    }
+
+    const domain = toDomain(row);
     await this.audit.log({
-      actor: auditActor(user),
+      actor,
       actorRole: role,
       action: 'item.delete',
       entityType: 'inventory_item',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: JSON.stringify({ snapshot }),
     });
+
+    return domain;
+  }
+
+  /**
+   * Restore a soft-deleted inventory item to its original owner. If the original
+   * character no longer exists in the campaign, the item falls back to the party
+   * stash so restoration always succeeds. Already-restored items are returned
+   * as-is without re-auditing, making the operation idempotent.
+   */
+  async restore(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
+    const existing = await this.getRowOrThrow(id, { includeDeleted: true });
+
+    const actor = auditActor(user);
+    await this.assertCanRestore(existing, user, role, actor);
+
+    if (!existing.deletedAt) {
+      return toDomain(existing);
+    }
+
+    // Verify the original owner still exists; otherwise restore to the party stash.
+    let ownerType = existing.ownerType as 'party' | 'character';
+    let characterId = existing.characterId;
+    let fallback = false;
+    if (ownerType === 'character' && characterId != null) {
+      const character = await this.validateOwner(ownerType, characterId, existing.campaignId);
+      if (!character) {
+        ownerType = 'party';
+        characterId = null;
+        fallback = true;
+      }
+    }
+
+    const ts = nowIso();
+    const [row] = await this.db
+      .update(inventoryItems)
+      .set({
+        ownerType,
+        characterId,
+        deletedAt: null,
+        deletedBy: null,
+        updatedAt: ts,
+      })
+      .where(eq(inventoryItems.id, id))
+      .returning();
+
+    const domain = toDomain(row);
+    await this.audit.log({
+      actor,
+      actorRole: role,
+      action: 'item.restore',
+      entityType: 'inventory_item',
+      entityId: id,
+      campaignId: existing.campaignId,
+      detail: JSON.stringify({
+        snapshot: {
+          name: existing.name,
+          qty: existing.qty,
+          notes: existing.notes,
+          iconSlug: existing.iconSlug,
+          ownerType: existing.ownerType,
+          characterId: existing.characterId,
+        },
+        ...(fallback ? { fallbackToParty: true } : {}),
+      }),
+    });
+
+    return domain;
+  }
+
+  private async assertCanRestore(
+    existing: typeof inventoryItems.$inferSelect,
+    user: RequestUser,
+    role: Role,
+    actor: string,
+  ): Promise<void> {
+    if (role === 'dm') return;
+    // The player who deleted it may always undo their own delete.
+    if (existing.deletedBy === actor) return;
+    // Shared party items are player-writable, so any player may restore them.
+    if (existing.ownerType === 'party') return;
+    // Character items may be restored by the character's owning player.
+    if (existing.ownerType === 'character' && existing.characterId != null) {
+      const character = await this.validateOwner(existing.ownerType as 'character', existing.characterId, existing.campaignId);
+      if (character && character.ownerUserId === user.id) return;
+    }
+    throw new ForbiddenException('Only the dm, the deleting player, or the owning player may restore this item');
   }
 
   // ---------- treasury ----------
