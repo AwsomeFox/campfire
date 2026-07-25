@@ -6,6 +6,8 @@
  */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { SearchResponse, SearchResult } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { Card, EmptyState, ErrorNote, Skeleton, TextInput } from '../../components/ui';
@@ -75,6 +77,7 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const resultRefs = useRef<Array<HTMLAnchorElement | null>>([]);
+  useRestoreListOriginScroll();
 
   useEffect(() => {
     setInput(q);
@@ -187,7 +190,7 @@ export default function SearchPage() {
                 </h2>
                 <div className="space-y-2">
                   {grouped.get(t)!.map((r) => (
-                    <Link
+                    <ListDetailLink
                       key={`${r.type}-${r.id}`}
                       to={searchResultHref(campaignId, r)}
                       className="block"
@@ -207,7 +210,7 @@ export default function SearchPage() {
                           </div>
                         )}
                       </Card>
-                    </Link>
+                    </ListDetailLink>
                   ))}
                 </div>
               </div>

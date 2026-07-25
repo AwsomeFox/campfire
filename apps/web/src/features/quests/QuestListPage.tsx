@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Quest, QuestChanges, QuestListItem } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
@@ -68,6 +70,7 @@ export default function QuestListPage() {
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { isDm, canDmWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
 
   const [quests, setQuests] = useState<QuestListItem[]>([]);
   const [changes, setChanges] = useState<Map<number, ChangeKind>>(new Map());
@@ -183,7 +186,7 @@ export default function QuestListPage() {
             <div key={q.id} data-testid={`quest-card-${q.id}`} className="card elev-sm quest-list-card">
               <div className="quest-card-heading">
                 <QuestStatusBadge status={q.status} />
-                <Link
+                <ListDetailLink
                   to={`/c/${cid}/quests/${q.id}`}
                   className="quest-card-title"
                   style={{
@@ -196,7 +199,7 @@ export default function QuestListPage() {
                   }}
                 >
                   {q.title}
-                </Link>
+                </ListDetailLink>
                 <ChangeBadge quest={q} kind={changes.get(q.id)} />
                 {isDm && q.hidden && (
                   <span className="tag tag-outline" style={{ fontSize: 10 }} title={t('quests.hiddenFromPlayers')}>
@@ -241,24 +244,24 @@ export default function QuestListPage() {
                       <span>{q.nextObjective.text}</span>
                     </p>
                   )}
-                  <Link
+                  <ListDetailLink
                     to={`/c/${cid}/quests/${q.id}`}
                     className="btn btn-secondary quest-detail-link"
                     aria-label={t('quests.viewDetailsLabel', { title: q.title })}
                   >
                     {t('quests.viewDetails')}
-                  </Link>
+                  </ListDetailLink>
                 </div>
               )}
               {kids.map((s) => (
                 <div key={s.id} className="quest-subquest-row">
                   <span className="text-muted">↳</span>
-                  <Link
+                  <ListDetailLink
                     to={`/c/${cid}/quests/${s.id}`}
                     style={{ color: 'var(--color-neutral-200)', fontSize: 13.5, textDecoration: 'none', overflowWrap: 'anywhere', minWidth: 0 }}
                   >
                     {s.title}
-                  </Link>
+                  </ListDetailLink>
                   <QuestStatusBadge status={s.status} />
                   <ChangeBadge quest={s} kind={changes.get(s.id)} />
                 </div>

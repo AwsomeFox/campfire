@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -1298,18 +1299,11 @@ export default function RunSessionPage() {
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
-      <div>
-        <Btn
-          ghost
-          className="!min-h-0 !py-1.5 text-xs"
-          onClick={() => {
-            setActionError(null);
-            navigate(`/c/${cid}/encounters`);
-          }}
-        >
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/encounters`}
+        defaultLabel="← Back to encounters"
+      />
 
       {(loadError || actionError) && (
         <ErrorNote

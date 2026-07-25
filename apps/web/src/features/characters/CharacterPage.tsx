@@ -23,6 +23,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
@@ -254,11 +255,11 @@ export default function CharacterPage() {
 
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
-      <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/party`)}>
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/party`}
+        defaultLabel="← Back to party"
+      />
 
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
 

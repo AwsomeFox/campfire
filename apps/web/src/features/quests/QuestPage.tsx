@@ -5,7 +5,9 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
+import { preserveListOriginState } from '../../lib/detailListOrigin';
 import { QuestStatus, type Quest, type QuestObjective, type Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import {
@@ -74,6 +76,7 @@ export default function QuestPage() {
 // ---------------------------------------------------------------------------
 
 function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId: number }) {
+  const location = useLocation();
   const { t } = useTranslation();
   const { role, isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   const canToggleObjectives = canPlayerWrite;
@@ -479,11 +482,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
         />
       )}
 
-      <div>
-        <Link to={`/c/${campaignId}/quests`} className="btn btn-ghost" style={{ fontSize: 13 }}>
-          {t('quests.back')}
-        </Link>
-      </div>
+      <DetailPageWayfinding
+        campaignId={campaignId}
+        defaultPath={`/c/${campaignId}/quests`}
+        defaultLabel={t('quests.backToQuests')}
+      />
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 className="min-w-0 break-words" style={{ margin: 0 }}>{quest.title}</h3>
@@ -701,6 +704,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                     <span className="text-muted">↳</span>
                     <Link
                       to={`/c/${campaignId}/quests/${sq.id}`}
+                      state={preserveListOriginState(location.state)}
                       style={{ color: 'var(--color-neutral-200)', fontSize: 14, textDecoration: 'none' }}
                     >
                       {sq.title}
