@@ -3352,6 +3352,20 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     expect(getRes.body.gridType).toBe('hex');
   });
 
+  it('DM sets hex orientation; it round-trips with default pointy for legacy encounters', async () => {
+    const server = ctx.app.getHttpServer();
+    const fresh = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hex orient', hidden: false })
+    ).body.id;
+    expect((await request(server).get(`/api/v1/encounters/${fresh}`).set(dm)).body.hexOrientation).toBe('pointy');
+    const res = await request(server).patch(`/api/v1/encounters/${fresh}`).set(dm).send({ gridType: 'hex', hexOrientation: 'flat' });
+    expect(res.status).toBe(200);
+    expect(res.body.hexOrientation).toBe('flat');
+    expect((await request(server).get(`/api/v1/encounters/${fresh}`).set(player)).body.hexOrientation).toBe('flat');
+    const bad = await request(server).patch(`/api/v1/encounters/${fresh}`).set(dm).send({ hexOrientation: 'diamond' });
+    expect(bad.status).toBe(400);
+  });
+
   it('an invalid gridType is rejected (400)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridType: 'octagon' });
