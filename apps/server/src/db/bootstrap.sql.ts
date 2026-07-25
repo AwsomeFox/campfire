@@ -650,6 +650,8 @@ CREATE TABLE IF NOT EXISTS proposals (
   action TEXT NOT NULL,
   payload TEXT NOT NULL DEFAULT '{}',
   snapshot TEXT,
+  base_updated_at TEXT,
+  base_snapshot_hash TEXT,
   proposer TEXT NOT NULL,
   proposer_user_id TEXT NOT NULL DEFAULT '',
   proposer_token TEXT,

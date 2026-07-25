@@ -825,6 +825,10 @@ export const proposals = sqliteTable('proposals', {
   // JSON snapshot of the target entity at propose time (update proposals only; NULL for
   // creates and for rows written before this column existed) — powers before/after diffs.
   snapshot: text('snapshot'),
+  // Target entity `updatedAt` at propose time (issue #681). NULL for creates/legacy rows.
+  baseUpdatedAt: text('base_updated_at'),
+  // sha256 of the canonical base snapshot JSON at propose time (issue #681).
+  baseSnapshotHash: text('base_snapshot_hash'),
   // Human-readable display name of the submitting user (issue #124).
   proposer: text('proposer').notNull(),
   // Stable id of the submitting user (String(users.id) or dev:<name>) — powers the

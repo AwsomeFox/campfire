@@ -1,0 +1,82 @@
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+
+/** Stable JSON for hashing — sorted object keys, deterministic arrays. */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
+/** sha256 hex digest of a proposal base snapshot (issue #681). */
+export function hashProposalSnapshot(snapshot: Record<string, unknown>): string {
+  return createHash('sha256').update(stableStringify(snapshot)).digest('hex');
+}
+
+export type ProposalThreeWayDiff = {
+  base: Record<string, unknown> | null;
+  current: Record<string, unknown> | null;
+  proposed: Record<string, unknown> | null;
+};
+
+export type StaleProposalTargetBody = {
+  code: 'STALE_PROPOSAL_TARGET';
+  message: string;
+  baseUpdatedAt: string | null;
+  currentUpdatedAt: string | null;
+  diff: ProposalThreeWayDiff;
+};
+
+/** Machine-readable 409 when the target entity changed since the proposal was filed. */
+export function staleProposalTarget(input: {
+  base: Record<string, unknown> | null;
+  current: Record<string, unknown> | null;
+  proposed: Record<string, unknown> | null;
+}): ConflictException {
+  const baseUpdatedAt = typeof input.base?.updatedAt === 'string' ? input.base.updatedAt : null;
+  const currentUpdatedAt = typeof input.current?.updatedAt === 'string' ? input.current.updatedAt : null;
+  return new ConflictException({
+    code: 'STALE_PROPOSAL_TARGET',
+    message:
+      'The target entity changed after this proposal was filed. Reload the proposal queue, ' +
+      'review the three-way diff, and approve again (or reject and re-propose).',
+    baseUpdatedAt,
+    currentUpdatedAt,
+    diff: {
+      base: input.base,
+      current: input.current,
+      proposed: input.proposed,
+    },
+  } satisfies StaleProposalTargetBody);
+}
+
+/** Compare stored base hash to the live entity snapshot; throws on mismatch or missing target. */
+export function assertProposalTargetFresh(input: {
+  action: 'create' | 'update' | 'delete';
+  baseSnapshot: Record<string, unknown> | null;
+  baseSnapshotHash: string | null;
+  currentSnapshot: Record<string, unknown> | null;
+  proposed: Record<string, unknown> | null;
+}): void {
+  if (input.action === 'create') return;
+
+  if (input.currentSnapshot === null) {
+    throw new NotFoundException('Proposal target no longer exists');
+  }
+
+  const expectedHash =
+    input.baseSnapshotHash ??
+    (input.baseSnapshot !== null ? hashProposalSnapshot(input.baseSnapshot) : null);
+  if (expectedHash === null) return;
+
+  const currentHash = hashProposalSnapshot(input.currentSnapshot);
+  if (currentHash !== expectedHash) {
+    throw staleProposalTarget({
+      base: input.baseSnapshot,
+      current: input.currentSnapshot,
+      proposed: input.proposed,
+    });
+  }
+}

@@ -600,6 +600,58 @@ describe('proposals (e2e, real cookie sessions)', () => {
     expect(quest.body.title).toBe('Seq Approve Then Reject (applied)');
   });
 
+  // ---------- #681: stale target rejection + atomic finalize ----------
+
+  it('approving an update after the entity changed returns 409 STALE_PROPOSAL_TARGET with a three-way diff', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Stale Target Quest', reward: '1gp', hidden: false });
+    const staleQuestId = questRes.body.id;
+
+    const proposeRes = await playerAgent
+      .patch(`/api/v1/quests/${staleQuestId}?proposed=true`)
+      .send({ title: 'Stale Target Quest (proposed)' });
+    expect(proposeRes.status).toBe(202);
+    expect(proposeRes.body.proposal.baseSnapshotHash).toBeTruthy();
+    expect(proposeRes.body.proposal.baseUpdatedAt).toBeTruthy();
+    const proposalId = proposeRes.body.proposal.id;
+
+    await dmAgent.patch(`/api/v1/quests/${staleQuestId}`).send({ title: 'Stale Target Quest (dm edited)' });
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(409);
+    expect(approveRes.body.code).toBe('STALE_PROPOSAL_TARGET');
+    expect(approveRes.body.diff.base.title).toBe('Stale Target Quest');
+    expect(approveRes.body.diff.current.title).toBe('Stale Target Quest (dm edited)');
+    expect(approveRes.body.diff.proposed.title).toBe('Stale Target Quest (proposed)');
+
+    const quest = await dmAgent.get(`/api/v1/quests/${staleQuestId}`);
+    expect(quest.body.title).toBe('Stale Target Quest (dm edited)');
+
+    const pendingRes = await dmAgent.get(`/api/v1/campaigns/${campaignId}/proposals?status=pending`);
+    expect(pendingRes.body.some((p: { id: number }) => p.id === proposalId)).toBe(true);
+  });
+
+  it('approving a delete after the entity changed returns 409 and leaves the entity intact', async () => {
+    const questRes = await dmAgent
+      .post(`/api/v1/campaigns/${campaignId}/quests`)
+      .send({ title: 'Stale Delete Quest', reward: '2gp', hidden: false });
+    const staleDeleteId = questRes.body.id;
+
+    const proposeRes = await playerAgent.delete(`/api/v1/quests/${staleDeleteId}?proposed=true`);
+    expect(proposeRes.status).toBe(202);
+    const proposalId = proposeRes.body.proposal.id;
+
+    await dmAgent.patch(`/api/v1/quests/${staleDeleteId}`).send({ reward: '99gp' });
+
+    const approveRes = await dmAgent.post(`/api/v1/proposals/${proposalId}/approve`).send({});
+    expect(approveRes.status).toBe(409);
+    expect(approveRes.body.code).toBe('STALE_PROPOSAL_TARGET');
+    expect(approveRes.body.diff.proposed).toBeNull();
+
+    expect((await dmAgent.get(`/api/v1/quests/${staleDeleteId}`)).status).toBe(200);
+  });
+
   // ---------- #817: proposal self-view must not disclose hidden entities / dmSecret ----------
 
   describe('issue #817 — hidden target + dmSecret projection', () => {

@@ -4681,6 +4681,14 @@ export const Proposal = z.object({
   // member export) projects a redacted/omitted view so dmSecret and unrevealed entities
   // never leak through the approval queue (issue #817).
   snapshot: z.record(z.string(), z.unknown()).nullable().default(null),
+  // Revision token of the target entity at propose time (update/delete only; null for
+  // creates and legacy rows). Paired with baseSnapshotHash for approve-time stale
+  // detection (issue #681).
+  baseUpdatedAt: z.string().nullable().default(null),
+  // sha256 of the canonical base snapshot JSON at propose time. On approve, the live
+  // entity must still match this hash or the server returns 409 STALE_PROPOSAL_TARGET
+  // with a three-way diff (base / current / proposed).
+  baseSnapshotHash: z.string().nullable().default(null),
   // Human-readable attribution: the display name of the USER who submitted, even when
   // the write came in over a PAT (resolved to the token's owning user — issue #124).
   proposer: z.string().max(200),

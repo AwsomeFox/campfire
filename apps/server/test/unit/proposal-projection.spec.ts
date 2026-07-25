@@ -21,6 +21,8 @@ function baseProposal(over: Partial<Proposal> = {}): Proposal {
       dmSecret: 'vault-trap',
       hidden: false,
     },
+    baseUpdatedAt: null,
+    baseSnapshotHash: null,
     proposer: 'Ada',
     proposerUserId: '3',
     proposerToken: null,
