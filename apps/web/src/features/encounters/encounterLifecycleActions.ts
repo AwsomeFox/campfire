@@ -71,11 +71,11 @@ export function deleteConfirmCopy(status: EncounterLifecycleStatus): { title: st
   if (status === 'preparing') {
     return {
       title: 'Cancel this preparation?',
-      body: 'Discards this encounter and its combatants. Nothing has been written back to character sheets.',
+      body: 'Moves this encounter to the Trash — you can undo it, or restore it from the campaign Trash. Nothing has been written back to character sheets.',
     };
   }
   return {
     title: 'Delete this encounter?',
-    body: 'This cannot be undone.',
+    body: 'Moves this encounter to the Trash — you can undo it, or restore it from the campaign Trash. Combatants, logs, and map settings are kept.',
   };
 }

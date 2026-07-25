@@ -323,13 +323,24 @@ export class CampaignsService {
    * resource name, with timeline_event -> /timeline/:id/restore). DM-only — gated in
    * the controller. Covers the entity types that both carry a `deleted_at` column AND
    * expose a DM-gated restore endpoint today: sessions, characters, quests, npcs,
-   * locations, timeline events. Notes are deliberately excluded — their per-author/whisper visibility
-   * means a trashed note may belong to another member and must not surface in a DM's
+   * locations, factions, encounters, story arcs, story beats, and timeline events. Notes are deliberately
+   * excluded — their per-author/whisper visibility means a trashed note may belong to another member and must not surface in a DM's
    * campaign-wide Trash (their restore is membership+author-scoped, not DM-only). Add a
    * new type here (and to @campfire/schema TrashedEntityType) when it gains a restore route.
    */
   async listTrashedEntities(campaignId: number): Promise<TrashedEntity[]> {
-    const [sessionRows, characterRows, questRows, npcRows, locationRows, timelineEventRows] = await Promise.all([
+    const [
+      sessionRows,
+      characterRows,
+      questRows,
+      npcRows,
+      locationRows,
+      factionRows,
+      encounterRows,
+      storyArcRows,
+      storyBeatRows,
+      timelineEventRows,
+    ] = await Promise.all([
       this.db
         .select({ id: sessions.id, title: sessions.title, number: sessions.number, deletedAt: sessions.deletedAt })
         .from(sessions)
@@ -351,10 +362,33 @@ export class CampaignsService {
         .from(locations)
         .where(and(eq(locations.campaignId, campaignId), isNotNull(locations.deletedAt))),
       this.db
+        .select({ id: factions.id, name: factions.name, deletedAt: factions.deletedAt })
+        .from(factions)
+        .where(and(eq(factions.campaignId, campaignId), isNotNull(factions.deletedAt))),
+      this.db
+        .select({ id: encounters.id, name: encounters.name, deletedAt: encounters.deletedAt })
+        .from(encounters)
+        .where(and(eq(encounters.campaignId, campaignId), isNotNull(encounters.deletedAt))),
+      this.db
+        .select({ id: storyArcs.id, title: storyArcs.title, deletedAt: storyArcs.deletedAt })
+        .from(storyArcs)
+        .where(and(eq(storyArcs.campaignId, campaignId), isNotNull(storyArcs.deletedAt))),
+      this.db
+        .select({
+          id: storyBeats.id,
+          title: storyBeats.title,
+          deletedAt: storyBeats.deletedAt,
+          arcId: storyBeats.arcId,
+        })
+        .from(storyBeats)
+        .where(and(eq(storyBeats.campaignId, campaignId), isNotNull(storyBeats.deletedAt))),
+      this.db
         .select({ id: timelineEvents.id, title: timelineEvents.title, deletedAt: timelineEvents.deletedAt })
         .from(timelineEvents)
         .where(and(eq(timelineEvents.campaignId, campaignId), isNotNull(timelineEvents.deletedAt))),
     ]);
+
+    const trashedArcIds = new Set(storyArcRows.map((r) => r.id));
 
     const items: TrashedEntity[] = [
       ...sessionRows.map((r) => ({
@@ -367,6 +401,13 @@ export class CampaignsService {
       ...questRows.map((r) => ({ type: 'quest' as const, id: r.id, name: r.title, deletedAt: r.deletedAt as string })),
       ...npcRows.map((r) => ({ type: 'npc' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
       ...locationRows.map((r) => ({ type: 'location' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+      ...factionRows.map((r) => ({ type: 'faction' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+      ...encounterRows.map((r) => ({ type: 'encounter' as const, id: r.id, name: r.name, deletedAt: r.deletedAt as string })),
+      ...storyArcRows.map((r) => ({ type: 'story_arc' as const, id: r.id, name: r.title, deletedAt: r.deletedAt as string })),
+      // Beats trashed as part of an arc cascade surface only via the arc row.
+      ...storyBeatRows
+        .filter((r) => !trashedArcIds.has(r.arcId))
+        .map((r) => ({ type: 'story_beat' as const, id: r.id, name: r.title, deletedAt: r.deletedAt as string })),
       ...timelineEventRows.map((r) => ({
         type: 'timeline_event' as const,
         id: r.id,
@@ -659,15 +700,15 @@ export class CampaignsService {
       revisionRows,
     ] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
-      this.db.select().from(factions).where(eq(factions.campaignId, id)),
+      this.db.select().from(factions).where(and(eq(factions.campaignId, id), notDeleted(factions.deletedAt))),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
       this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
-      this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+      this.db.select().from(encounters).where(and(eq(encounters.campaignId, id), notDeleted(encounters.deletedAt))),
       this.db.select().from(comments).where(eq(comments.campaignId, id)),
-      this.db.select().from(storyArcs).where(eq(storyArcs.campaignId, id)),
+      this.db.select().from(storyArcs).where(and(eq(storyArcs.campaignId, id), notDeleted(storyArcs.deletedAt))),
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),
@@ -914,15 +955,15 @@ export class CampaignsService {
       revisionRows,
     ] = await Promise.all([
       this.db.select().from(locations).where(and(eq(locations.campaignId, id), notDeleted(locations.deletedAt))),
-      this.db.select().from(factions).where(eq(factions.campaignId, id)),
+      this.db.select().from(factions).where(and(eq(factions.campaignId, id), notDeleted(factions.deletedAt))),
       this.db.select().from(npcs).where(and(eq(npcs.campaignId, id), notDeleted(npcs.deletedAt))),
       this.db.select().from(quests).where(and(eq(quests.campaignId, id), notDeleted(quests.deletedAt))),
       this.db.select().from(characters).where(and(eq(characters.campaignId, id), notDeleted(characters.deletedAt))),
       this.db.select().from(sessions).where(and(eq(sessions.campaignId, id), notDeleted(sessions.deletedAt))),
       this.db.select().from(notes).where(and(eq(notes.campaignId, id), notDeleted(notes.deletedAt))),
-      this.db.select().from(encounters).where(eq(encounters.campaignId, id)),
+      this.db.select().from(encounters).where(and(eq(encounters.campaignId, id), notDeleted(encounters.deletedAt))),
       this.db.select().from(comments).where(eq(comments.campaignId, id)),
-      this.db.select().from(storyArcs).where(eq(storyArcs.campaignId, id)),
+      this.db.select().from(storyArcs).where(and(eq(storyArcs.campaignId, id), notDeleted(storyArcs.deletedAt))),
       this.db.select().from(timelineEvents).where(eq(timelineEvents.campaignId, id)),
       this.db.select().from(timelineCalendars).where(eq(timelineCalendars.campaignId, id)).limit(1),
       this.db.select().from(sessionZero).where(eq(sessionZero.campaignId, id)).limit(1),

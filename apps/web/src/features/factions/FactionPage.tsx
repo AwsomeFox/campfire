@@ -16,6 +16,7 @@ import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { GameIcon } from '../../components/GameIcon';
@@ -56,6 +57,7 @@ export default function FactionPage() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [pendingUndo, setPendingUndo] = useState(false);
   const [togglingHidden, setTogglingHidden] = useState(false);
   const [bumping, setBumping] = useState(false);
   // Optimistic-concurrency guard (#157/#440): a stale save 409s instead of clobbering a
@@ -203,11 +205,19 @@ export default function FactionPage() {
     setDeleting(true);
     try {
       await api.delete(`${API}/factions/${id}`);
-      navigate(`/c/${cid}/factions`);
+      setConfirmingDelete(false);
+      setPendingUndo(true);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Couldn't delete this faction.");
+    } finally {
       setDeleting(false);
     }
+  }
+
+  async function undoDelete() {
+    await api.post(`${API}/factions/${id}/restore`);
+    setPendingUndo(false);
+    await load();
   }
 
   if (!Number.isFinite(cid) || !Number.isFinite(id)) {
@@ -539,11 +549,18 @@ export default function FactionPage() {
       {confirmingDelete && (
         <ConfirmDialog
           title={`Delete ${faction.name}?`}
-          body="This cannot be undone. Member NPCs are unlinked, not deleted."
+          body="This moves the faction to the Trash — you can undo it, or restore it from the campaign Trash. Member NPC links and revisions are kept."
           confirmLabel="Delete faction"
           busy={deleting}
           onConfirm={remove}
           onCancel={() => setConfirmingDelete(false)}
+        />
+      )}
+      {pendingUndo && (
+        <UndoSnackbar
+          message="Faction moved to Trash."
+          onUndo={undoDelete}
+          onExpire={() => navigate(`/c/${cid}/factions`)}
         />
       )}
     </div>

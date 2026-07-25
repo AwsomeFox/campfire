@@ -4,8 +4,9 @@ import type { z } from 'zod';
 import { FactionCreate, FactionUpdate } from '@campfire/schema';
 import type { Faction, FactionStanding, FactionWithMembers, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { factions, npcs } from '../../db/schema';
+import { factions } from '../../db/schema';
 import { nowIso } from '../../common/time';
+import { notDeleted } from '../../common/soft-delete';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
 import { AuditService } from '../audit/audit.service';
 import { RevisionsService } from '../revisions/revisions.service';
@@ -43,14 +44,18 @@ export class FactionsService {
   ) {}
 
   async listForCampaign(campaignId: number, role: Role): Promise<Faction[]> {
-    const rows = await this.db.select().from(factions).where(eq(factions.campaignId, campaignId));
+    const rows = await this.db
+      .select()
+      .from(factions)
+      .where(and(eq(factions.campaignId, campaignId), notDeleted(factions.deletedAt)));
     // Drop hidden factions wholesale for non-DM BEFORE redacting dmSecret (issue #42).
     return redactSecrets(filterHidden(rows.map(toDomain), role), role);
   }
 
-  async getRowOrThrow(id: number) {
+  async getRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(factions).where(eq(factions.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Faction ${id} not found`);
+    // A trashed faction (soft-deleted, #701) reads as nonexistent unless includeDeleted (restore).
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Faction ${id} not found`);
     return row;
   }
 
@@ -63,7 +68,7 @@ export class FactionsService {
     const [row] = await this.db
       .select()
       .from(factions)
-      .where(and(eq(factions.campaignId, campaignId), sql`lower(${factions.name}) = lower(${name})`))
+      .where(and(eq(factions.campaignId, campaignId), sql`lower(${factions.name}) = lower(${name})`, notDeleted(factions.deletedAt)))
       .orderBy(factions.id)
       .limit(1);
     return row;
@@ -251,16 +256,7 @@ export class FactionsService {
 
   async remove(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getRowOrThrow(id);
-    // Null out any NPC pinned to this faction in the same transaction as the delete,
-    // so a membership never dangles on a deleted faction. Mirrors NpcsService.remove()'s
-    // giverNpcId re-nulling. (Fresh DBs also have ON DELETE SET NULL, but migrated DBs
-    // added faction_id without the FK clause — #69 — so do it explicitly.)
-    this.db.transaction((tx) => {
-      tx.update(npcs).set({ factionId: null, updatedAt: nowIso() }).where(eq(npcs.factionId, id)).run();
-      tx.delete(factions).where(eq(factions.id, id)).run();
-    });
-    // Drop this faction's prose revisions (polymorphic soft ref, no FK cascade — #157).
-    await this.revisions.removeForEntity('faction', id);
+    await this.db.update(factions).set({ deletedAt: nowIso(), updatedAt: nowIso() }).where(eq(factions.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -268,6 +264,27 @@ export class FactionsService {
       entityType: 'faction',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed faction (issue #701) — clears `deleted_at`. 404 if it isn't trashed. */
+  async restore(id: number, user: RequestUser, role: Role): Promise<Faction> {
+    const existing = await this.getRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Faction ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(factions)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(factions.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'faction.restore',
+      entityType: 'faction',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toDomain(row), role);
   }
 }

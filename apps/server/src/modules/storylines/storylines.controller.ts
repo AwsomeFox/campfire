@@ -99,12 +99,21 @@ export class ArcsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a story arc', description: 'DM only. Cascades to its beats and any branches touching them.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) a story arc', description: 'DM only. Soft-delete (issue #701) — moves the arc and its beats to the campaign Trash; branches and revisions survive for restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.storylines.getArcRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.storylines.removeArc(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed story arc', description: 'DM only. Restores the arc and every beat trashed with it (issue #701).' })
+  @ApiResponse({ status: 201, description: 'Restored arc with beats.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.storylines.getArcRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.storylines.restoreArc(id, user, role);
   }
 
   @Post(':id/beats')
@@ -169,12 +178,22 @@ export class BeatsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a beat', description: 'DM only. Also removes any branch pointing at or out of it.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) a beat', description: 'DM only. Soft-delete (issue #701) — branches and revisions survive for restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.storylines.getBeatRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.storylines.removeBeat(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed beat', description: 'DM only. Refused while the parent arc is still in the Trash (issue #701).' })
+  @ApiResponse({ status: 201, description: 'Restored beat.' })
+  @ApiResponse({ status: 409, description: 'Parent arc is still trashed — restore the arc first.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.storylines.getBeatRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.storylines.restoreBeat(id, user, role);
   }
 
   @Post(':id/branches')
