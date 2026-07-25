@@ -245,13 +245,14 @@ export function iconPickerNextCategoryKey(
   currentKey: string,
   direction: 'next' | 'prev' | 'home' | 'end',
 ): string {
+  if (keys.length === 0) return currentKey;
   const idx = keys.indexOf(currentKey);
   const safeIdx = idx >= 0 ? idx : 0;
   switch (direction) {
     case 'next':
-      return keys[(safeIdx + 1) % keys.length] ?? keys[0]!;
+      return keys[(safeIdx + 1) % keys.length]!;
     case 'prev':
-      return keys[(safeIdx - 1 + keys.length) % keys.length] ?? keys[0]!;
+      return keys[(safeIdx - 1 + keys.length) % keys.length]!;
     case 'home':
       return keys[0]!;
     case 'end':

@@ -140,6 +140,7 @@ test.describe('icon picker UX helpers (issue #648)', () => {
     expect(iconPickerNextCategoryKey(keys, 'armor', 'next')).toBe('all');
     expect(iconPickerNextCategoryKey(keys, 'weapons', 'home')).toBe('all');
     expect(iconPickerNextCategoryKey(keys, 'weapons', 'end')).toBe('armor');
+    expect(iconPickerNextCategoryKey([], 'weapons', 'next')).toBe('weapons');
   });
 
   test('pins explicit value and auto slug; dedupes grid', () => {
