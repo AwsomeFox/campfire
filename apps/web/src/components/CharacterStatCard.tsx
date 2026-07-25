@@ -329,6 +329,7 @@ export function CharacterStatCard({
                             onClick={() =>
                               void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
                                 applyEligible: !!onApplyDamage,
+                                onApply: onApplyDamage,
                               })
                             }
                             data-testid="damage-roll-control"

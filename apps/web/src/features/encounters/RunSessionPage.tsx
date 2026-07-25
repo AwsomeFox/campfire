@@ -68,7 +68,7 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
-import { useRollApplyDamageBridge, useRollResultToast } from '../../components/RollResultToastContext';
+import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
@@ -868,11 +868,6 @@ export default function RunSessionPage() {
 
   useRollApplyDamageBridge(onApplyDamageRolled);
 
-  const { setCombatApplyArmed } = useRollResultToast();
-  useEffect(() => {
-    setCombatApplyArmed(encounter?.status === 'running');
-  }, [encounter?.status, setCombatApplyArmed]);
-
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {
       setPendingApply(null);
@@ -1608,7 +1603,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={onApplyDamageRolled}
+              onApplyDamage={encounter.status === 'running' ? onApplyDamageRolled : undefined}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -3437,7 +3432,7 @@ function CombatantRow({
   campaignId: number | undefined;
   onRollError: (msg: string | null) => void;
   /** A damage total rolled from the card, to be applied to a target combatant. */
-  onApplyDamage: (amount: number, label: string) => void;
+  onApplyDamage?: (amount: number, label: string) => void;
   /** Issue #414: open the structured action Use flow for a resolvable action index. */
   onUseAction?: (actionIndex: number) => void;
   busy: boolean;

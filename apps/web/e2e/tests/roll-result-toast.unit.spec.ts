@@ -62,8 +62,7 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
   test('provider wires apply shortcut through looksLikeDamageRoll', () => {
     expect(contextSource).toMatch(/looksLikeDamageRoll/);
     expect(contextSource).toMatch(/useRollApplyDamageBridge/);
-    expect(contextSource).toMatch(/rollApplyEligible/);
-    expect(contextSource).toMatch(/setCombatApplyArmed/);
+    expect(contextSource).toMatch(/rollApplyHandler/);
     expect(contextSource).toMatch(/useUndoSnackbarChrome/);
   });
 
@@ -72,7 +71,7 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
     const logSource = readFileSync(resolve(ROOT, 'src/features/dice/SharedDiceLog.tsx'), 'utf8');
     expect(rollerSource).toMatch(/showRoll\(result/);
     expect(rollerSource).toMatch(/showRoll\(res\.roll\)/);
-    expect(rollerSource).toMatch(/applyEligible/);
+    expect(rollerSource).toMatch(/onApply/);
     expect(logSource).toMatch(/showRoll\(result\)/);
   });
 });
