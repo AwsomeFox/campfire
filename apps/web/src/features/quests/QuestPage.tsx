@@ -29,6 +29,7 @@ import { QuestStatusBadge } from '../../components/EntitySemanticBadges';
 import { Markdown } from '../../components/Markdown';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
@@ -791,6 +792,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               {t('quests.addDmNotes')}
             </button>
           )}
+
+          <EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} />
         </div>
 
         <div className="lg:col-span-5" style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
