@@ -10,6 +10,7 @@ export function looksLikeDamageRoll(r: Pick<DiceRoll, 'expr' | 'total' | 'label'
   if (r.total <= 0) return false;
   const label = (r.label ?? '').toLowerCase();
   if (label.includes('damage')) return true;
+  if (label.includes('heal') || label.includes('cure')) return false;
   const expr = r.expr.trim();
   if (!/\d*d\d/i.test(expr)) return false;
   if (/d20(?!\d)/i.test(expr)) return false;

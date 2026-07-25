@@ -3,7 +3,6 @@
  * is in flight; settles on the server-returned faces, then hands off to RollResultToast.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import type { DiceTheme } from '@campfire/schema';
 
 export const DICE_ROLL_MIN_TUMBLE_MS = 650;
@@ -60,7 +59,6 @@ export function DiceRollOverlay({
   theme?: DiceTheme | null;
   onSettled: () => void;
 }) {
-  const { t } = useTranslation();
   const [faces, setFaces] = useState<number[]>(() => dice.map((d) => randomFace(d.sides)));
 
   useEffect(() => {
@@ -93,10 +91,8 @@ export function DiceRollOverlay({
       data-testid="dice-roll-overlay"
       data-phase={phase}
       data-dice-theme={activeTheme}
-      role="status"
-      aria-live="polite"
-      aria-label={t('dice.rollOverlayLabel', { count: dice.length })}
-      onClick={phase === 'settling' ? onSettled : undefined}
+      role="presentation"
+      aria-hidden="true"
     >
       <div className="cf-dice-roll-overlay__stage">
         {dice.map((die, i) => {

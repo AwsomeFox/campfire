@@ -11,7 +11,7 @@ import { RolledDice } from '../features/dice/RolledDice';
 import { RolledTerms } from '../features/dice/RolledTerms';
 import { d20Flavor, d20TotalClasses } from '../lib/d20Flavor';
 
-const AUTO_DISMISS_MS = 8000;
+const AUTO_DISMISS_MS = 15000;
 
 export function RollResultToast({
   roll,

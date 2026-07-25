@@ -1674,7 +1674,11 @@ a:hover .cf-name-reveal {
   .cf-anim-levelup,
   .cf-sparkle,
   .cf-dice-roll-overlay__inner--tumble,
-  .cf-dice-roll-overlay__inner--land {
+  .cf-dice-roll-overlay__inner--land,
+  .cf-dice-roll-overlay__die--crit,
+  .cf-dice-roll-overlay__die--fumble,
+  .cf-dice-roll-overlay__crit-ring,
+  .cf-dice-roll-overlay__fumble-void {
     animation: none !important;
   }
 }
