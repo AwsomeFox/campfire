@@ -36,6 +36,8 @@ export interface StatusMenuOption<V extends string> {
   value: V;
   /** Visible label, usually the badge text (icon + word). */
   label: React.ReactNode;
+  /** Optional accessible name when the visible label is not sufficient. */
+  accessibleName?: string;
 }
 
 export interface StatusMenuButtonProps<V extends string> {
@@ -410,6 +412,7 @@ export function StatusMenuButton<V extends string>({
                 role="option"
                 tabIndex={isActive ? 0 : -1}
                 aria-selected={selected}
+                aria-label={option.accessibleName}
                 data-active={isActive ? '' : undefined}
                 className={`w-full text-left text-xs rounded px-2 py-1.5 cursor-pointer outline-none focus-visible:bg-slate-700 hover:bg-slate-700 ${
                   selected ? 'text-white font-semibold' : 'text-slate-300'
