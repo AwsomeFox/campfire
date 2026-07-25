@@ -1,13 +1,10 @@
-import { execFile } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import type { CoverageMapData } from 'istanbul-lib-coverage';
 import libCoverage from 'istanbul-lib-coverage';
-
-const execFileAsync = promisify(execFile);
 
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const MERGE_WORKER = path.join(__dirname, 'oidc-v8-merge-worker.cjs');
@@ -52,12 +49,12 @@ function applyMergedCoverage(incoming: CoverageMapData): void {
   }
 }
 
-async function mergeCoverageDirInSubprocess(dir: string): Promise<CoverageMapData> {
-  const { stdout } = await execFileAsync(process.execPath, [MERGE_WORKER, dir], {
+function mergeCoverageDirInSubprocess(dir: string): CoverageMapData {
+  const stdout = execFileSync(process.execPath, [MERGE_WORKER, dir], {
     maxBuffer: 64 * 1024 * 1024,
     timeout: 120_000,
   });
-  return JSON.parse(stdout || '{}') as CoverageMapData;
+  return JSON.parse(stdout.toString() || '{}') as CoverageMapData;
 }
 
 /**
@@ -66,7 +63,7 @@ async function mergeCoverageDirInSubprocess(dir: string): Promise<CoverageMapDat
  */
 export async function mergeChildV8Coverage(): Promise<void> {
   if (!coverageDir || !fs.existsSync(coverageDir)) return;
-  const incoming = await mergeCoverageDirInSubprocess(coverageDir);
+  const incoming = mergeCoverageDirInSubprocess(coverageDir);
   if (Object.keys(incoming).length > 0) {
     applyMergedCoverage(incoming);
   }

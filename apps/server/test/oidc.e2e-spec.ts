@@ -213,7 +213,6 @@ async function spawnAppOnce(
       }
       child.stdout?.destroy();
       child.stderr?.destroy();
-      child.unref?.();
     };
     if (exitState.current || child.killed) {
       releaseChild();
