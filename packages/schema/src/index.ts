@@ -6866,8 +6866,42 @@ export type EncounterRollInitiativeResult = z.infer<typeof EncounterRollInitiati
 // 'effect' (issue #413) records a start/end-of-turn effect resolution (ongoing damage,
 // regeneration tick, an expired effect, a prompted repeat save). Appended alongside the
 // existing types by the turn-advancement path; free-text column, so older DBs are unaffected.
-export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect']);
+export const EncounterEventType = z.enum(['damage', 'heal', 'condition', 'death', 'roll', 'turn', 'note', 'override', 'correction', 'effect', 'resource_changed']);
 export type EncounterEventType = z.infer<typeof EncounterEventType>;
+
+/** Phase within an action-resolution event chain (issue #426). */
+export const EncounterEventPhase = z.enum(['declare', 'roll', 'ruling', 'consequence', 'resource', 'undo']);
+export type EncounterEventPhase = z.infer<typeof EncounterEventPhase>;
+
+/** Who performed the action that produced a combat-log chain (issue #426). */
+export const EncounterEventPerformedBy = z.object({
+  userId: z.string().max(120).nullable().default(null),
+  role: z.string().max(24).nullable().default(null),
+  kind: z.enum(['human', 'ai', 'system']).default('human'),
+});
+export type EncounterEventPerformedBy = z.infer<typeof EncounterEventPerformedBy>;
+
+/** Structured payload for expandable combat-log details (issue #426). */
+export const EncounterEventMetadata = z.object({
+  actionName: z.string().max(120).optional(),
+  mode: z.string().max(24).optional(),
+  outcome: z.string().max(24).optional(),
+  playerText: z.string().max(600).optional(),
+  dmText: z.string().max(600).optional(),
+  naturalRoll: z.number().int().nullable().optional(),
+  attackTotal: z.number().int().nullable().optional(),
+  saveTotal: z.number().int().nullable().optional(),
+  vsValue: z.number().int().nullable().optional(),
+  saveDc: z.number().int().nullable().optional(),
+  degree: z.string().max(24).optional(),
+  damageSummary: z.string().max(200).optional(),
+  costSlot: z.string().max(40).optional(),
+  costCount: z.number().int().optional(),
+  spellLevelSpent: z.number().int().optional(),
+  undoOfChainId: z.string().max(64).optional(),
+  ruleSystem: z.string().max(40).optional(),
+});
+export type EncounterEventMetadata = z.infer<typeof EncounterEventMetadata>;
 
 export const EncounterEvent = z.object({
   id: Id,
@@ -6893,6 +6927,13 @@ export const EncounterEvent = z.object({
   // #869) — store deltas/outcomes only ("took 8 damage", "Combat started"); the
   // UI composes names from actor/target.
   detail: z.string().max(500).default(''),
+  // Issue #426: correlate declaration, rolls, rulings, consequences, resources,
+  // and undo in one event chain without rewriting history.
+  chainId: z.string().max(64).nullable().default(null),
+  parentEventId: Id.nullable().default(null),
+  phase: EncounterEventPhase.nullable().default(null),
+  performedBy: EncounterEventPerformedBy.nullable().default(null),
+  metadata: EncounterEventMetadata.default({}),
   createdAt: IsoDate,
 });
 export type EncounterEvent = z.infer<typeof EncounterEvent>;

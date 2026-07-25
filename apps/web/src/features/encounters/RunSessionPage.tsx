@@ -81,7 +81,10 @@ import { useDisclosure } from '../../components/useDisclosure';
 import {
   advanceCombatLogAnnouncements,
   formatCombatLogAnnouncementBatch,
+  formatCombatLogChainDetails,
+  formatCombatLogChainSummary,
   formatCombatLogEventSummary,
+  groupCombatLogEvents,
   type CombatLogAnnouncementCursor,
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
@@ -4996,6 +4999,17 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
   const headingId = 'combat-log-heading';
   const logRef = useRef<HTMLDivElement>(null);
   const preservedScrollTopRef = useRef(0);
+  const [expandedChains, setExpandedChains] = useState<Set<string>>(() => new Set());
+  const chains = useMemo(() => groupCombatLogEvents(events), [events]);
+
+  const toggleChain = useCallback((key: string) => {
+    setExpandedChains((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // React's list append can invoke browser scroll anchoring around the focused
   // container. Snapshot before the commit and restore in the layout phase so a
@@ -5027,19 +5041,49 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
           </p>
         ) : (
           <ol style={{ display: 'flex', flexDirection: 'column', gap: 4, listStyle: 'none', margin: 0, padding: 0 }}>
-            {events.map((ev) => (
-              <li key={ev.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5, lineHeight: 1.4 }}>
-                <span aria-hidden="true" style={{ flex: 'none' }}>
-                  {EVENT_ICON[ev.type] ? <GameIcon slug={EVENT_ICON[ev.type]} size={13} /> : '•'}
-                </span>
-                {ev.round > 0 && (
-                  <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
-                    R{ev.round}
-                  </span>
-                )}
-                <span style={{ minWidth: 0 }}>{formatCombatLogEventSummary(ev)}</span>
-              </li>
-            ))}
+            {chains.map((chain, index) => {
+              const head = chain.events[0];
+              const chainKey = chain.chainId ?? `solo-${head.id}`;
+              const expandable = chain.events.length > 1;
+              const expanded = expandedChains.has(chainKey);
+              const details = expandable ? formatCombatLogChainDetails(chain) : [];
+              const summary = chain.chainId ? formatCombatLogChainSummary(chain) : formatCombatLogEventSummary(head);
+              const iconType = head.type;
+              return (
+                <li key={chainKey} style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 12.5, lineHeight: 1.4 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                    <span aria-hidden="true" style={{ flex: 'none' }}>
+                      {EVENT_ICON[iconType] ? <GameIcon slug={EVENT_ICON[iconType]} size={13} /> : '•'}
+                    </span>
+                    {head.round > 0 && (
+                      <span className="tag tag-neutral" style={{ fontSize: 9, flex: 'none' }}>
+                        R{head.round}
+                      </span>
+                    )}
+                    {expandable ? (
+                      <button
+                        type="button"
+                        className="link-button"
+                        onClick={() => toggleChain(chainKey)}
+                        aria-expanded={expanded}
+                        style={{ minWidth: 0, textAlign: 'left', fontSize: 'inherit', padding: 0 }}
+                      >
+                        {summary}
+                      </button>
+                    ) : (
+                      <span style={{ minWidth: 0 }}>{summary}</span>
+                    )}
+                  </div>
+                  {expandable && expanded && details.length > 0 && (
+                    <ul style={{ margin: '0 0 0 28px', padding: 0, listStyle: 'disc', color: 'var(--text-secondary)' }}>
+                      {details.map((line, detailIndex) => (
+                        <li key={`${chainKey}-${detailIndex}`}>{line}</li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
           </ol>
         )}
       </div>
