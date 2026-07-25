@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 
 /** Stable JSON for hashing — sorted object keys, deterministic arrays. Omits undefined values. */
 export function stableStringify(value: unknown): string {
+  // Snapshots are always objects; top-level undefined hashes as JSON null.
   if (value === undefined) return 'null';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;

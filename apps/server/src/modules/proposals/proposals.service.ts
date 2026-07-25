@@ -318,9 +318,15 @@ export class ProposalsService {
         const createdId = created?.id;
         if (typeof createdId === 'number') {
           createdEntityId = createdId;
+        } else if (typeof createdId === 'bigint') {
+          if (createdId <= BigInt(Number.MAX_SAFE_INTEGER) && createdId >= BigInt(Number.MIN_SAFE_INTEGER)) {
+            createdEntityId = Number(createdId);
+          }
         } else if (typeof createdId === 'string' && createdId !== '') {
-          const parsed = Number(createdId);
-          if (Number.isFinite(parsed)) createdEntityId = parsed;
+          const parsed = BigInt(createdId);
+          if (parsed <= BigInt(Number.MAX_SAFE_INTEGER) && parsed >= BigInt(Number.MIN_SAFE_INTEGER)) {
+            createdEntityId = Number(parsed);
+          }
         }
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -331,14 +337,25 @@ export class ProposalsService {
       // rather than being stranded as approved with no write applied.
       try {
         await this.records.revertToPending(id);
-      } catch {
-        // Revert failed; preserve and surface the original entity-write error.
+      } catch (revertErr) {
+        await this.audit
+          .log({
+            actor: auditActor(user),
+            actorRole: role,
+            action: 'proposal.revert_failed',
+            entityType: existing.entityType,
+            entityId: id,
+            campaignId: existing.campaignId,
+            detail: String(revertErr),
+          })
+          .catch(() => {});
       }
       throw err;
     }
 
     // Finalize bookkeeping only after a successful entity write. Failures here must
     // not revert the claim — the mutation already landed (issue #85 / #681).
+    // finalizeApproved is intentionally synchronous (better-sqlite3 transaction).
     try {
       this.records.finalizeApproved(id, user, role, {
         ...(amended ? { payload: validated! } : {}),
