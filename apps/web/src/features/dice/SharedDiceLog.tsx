@@ -28,9 +28,10 @@ import {
   formatDiceRollAnnouncementBatch,
   type DiceRollAnnouncementCursor,
 } from './diceLogAccessibility';
-import { diceRollDisplayActor, diceRollSummaryLine, isManualDiceRoll, showRolledDice } from './diceRollDisplay';
+import { diceRollDisplayActor, diceRollSummaryLine, showRolledDice } from './diceRollDisplay';
 import {
   EMPTY_PHYSICAL_ROLL_FORM,
+  isManualDiceRoll,
   parsePhysicalRollForm,
   type PhysicalRollFormFields,
 } from './physicalRollForm';
