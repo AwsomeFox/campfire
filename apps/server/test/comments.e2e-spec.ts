@@ -1088,12 +1088,14 @@ describe('comments / threaded discussion (e2e)', () => {
         expect(created.body.entityType).toBe(anchor.entityType);
         expect(created.body.entityId).toBe(anchor.entityId);
 
-        const listed = await request(server)
-          .get(`/api/v1/campaigns/${campaignId}/comments`)
-          .query({ entityType: anchor.entityType, entityId: anchor.entityId })
-          .set(authorPlayer);
-        expect(listed.status).toBe(200);
-        expect(discussionBodies(listed.body)).toContain(anchor.body);
+        const listed = await findCommentInDiscussion(
+          server,
+          campaignId,
+          { entityType: anchor.entityType, entityId: String(anchor.entityId) },
+          created.body.id,
+          authorPlayer,
+        );
+        expect(listed?.body).toBe(anchor.body);
       }
     });
   });
