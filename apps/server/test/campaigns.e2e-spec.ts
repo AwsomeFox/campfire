@@ -60,6 +60,25 @@ describe('campaigns (e2e)', () => {
     expect(getAfterDelete.status).toBe(404);
   });
 
+  it('narrationLanguage defaults to en and can be patched (#635)', async () => {
+    const server = ctx.app.getHttpServer();
+
+    const createRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Lang Test' });
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.narrationLanguage).toBe('en');
+    const id = createRes.body.id;
+
+    const patchRes = await request(server)
+      .patch(`/api/v1/campaigns/${id}`)
+      .set(dm)
+      .send({ narrationLanguage: 'ja' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.narrationLanguage).toBe('ja');
+
+    const getRes = await request(server).get(`/api/v1/campaigns/${id}`).set(dm);
+    expect(getRes.body.narrationLanguage).toBe('ja');
+  });
+
   // Strict-validation (task P1 item 3): CampaignCreateDto/CampaignUpdateDto are
   // now .strict() at the DTO layer — an unrecognized key 400s with a clear
   // message instead of the global ZodValidationPipe silently stripping it.
