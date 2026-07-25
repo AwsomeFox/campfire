@@ -1060,7 +1060,7 @@ export default function RunSessionPage() {
    * fails we still apply the roll outcome (the combat-log event records provenance too).
    */
   const rollDeathSave = useCallback(
-    (combatant: Combatant) => {
+    (combatant: Pick<Combatant, 'id' | 'name'>) => {
       const face = 1 + Math.floor(Math.random() * 20); // 1–20, uniform
       const label = `${combatant.name} · death save`;
       // Visible in the shared dice tray. A plain 1d20 expr so crit/fumble flavor lights up.
