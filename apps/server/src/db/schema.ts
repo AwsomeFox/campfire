@@ -193,6 +193,8 @@ export const timelineEvents = sqliteTable('timeline_events', {
   sortIndex: integer('sort_index').notNull().default(0),
   dmSecret: text('dm_secret').notNull().default(''),
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Soft-delete / trash timestamp (issue #116 / #693).
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

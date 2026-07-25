@@ -319,11 +319,12 @@ export class CampaignsService {
   /**
    * The per-campaign Trash (issue #269): every soft-deleted (issue #116) child entity
    * of this campaign, newest-trashed first, as lightweight {type,id,name,deletedAt} rows
-   * the Trash page renders and restores (POST /<type>/:id/restore). DM-only — gated in
+   * the Trash page renders and restores (POST /<route>/:id/restore — usually the plural
+   * resource name, with timeline_event -> /timeline/:id/restore). DM-only — gated in
    * the controller. Covers the entity types that both carry a `deleted_at` column AND
    * expose a DM-gated restore endpoint today: sessions, characters, quests, npcs,
-   * locations, factions, encounters, story arcs, and story beats. Notes are deliberately
-   * excluded — their per-author/whisper visibility means a trashed note may belong to
+   * locations, factions, encounters, story arcs, story beats, and timeline events. Notes are deliberately
+   * excluded — their per-author/whisper visibility means a trashed note may belong to another member and must not surface in a DM's
    * campaign-wide Trash (their restore is membership+author-scoped, not DM-only). Add a
    * new type here (and to @campfire/schema TrashedEntityType) when it gains a restore route.
    */
@@ -338,6 +339,7 @@ export class CampaignsService {
       encounterRows,
       storyArcRows,
       storyBeatRows,
+      timelineEventRows,
     ] = await Promise.all([
       this.db
         .select({ id: sessions.id, title: sessions.title, number: sessions.number, deletedAt: sessions.deletedAt })
@@ -380,6 +382,10 @@ export class CampaignsService {
         })
         .from(storyBeats)
         .where(and(eq(storyBeats.campaignId, campaignId), isNotNull(storyBeats.deletedAt))),
+      this.db
+        .select({ id: timelineEvents.id, title: timelineEvents.title, deletedAt: timelineEvents.deletedAt })
+        .from(timelineEvents)
+        .where(and(eq(timelineEvents.campaignId, campaignId), isNotNull(timelineEvents.deletedAt))),
     ]);
 
     const trashedArcIds = new Set(storyArcRows.map((r) => r.id));
@@ -402,6 +408,12 @@ export class CampaignsService {
       ...storyBeatRows
         .filter((r) => !trashedArcIds.has(r.arcId))
         .map((r) => ({ type: 'story_beat' as const, id: r.id, name: r.title, deletedAt: r.deletedAt as string })),
+      ...timelineEventRows.map((r) => ({
+        type: 'timeline_event' as const,
+        id: r.id,
+        name: r.title,
+        deletedAt: r.deletedAt as string,
+      })),
     ];
     // Newest-trashed first — a single ordering across the merged types.
     return items.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
