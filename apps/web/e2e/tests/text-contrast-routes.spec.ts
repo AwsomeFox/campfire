@@ -10,7 +10,7 @@ import { seed, stateFor } from './seed';
 
 test.use({ storageState: stateFor('dm') });
 
-const REPRESENTATIVE_ROUTES = (campaignId: string) => [
+const REPRESENTATIVE_ROUTES = (campaignId: number) => [
   { path: '/', label: 'home' },
   { path: '/preferences', label: 'preferences' },
   { path: `/c/${campaignId}`, label: 'dashboard' },
