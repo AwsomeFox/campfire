@@ -469,7 +469,6 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
-  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
