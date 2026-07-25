@@ -4458,14 +4458,14 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .post(`/api/v1/encounters/${encounterId}/combatants/${ariaId}/turn-state`)
       .set(player)
       .send({ delaying: true });
-    expect(delayed.status).toBe(200);
+    expect(delayed.status).toBe(201);
     expect(delayed.body.turnState.delaying).toBe(true);
 
     const readied = await request(server)
       .post(`/api/v1/encounters/${encounterId}/combatants/${ariaId}/turn-state`)
       .set(player)
       .send({ readied: 'When the door opens' });
-    expect(readied.status).toBe(200);
+    expect(readied.status).toBe(201);
     expect(readied.body.turnState.readied).toBe('When the door opens');
   });
 
