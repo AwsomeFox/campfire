@@ -8,7 +8,8 @@ import { useTranslation } from 'react-i18next';
  * login) when there is no successful end-to-end OIDC diagnostic matching the
  * current effective config.
  */
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import type { OidcSettings, ServerSettings } from '@campfire/schema';
 import { api, API, translateApiError } from '../../lib/api';
 import { Card } from '../../components/ui';
@@ -70,9 +71,21 @@ export function SettingsCard({ settings, onChange }: { settings: ServerSettings 
     <Card className="space-y-3">
       <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Server settings</h2>
       {error && <p className="text-xs text-rose-400">{error}</p>}
+      <p className="text-[11px] text-secondary">
+        This toggle controls whether non-admin users can sign in with username/password. Optional OIDC/SSO is
+        configured on{' '}
+        <Link to="/admin/auth" className="underline hover:text-white">
+          Auth
+        </Link>
+        . When off, non-admins must use OIDC/SSO — ensure OIDC is enabled and run a successful{' '}
+        <Link to="/admin/auth" className="underline hover:text-white">
+          Test login (end-to-end)
+        </Link>{' '}
+        before turning this off to avoid lockouts.
+      </p>
       <SettingToggleRow
         title="Allow username/password sign-in for non-admin users"
-        hint="When off, only server admins can sign in locally (SSO coming later)."
+        hint="When off, non-admins sign in only via OIDC/SSO; server admins can still sign in locally with username/password."
         checked={settings?.allowLocalLogin ?? false}
         disabled={!settings || saving}
         onToggle={() => toggle('allowLocalLogin')}
@@ -119,7 +132,7 @@ function SettingToggleRow({
   onToggle,
 }: {
   title: string;
-  hint: string;
+  hint: ReactNode;
   checked: boolean;
   disabled: boolean;
   onToggle: () => void;

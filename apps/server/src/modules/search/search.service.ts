@@ -103,7 +103,6 @@ export class SearchService {
       factions,
       locations,
       characters,
-      sessions,
       notes,
       timelineEvents,
       items,
@@ -111,13 +110,13 @@ export class SearchService {
       arcs,
       encounterHits,
       scheduledSessionHits,
+      sessionHits,
     ] = await Promise.all([
       this.quests.listForCampaign(campaignId, role),
       this.npcs.listForCampaign(campaignId, role),
       this.factions.listForCampaign(campaignId, role),
       this.locations.listForCampaign(campaignId, role),
       this.characters.listForCampaign(campaignId, role),
-      this.sessions.listForCampaign(campaignId, role),
       this.notes.listAllForCampaign(campaignId, user, role, {}),
       this.timeline.listEvents(campaignId, role),
       this.inventory.listForCampaign(campaignId),
@@ -127,6 +126,7 @@ export class SearchService {
       isDm ? this.storylines.listArcsWithBeats(campaignId) : Promise.resolve([]),
       this.encounters.searchForCampaign(campaignId, role, needle, limit),
       this.scheduling.searchForCampaign(campaignId, needle, limit),
+      this.sessions.searchForCampaign(campaignId, role, needle, limit),
     ]);
 
     const results: SearchResult[] = [];
@@ -189,13 +189,12 @@ export class SearchService {
         { field: 'dmSecret', text: ch.dmSecret },
       ]);
     }
-    for (const s of sessions) {
-      const title = s.title || `Session ${s.number}`;
+    for (const s of sessionHits) {
+      const title = s.title.trim() || `Session ${s.number}`;
       push('session', s.id, title, [
         { field: 'title', text: title },
-        // The sessions list carries a short recapExcerpt, not the full recap body (#71
-        // trimmed it for pagination); searching the excerpt keeps this a cheap list read.
-        { field: 'recap', text: s.recapExcerpt },
+        // Full recap body via SessionsService.searchForCampaign (issue #442).
+        { field: 'recap', text: s.recap },
         { field: 'dmSecret', text: s.dmSecret },
       ]);
     }

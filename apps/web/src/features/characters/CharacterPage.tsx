@@ -12,8 +12,8 @@
  * spell slots (per-level pips; spend/restore via POST /characters/:id/spell-slots,
  * maxima via PATCH spellSlots) are all backed by the Character schema now.
  *
- * Design affordances with no backing API (rendered disabled with a "soon" tag — see report):
- *  - Inventory (no inventory API — `Character` has no items field)
+ * Inventory (issue #454): character pack items are loaded from the campaign
+ * inventory API and filtered by characterId — see CharacterInventorySection.
  *
  * D&D Beyond provenance (issue #720): the schema carries `ddbId` for characters
  * imported once from a public DDB sheet (issue #18 — a one-time import, not a live
@@ -47,7 +47,8 @@ import {
 } from './characterSheetFormState';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, TextArea, ErrorNote, HpBar } from '../../components/ui';
+import { CharacterDetailLoadingSkeleton } from './CharacterDetailLoadingSkeleton';
 import { Field } from '../../components/Field';
 import {
   CHARACTER_AC_LABEL,
@@ -107,6 +108,7 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
 import { CharacterCompletionBanner } from './CharacterCompletionBanner';
+import { CharacterInventorySection } from './CharacterInventorySection';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import {
   XP_AWARD_HELP,
@@ -152,6 +154,7 @@ export default function CharacterPage() {
   });
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError(null);
     setNotFound(false);
     try {
@@ -166,6 +169,13 @@ export default function CharacterPage() {
     } finally {
       setLoading(false);
     }
+  }, [id]);
+
+  // Drop stale sheet data immediately when the route id changes so reload and
+  // character-to-character navigation never flash the previous character.
+  useEffect(() => {
+    if (!Number.isFinite(id)) return;
+    setCharacter(null);
   }, [id]);
 
   useEffect(() => {
@@ -205,13 +215,7 @@ export default function CharacterPage() {
   }
 
   if (loading && !character) {
-    return (
-      <div className="max-w-5xl mx-auto px-4 mt-5 space-y-5">
-        <Card>
-          <Skeleton lines={4} />
-        </Card>
-      </div>
-    );
+    return <CharacterDetailLoadingSkeleton />;
   }
 
   if (notFound && !character) {
@@ -543,12 +547,8 @@ export default function CharacterPage() {
             aria-label={CHARACTER_SHEET_SECTION_LABEL.inventory}
             className="scroll-mt-24"
           >
-            <Card className="space-y-2">
-              <div className="flex items-baseline gap-2.5">
-                <p className="card-kicker mb-0">Inventory</p>
-                <span className="tag tag-neutral">soon</span>
-              </div>
-              <p className="text-xs text-secondary">Item tracking arrives with the Compendium — no inventory API yet.</p>
+            <Card>
+              <CharacterInventorySection campaignId={cid} character={character} />
             </Card>
           </section>
 
