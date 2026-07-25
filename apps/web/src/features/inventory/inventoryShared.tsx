@@ -5,9 +5,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Character, InventoryItem } from '@campfire/schema';
-import { api, API, ApiError, translateApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { useAnnounce } from '../../components/Announcer';
-import { Card, Btn, TextInput } from '../../components/ui';
+import { Card, Btn } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { Field } from '../../components/Field';
 import {

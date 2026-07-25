@@ -62,7 +62,7 @@ test.describe('Character sheet inventory (#454)', () => {
     const name = `INV454 ${Date.now()}`;
     const itemName = `INV454 Torch ${Date.now()}`;
     let characterId = 0;
-    let itemId = 0;
+    let itemId: number;
 
     try {
       characterId = await createCharacter(baseURL!, name);
