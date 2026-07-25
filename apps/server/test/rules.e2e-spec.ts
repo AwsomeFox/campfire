@@ -1522,6 +1522,31 @@ liveSmoke('rules / rule packs — Open Legend live default source smoke (issue #
 });
 
 /**
+ * Live smoke test (issue #555 acceptance): Pathfinder 1e has no verified built-in open API,
+ * so the default install path must be rejected 400 before any fetch is attempted. When
+ * RUN_LIVE_RULES_SMOKE=1, this proves the placeholder default is not silently resolving to a
+ * dead `.example` domain or leaving a failing background job.
+ */
+liveSmoke('rules / rule packs — Pathfinder 1e default source smoke (issue #555)', () => {
+  let ctx: TestAppContext;
+  let server: Server;
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    server = ctx.app.getHttpServer();
+  });
+  afterAll(async () => {
+    await closeTestApp(ctx);
+  });
+
+  it('rejects a PF1e install with no url before any live fetch is attempted', async () => {
+    const res = await request(server).post('/api/v1/rules/packs/install').set(dm).send({ source: 'pf1e' });
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toMatch(/url/i);
+  });
+});
+
+/**
  * Issue #734: rule-pack licensing. Upload accepts per-entry license/attribution/author/
  * sourceUrl, but install validated only the pack license, persistence dropped each entry's
  * license, and the reader labelled every entry with the pack license. These tests pin the

@@ -3,6 +3,7 @@ import {
   importPathfinder1e,
   entryTypeForSection,
   ALL_PF1E_SECTIONS,
+  PF1E_DEFAULT_BASE_URL,
   PF1E_PACK_NAME,
   type Pf1eImportLogger,
 } from '../../src/modules/rules/pathfinder1e-importer';
@@ -179,5 +180,22 @@ describe('pathfinder1e-importer — hardening', () => {
     await expect(fetchPathfinder1eSection('http://127.0.0.1:1/api/v1', 'spells', recordingLogger())).rejects.toMatchObject({
       status: 400,
     });
+  });
+});
+
+describe('pathfinder1e-importer — default URL sentinel (issue #555)', () => {
+  it('does not ship a .example placeholder as the default base URL', () => {
+    // Match .example as a word boundary in the URL string (catches both hostname-only and
+    // path-prefixed cases like https://pathfinder-1e-srd.example/api/v1).
+    expect(PF1E_DEFAULT_BASE_URL).not.toMatch(/\.example\b/);
+  });
+
+  it('refuses to import with the empty default base URL', async () => {
+    const logger = recordingLogger();
+    await expect(importPathfinder1e(undefined as unknown as string, ALL_PF1E_SECTIONS, logger)).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(importPathfinder1e('', ALL_PF1E_SECTIONS, logger)).rejects.toMatchObject({ status: 400 });
+    await expect(fetchPathfinder1eSection('', 'spells', logger)).rejects.toMatchObject({ status: 400 });
   });
 });

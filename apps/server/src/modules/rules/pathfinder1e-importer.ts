@@ -27,7 +27,13 @@ import type { ImportedEntry } from './open5e-importer';
  *     per-entry license/attribution is recorded from it (issue #143), else the pack default.
  */
 
-export const PF1E_DEFAULT_BASE_URL = 'https://pathfinder-1e-srd.example/api/v1';
+/**
+ * The PF1e SRD has no verified, first-party machine-readable open API (issue #346/#400).
+ * This constant is intentionally an empty sentinel: the importer refuses to run without an
+ * explicit `url` pointing at a self-hosted mirror. Tests assert it never ships a `.example`
+ * placeholder again (issue #555).
+ */
+export const PF1E_DEFAULT_BASE_URL = '';
 /** Default pack-level license when a row carries no per-source license. PF1e SRD is OGL v1.0a. */
 export const PF1E_DEFAULT_LICENSE = 'OGL v1.0a';
 export const PF1E_PACK_NAME = 'Pathfinder 1e SRD';
@@ -381,6 +387,25 @@ function isSameOrigin(origin: string, candidate: string): boolean {
   }
 }
 
+/** Reject an empty or otherwise non-actionable base URL before any fetch is attempted. */
+function assertBaseUrl(baseUrl: unknown): asserts baseUrl is string {
+  if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) {
+    throw new BadRequestException(
+      'Pathfinder 1e SRD base URL is required. There is no built-in open source; pass an explicit "url" pointing at a self-hosted mirror or upload an open-licensed JSON pack.',
+    );
+  }
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('not http(s)');
+    }
+  } catch {
+    throw new BadRequestException(
+      `Pathfinder 1e SRD base URL must be a valid HTTP(S) URL. Received: ${String(baseUrl)}`,
+    );
+  }
+}
+
 /**
  * Fetch and map one section's entries, paginating until the API runs out of pages or
  * MAX_ENTRIES_PER_SECTION is hit. Hardening mirrors the Open5e importer:
@@ -394,6 +419,7 @@ export async function fetchPathfinder1eSection(
   section: Pf1eSection,
   logger: Pf1eImportLogger = consoleLogger,
 ): Promise<Pf1eSectionResult> {
+  assertBaseUrl(baseUrl);
   const path = SECTION_TO_PATH[section];
   const mapper = SECTION_MAPPER[section];
   const byName = new Map<string, { entry: ImportedEntry; rank: number }>();
@@ -503,6 +529,7 @@ export async function importPathfinder1e(
   sections: Pf1eSection[] = ALL_PF1E_SECTIONS,
   logger: Pf1eImportLogger = consoleLogger,
 ): Promise<Pf1eImportResult> {
+  assertBaseUrl(baseUrl);
   const results = await Promise.all(sections.map((s) => fetchPathfinder1eSection(baseUrl, s, logger)));
   const entries = results.flatMap((r) => r.entries);
   const totalSkipped = results.reduce((sum, r) => sum + r.skippedCount, 0);

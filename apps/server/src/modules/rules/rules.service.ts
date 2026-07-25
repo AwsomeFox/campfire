@@ -65,7 +65,6 @@ import {
 import {
   ALL_PF1E_SECTIONS,
   MAX_ENTRIES_PER_SECTION as PF1E_MAX_ENTRIES_PER_SECTION,
-  PF1E_DEFAULT_BASE_URL,
   PF1E_DEFAULT_LICENSE,
   PF1E_PACK_NAME,
   fetchPathfinder1eSection,
@@ -1077,15 +1076,17 @@ export class RulesService implements OnModuleInit {
    * if `pathfinder-1e` already exists. Deliberate mirror of installFromOpen5e — concurrent
    * fetch, per-section progress, shared persistPack (multi-pack coexistence + incremental
    * add + race guard). Installs under PF1E_PACK_SLUG, which the Pathfinder1eAdapter is
-   * registered against. NOTE: the default base URL is a `.example` placeholder (#346); the
-   * enqueue path requires an explicit `url` until a live SRD mirror is validated.
+   * registered against. NOTE: no live PF1e SRD mirror is configured; `assertUrlForSource`
+   * requires an explicit `url` and the importer itself refuses an empty/missing base URL
+   * before any fetch (#555).
    */
   async installFromPf1e(
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
   ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
-    const baseUrl = input.url ?? PF1E_DEFAULT_BASE_URL;
+    this.assertUrlForSource(input.source, input.url);
+    const baseUrl = input.url!;
     const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
 
     const sectionResults = await Promise.all(
