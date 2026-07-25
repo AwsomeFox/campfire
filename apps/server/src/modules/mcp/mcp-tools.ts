@@ -135,6 +135,7 @@ import { UsersService } from '../users/users.service';
 import { RevisionsService } from '../revisions/revisions.service';
 import { InvitesService } from '../membership/invites.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BulkNotificationSchema } from '../notifications/notifications.dto';
 
 import { APP_VERSION } from '../../common/build-metadata';
 
@@ -3099,26 +3100,23 @@ export class McpToolsService {
       'Mark selected, campaign-scoped, or all of the caller\'s notifications read. At least one of ids, campaignId, ' +
         'or all:true is required.',
       BulkNotificationArgs,
-      async ({ ids, campaignId, all }) =>
-        this.notifications.markReadBulk(user, {
-          ids: ids as number[] | undefined,
-          campaignId: campaignId as number | undefined,
-          all: all as boolean | undefined,
-        }),
+      async ({ ids, campaignId, all }) => {
+        const validated = BulkNotificationSchema.parse({ ids, campaignId, all });
+        return this.notifications.markReadBulk(user, validated);
+      },
     );
 
     this.writeTool(
       server,
       user,
       'mark_notifications_unread',
-      'Mark selected, campaign-scoped, or all of the caller\'s notifications unread.',
+      'Mark selected, campaign-scoped, or all of the caller\'s notifications unread. At least one of ids, ' +
+        'campaignId, or all:true is required.',
       BulkNotificationArgs,
-      async ({ ids, campaignId, all }) =>
-        this.notifications.markUnreadBulk(user, {
-          ids: ids as number[] | undefined,
-          campaignId: campaignId as number | undefined,
-          all: all as boolean | undefined,
-        }),
+      async ({ ids, campaignId, all }) => {
+        const validated = BulkNotificationSchema.parse({ ids, campaignId, all });
+        return this.notifications.markUnreadBulk(user, validated);
+      },
     );
 
     this.writeTool(

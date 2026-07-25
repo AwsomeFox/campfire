@@ -504,10 +504,10 @@ claude mcp add --transport http campfire http://host:8080/mcp \
 ```
 
 **Tool catalog** (207 — `modules/mcp/mcp-tools.ts`; see `test/mcp.e2e-spec.ts`'s
-`ALL_TOOLS` for the exact, test-pinned list). This is full REST parity: an
-agent can run an entire campaign — world-building, session prep, and live
-combat — over MCP alone. Binary attachment upload and file download remain
-REST-only (`POST /campaigns/:id/attachments`, `GET /attachments/:id/file`);
+`ALL_TOOLS` for the exact, test-pinned list). This is full REST parity except
+binary attachments: an agent can run an entire campaign — world-building, session
+prep, and live combat — over MCP alone. Binary attachment upload and file download
+remain REST-only (`POST /campaigns/:id/attachments`, `GET /attachments/:id/file`);
 see `modules/mcp/mcp-rest-parity.ts` for the issue #683 parity matrix.
 
 - **Read:** `list_campaigns`, `get_campaign_summary`, `get_quest`,
