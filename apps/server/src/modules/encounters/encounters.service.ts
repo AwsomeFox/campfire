@@ -3216,7 +3216,7 @@ export class EncountersService {
     let newCurrentId: number | null = null;
     let newCurrentName: string | null = null;
     let endedName: string | null = null;
-    let skippedTurns: Array<{ id: number; name: string }> = [];
+    let skippedTurns: Array<{ id: number; name: string; round: number }> = [];
     const expiredEffects: Array<{ combatantId: number; combatantName: string; effectName: string }> = [];
 
     this.db.transaction((tx) => {
@@ -3275,7 +3275,7 @@ export class EncountersService {
 
     // Combat-log markers for auto-skipped dead/defeated combatants (issue #610).
     for (const skipped of skippedTurns) {
-      await this.appendEvent(encounterId, endedRound, 'turn', {
+      await this.appendEvent(encounterId, skipped.round, 'turn', {
         actor: skipped.name,
         target: skipped.name,
         actorId: skipped.id,

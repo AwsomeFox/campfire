@@ -259,7 +259,7 @@ describe('encounters — advanceTurn skips dead/downed (issue #610)', () => {
     const result = advanceTurn(order, 1, 1);
     expect(result.currentCombatantId).toBe(3);
     expect(result.round).toBe(1);
-    expect(result.skipped).toEqual([{ id: 2, name: 'c2' }]);
+    expect(result.skipped).toEqual([{ id: 2, name: 'c2', round: 1 }]);
   });
 
   it('still lands on a dying PC for death saves', () => {
@@ -283,6 +283,27 @@ describe('encounters — advanceTurn skips dead/downed (issue #610)', () => {
     expect(result.currentCombatantId).toBe(1);
     expect(result.round).toBe(2);
     expect(result.skipped.map((s) => s.id)).toEqual([2, 3]);
+    expect(result.skipped.map((s) => s.round)).toEqual([1, 1]);
+  });
+
+  it('returns null when every combatant is skippable', () => {
+    const order = [
+      combatant({ id: 1, hpCurrent: 0, hpMax: 10 }),
+      combatant({ id: 2, hpCurrent: 0, hpMax: 10 }),
+    ];
+    const result = advanceTurn(order, 1, 1);
+    expect(result.currentCombatantId).toBeNull();
+    expect(result.round).toBe(2);
+    expect(result.skipped.map((s) => s.id)).toEqual([2, 1]);
+    expect(result.skipped.map((s) => s.round)).toEqual([1, 2]);
+  });
+
+  it('caps round to a single wrap for a solo skippable combatant', () => {
+    const solo = [combatant({ id: 1, hpCurrent: 0, hpMax: 10 })];
+    const result = advanceTurn(solo, 1, 1);
+    expect(result.currentCombatantId).toBeNull();
+    expect(result.round).toBe(2);
+    expect(result.skipped).toEqual([{ id: 1, name: 'c1', round: 2 }]);
   });
 });
 

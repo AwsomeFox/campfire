@@ -362,6 +362,8 @@ export function turnIndexFor(sorted: Combatant[], currentCombatantId: number | n
 export interface SkippedTurnCombatant {
   id: number;
   name: string;
+  /** The round the skipped turn would have occurred in. */
+  round: number;
 }
 
 /** Result of advancing the turn pointer over a sorted running order. */
@@ -420,10 +422,15 @@ export function advanceTurn(
 
   let steps = 0;
   while (steps < count && shouldSkipTurnOnAdvance(sorted[nextIdx])) {
-    skipped.push({ id: sorted[nextIdx].id, name: sorted[nextIdx].name });
+    skipped.push({ id: sorted[nextIdx].id, name: sorted[nextIdx].name, round: nextRound });
     nextIdx += 1;
     stepForward();
     steps += 1;
+  }
+
+  if (steps >= count || shouldSkipTurnOnAdvance(sorted[nextIdx])) {
+    // Every combatant is dead/defeated — no active turn. Cap round to at most one wrap.
+    return { turnIndex: 0, round: Math.min(nextRound, round + 1), currentCombatantId: null, skipped };
   }
 
   return { turnIndex: nextIdx, round: nextRound, currentCombatantId: sorted[nextIdx].id, skipped };
