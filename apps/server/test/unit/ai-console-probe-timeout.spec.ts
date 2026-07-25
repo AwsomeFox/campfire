@@ -6,7 +6,10 @@ import {
 import type { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 import type { SettingsService } from '../../src/modules/settings/settings.service';
 import type { AuditService } from '../../src/modules/audit/audit.service';
+import type { AiDriverService } from '../../src/modules/ai-driver/ai-driver.service';
 import type { DrizzleDb } from '../../src/db/db.module';
+
+const mockDriver = { cancelAllGenerations: jest.fn() } as unknown as AiDriverService;
 
 /**
  * Issue #1061 — AI Console testAll() must bound each provider probe so a hanging
@@ -136,6 +139,7 @@ describe('AiConsoleService.testAll — per-probe timeout (issue #1061)', () => {
       {} as SettingsService,
       providers,
       {} as AuditService,
+      mockDriver,
     );
 
     const resultPromise = service.testAll();
@@ -190,6 +194,7 @@ describe('AiConsoleService.testAll — per-probe timeout (issue #1061)', () => {
       {} as SettingsService,
       providers,
       {} as AuditService,
+      mockDriver,
     );
 
     const resultPromise = service.testAll();

@@ -29,7 +29,7 @@ describe('AI driver stop-control helpers (#558)', () => {
   it('shouldEmitTurnCancelled covers stop-control terminal reasons', () => {
     expect(shouldEmitTurnCancelled('cancelled')).toBe(true);
     expect(shouldEmitTurnCancelled('frozen')).toBe(true);
-    expect(shouldEmitTurnCancelled('aborted')).toBe(true);
+    expect(shouldEmitTurnCancelled('aborted')).toBe(false);
     expect(shouldEmitTurnCancelled('complete')).toBe(false);
     expect(shouldEmitTurnCancelled('provider_error')).toBe(false);
   });

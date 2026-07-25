@@ -78,7 +78,7 @@ export function generationAuthorityStopReason(auth: Exclude<GenerationAuthority,
 
 /** Whether a finished turn should emit the ordered `turn.cancelled` SSE before `turn.end` (#558). */
 export function shouldEmitTurnCancelled(stopReason: AiDmStopReason): boolean {
-  return stopReason === 'cancelled' || stopReason === 'frozen' || stopReason === 'aborted';
+  return stopReason === 'cancelled' || stopReason === 'frozen';
 }
 
 /**
@@ -944,14 +944,17 @@ export class AiDriverService {
     }
   }
 
-  private beginGeneration(campaignId: number): AbortSignal {
-    const controller = new AbortController();
-    this.activeGenerations.set(campaignId, { controller, stopped: false });
-    return controller.signal;
+  private beginGeneration(campaignId: number): { signal: AbortSignal; handle: ActiveGeneration } {
+    const handle: ActiveGeneration = { controller: new AbortController(), stopped: false };
+    this.activeGenerations.set(campaignId, handle);
+    return { signal: handle.controller.signal, handle };
   }
 
-  private endGeneration(campaignId: number): void {
-    this.activeGenerations.delete(campaignId);
+  /** Compare-and-set: an orphaned turn must not erase a newer turn's cancellation handle (#558 / #1071). */
+  private endGeneration(campaignId: number, handle: ActiveGeneration): void {
+    if (this.activeGenerations.get(campaignId) === handle) {
+      this.activeGenerations.delete(campaignId);
+    }
   }
 
   /**
@@ -1244,7 +1247,7 @@ export class AiDriverService {
     let stopReason: AiDmStopReason = 'complete';
     const executed: AiDmExecutedTool[] = [];
     let steps = 0;
-    const generationSignal = this.beginGeneration(campaignId);
+    const { signal: generationSignal, handle: generationHandle } = this.beginGeneration(campaignId);
 
     try {
       for (let step = 0; step < maxSteps; step++) {
@@ -1446,7 +1449,7 @@ export class AiDriverService {
         detail: `${detail} (triggered by ${triggeredBy.id})`,
       });
     } finally {
-      this.endGeneration(campaignId);
+      this.endGeneration(campaignId, generationHandle);
       // Compare-and-set (#381): only release the seat if THIS turn still owns the `running` status.
       // A human-control event that landed mid-turn — a DM pause, a grantTakeover, or a passed table
       // pause-vote — will have flipped `status` to `paused`; do NOT stomp it back to `idle` and

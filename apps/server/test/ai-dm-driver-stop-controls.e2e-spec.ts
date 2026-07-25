@@ -82,12 +82,13 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
     const streamSvc = h.ctx.app.get(AiDmStreamService);
     const user = { id: 'dev:ai-eval-dm', name: 'ai-eval-dm', serverRole: 'user' as const, devRole: 'dm' as const };
     let killed = false;
+    let killSwitchPromise: Promise<unknown> | undefined;
     const events: AiDmStreamEvent[] = [];
     const sub = streamSvc.streamFor(campaignId).subscribe((e) => {
       events.push(e);
       if (e.type === 'narration.delta' && !killed) {
         killed = true;
-        void consoleSvc.setKillSwitch(false, user);
+        killSwitchPromise = consoleSvc.setKillSwitch(false, user);
       }
     });
 
@@ -99,6 +100,7 @@ describe('ai-dm driver — stop controls cancel generation (#558)', () => {
 
     const res = await h.sendMessage(campaignId, { input: 'keep going' });
     sub.unsubscribe();
+    await killSwitchPromise;
 
     expect(res.status).toBe(201);
     expect(killed).toBe(true);
