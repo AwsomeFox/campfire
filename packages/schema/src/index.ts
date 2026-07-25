@@ -285,6 +285,10 @@ export const CampaignImport = z
     // Issue #436: planned game nights (with nested RSVPs) and per-session attendance.
     scheduledSessions: z.array(ImportedEntity).optional(),
     sessionAttendance: z.array(ImportedEntity).optional(),
+    // Issue #584: open-license packs the export's compendium refs depend on (loose — validated in service).
+    compendiumDependencies: z.array(ImportedEntity).optional(),
+    /** When refs cannot resolve: block (default) or import with detached snapshots. */
+    onUnresolvedCompendium: z.enum(['block', 'detach']).optional(),
   })
   .passthrough();
 export type CampaignImport = z.infer<typeof CampaignImport>;
@@ -758,6 +762,12 @@ export const StoryBranchCreate = z.object({
   sortOrder: z.number().int().optional(),
 });
 export type StoryBranchCreate = z.infer<typeof StoryBranchCreate>;
+export const StoryBranchUpdate = z.object({
+  label: z.string().min(1).max(200).optional(),
+  toBeatId: Id.nullable().optional(),
+  sortOrder: z.number().int().optional(),
+});
+export type StoryBranchUpdate = z.infer<typeof StoryBranchUpdate>;
 
 export const StoryBeat = z.object({
   id: Id,
@@ -1226,6 +1236,74 @@ export const TimelineCalendarUpdate = z.object({
   note: z.string().max(4000).optional(),
 });
 export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
+
+// ---------- catch-up (#549) ----------
+// Per-user, per-campaign "since you were last here" diff for returning players.
+// `since` is the reference instant used for this response; `lastCaughtUpAt` is the
+// stored cursor (null when never marked caught up). Each group carries a `kind` so
+// the UI can distinguish new-to-you, edited, and resolved-since-last-visit items.
+// All entity payloads reuse existing list shapes and inherit role redaction/hidden
+// filtering from their source services — nothing here widens visibility.
+export const CatchUpChangeKind = z.enum(['new', 'changed', 'resolved']);
+export type CatchUpChangeKind = z.infer<typeof CatchUpChangeKind>;
+
+export const CatchUpQuestItem = z.object({
+  kind: CatchUpChangeKind,
+  quest: Quest,
+});
+export type CatchUpQuestItem = z.infer<typeof CatchUpQuestItem>;
+
+export const CatchUpSessionItem = z.object({
+  kind: CatchUpChangeKind,
+  session: SessionListItem,
+});
+export type CatchUpSessionItem = z.infer<typeof CatchUpSessionItem>;
+
+export const CatchUpTimelineItem = z.object({
+  kind: CatchUpChangeKind,
+  event: TimelineEvent,
+});
+export type CatchUpTimelineItem = z.infer<typeof CatchUpTimelineItem>;
+
+export const CatchUpScheduleItem = z.object({
+  kind: CatchUpChangeKind,
+  schedule: ScheduledSessionWithRsvps,
+});
+export type CatchUpScheduleItem = z.infer<typeof CatchUpScheduleItem>;
+
+export const CampaignCatchUp = z.object({
+  since: IsoDate.nullable(),
+  lastCaughtUpAt: IsoDate.nullable(),
+  quests: z.array(CatchUpQuestItem),
+  sessions: z.array(CatchUpSessionItem),
+  timeline: z.array(CatchUpTimelineItem),
+  schedules: z.array(CatchUpScheduleItem),
+  totalCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type CampaignCatchUp = z.infer<typeof CampaignCatchUp>;
+
+export const CatchUpMark = z.object({
+  at: IsoDate.optional(),
+});
+export type CatchUpMark = z.infer<typeof CatchUpMark>;
+
+export const CatchUpCursor = z.object({
+  lastCaughtUpAt: IsoDate.nullable(),
+});
+export type CatchUpCursor = z.infer<typeof CatchUpCursor>;
+
+/** Classify a catch-up row relative to the reference instant. */
+export function catchUpChangeKind(
+  createdAt: string,
+  _updatedAt: string,
+  since: string,
+  resolved = false,
+): CatchUpChangeKind {
+  if (resolved) return 'resolved';
+  if (createdAt >= since) return 'new';
+  return 'changed';
+}
 
 // ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
 // Session zero is where a table agrees on the content it will and won't play through
@@ -1867,6 +1945,94 @@ export const RuleEntryUpdate = z.object({
   iconSlug: z.string().max(80),
 }).partial();
 export type RuleEntryUpdate = z.infer<typeof RuleEntryUpdate>;
+
+/**
+ * Portable compendium identity for campaign export/import (issue #584). Replaces
+ * server-local `ruleEntryId` in export documents — numeric ids are autoincrement
+ * values that alias unrelated content on another install.
+ */
+export const CompendiumRef = z.object({
+  packSlug: z.string().min(1).max(80),
+  packVersion: z.string().max(40).default(''),
+  entrySlug: z.string().min(1).max(160),
+  entryType: RuleEntryType,
+  /** sha256 hex of the portable entry payload (see computeRuleEntryContentHash). */
+  contentHash: z.string().length(64),
+});
+export type CompendiumRef = z.infer<typeof CompendiumRef>;
+
+/** Entry content captured at export time for detached import when a pack is missing (issue #584). */
+export const CompendiumSnapshot = z.object({
+  slug: z.string().min(1).max(160),
+  name: z.string().min(1).max(200),
+  type: RuleEntryType,
+  summary: z.string().max(1000).default(''),
+  body: z.string().max(50_000).default(''),
+  dataJson: z.string().nullable().default(null),
+  source: z.string().max(200).default(''),
+  license: z.string().max(160).default(''),
+  attribution: z.string().max(500).default(''),
+  author: z.string().max(200).default(''),
+  sourceUrl: z.string().max(500).default(''),
+});
+export type CompendiumSnapshot = z.infer<typeof CompendiumSnapshot>;
+
+/** One installed/open-licensed pack the export's compendium refs depend on (issue #584). */
+export const CompendiumDependency = z.object({
+  packSlug: z.string().min(1).max(80),
+  packVersion: z.string().max(40).default(''),
+  name: z.string().min(1).max(120),
+  license: z.string().max(120).default(''),
+  sourceUrl: z.string().max(500).default(''),
+  entrySlugs: z.array(z.string().min(1).max(160)),
+});
+export type CompendiumDependency = z.infer<typeof CompendiumDependency>;
+
+export const CompendiumRefStatus = z.enum([
+  'resolved',
+  'missing_pack',
+  'missing_entry',
+  'hash_mismatch',
+  'type_mismatch',
+  'legacy_numeric_id',
+]);
+export type CompendiumRefStatus = z.infer<typeof CompendiumRefStatus>;
+
+export const CompendiumInstallHint = z.object({
+  packSlug: z.string().min(1).max(80),
+  packName: z.string().min(1).max(120),
+  license: z.string().max(120).default(''),
+  sourceUrl: z.string().max(500).default(''),
+  /** Suggested `source` for POST /rules/packs/install when known (e.g. open5e, pf2e). */
+  suggestedSource: z.string().max(40).optional(),
+});
+export type CompendiumInstallHint = z.infer<typeof CompendiumInstallHint>;
+
+export const CompendiumRefReport = z.object({
+  compendiumRef: CompendiumRef.nullable(),
+  legacyRuleEntryId: Id.nullable().optional(),
+  combatantName: z.string().max(120).optional(),
+  status: CompendiumRefStatus,
+  resolvedEntryId: Id.nullable(),
+  expectedContentHash: z.string().length(64).optional(),
+  actualContentHash: z.string().length(64).optional(),
+  installHint: CompendiumInstallHint.nullable().optional(),
+  detached: z.boolean().optional(),
+});
+export type CompendiumRefReport = z.infer<typeof CompendiumRefReport>;
+
+export const CampaignImportPreflight = z.object({
+  compendiumDependencies: z.array(CompendiumDependency),
+  references: z.array(CompendiumRefReport),
+  canImport: z.boolean(),
+  canImportDetached: z.boolean(),
+  unresolvedCount: z.number().int().nonnegative(),
+});
+export type CampaignImportPreflight = z.infer<typeof CampaignImportPreflight>;
+
+/** How import handles compendium refs that cannot be resolved on this server (issue #584). */
+export const OnUnresolvedCompendium = z.enum(['block', 'detach']);
+export type OnUnresolvedCompendium = z.infer<typeof OnUnresolvedCompendium>;
 
 /**
  * Importer registry for the /rules/packs/install endpoint (issue #70). Was a bare
@@ -5125,9 +5291,10 @@ export type AiProviderParams = z.infer<typeof AiProviderParams>;
 // AiProviderConfigService.resolveEffectiveConfig); this guard additionally constrains
 // what an override endpoint may even look like. `http` is permitted so self-hosted
 // local model servers (e.g. http://localhost:11434) can be expressed — but the server
-// applies a separate SSRF host policy (issue #1064): cloud metadata / link-local are
-// always blocked, and private/loopback hosts require an operator opt-in
-// (`AI_PROVIDER_ALLOW_PRIVATE_HOSTS`) or an explicit host allowlist.
+// applies a separate SSRF host policy (issues #1064, #570): cloud metadata / link-local /
+// multicast are always blocked, and private/loopback hosts require an operator opt-in
+// (`AI_PROVIDER_ALLOW_PRIVATE_HOSTS`) or an explicit host/CIDR allowlist. DNS is
+// re-validated at request time to defend rebinding.
 const AiProviderBaseUrl = z
   .string()
   .trim()
@@ -7492,6 +7659,105 @@ export const StorageCleanupResult = z.object({
   bytesReclaimed: z.number().int().nonnegative(), // disk bytes freed by deleting orphan files
 });
 export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
+
+// ---------- admin bulk roster import (issue #589) ----------
+// Server-admin dry-run + commit for seasonal roster setup. CSV/JSON rows map to
+// local usernames and/or OIDC subjects, optionally seat users in campaigns.
+// New accounts are created passwordless; commit returns expiring activation codes
+// ONCE (never logged or exported in audit detail).
+export const RosterImportFormat = z.enum(['csv', 'json']);
+export type RosterImportFormat = z.infer<typeof RosterImportFormat>;
+
+export const RosterImportField = z.enum([
+  'username',
+  'displayName',
+  'oidcSub',
+  'campaignId',
+  'campaignRole',
+  'characterId',
+]);
+export type RosterImportField = z.infer<typeof RosterImportField>;
+
+/** Canonical row after parsing + mapping (commit payload). */
+export const RosterImportRow = z
+  .object({
+    rowIndex: z.number().int().nonnegative(),
+    username: User.shape.username.optional(),
+    displayName: z.string().max(120).optional(),
+    oidcSub: z.string().max(200).optional(),
+    campaignId: Id.optional(),
+    campaignRole: Role.optional(),
+    characterId: Id.nullable().optional(),
+  })
+  .refine((row) => row.username != null || row.oidcSub != null, {
+    message: 'Row needs at least one of username or oidcSub',
+  });
+export type RosterImportRow = z.infer<typeof RosterImportRow>;
+
+export const RosterImportRowAction = z.enum(['create', 'update', 'skip', 'error']);
+export type RosterImportRowAction = z.infer<typeof RosterImportRowAction>;
+
+export const RosterImportRowDiagnostic = z.object({
+  rowIndex: z.number().int().nonnegative(),
+  action: RosterImportRowAction,
+  matchedUserId: Id.nullable().optional(),
+  matchBy: z.enum(['username', 'oidcSub']).nullable().optional(),
+  username: z.string().optional(),
+  displayName: z.string().optional(),
+  oidcSub: z.string().optional(),
+  campaignId: Id.optional(),
+  campaignRole: Role.optional(),
+  characterId: Id.nullable().optional(),
+  errors: z.array(z.string()),
+  warnings: z.array(z.string()),
+});
+export type RosterImportRowDiagnostic = z.infer<typeof RosterImportRowDiagnostic>;
+
+export const RosterImportRequest = z.object({
+  dryRun: z.boolean().default(true),
+  format: RosterImportFormat,
+  content: z.string().max(1_000_000),
+  /** CSV only: header name -> canonical field. Unmapped headers are ignored. */
+  columnMap: z.record(z.string(), RosterImportField).optional(),
+  activationExpiresInDays: z.number().int().min(1).max(30).default(7),
+  /** Required on commit — the reviewed normalized rows from the dry-run preview. */
+  rows: z.array(RosterImportRow).max(500).optional(),
+  /** Fingerprint from dry-run; must match on commit. */
+  batchId: z.string().max(128).optional(),
+});
+export type RosterImportRequest = z.infer<typeof RosterImportRequest>;
+
+export const RosterImportPreview = z.object({
+  dryRun: z.literal(true),
+  batchId: z.string(),
+  totalRows: z.number().int().nonnegative(),
+  validRows: z.number().int().nonnegative(),
+  errorRows: z.number().int().nonnegative(),
+  rows: z.array(RosterImportRowDiagnostic),
+  /** Normalized rows eligible for commit (action create|update|skip, no errors). */
+  commitRows: z.array(RosterImportRow),
+});
+export type RosterImportPreview = z.infer<typeof RosterImportPreview>;
+
+export const RosterImportActivation = z.object({
+  userId: Id,
+  username: z.string(),
+  activationCode: z.string(),
+  expiresAt: IsoDate,
+});
+export type RosterImportActivation = z.infer<typeof RosterImportActivation>;
+
+export const RosterImportCommitResult = z.object({
+  dryRun: z.literal(false),
+  batchId: z.string(),
+  created: z.number().int().nonnegative(),
+  updated: z.number().int().nonnegative(),
+  membershipsAdded: z.number().int().nonnegative(),
+  membershipsUpdated: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  activations: z.array(RosterImportActivation),
+});
+export type RosterImportCommitResult = z.infer<typeof RosterImportCommitResult>;
 
 // ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
 // The kinds of things a campaign-wide search can turn up. `campaign` from

@@ -487,6 +487,17 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   UNIQUE(campaign_id, user_id)
 );
 
+-- Issue #549 — per-user, per-campaign catch-up cursor (independent of auth sessions).
+CREATE TABLE IF NOT EXISTS campaign_catch_up_cursors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  last_caught_up_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, campaign_id)
+);
+
 -- Migration repair history for #849. No FKs by design: rows describe missing
 -- references and must remain readable to a server admin without campaign access.
 CREATE TABLE IF NOT EXISTS membership_integrity_repairs (
@@ -1077,6 +1088,7 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_password_reset_requests_user ON password_reset_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_campaign ON campaign_members(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_members_user ON campaign_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_catch_up_campaign ON campaign_catch_up_cursors(campaign_id);
 -- Issue #819: exclusive character seat — at most one membership may link a given
 -- character. Partial so unlinked (NULL) seats do not collide. Matches migration 0067.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_campaign_members_character

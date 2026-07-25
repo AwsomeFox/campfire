@@ -1,16 +1,19 @@
 /**
- * SSRF guard for AI provider `baseUrl` hosts (issue #1064).
+ * SSRF guard for AI provider `baseUrl` hosts (issues #1064, #570).
  *
  * Schema validation only constrains scheme (http/https) and forbids embedded
  * credentials. This module is the server-side host policy: block cloud metadata
- * / link-local targets always, block private/loopback ranges unless the operator
- * opts in (local Ollama / llama.cpp / LM Studio), and honor optional host
- * allow/deny lists.
+ * / link-local / multicast targets always, block private/loopback ranges unless the
+ * operator opts in (local Ollama / llama.cpp / LM Studio), and honor optional host
+ * / CIDR allow/deny lists. Request-time DNS re-validation lives in
+ * `ai-provider-outbound.ts`.
  *
  * Env:
  *  - `AI_PROVIDER_ALLOW_PRIVATE_HOSTS=1|true` — permit RFC1918, loopback, ULA, etc.
  *  - `AI_PROVIDER_BASEURL_ALLOW_HOSTS` — comma-separated hostnames; when non-empty,
  *    only listed hosts (plus still-blocked metadata/link-local) may be used.
+ *  - `AI_PROVIDER_BASEURL_ALLOW_CIDRS` — comma-separated CIDRs; private addresses in
+ *    these ranges are permitted without the blanket private opt-in.
  *  - `AI_PROVIDER_BASEURL_DENY_HOSTS` — comma-separated hostnames always rejected.
  */
 
@@ -36,13 +39,26 @@ export type AiProviderBaseUrlHostClass =
   | 'loopback'
   | 'link-local'
   | 'metadata'
+  | 'multicast'
   | 'unspecified'
   | 'invalid';
 
 export interface AiProviderBaseUrlPolicy {
   allowPrivateHosts: boolean;
   allowHosts: string[];
+  allowCidrs: string[];
   denyHosts: string[];
+}
+
+/** Host classes that are never permitted, even via allowlist / private opt-in. */
+export function isAlwaysBlockedHostClass(hostClass: AiProviderBaseUrlHostClass): boolean {
+  return (
+    hostClass === 'metadata' ||
+    hostClass === 'link-local' ||
+    hostClass === 'multicast' ||
+    hostClass === 'unspecified' ||
+    hostClass === 'invalid'
+  );
 }
 
 export interface AiProviderBaseUrlDecision {
@@ -74,8 +90,17 @@ export function resolveAiProviderBaseUrlPolicy(
   return {
     allowPrivateHosts: envFlagTrue(env.AI_PROVIDER_ALLOW_PRIVATE_HOSTS),
     allowHosts: parseHostList(env.AI_PROVIDER_BASEURL_ALLOW_HOSTS),
+    allowCidrs: parseCidrList(env.AI_PROVIDER_BASEURL_ALLOW_CIDRS),
     denyHosts: parseHostList(env.AI_PROVIDER_BASEURL_DENY_HOSTS),
   };
+}
+
+function parseCidrList(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return raw
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
 }
 
 function stripBrackets(hostname: string): string {
@@ -131,6 +156,8 @@ function classifyIpv4(ip: string): AiProviderBaseUrlHostClass {
   if (a === 100 && b === 100 && o[2] === 100 && o[3] === 200) return 'metadata';
   // Carrier-grade NAT
   if (a === 100 && b >= 64 && b <= 127) return 'private';
+  // Multicast 224.0.0.0/4
+  if (a >= 224 && a <= 239) return 'multicast';
   return 'public';
 }
 
@@ -155,6 +182,8 @@ function classifyIpv6(ip: string): AiProviderBaseUrlHostClass {
   if (buf[0] === 0xfe && (buf[1] & 0xc0) === 0x80) return 'link-local';
   // fc00::/7 unique local
   if ((buf[0] & 0xfe) === 0xfc) return 'private';
+  // ff00::/8 multicast
+  if (buf[0] === 0xff) return 'multicast';
   return 'public';
 }
 
@@ -217,6 +246,58 @@ function hostMatchesList(hostname: string, list: string[]): boolean {
   return list.some((entry) => entry === host);
 }
 
+function ipv4ToUint32(ip: string): number | null {
+  const o = ipv4Octets(ip);
+  if (!o) return null;
+  return ((o[0] << 24) | (o[1] << 16) | (o[2] << 8) | o[3]) >>> 0;
+}
+
+function ipv4InCidr(ip: string, cidr: string): boolean {
+  const [network, bitsRaw] = cidr.split('/');
+  const bits = Number(bitsRaw);
+  if (!Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+  const ipNum = ipv4ToUint32(ip);
+  const netNum = ipv4ToUint32(network);
+  if (ipNum === null || netNum === null) return false;
+  if (bits === 0) return true;
+  const mask = (0xffffffff << (32 - bits)) >>> 0;
+  return (ipNum & mask) === (netNum & mask);
+}
+
+function ipv6InCidr(ip: string, cidr: string): boolean {
+  const [network, bitsRaw] = cidr.split('/');
+  const bits = Number(bitsRaw);
+  if (!Number.isInteger(bits) || bits < 0 || bits > 128) return false;
+  let ipBuf: Buffer;
+  let netBuf: Buffer;
+  try {
+    ipBuf = ipv6ToBuffer(ip);
+    netBuf = ipv6ToBuffer(network);
+  } catch {
+    return false;
+  }
+  const fullBytes = Math.floor(bits / 8);
+  const remBits = bits % 8;
+  for (let i = 0; i < fullBytes; i++) {
+    if (ipBuf[i] !== netBuf[i]) return false;
+  }
+  if (remBits === 0) return true;
+  const mask = (0xff << (8 - remBits)) & 0xff;
+  return (ipBuf[fullBytes] & mask) === (netBuf[fullBytes] & mask);
+}
+
+/** True when `address` falls inside any configured CIDR allow entry. */
+export function hostMatchesAllowCidrs(address: string, cidrs: string[]): boolean {
+  if (cidrs.length === 0) return false;
+  const ipKind = net.isIP(address);
+  return cidrs.some((cidr) => {
+    if (!cidr.includes('/')) return false;
+    if (ipKind === 4) return ipv4InCidr(address, cidr);
+    if (ipKind === 6) return ipv6InCidr(address, cidr);
+    return false;
+  });
+}
+
 /**
  * Decide whether a candidate `baseUrl` may be used for an outbound provider call.
  * `baseUrl` may be undefined/empty (provider default endpoint) — that is always OK.
@@ -246,18 +327,8 @@ export function evaluateAiProviderBaseUrl(
   const hostname = normalizeHostname(url.hostname);
   const hostClass = classifyAiProviderHostname(hostname);
 
-  if (hostClass === 'invalid' || hostClass === 'unspecified') {
-    return { ok: false, hostname, hostClass, reason: 'invalid or unspecified host' };
-  }
-
-  // Metadata + link-local are NEVER permitted — not even via allowlist / private opt-in.
-  if (hostClass === 'metadata' || hostClass === 'link-local') {
-    return {
-      ok: false,
-      hostname,
-      hostClass,
-      reason: 'cloud metadata / link-local hosts are blocked',
-    };
+  if (isAlwaysBlockedHostClass(hostClass)) {
+    return { ok: false, hostname, hostClass, reason: `${hostClass} host blocked` };
   }
 
   if (hostMatchesList(hostname, policy.denyHosts)) {
@@ -272,14 +343,17 @@ export function evaluateAiProviderBaseUrl(
   }
 
   if (hostClass === 'private' || hostClass === 'loopback') {
-    if (policy.allowPrivateHosts) {
+    if (
+      policy.allowPrivateHosts ||
+      hostMatchesAllowCidrs(hostname, policy.allowCidrs)
+    ) {
       return { ok: true, hostname, hostClass, reason: 'private hosts opted in' };
     }
     return {
       ok: false,
       hostname,
       hostClass,
-      reason: 'private/loopback hosts require AI_PROVIDER_ALLOW_PRIVATE_HOSTS=1',
+      reason: 'private/loopback hosts require AI_PROVIDER_ALLOW_PRIVATE_HOSTS=1 or CIDR allowlist',
     };
   }
 

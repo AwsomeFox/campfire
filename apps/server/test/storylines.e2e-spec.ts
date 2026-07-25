@@ -113,6 +113,64 @@ describe('storylines (e2e)', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('updates a branch label and retargets it to a beat created later (#1313)', async () => {
+    const server = ctx.app.getHttpServer();
+    const arcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Arc C' });
+    const arcId = arcRes.body.id;
+    const beat1Res = await request(server).post(`/api/v1/arcs/${arcId}/beats`).set(dm).send({ title: 'Beat C1' });
+    const beat1 = beat1Res.body.id;
+
+    // Create a branch with no target yet (open branch).
+    const openBranch = await request(server)
+      .post(`/api/v1/beats/${beat1}/branches`)
+      .set(dm)
+      .send({ label: 'If the party flees' });
+    expect(openBranch.status).toBe(201);
+    expect(openBranch.body.toBeatId).toBeNull();
+    const branchId = openBranch.body.id;
+
+    // Later, create the destination beat.
+    const beat2Res = await request(server).post(`/api/v1/arcs/${arcId}/beats`).set(dm).send({ title: 'Beat C2' });
+    const beat2 = beat2Res.body.id;
+
+    // Retarget the existing branch to the new beat and relabel.
+    const updated = await request(server)
+      .patch(`/api/v1/beats/${beat1}/branches/${branchId}`)
+      .set(dm)
+      .send({ label: 'If the party flees into the woods', toBeatId: beat2 });
+    expect(updated.status).toBe(200);
+    expect(updated.body.id).toBe(branchId);
+    expect(updated.body.label).toBe('If the party flees into the woods');
+    expect(updated.body.toBeatId).toBe(beat2);
+
+    // Clear the target back to an open branch.
+    const cleared = await request(server)
+      .patch(`/api/v1/beats/${beat1}/branches/${branchId}`)
+      .set(dm)
+      .send({ toBeatId: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.toBeatId).toBeNull();
+    // Label is preserved when only toBeatId is patched.
+    expect(cleared.body.label).toBe('If the party flees into the woods');
+
+    // Rejects retargeting to a beat in a different campaign.
+    const otherCampaign = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Other campaign' });
+    const otherArc = await request(server).post(`/api/v1/campaigns/${otherCampaign.body.id}/arcs`).set(dm).send({ title: 'Other arc' });
+    const otherBeat = await request(server).post(`/api/v1/arcs/${otherArc.body.id}/beats`).set(dm).send({ title: 'Other beat' });
+    const crossCampaign = await request(server)
+      .patch(`/api/v1/beats/${beat1}/branches/${branchId}`)
+      .set(dm)
+      .send({ toBeatId: otherBeat.body.id });
+    expect(crossCampaign.status).toBe(400);
+
+    // Player cannot update a branch (DM-only).
+    const pUpdate = await request(server)
+      .patch(`/api/v1/beats/${beat1}/branches/${branchId}`)
+      .set(player)
+      .send({ label: 'hacked' });
+    expect(pUpdate.status).toBe(403);
+  });
+
   it('is DM-only: players and viewers get 403 on reads and writes', async () => {
     const server = ctx.app.getHttpServer();
     const arcRes = await request(server).post(`/api/v1/campaigns/${campaignId}/arcs`).set(dm).send({ title: 'Secret Arc' });

@@ -58,6 +58,7 @@ import { AiProviderConfigModule } from './modules/ai-provider-config/ai-provider
 import { AiConsoleModule } from './modules/ai-console/ai-console.module';
 import { ScribeModule } from './modules/scribe/scribe.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
+import { CatchUpModule } from './modules/catch-up/catch-up.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
 import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
@@ -179,6 +180,7 @@ function serveStaticImports(): DynamicModule[] {
     AiConsoleModule,
     ScribeModule,
     TimelineModule,
+    CatchUpModule,
     SessionZeroModule,
     RevisionsModule,
   ],

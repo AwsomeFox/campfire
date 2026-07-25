@@ -662,9 +662,9 @@ Outbound AI provider requests honor a server-side SSRF host policy
 (`common/ai-provider-baseurl.ts`) on every save, test-connection, model list, and
 execution resolve:
 
-- **Always blocked:** cloud metadata / link-local (`169.254.0.0/16`, `fe80::/10`,
-  `metadata.google.internal`, Alibaba `100.100.100.200`, …). An allowlist entry
-  cannot override this.
+- **Always blocked:** cloud metadata / link-local / multicast (`169.254.0.0/16`,
+  `fe80::/10`, `224.0.0.0/4`, `metadata.google.internal`, Alibaba `100.100.100.200`,
+  …). An allowlist entry cannot override this.
 - **Blocked by default:** private / loopback hosts (RFC1918, `localhost`, ULA,
   CGNAT `100.64/10`, …). A campaign DM therefore cannot point Test connection at
   internal services unless the operator opts in.
@@ -674,6 +674,7 @@ execution resolve:
 | --- | --- | --- | --- |
 | `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | no | unset (blocked) | Set `1` / `true` to permit private/loopback `baseUrl`s for local model servers (Ollama / llama.cpp / LM Studio). Metadata / link-local stay blocked. Only enable on a trusted single-tenant host. |
 | `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | no | unset | Comma-separated hostname allowlist. When non-empty, only listed hosts are accepted (metadata still blocked). Prefer listing `localhost` (or your LAN hostname) over the blanket private opt-in. |
+| `AI_PROVIDER_BASEURL_ALLOW_CIDRS` | no | unset | Comma-separated CIDR allowlist (e.g. `192.168.1.0/24`). Private addresses in these ranges are permitted without `AI_PROVIDER_ALLOW_PRIVATE_HOSTS`. Metadata / link-local / multicast stay blocked. |
 | `AI_PROVIDER_BASEURL_DENY_HOSTS` | no | unset | Comma-separated hostname denylist — always rejected. |
 
 Test-connection failures for a blocked host return the generic

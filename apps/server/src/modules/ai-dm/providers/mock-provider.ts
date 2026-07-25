@@ -48,6 +48,10 @@ export interface MockResponse {
    * Simulates a provider stream that stalls mid-body with no error.
    */
   stallAfterChunks?: number;
+  /** Throw after emitting the usage frame but before `done` (#560). */
+  throwAfterUsage?: boolean;
+  /** Throw when the first tool_call delta is yielded (#560). */
+  throwDuringToolCall?: boolean;
   /** Throw this error from `generate`/`stream` instead of returning a reply (#1046). */
   throwError?: Error;
 }
@@ -130,7 +134,14 @@ export class MockAiProvider implements AiProvider {
     // Chunk the text so streaming consumers get multiple deltas, deterministically.
     const nChunks = Math.max(1, canned.streamChunks ?? 3);
     const parts = canned.streamTextDeltas === false ? [] : splitEven(result.text, nChunks);
-    const throwAfter = canned.throwError ? (canned.throwAfterChunks ?? 0) : undefined;
+    // Default to throw-before-first-chunk only for plain throwError; throwAfterUsage and
+    // throwDuringToolCall need the stream to reach usage/tool-call frames first (#560).
+    const throwAfter =
+      canned.throwError && canned.throwAfterChunks !== undefined
+        ? canned.throwAfterChunks
+        : canned.throwError && !canned.throwAfterUsage && !canned.throwDuringToolCall
+          ? 0
+          : undefined;
     let yielded = 0;
     if (throwAfter === 0 && canned.throwError) throw canned.throwError;
     for (const part of parts) {
@@ -156,8 +167,10 @@ export class MockAiProvider implements AiProvider {
         name: tc.name,
         argumentsDelta: JSON.stringify(tc.arguments ?? {}),
       };
+      if (canned.throwError && canned.throwDuringToolCall) throw canned.throwError;
     }
     yield { type: 'usage', usage: result.usage };
+    if (canned.throwError && canned.throwAfterUsage) throw canned.throwError;
     yield { type: 'done', result };
   }
 }
