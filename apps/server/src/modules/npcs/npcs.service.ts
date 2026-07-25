@@ -117,7 +117,7 @@ export class NpcsService {
     const [row] = await this.db
       .select({ id: factions.id })
       .from(factions)
-      .where(and(eq(factions.id, factionId), eq(factions.campaignId, campaignId)))
+      .where(and(eq(factions.id, factionId), eq(factions.campaignId, campaignId), notDeleted(factions.deletedAt)))
       .limit(1);
     if (!row) throw new BadRequestException(`factionId ${factionId} does not exist in this campaign`);
   }

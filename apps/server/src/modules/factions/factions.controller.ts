@@ -91,11 +91,20 @@ export class FactionsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a faction', description: 'dm role required. NPCs pinned to it are unlinked (factionId nulled).' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) a faction', description: 'dm role required. Soft-delete (issue #701) — moves the faction to the campaign Trash; member NPC links and revisions survive for restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.factions.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.factions.remove(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed faction', description: 'dm role required. Undo a soft-delete (issue #701) — the faction returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'Restored faction.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.factions.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.factions.restore(id, user, role);
   }
 }

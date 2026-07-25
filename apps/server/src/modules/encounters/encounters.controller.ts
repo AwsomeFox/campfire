@@ -342,13 +342,22 @@ export class EncountersController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete an encounter', description: 'dm role required.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) an encounter', description: 'dm role required. Soft-delete (issue #701) — combatants, logs, map, and links survive for restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     await this.encounters.remove(id, user, role);
     return { ok: true };
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed encounter', description: 'dm role required. Undo a soft-delete (issue #701) — the encounter returns with its roster and log intact.' })
+  @ApiResponse({ status: 201, description: 'Restored encounter.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const row = await this.encounters.getRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    return this.encounters.restore(id, user, role);
   }
 
   @Post(':id/combatants')
