@@ -32,8 +32,14 @@ describe('db hot-history composite indexes (#617)', () => {
     'idx_dice_rolls_campaign',
   ] as const;
 
+  const HISTORY_TABLES = ['notes', 'comments', 'scheduled_sessions', 'timeline_events', 'dice_rolls'] as const;
+
   function indexNames(sqlite: Database.Database, table: string): string[] {
     return (sqlite.pragma(`index_list(${table})`) as Array<{ name: string }>).map((row) => row.name);
+  }
+
+  function allHistoryIndexNames(sqlite: Database.Database): string[] {
+    return HISTORY_TABLES.flatMap((table) => indexNames(sqlite, table));
   }
 
   function explainDetail(sqlite: Database.Database, sql: string, ...params: unknown[]): string {
@@ -42,7 +48,9 @@ describe('db hot-history composite indexes (#617)', () => {
   }
 
   function usesIndex(sqlite: Database.Database, sql: string, indexName: string, ...params: unknown[]): void {
-    expect(explainDetail(sqlite, sql, ...params)).toContain(indexName);
+    const plan = explainDetail(sqlite, sql, ...params);
+    expect(plan).toContain(indexName);
+    expect(plan).not.toMatch(/USE TEMP B-TREE/i);
   }
 
   it('records migration 0084 and creates every composite index on a fresh DB', () => {
@@ -50,21 +58,12 @@ describe('db hot-history composite indexes (#617)', () => {
     const { sqlite } = openDatabase(dataDir);
     try {
       expect(MIGRATION_NAMES).toContain('0084_hot_history_composite_indexes');
-      expect(indexNames(sqlite, 'notes')).toEqual(expect.arrayContaining(['idx_notes_campaign_id_desc', 'idx_notes_inbox_resolved']));
-      expect(indexNames(sqlite, 'comments')).toEqual(expect.arrayContaining(['idx_comments_entity', 'idx_comments_campaign_id']));
-      expect(indexNames(sqlite, 'scheduled_sessions')).toContain('idx_scheduled_sessions_campaign_at');
-      expect(indexNames(sqlite, 'timeline_events')).toContain('idx_timeline_events_campaign_sort');
-      expect(indexNames(sqlite, 'dice_rolls')).toContain('idx_dice_rolls_campaign_id_desc');
+      const indexes = allHistoryIndexNames(sqlite);
+      for (const index of HOT_HISTORY_INDEXES) {
+        expect(indexes).toContain(index);
+      }
       for (const legacy of LEGACY_INDEXES) {
-        expect(
-          [
-            ...indexNames(sqlite, 'notes'),
-            ...indexNames(sqlite, 'comments'),
-            ...indexNames(sqlite, 'scheduled_sessions'),
-            ...indexNames(sqlite, 'timeline_events'),
-            ...indexNames(sqlite, 'dice_rolls'),
-          ],
-        ).not.toContain(legacy);
+        expect(indexes).not.toContain(legacy);
       }
     } finally {
       sqlite.close();
@@ -109,7 +108,10 @@ describe('db hot-history composite indexes (#617)', () => {
       expect(indexNames(upgraded.sqlite, 'scheduled_sessions')).toContain('idx_scheduled_sessions_campaign_at');
       expect(indexNames(upgraded.sqlite, 'timeline_events')).toContain('idx_timeline_events_campaign_sort');
       expect(indexNames(upgraded.sqlite, 'dice_rolls')).toContain('idx_dice_rolls_campaign_id_desc');
-      expect(indexNames(upgraded.sqlite, 'notes')).not.toContain('idx_notes_campaign');
+      const upgradedIndexes = allHistoryIndexNames(upgraded.sqlite);
+      for (const legacy of LEGACY_INDEXES) {
+        expect(upgradedIndexes).not.toContain(legacy);
+      }
     } finally {
       upgraded.sqlite.close();
     }
