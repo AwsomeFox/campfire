@@ -62,7 +62,6 @@ function defaultFetchImpl(config: AiProviderConfig): FetchLike {
  * requested without an API key, so the failure is the same shape #312 handles everywhere.
  */
 export function createAiProvider(config: AiProviderConfig): AiProvider {
-  const fetchImpl = defaultFetchImpl(config);
   switch (config.providerType) {
     case 'openai':
       requireKey(config);
@@ -75,7 +74,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl,
+        fetchImpl: defaultFetchImpl(config),
       });
     case 'anthropic':
       requireKey(config);
@@ -88,7 +87,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl,
+        fetchImpl: defaultFetchImpl(config),
       });
     case 'gemini':
       requireKey(config);
@@ -101,7 +100,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl,
+        fetchImpl: defaultFetchImpl(config),
       });
     case 'mock':
       return new MockAiProvider({ model: config.model, responses: config.mockResponses });
