@@ -153,6 +153,7 @@ export function CommentsThread({
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
+    setLoadingMoreThreads(false);
     setError(null);
     try {
       const page = await api.get<CommentThreadPage>(
@@ -192,7 +193,7 @@ export function CommentsThread({
       if (sequence !== loadSequence.current) return;
       setError("Couldn't load more discussion.");
     } finally {
-      if (sequence === loadSequence.current) setLoadingMoreThreads(false);
+      setLoadingMoreThreads(false);
     }
   }, [campaignId, entityType, entityId, nextThreadCursor, loadingMoreThreads, loading, toLoadedThread]);
 
@@ -212,6 +213,7 @@ export function CommentsThread({
             ? {
                 ...t,
                 loadedReplies: mergeReplies(t.loadedReplies, page.items),
+                replyCount: page.replyCount,
                 replyHasMore: page.hasMore,
                 replyNextCursor: page.nextCursor,
                 loadingMoreReplies: false,

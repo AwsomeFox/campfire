@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, count, eq, gt, isNull, ne } from 'drizzle-orm';
+import { and, asc, count, eq, gt, inArray, isNull, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
 import type { Comment, CommentReplyPage, CommentThread, CommentThreadPage, Role, PageParams } from '@campfire/schema';
@@ -329,10 +329,7 @@ export class CommentsService {
 
     const hasMore = rootRows.length > limit;
     const pageRoots = hasMore ? rootRows.slice(0, limit) : rootRows;
-    const items: CommentThread[] = [];
-    for (const rootRow of pageRoots) {
-      items.push(await this.buildThreadPreview(rootRow, anchor, previewLimit));
-    }
+    const items = await this.buildThreadPreviews(pageRoots, anchor, previewLimit);
 
     const lastRoot = pageRoots[pageRoots.length - 1];
     const nextCursor =
@@ -340,37 +337,57 @@ export class CommentsService {
     return { items, total, totalComments, hasMore, nextCursor, limit };
   }
 
-  private async buildThreadPreview(
-    rootRow: typeof comments.$inferSelect,
+  private async buildThreadPreviews(
+    rootRows: (typeof comments.$inferSelect)[],
     anchor: ReturnType<CommentsService['entityAnchorWhere']>,
     previewLimit: number,
-  ): Promise<CommentThread> {
-    const [replyCountRow, replyRows] = await Promise.all([
+  ): Promise<CommentThread[]> {
+    if (rootRows.length === 0) return [];
+    const rootIds = rootRows.map((row) => row.id);
+    const previewCap = previewLimit + 1;
+
+    const [countRows, replyRows] = await Promise.all([
       this.db
-        .select({ value: count() })
+        .select({ parentId: comments.parentId, value: count() })
         .from(comments)
-        .where(and(anchor, eq(comments.parentId, rootRow.id))),
+        .where(and(anchor, inArray(comments.parentId, rootIds)))
+        .groupBy(comments.parentId),
       this.db
         .select()
         .from(comments)
-        .where(and(anchor, eq(comments.parentId, rootRow.id)))
-        .orderBy(asc(comments.id))
-        .limit(previewLimit + 1),
+        .where(and(anchor, inArray(comments.parentId, rootIds)))
+        .orderBy(asc(comments.parentId), asc(comments.id)),
     ]);
-    const replyCount = replyCountRow[0]?.value ?? 0;
-    const replyHasMore = replyRows.length > previewLimit;
-    const previewReplies = replyHasMore ? replyRows.slice(0, previewLimit) : replyRows;
-    const lastPreview = previewReplies[previewReplies.length - 1];
-    return {
-      root: toDomain(rootRow),
-      replies: previewReplies.map(toDomain),
-      replyCount,
-      replyHasMore,
-      replyNextCursor:
-        replyHasMore && lastPreview
-          ? encodeCommentsCursor({ v: 1, m: 'reply', r: rootRow.id, i: lastPreview.id })
-          : null,
-    };
+
+    const countByParent = new Map(countRows.map((row) => [row.parentId!, row.value]));
+    const previewsByParent = new Map<number, (typeof comments.$inferSelect)[]>();
+    for (const row of replyRows) {
+      const parentId = row.parentId!;
+      let bucket = previewsByParent.get(parentId);
+      if (!bucket) {
+        bucket = [];
+        previewsByParent.set(parentId, bucket);
+      }
+      if (bucket.length < previewCap) bucket.push(row);
+    }
+
+    return rootRows.map((rootRow) => {
+      const replyCount = countByParent.get(rootRow.id) ?? 0;
+      const previewRows = previewsByParent.get(rootRow.id) ?? [];
+      const replyHasMore = previewRows.length > previewLimit;
+      const previewReplies = replyHasMore ? previewRows.slice(0, previewLimit) : previewRows;
+      const lastPreview = previewReplies[previewReplies.length - 1];
+      return {
+        root: toDomain(rootRow),
+        replies: previewReplies.map(toDomain),
+        replyCount,
+        replyHasMore,
+        replyNextCursor:
+          replyHasMore && lastPreview
+            ? encodeCommentsCursor({ v: 1, m: 'reply', r: rootRow.id, i: lastPreview.id })
+            : null,
+      };
+    });
   }
 
   /**
