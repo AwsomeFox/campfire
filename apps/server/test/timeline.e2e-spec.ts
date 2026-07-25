@@ -47,9 +47,13 @@ describe('timeline / in-world calendar (e2e)', () => {
 
     const listRes = await request(server).get(`/api/v1/campaigns/${campaignId}/timeline`).set(dm);
     expect(listRes.status).toBe(200);
-    const titles = listRes.body.map((e: { title: string }) => e.title);
+    expect(listRes.body.items).toBeDefined();
+    expect(listRes.body.total).toBe(3);
+    expect(listRes.body.hasMore).toBe(false);
+    expect(listRes.body.nextCursor).toBeNull();
+    const titles = listRes.body.items.map((e: { title: string }) => e.title);
     expect(titles).toEqual(['Founding of Neverwinter', 'The Spellplague', 'The Sundering']);
-    expect(listRes.body.map((e: { id: number }) => e.id)).toEqual([first.body.id, second.body.id, third.body.id]);
+    expect(listRes.body.items.map((e: { id: number }) => e.id)).toEqual([first.body.id, second.body.id, third.body.id]);
   });
 
   it('get / update / delete a single event', async () => {
@@ -111,7 +115,7 @@ describe('timeline / in-world calendar (e2e)', () => {
     expect(playerGet.body.dmSecret).toBeFalsy();
 
     const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/timeline`).set(player);
-    for (const e of playerList.body) expect(e.dmSecret).toBeFalsy();
+    for (const e of playerList.body.items) expect(e.dmSecret).toBeFalsy();
   });
 
   it('hidden event is absent for non-DM (list + direct GET 404), reveal makes it appear', async () => {
@@ -126,11 +130,11 @@ describe('timeline / in-world calendar (e2e)', () => {
 
     // DM sees it
     const dmList = await request(server).get(`/api/v1/campaigns/${campaignId}/timeline`).set(dm);
-    expect(dmList.body.some((e: { id: number }) => e.id === id)).toBe(true);
+    expect(dmList.body.items.some((e: { id: number }) => e.id === id)).toBe(true);
 
     // Player & viewer: excluded from list, direct GET 404s (existence not leaked)
     const playerList = await request(server).get(`/api/v1/campaigns/${campaignId}/timeline`).set(player);
-    expect(playerList.body.some((e: { id: number }) => e.id === id)).toBe(false);
+    expect(playerList.body.items.some((e: { id: number }) => e.id === id)).toBe(false);
     expect((await request(server).get(`/api/v1/timeline/${id}`).set(player)).status).toBe(404);
     expect((await request(server).get(`/api/v1/timeline/${id}`).set(viewer)).status).toBe(404);
 
@@ -138,7 +142,7 @@ describe('timeline / in-world calendar (e2e)', () => {
     const reveal = await request(server).patch(`/api/v1/timeline/${id}`).set(dm).send({ hidden: false });
     expect(reveal.status).toBe(200);
     const playerListAfter = await request(server).get(`/api/v1/campaigns/${campaignId}/timeline`).set(player);
-    expect(playerListAfter.body.some((e: { id: number }) => e.id === id)).toBe(true);
+    expect(playerListAfter.body.items.some((e: { id: number }) => e.id === id)).toBe(true);
   });
 
   it('non-DM cannot create/update/delete events (403)', async () => {
@@ -189,5 +193,44 @@ describe('timeline / in-world calendar (e2e)', () => {
       .set(player)
       .send({ currentDate: 'nope' });
     expect(forbidden.status).toBe(403);
+  });
+
+  it('list pagination: bounded pages with stable cursors (issue #615)', async () => {
+    const server = ctx.app.getHttpServer();
+    const pagingCampaign = (
+      await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'Timeline Paging Campaign' })
+    ).body.id;
+
+    for (let i = 0; i < 5; i++) {
+      await request(server)
+        .post(`/api/v1/campaigns/${pagingCampaign}/timeline`)
+        .set(dm)
+        .send({ title: `Event ${i}`, sortIndex: (i + 1) * 10 });
+    }
+
+    const page1 = await request(server)
+      .get(`/api/v1/campaigns/${pagingCampaign}/timeline?limit=2`)
+      .set(dm);
+    expect(page1.status).toBe(200);
+    expect(page1.body.items).toHaveLength(2);
+    expect(page1.body.total).toBe(5);
+    expect(page1.body.hasMore).toBe(true);
+    expect(page1.body.nextCursor).toBeTruthy();
+    expect(page1.body.items[0].title).toBe('Event 0');
+
+    const page2 = await request(server)
+      .get(`/api/v1/campaigns/${pagingCampaign}/timeline?limit=2&cursor=${encodeURIComponent(page1.body.nextCursor)}`)
+      .set(dm);
+    expect(page2.body.items).toHaveLength(2);
+    expect(page2.body.items[0].title).toBe('Event 2');
+    expect(page2.body.hasMore).toBe(true);
+
+    const page3 = await request(server)
+      .get(`/api/v1/campaigns/${pagingCampaign}/timeline?limit=2&cursor=${encodeURIComponent(page2.body.nextCursor)}`)
+      .set(dm);
+    expect(page3.body.items).toHaveLength(1);
+    expect(page3.body.items[0].title).toBe('Event 4');
+    expect(page3.body.hasMore).toBe(false);
+    expect(page3.body.nextCursor).toBeNull();
   });
 });

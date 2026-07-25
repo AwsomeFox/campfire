@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Admin storage management card (issue #24). Server-admin only — sits in the
  * /admin console. Reads GET /admin/storage (upload-size visibility), lets the
@@ -7,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { StorageStats, StorageCleanupResult } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 
 function formatBytes(bytes: number): string {
@@ -34,6 +35,7 @@ function parseQuota(input: string): number | null | undefined {
 }
 
 export function StorageCard() {
+  const { t } = useTranslation();
   const [stats, setStats] = useState<StorageStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [cleanup, setCleanup] = useState<StorageCleanupResult | null>(null);
@@ -44,7 +46,7 @@ export function StorageCard() {
     try {
       setStats(await api.get<StorageStats>(`${API}/admin/storage`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load storage stats.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 
@@ -59,7 +61,7 @@ export function StorageCard() {
       await api.post(`${API}/admin/storage/fs-cleanup/retry`);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't retry filesystem cleanup.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusy(false);
     }
@@ -73,7 +75,7 @@ export function StorageCard() {
       setCleanup(res);
       if (!dryRun) await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't run cleanup.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusy(false);
     }
@@ -221,6 +223,7 @@ function QuotaRow({
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [input, setInput] = useState('');
   const [saving, setSaving] = useState(false);
@@ -243,7 +246,7 @@ function QuotaRow({
       setEditing(false);
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't set quota.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }

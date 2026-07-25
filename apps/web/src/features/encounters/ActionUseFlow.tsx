@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Structured action Use flow (issue #414) — pick legal targets, resolve to a preview,
  * commit atomically (or hand off to the DM under dm-confirmed / player-declares policy),
@@ -15,7 +16,7 @@ import type {
   ActionUndoToken,
   Combatant,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Btn } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
 
@@ -68,6 +69,7 @@ export function ActionUsePanel({
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy) => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [step, setStep] = useState<Step>('targets');
   const [targetIds, setTargetIds] = useState<number[]>([]);
@@ -93,7 +95,7 @@ export function ActionUsePanel({
       setStep('preview');
       announce(res.resolution.playerSummary);
     },
-    onError: (err) => onError(err instanceof ApiError ? err.message : "Couldn't resolve that action."),
+    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.resolveAction' })),
   });
 
   const commit = useMutation({
@@ -109,7 +111,7 @@ export function ActionUsePanel({
       announce(`${actionName} applied.`);
       onDismiss();
     },
-    onError: (err) => onError(err instanceof ApiError ? err.message : "Couldn't apply that action."),
+    onError: (err) => onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.applyAction' })),
   });
 
   function toggleTarget(id: number) {

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * /admin/rules — rule-pack install & management. Part of the /admin/* page
  * split (issue #350); see AdminPage.tsx for the full route map.
@@ -9,6 +10,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { NEW_CAMPAIGN_SETUP_PATH, safeAdminRulesReturnPath } from '../../lib/adminNavigation';
 
 export default function AdminRulesPage() {
+  const { t } = useTranslation();
   const location = useLocation();
   const stateReturnTo = (location.state as { returnTo?: unknown } | null)?.returnTo;
   // Match LoginPage's redirect precedence: an explicit URL parameter survives a
@@ -18,8 +20,8 @@ export default function AdminRulesPage() {
     safeAdminRulesReturnPath(new URLSearchParams(location.search).get('returnTo')) ??
     safeAdminRulesReturnPath(stateReturnTo);
   const returnLabel = returnTo === NEW_CAMPAIGN_SETUP_PATH
-    ? 'Back to campaign setup'
-    : 'Back to campaign settings';
+    ? t('admin.rules.backToSetup')
+    : t('admin.rules.backToSettings');
 
   return (
     <RequireServerAdmin>

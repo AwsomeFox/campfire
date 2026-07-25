@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Admin AI console (issue #315) — the server-admin cockpit over the AI program
  * (epic #308), rendered on /admin. One card that surfaces and drives:
@@ -12,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AiConsoleOverview, AiProviderHealthEntry } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, Skeleton, ErrorNote } from '../../components/ui';
 import { ProviderForm } from '../settings/ProviderForm';
 
@@ -63,6 +64,7 @@ function validateAllowlistDraft(text: string): AllowlistDraftValidation {
 }
 
 export function AiConsoleCard() {
+  const { t } = useTranslation();
   const [ov, setOv] = useState<AiConsoleOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,7 +74,7 @@ export function AiConsoleCard() {
     try {
       setOv(await api.get<AiConsoleOverview>(`${API}/settings/ai`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the AI console.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 
@@ -87,7 +89,7 @@ export function AiConsoleCard() {
     try {
       setOv(await api.post<AiConsoleOverview>(`${API}/settings/ai/kill`, { enabled: !ov.killSwitchEnabled }));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't toggle the kill switch.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusy(false);
     }
@@ -199,6 +201,7 @@ function CapsEditor({
   onSaved: (o: AiConsoleOverview) => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [cap, setCap] = useState(String(ov.serverTokenCap));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -217,7 +220,7 @@ function CapsEditor({
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't save the cap.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }
@@ -280,6 +283,7 @@ function AllowlistEditor({
   onSaved: (o: AiConsoleOverview) => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const savedText = ov.allowedModels.join('\n');
   const [text, setText] = useState(savedText);
   const [saving, setSaving] = useState(false);
@@ -309,7 +313,7 @@ function AllowlistEditor({
       setSaved(true);
       setTimeout(() => setSaved(false), 1500);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't save the allowlist.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }
@@ -443,6 +447,7 @@ function CampaignUsageTable({ ov }: { ov: AiConsoleOverview }) {
 }
 
 function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
+  const { t } = useTranslation();
   const [results, setResults] = useState<AiProviderHealthEntry[] | null>(null);
   const [testing, setTesting] = useState(false);
 
@@ -452,7 +457,7 @@ function HealthPanel({ onError }: { onError: (msg: string | null) => void }) {
     try {
       setResults(await api.post<AiProviderHealthEntry[]>(`${API}/settings/ai/health`));
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't run the health check.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setTesting(false);
     }

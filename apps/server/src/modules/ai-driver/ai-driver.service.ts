@@ -11,7 +11,8 @@ import { RulesService } from '../rules/rules.service';
 import { EncountersService } from '../encounters/encounters.service';
 import { MembersService } from '../membership/members.service';
 import { CharactersService } from '../characters/characters.service';
-import type { AiDmSeat, Role, RuleEntry, RulePack } from '@campfire/schema';
+import type { AiDmSeat, NarrationLanguage, Role, RuleEntry, RulePack } from '@campfire/schema';
+import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import type {
   AiProvider,
   AiMessage,
@@ -247,6 +248,7 @@ export interface RunTurnOptions {
   maxTokens?: number;
   proactive?: boolean;
   characterId?: number;
+  narrationLanguage?: NarrationLanguage;
 }
 
 interface ActionQueueEntry {
@@ -1075,7 +1077,7 @@ export class AiDriverService {
         parameters: t.inputSchema,
       }));
 
-    const system = await this.assembleSystemPrompt(campaignId, seat);
+    const system = await this.assembleSystemPrompt(campaignId, seat, opts.narrationLanguage);
     
     let speakerPrefix = '';
     if (opts.characterId) {
@@ -2383,9 +2385,17 @@ export class AiDriverService {
    * anything the seat principal isn't allowed to see. Reads are best-effort: a failing
    * read is simply omitted rather than aborting the turn.
    */
-  private async assembleSystemPrompt(campaignId: number, seat: AiDmSeat): Promise<string> {
+  private async assembleSystemPrompt(
+    campaignId: number,
+    seat: AiDmSeat,
+    narrationLanguageOverride?: NarrationLanguage,
+  ): Promise<string> {
     const parts: string[] = [GROUNDING_PREAMBLE, UNTRUSTED_INPUT_PREAMBLE];
     if (seat.instructions) parts.push(`## DM steering\n${seat.instructions}`);
+
+    const campaign = await this.campaigns.getOrThrow(campaignId);
+    const { language, provenance } = resolveNarrationLanguage(campaign.narrationLanguage, narrationLanguageOverride);
+    parts.push(buildNarrationLanguageContract(language, provenance));
 
     // #387: assemble the campaign context through a NON-DM (player-scoped) toolset so DM-only
     // material (hidden entities, dmSecret fields, unexplored locations) is excluded WHOLESALE from

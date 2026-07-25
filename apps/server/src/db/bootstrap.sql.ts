@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0,
   public_recap_sharing_enabled INTEGER NOT NULL DEFAULT 1,
   public_invites_enabled INTEGER NOT NULL DEFAULT 1,
+  narration_language TEXT NOT NULL DEFAULT 'en',
   session_count INTEGER NOT NULL DEFAULT 0,
   rule_system TEXT NOT NULL DEFAULT '',
   map_attachment_id INTEGER REFERENCES attachments(id) ON DELETE SET NULL,

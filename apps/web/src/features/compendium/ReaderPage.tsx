@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Reader — /c/:campaignId/compendium/:entryId.
  * Mirrors design/claude-design/Campfire.dc.html "Reader" (~1338-1367): entry
@@ -9,7 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, ApiError, API } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import type { RuleEntry, RulePack } from '@campfire/schema';
 import { Card, ErrorNote, Skeleton, Btn } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
@@ -27,6 +28,7 @@ import {
 } from './compendiumProvenance';
 
 export default function ReaderPage() {
+  const { t } = useTranslation();
   const { campaignId, entryId } = useParams<{ campaignId: string; entryId: string }>();
   const id = Number(campaignId);
   const navigate = useNavigate();
@@ -54,7 +56,7 @@ export default function ReaderPage() {
       const updated = await api.patch<RuleEntry>(`${API}/rules/entries/${entry.id}`, { iconSlug: slug });
       setEntry(updated);
     } catch (err) {
-      setIconError(err instanceof ApiError ? err.message : "Couldn't update the icon.");
+      setIconError(translateApiError(err, t, { fallbackKey: 'compendium.errors.updateIcon' }));
     } finally {
       setSavingIcon(false);
     }
@@ -76,7 +78,7 @@ export default function ReaderPage() {
           setPack(packs.find((p) => p.id === data.packId) ?? null);
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Couldn't load this entry.");
+        if (!cancelled) setError(translateApiError(err, t, { fallbackKey: 'compendium.errors.loadEntry' }));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -89,7 +91,7 @@ export default function ReaderPage() {
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -115,7 +117,7 @@ export default function ReaderPage() {
       ) : error ? (
         <ErrorNote message={error} />
       ) : !entry ? (
-        <ErrorNote message="Entry not found." />
+        <ErrorNote message={t('compendium.notFound')} />
       ) : (
         <div className="card elev-sm" style={{ minWidth: 0, padding: '22px 26px', gap: 12 }}>
           <div className="flex items-center gap-2.5 flex-wrap">

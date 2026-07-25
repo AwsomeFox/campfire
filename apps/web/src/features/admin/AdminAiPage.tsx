@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * /admin/ai — AI console (provider config & usage). Part of the /admin/* page
  * split (issue #350); see AdminPage.tsx for the full route map.
@@ -7,6 +8,7 @@ import { AiConsoleCard } from './AiConsoleCard';
 import { GameIcon } from '../../components/GameIcon';
 
 export default function AdminAiPage() {
+  useTranslation();
   return (
     <RequireServerAdmin>
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">

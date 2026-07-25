@@ -1,0 +1,16 @@
+{
+  "common": {
+    "save": "حفظ",
+    "cancel": "إلغاء",
+    "delete": "حذف",
+    "edit": "تعديل",
+    "close": "Close",
+    "loading": "جارٍ التحميل…",
+    "saving": "جارٍ الحفظ…",
+    "retry": "إعادة المحاولة",
+    "undated": "Undated",
+    "moreActions": "More actions",
+    "pageActionsMenu": "Page actions",
+    "noCampaign": "لم يتم اختيار حملة."
+  }
+}

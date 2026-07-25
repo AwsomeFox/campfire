@@ -1,0 +1,55 @@
+{
+  "sessionZero": {
+    "title": "Session Zero",
+    "accessDenied": "You don't have access to this campaign",
+    "empty": {
+      "title": "No session-zero charter yet",
+      "hintDm": "Record your table's lines & veils, safety tools, and house rules with \"Edit charter\".",
+      "hintPlayer": "The DM hasn't recorded the table's charter yet."
+    },
+    "errors": {
+      "load": "Couldn't load the session-zero charter.",
+      "save": "Couldn't save the charter.",
+      "saveSupport": "Couldn't save your support preference.",
+      "deleteSupport": "Couldn't delete your support preference."
+    },
+    "savedSupport": "Your support preference was saved.",
+    "deletedSupport": "Your support preference was deleted.",
+    "charterStale": "The charter changed, but the latest version couldn't be loaded. Your draft is still here.",
+    "charter": {
+      "lines": {
+        "title": "Lines",
+        "hint": "Hard limits — content that never appears at the table.",
+        "formLabel": "Lines (hard limits)",
+        "formHelp": "Content that never appears at the table. One entry per line.",
+        "placeholder": "Harm to children\nSexual violence\nSpiders"
+      },
+      "veils": {
+        "title": "Veils",
+        "hint": "Soft limits — content that stays off-screen (fade to black).",
+        "formLabel": "Veils (soft limits)",
+        "formHelp": "Content that may exist but stays off-screen. One entry per line.",
+        "placeholder": "On-screen torture\nGraphic gore"
+      },
+      "safetyTools": {
+        "title": "Safety tools",
+        "hint": "Tools the table has agreed to use (X-Card, Open Door, Script Change…).",
+        "formLabel": "Safety tools",
+        "formHelp": "Tools the table agreed to use. One entry per line.",
+        "placeholder": "X-Card\nOpen Door\nScript Change"
+      },
+      "houseRules": {
+        "title": "House rules",
+        "formLabel": "House rules",
+        "formHelp": "Optional markdown for table conventions and rules-as-written deviations.",
+        "placeholder": "Table conventions, rules-as-written deviations…"
+      },
+      "tone": {
+        "title": "Tone & content expectations",
+        "formLabel": "Tone & content expectations",
+        "formHelp": "Optional markdown for grit vs. heroism, comedy vs. seriousness, spotlight and PvP norms.",
+        "placeholder": "Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
+      }
+    }
+  }
+}

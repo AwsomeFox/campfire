@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Password reset requests card — extracted from AdminPage.tsx as part of the
  * /admin/* page split (issue #350). Lives on /admin/users.
@@ -8,12 +9,13 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { PasswordResetRequest, PasswordResetApproval } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { Card, Btn } from '../../components/ui';
 import { CopyControl } from '../../components/CopyControl';
 
 export function ResetRequestsCard() {
+  const { t } = useTranslation();
   const [requests, setRequests] = useState<PasswordResetRequest[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -25,7 +27,7 @@ export function ResetRequestsCard() {
     try {
       setRequests(await api.get<PasswordResetRequest[]>(`${API}/users/reset-requests`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load reset requests.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 
@@ -41,7 +43,7 @@ export function ResetRequestsCard() {
       setCodes((prev) => ({ ...prev, [id]: approval }));
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't approve request.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusyId(null);
     }
@@ -59,7 +61,7 @@ export function ResetRequestsCard() {
       });
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't dismiss request.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setBusyId(null);
     }

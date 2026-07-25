@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * OIDC/SSO configuration card — extracted from AdminPage.tsx as part of the
  * /admin/* page split (issue #350). Lives on /admin/auth.
@@ -14,7 +15,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { OidcCheckResult, OidcSettings, OidcTestLoginStart, OidcTestResult } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, TextInput, ErrorNote } from '../../components/ui';
 
 interface OidcDraft {
@@ -76,6 +77,7 @@ function sourceSummary(result: OidcTestResult): string {
 }
 
 export function OidcCard() {
+  const { t } = useTranslation();
   const [cfg, setCfg] = useState<OidcSettings | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
 
@@ -165,7 +167,7 @@ export function OidcCard() {
     try {
       apply(await api.get<OidcSettings>(`${API}/settings/oidc`));
     } catch (err) {
-      setLoadErr(err instanceof ApiError ? err.message : "Couldn't load OIDC settings.");
+      setLoadErr(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, [apply]);
 
@@ -256,7 +258,7 @@ export function OidcCard() {
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      setSaveErr(err instanceof ApiError ? err.message : "Couldn't save OIDC settings.");
+      setSaveErr(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }
@@ -272,7 +274,7 @@ export function OidcCard() {
       if (currentDraftFingerprint.current === fingerprint) setTestResult(result);
     } catch (err) {
       if (currentDraftFingerprint.current === fingerprint) {
-        setSaveErr(err instanceof ApiError ? err.message : "Couldn't run the discovery test.");
+        setSaveErr(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
       }
     } finally {
       if (currentDraftFingerprint.current === fingerprint) setTesting(false);
@@ -293,7 +295,7 @@ export function OidcCard() {
       window.location.assign(started.authorizationUrl);
     } catch (err) {
       if (currentDraftFingerprint.current === fingerprint) {
-        setSaveErr(err instanceof ApiError ? err.message : "Couldn't start the end-to-end test login.");
+        setSaveErr(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
         setTestingLogin(false);
       }
     }

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * /admin/users — accounts, password-reset requests, and sign-in settings.
  * Part of the /admin/* page split (issue #350); see AdminPage.tsx for the
@@ -7,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { User, ServerSettings } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Skeleton, ErrorNote } from '../../components/ui';
 import { RequireServerAdmin } from './RequireServerAdmin';
 import { UsersCard } from './UsersCard';
@@ -17,6 +18,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { MembershipIntegrityCard } from './MembershipIntegrityCard';
 
 function AdminUsers() {
+  const { t } = useTranslation();
   const [users, setUsers] = useState<User[] | null>(null);
   const [settings, setSettings] = useState<ServerSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,11 +35,11 @@ function AdminUsers() {
       setUsers(u);
       setSettings(s);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load admin data.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -77,6 +79,7 @@ function AdminUsers() {
 }
 
 export default function AdminUsersPage() {
+  useTranslation();
   return (
     <RequireServerAdmin>
       <AdminUsers />
