@@ -520,28 +520,34 @@ export function retreatEncounterTurn(
   if (phase === 'lair') {
     const resumeId = lairResumeCombatantId ?? sorted[0]?.id ?? null;
     let prev: Combatant | undefined;
+    let wrappedToPrevRound = false;
     if (resumeId !== null) {
       const resumeIdx = sorted.findIndex((c) => c.id === resumeId);
       if (resumeIdx > 0) prev = sorted[resumeIdx - 1];
-      else prev = sorted[sorted.length - 1];
+      else {
+        prev = sorted[sorted.length - 1];
+        wrappedToPrevRound = true;
+      }
     }
+    const retreatRound = wrappedToPrevRound ? Math.max(1, round - 1) : round;
+
     if (prev && hasLairSlot && shouldEnterLairAfterCombatant(prev, sorted)) {
       return {
         turnIndex: turnIndexFor(sorted, prev.id),
-        round,
+        round: retreatRound,
         currentCombatantId: prev.id,
         phase: 'combatant',
         lairResumeCombatantId: null,
-        roundWrapped: false,
+        roundWrapped: wrappedToPrevRound,
       };
     }
     return {
       turnIndex: prev ? turnIndexFor(sorted, prev.id) : 0,
-      round,
+      round: retreatRound,
       currentCombatantId: prev?.id ?? null,
       phase: 'combatant',
       lairResumeCombatantId: null,
-      roundWrapped: false,
+      roundWrapped: wrappedToPrevRound,
     };
   }
 

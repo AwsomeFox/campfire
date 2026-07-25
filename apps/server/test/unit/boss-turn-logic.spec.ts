@@ -6,6 +6,7 @@ import {
   lairLeadsRound,
   resetLegendaryUsage,
   resetTurnStateForStart,
+  retreatEncounterTurn,
   shouldEnterLairAfterCombatant,
 } from '../../src/modules/encounters/encounters.logic';
 
@@ -89,5 +90,27 @@ describe('boss turn scheduling (issue #618)', () => {
     const reset = resetTurnStateForStart(state);
     expect(reset.used).toEqual({ [LEGENDARY_ACTION_SLOT]: 2 });
     expect(resetLegendaryUsage(reset).used).toEqual({});
+  });
+
+  it('retreats from lair back to the combatant that triggered it in the same round', () => {
+    const sorted = [combatant(1, 25), combatant(2, 20), combatant(3, 12)];
+    const retreated = retreatEncounterTurn(sorted, null, 1, 'lair', true, 3);
+    expect(retreated).toMatchObject({
+      phase: 'combatant',
+      currentCombatantId: 2,
+      round: 1,
+      lairResumeCombatantId: null,
+    });
+  });
+
+  it('retreats from a round-starting lair slot to the previous round last combatant', () => {
+    const sorted = [combatant(1, 18), combatant(2, 10)];
+    const retreated = retreatEncounterTurn(sorted, null, 2, 'lair', true, 1);
+    expect(retreated).toMatchObject({
+      phase: 'combatant',
+      currentCombatantId: 2,
+      round: 1,
+      roundWrapped: true,
+    });
   });
 });

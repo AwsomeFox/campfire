@@ -3818,7 +3818,12 @@ export class EncountersService {
     if (logs.length > 0) {
       this.emitEncounterEvent('encounter.updated', encounterRow.campaignId, encounterId, encounterRow.hidden);
     }
-    return combatantToDomain(row);
+    const domain = combatantToDomain(row);
+    if (legendaryMax > 0) {
+      const used = domain.turnState.used[LEGENDARY_ACTION_SLOT] ?? 0;
+      return { ...domain, legendaryActions: { max: legendaryMax, used } };
+    }
+    return domain;
   }
 
   /**
