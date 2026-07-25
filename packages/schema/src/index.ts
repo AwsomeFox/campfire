@@ -6888,9 +6888,20 @@ export const InventoryItem = z.object({
   // heuristic. Same bundled icon library as NPCs (#302); see apps/web/src/lib/icons.
   iconSlug: z.string().max(80).default(''),
   ...timestamps,
+  // Soft-delete tombstone (issue #551). NULL on live items; ISO timestamp + actor
+  // id when the item is in the campaign trash. Not user-writable via create/update.
+  deletedAt: IsoDate.nullable().default(null),
+  deletedBy: z.string().max(120).nullable().default(null),
 });
 export type InventoryItem = z.infer<typeof InventoryItem>;
-export const InventoryItemCreate = InventoryItem.omit({ id: true, campaignId: true, createdAt: true, updatedAt: true }).partial().required({ name: true });
+export const InventoryItemCreate = InventoryItem.omit({
+  id: true,
+  campaignId: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+  deletedBy: true,
+}).partial().required({ name: true });
 // Issue #782: quantity writes are either an atomic relative `qtyDelta` (preferred for
 // +/-; requires a per-action `idempotencyKey` so retries never double-apply) or an
 // absolute `qty` reconciliation that MUST carry `expectedUpdatedAt` (CAS) so a stale
