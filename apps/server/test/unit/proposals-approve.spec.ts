@@ -14,6 +14,7 @@ describe('ProposalsService.approve (issue #681)', () => {
     revertToPending?: jest.Mock;
     finalizeApproved?: jest.Mock;
     createThrows?: boolean;
+    finalizeThrows?: boolean;
   }) {
     const existing = {
       id: 9,
@@ -37,7 +38,13 @@ describe('ProposalsService.approve (issue #681)', () => {
       getCurrentAuthorizedSnapshot: jest.fn(async () => overrides.currentSnapshot ?? null),
       markResolved: overrides.markResolved ?? jest.fn(async () => ({ id: existing.id, status: 'approved' })),
       revertToPending: overrides.revertToPending ?? jest.fn(async () => undefined),
-      finalizeApproved: overrides.finalizeApproved ?? jest.fn(),
+      finalizeApproved:
+        overrides.finalizeApproved ??
+        (overrides.finalizeThrows
+          ? jest.fn(() => {
+              throw new Error('simulated finalize failure');
+            })
+          : jest.fn()),
     };
 
     const quests = {
@@ -105,5 +112,13 @@ describe('ProposalsService.approve (issue #681)', () => {
     const result = await service.approve(9, {}, user, role);
     expect(result.entityId).toBe(100);
     expect(records.finalizeApproved).toHaveBeenCalledWith(9, user, role, { entityId: 100 });
+  });
+
+  it('does not revert to pending when finalize fails after a successful entity write', async () => {
+    const { service, records } = makeService({ finalizeThrows: true });
+
+    await expect(service.approve(9, {}, user, role)).rejects.toThrow('simulated finalize failure');
+    expect(records.revertToPending).not.toHaveBeenCalled();
+    expect(records.finalizeApproved).toHaveBeenCalled();
   });
 });

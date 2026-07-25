@@ -322,16 +322,19 @@ export class ProposalsService {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).update(existing.entityId, validated, user, role);
       }
-      this.records.finalizeApproved(id, user, role, {
-        ...(amended ? { payload: validated! } : {}),
-        ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
-      });
     } catch (err) {
       // The entity write failed — undo the claim so the proposal returns to pending
       // rather than being stranded as approved with no write applied.
       await this.records.revertToPending(id);
       throw err;
     }
+
+    // Finalize bookkeeping only after a successful entity write. Failures here must
+    // not revert the claim — the mutation already landed (issue #85 / #681).
+    this.records.finalizeApproved(id, user, role, {
+      ...(amended ? { payload: validated! } : {}),
+      ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
+    });
 
     await this.notifyProposerOfResolution(resolved, 'approved', user);
 
