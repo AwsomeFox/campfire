@@ -34,10 +34,14 @@ export class RequestObservabilityInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    let result: 'ok' | 'error' = 'ok';
+    res.once('finish', () => this.emit(req, res, startedAt, result));
+
     return next.handle().pipe(
       tap({
-        next: () => this.emit(req, res, startedAt, 'ok'),
-        error: () => this.emit(req, res, startedAt, 'error'),
+        error: () => {
+          result = 'error';
+        },
       }),
     );
   }

@@ -1,4 +1,5 @@
 import {
+  bindRequestContext,
   createRequestContext,
   getRequestId,
   patchRequestContext,
@@ -52,5 +53,17 @@ describe('request-context (#684)', () => {
       }),
     ]);
     expect(seen).toEqual(['req-a', 'req-b']);
+  });
+
+  it('bindRequestContext preserves requestId for callbacks with parameters', () => {
+    const ctx = createRequestContext({ inboundHeader: 'timer-corr', transport: 'rest' });
+    runWithRequestContext(ctx, () => {
+      const onTimeout = bindRequestContext((id: string, n: number) => {
+        expect(getRequestId()).toBe('timer-corr');
+        expect(id).toBe('x');
+        expect(n).toBe(2);
+      });
+      onTimeout('x', 2);
+    });
   });
 });
