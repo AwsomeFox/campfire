@@ -21,7 +21,7 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
@@ -485,7 +485,7 @@ function SheetEditForm({
   onError: (msg: string | null) => void;
 }) {
   const { me } = useAuth();
-  const baseline = characterSheetDraftFrom(character);
+  const baseline = useMemo(() => characterSheetDraftFrom(character), [character.id, character.updatedAt]);
   const [name, setName] = useState(baseline.name);
   const [species, setSpecies] = useState(baseline.species);
   const [className, setClassName] = useState(baseline.className);

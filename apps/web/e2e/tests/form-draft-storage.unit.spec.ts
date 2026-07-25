@@ -128,6 +128,7 @@ test.describe('form draft storage (issue #641)', () => {
     expect(isFormDraftStale(fresh, '2026-07-01T12:00:00.000Z')).toBe(false);
     expect(isFormDraftStale(fresh, '2026-07-02T08:00:00.000Z')).toBe(true);
     expect(isFormDraftStale(fresh, null)).toBe(false);
+    expect(isFormDraftStale(fresh, '2026-07-01T12:00:00Z')).toBe(false);
   });
 });
 

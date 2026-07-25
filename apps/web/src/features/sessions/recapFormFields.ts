@@ -127,12 +127,14 @@ export function firstInvalidRecapControlId(
   return null;
 }
 
-/** Build aria-describedby from help + field error + optional form error. */
+/** Recap editor draft snapshot for protected-form persistence (issue #641). */
 export type RecapEditorDraft = {
   title: string;
   playedAt: string;
   recap: string;
 };
+
+export const EMPTY_RECAP_EDITOR_DRAFT: RecapEditorDraft = { title: '', playedAt: '', recap: '' };
 
 export function recapEditorDraftFromSession(input: {
   title: string;
@@ -158,6 +160,7 @@ export function isNewRecapDraftMeaningful(draft: RecapEditorDraft): boolean {
   return draft.title.trim() !== '' || draft.recap.trim() !== '' || draft.playedAt.trim() !== '';
 }
 
+/** Build aria-describedby from help + field error + optional form error. */
 export function recapDescribedBy(
   ids: RecapFieldIds,
   options: { help?: boolean; error?: boolean; formErrorId?: string | null } = {},

@@ -49,6 +49,7 @@ import {
   RECAP_PLAYED_ON_HELP,
   RECAP_TITLE_HELP,
   editRecapFieldIds,
+  EMPTY_RECAP_EDITOR_DRAFT,
   firstInvalidRecapControlId,
   isRecapEditorDirty,
   newRecapFieldIds,
@@ -690,11 +691,15 @@ function SessionDetail({
     recapLoading,
   );
 
-  const effectiveRecapBaseline: RecapEditorDraft = recapBaseline ?? {
-    title: session.title,
-    playedAt: toDateInputValue(session.playedAt),
-    recap: '',
-  };
+  const effectiveRecapBaseline = useMemo<RecapEditorDraft>(
+    () =>
+      recapBaseline ?? {
+        title: session.title,
+        playedAt: toDateInputValue(session.playedAt),
+        recap: '',
+      },
+    [recapBaseline, session.title, session.playedAt],
+  );
   const recapCurrent = { title: titleDraft, playedAt: dateDraft, recap: recapDraft };
   const recapDirty =
     editing && detailReady && recapBaseline != null && isRecapEditorDirty(recapCurrent, effectiveRecapBaseline);
@@ -1504,12 +1509,12 @@ function AddRecapForm({
   const [title, setTitle] = useState('');
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
   const dateWasEdited = useRef(false);
+  const dateFieldFocusedRef = useRef(false);
   const [recap, setRecap] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
   const fieldIds = newRecapFieldIds();
-  const newRecapBaseline: RecapEditorDraft = { title: '', playedAt: '', recap: '' };
   const newRecapDraft = { title, playedAt, recap };
   const newRecapDirty = title.trim() !== '' || recap.trim() !== '' || dateWasEdited.current;
 
@@ -1552,7 +1557,7 @@ function AddRecapForm({
     active: true,
     dirty: newRecapDirty,
     draft: newRecapDraft,
-    baseline: newRecapBaseline,
+    baseline: EMPTY_RECAP_EDITOR_DRAFT,
     isDraftEqual: recapEditorDraftsEqual,
     onRestoreDraft: (restored) => {
       setTitle(restored.title);
@@ -1667,9 +1672,22 @@ function AddRecapForm({
             className="min-w-0"
             type="date"
             value={playedAt}
+            onFocus={() => {
+              dateFieldFocusedRef.current = true;
+            }}
+            onBlur={(e) => {
+              const next = e.target.value;
+              if (dateFieldFocusedRef.current && next === '' && !dateWasEdited.current) {
+                dateWasEdited.current = true;
+                setPlayedAt('');
+              }
+              dateFieldFocusedRef.current = false;
+            }}
             onChange={(e) => {
+              const next = e.target.value;
+              if (next === '' && !dateWasEdited.current) return;
               dateWasEdited.current = true;
-              setPlayedAt(e.target.value);
+              setPlayedAt(next);
               setFieldErrors((current) => ({ ...current, playedAt: undefined }));
             }}
             aria-invalid={fieldErrors.playedAt ? true : undefined}

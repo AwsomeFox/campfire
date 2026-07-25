@@ -4,7 +4,7 @@
  * Replaces native `confirm()` for in-app navigation so the user can keep editing,
  * discard local work, or save before leaving.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Btn } from './ui';
 import { useDialog } from './useDialog';
@@ -36,7 +36,7 @@ export function UnsavedFormDialog({
   onSave: () => void;
 }) {
   const keepRef = useRef<HTMLButtonElement>(null);
-  const titleId = useRef(`unsaved-form-dialog-title-${Math.random().toString(36).slice(2)}`).current;
+  const titleId = useId();
   const busySaveLabel = resolveBusyConfirmLabel(saveLabel, pendingSaveLabel);
   const saveText = busy ? busySaveLabel : saveLabel;
 

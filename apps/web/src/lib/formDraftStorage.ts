@@ -71,12 +71,22 @@ export function clearFormDraft(key: string, store: StorageLike | null = defaultF
  * True when the server record moved on after the draft baseline was captured.
  * When either timestamp is missing the draft is treated as fresh (no stale flag).
  */
+function parseTimestampMs(value: string): number | null {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 export function isFormDraftStale(
   envelope: Pick<FormDraftEnvelope<unknown>, 'baselineUpdatedAt'>,
   currentUpdatedAt: string | null | undefined,
 ): boolean {
   if (!envelope.baselineUpdatedAt || !currentUpdatedAt) return false;
-  return envelope.baselineUpdatedAt !== currentUpdatedAt;
+  const baselineMs = parseTimestampMs(envelope.baselineUpdatedAt);
+  const currentMs = parseTimestampMs(currentUpdatedAt);
+  if (baselineMs == null || currentMs == null) {
+    return envelope.baselineUpdatedAt !== currentUpdatedAt;
+  }
+  return baselineMs !== currentMs;
 }
 
 export function buildFormDraftEnvelope<T>(

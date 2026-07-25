@@ -52,6 +52,7 @@ export type UseProtectedFormResult = {
   clearPersistedDraft: () => void;
 };
 
+/** Fallback equality when callers omit `isDraftEqual`. JSON serialization is sufficient for plain draft objects but can mis-compare key order or throw on circular refs. */
 function defaultDraftEqual<T>(a: T, b: T): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
 }
@@ -132,12 +133,7 @@ export function useProtectedForm<T>({
       if (isDraftEqual(draft, baseline)) clearPersistedDraft();
       return;
     }
-    const wrote = writeFormDraft(
-      storageKey,
-      buildFormDraftEnvelope(draft, serverUpdatedAt ?? null),
-      storage,
-    );
-    setHasStoredDraft(wrote);
+    writeFormDraft(storageKey, buildFormDraftEnvelope(draft, serverUpdatedAt ?? null), storage);
   }, [active, baseline, clearPersistedDraft, dirty, draft, isDraftEqual, serverUpdatedAt, storage, storageKey]);
 
   const saveStatus = deriveProtectedFormSaveStatus({
