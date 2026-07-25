@@ -3853,6 +3853,18 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export const DiceTheme = z.enum([
+  'nocturne',
+  'obsidian_gold',
+  'arcane_amethyst',
+  'dragon_ruby',
+  'celestial_pearl',
+  'cyberpunk_neon',
+  'eldritch_void',
+  'mahogany_wood',
+]);
+export type DiceTheme = z.infer<typeof DiceTheme>;
+
 export const User = z.object({
   id: Id,
   username: z.string().min(2).max(60).regex(/^[a-z0-9_.-]+$/i, 'letters, numbers, _ . - only'),
@@ -3863,6 +3875,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Per-player custom 3D dice texture/skin theme. */
+  diceTheme: DiceTheme.default('nocturne'),
   ...timestamps,
 }); // passwordHash never leaves the server
 export type User = z.infer<typeof User>;
@@ -3885,6 +3899,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  diceTheme: DiceTheme.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
 

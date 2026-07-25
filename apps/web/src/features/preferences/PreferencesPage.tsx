@@ -37,6 +37,9 @@ import {
   normalizeHex,
   paletteToCssVars,
 } from '../../app/accentPalette';
+import type { DiceTheme } from '@campfire/schema';
+import { DICE_THEMES, getDiceThemeSpec } from '../dice/diceThemes';
+import { useRollResultToast } from '../../components/RollResultToastContext';
 import { Card, ErrorNote } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
 import { NotificationPreferencesCard } from './NotificationPreferencesCard';
@@ -125,8 +128,41 @@ export default function PreferencesPage() {
   const profileDirty =
     displayName !== (user.displayName ?? '') ||
     textSize !== (user.textSize ?? 'default');
-  const accentDirty = accentColor !== appliedAccent;
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
+
+  const { beginRollAnimation, showRoll } = useRollResultToast();
+  const [selectedDiceTheme, setSelectedDiceTheme] = useState<DiceTheme>(
+    () => me?.user?.diceTheme ?? 'nocturne',
+  );
+
+  useEffect(() => {
+    if (me?.user?.diceTheme) {
+      setSelectedDiceTheme(me.user.diceTheme);
+    }
+  }, [me?.user?.diceTheme]);
+
+  async function selectDiceTheme(theme: DiceTheme) {
+    setSelectedDiceTheme(theme);
+    try {
+      await api.patch<User>(`${API}/me/preferences`, { diceTheme: theme });
+      await refresh();
+    } catch {
+      // Ignore background save error
+    }
+  }
+
+  function runTestRoll() {
+    beginRollAnimation('1d20');
+    window.setTimeout(() => {
+      const val = 1 + Math.floor(Math.random() * 20);
+      showRoll({
+        expr: '1d20',
+        total: val,
+        rolls: [{ sides: 20, value: val }],
+        label: t('dice.testRollLabel', 'Test Roll (1d20)'),
+      });
+    }, 700);
+  }
 
   function pickSwatch(hex: string) {
     // "Nocturne" swatch matches the server default — picking it clears the override (null),
@@ -382,6 +418,73 @@ export default function PreferencesPage() {
           {accentSaved && <span className="text-muted" style={{ fontSize: 12 }}>{t('preferences.accentApplied')}</span>}
         </div>
 
+        <p className="text-muted reading-supporting" style={{ fontSize: 12.5, marginTop: 4 }}>
+          {t('preferences.accentNote')}
+        </p>
+      </Card>
+
+      <Card className="flex flex-col gap-4">
+        <div>
+          <h2 className="text-lg font-bold" style={{ fontSize: 16 }}>
+            {t('dice.preferencesTitle', 'Dice Skin & Texture')}
+          </h2>
+          <p className="text-muted reading-supporting" style={{ fontSize: 13, marginTop: 2 }}>
+            {t('dice.preferencesDesc', 'Choose your personal 3D polyhedral material texture for table roll overlays.')}
+          </p>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {DICE_THEMES.map((theme) => {
+            const isSelected = selectedDiceTheme === theme.id;
+            return (
+              <button
+                key={theme.id}
+                type="button"
+                className="flex flex-col gap-2 p-3 rounded-lg text-left transition-all"
+                style={{
+                  background: 'var(--color-bg-elevated)',
+                  border: isSelected ? '2px solid var(--color-accent)' : '1px solid var(--color-border)',
+                  boxShadow: isSelected ? '0 0 12px rgba(99, 102, 241, 0.25)' : 'none',
+                  cursor: 'pointer',
+                }}
+                onClick={() => selectDiceTheme(theme.id)}
+              >
+                <div
+                  className="w-full h-12 rounded flex items-center justify-center font-bold text-sm"
+                  style={{
+                    background: theme.previewBg,
+                    border: theme.previewBorder,
+                    color: theme.previewText,
+                    boxShadow: theme.previewGlow ?? 'none',
+                  }}
+                >
+                  20
+                </div>
+                <span className="font-semibold text-xs text-foreground truncate">
+                  {t(theme.nameKey, theme.id)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center justify-between pt-2">
+          <span className="text-xs text-muted">
+            {t('dice.activeThemeLabel', 'Active skin: {{name}}', {
+              name: t(getDiceThemeSpec(selectedDiceTheme).nameKey, selectedDiceTheme),
+            })}
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary text-xs flex items-center gap-1.5"
+            onClick={runTestRoll}
+          >
+            🎲 {t('dice.testRollButton', 'Test Roll (1d20)')}
+          </button>
+        </div>
+      </Card>
+
+      <Card className="flex flex-col gap-4">
         <fieldset className="reading-preference-fieldset" aria-describedby="reading-mode-help">
           <legend>{t('preferences.readingMode')}</legend>
           <div className="reading-options">

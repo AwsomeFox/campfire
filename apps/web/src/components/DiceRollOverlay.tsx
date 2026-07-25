@@ -4,6 +4,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { DiceTheme } from '@campfire/schema';
 
 export const DICE_ROLL_MIN_TUMBLE_MS = 650;
 export const DICE_ROLL_SETTLE_MS = 550;
@@ -51,10 +52,12 @@ export function buildOverlayDice(
 export function DiceRollOverlay({
   dice,
   phase,
+  theme = 'nocturne',
   onSettled,
 }: {
   dice: DiceRollOverlayDie[];
   phase: DiceRollOverlayPhase;
+  theme?: DiceTheme | null;
   onSettled: () => void;
 }) {
   const { t } = useTranslation();
@@ -82,41 +85,55 @@ export function DiceRollOverlay({
 
   if (dice.length === 0) return null;
 
+  const activeTheme = theme || 'nocturne';
+
   return (
     <div
       className="cf-dice-roll-overlay"
       data-testid="dice-roll-overlay"
       data-phase={phase}
+      data-dice-theme={activeTheme}
       role="status"
       aria-live="polite"
       aria-label={t('dice.rollOverlayLabel', { count: dice.length })}
+      onClick={phase === 'settling' ? onSettled : undefined}
     >
       <div className="cf-dice-roll-overlay__stage">
-        {dice.map((die, i) => (
-          <div
-            key={i}
-            className={[
-              'cf-dice-roll-overlay__die',
-              `cf-dice-roll-overlay__die--d${die.sides}`,
-              phase === 'settling' && !die.kept ? 'cf-dice-roll-overlay__die--dropped' : '',
-            ].filter(Boolean).join(' ')}
-            data-sides={die.sides}
-          >
+        {dice.map((die, i) => {
+          const val = displayFaces[i];
+          const isCrit = phase === 'settling' && die.sides === 20 && val === 20;
+          const isFumble = phase === 'settling' && die.sides === 20 && val === 1;
+
+          return (
             <div
+              key={i}
               className={[
-                'cf-dice-roll-overlay__inner',
-                phase === 'tumbling' ? 'cf-dice-roll-overlay__inner--tumble' : 'cf-dice-roll-overlay__inner--land',
-              ].join(' ')}
+                'cf-dice-roll-overlay__die',
+                `cf-dice-roll-overlay__die--d${die.sides}`,
+                phase === 'settling' && !die.kept ? 'cf-dice-roll-overlay__die--dropped' : '',
+                isCrit ? 'cf-dice-roll-overlay__die--crit' : '',
+                isFumble ? 'cf-dice-roll-overlay__die--fumble' : '',
+              ].filter(Boolean).join(' ')}
+              data-sides={die.sides}
             >
-              <span className="cf-dice-roll-overlay__value" aria-hidden="true">
-                {displayFaces[i]}
-              </span>
-              <span className="cf-dice-roll-overlay__type" aria-hidden="true">
-                d{die.sides}
-              </span>
+              <div
+                className={[
+                  'cf-dice-roll-overlay__inner',
+                  phase === 'tumbling' ? 'cf-dice-roll-overlay__inner--tumble' : 'cf-dice-roll-overlay__inner--land',
+                ].join(' ')}
+              >
+                <span className="cf-dice-roll-overlay__value" aria-hidden="true">
+                  {val}
+                </span>
+                <span className="cf-dice-roll-overlay__type" aria-hidden="true">
+                  d{die.sides}
+                </span>
+                {isCrit && <div className="cf-dice-roll-overlay__crit-ring" />}
+                {isFumble && <div className="cf-dice-roll-overlay__fumble-void" />}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
