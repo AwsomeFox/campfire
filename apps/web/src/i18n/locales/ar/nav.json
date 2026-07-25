@@ -69,6 +69,8 @@
     "archivedDmHint": " Set its status back to active in Settings to make changes.",
     "offlineBanner": "Offline — showing last-known data.",
     "offlineSyncedAt": " Last synced {{when}}.",
+    "readSyncStale": "Connection slow — showing last-known data.",
+    "readSyncOffline": "Can't reach the server — showing last-known data.",
     "signedInAs": "Signed in as {{name}}",
     "viewingAs": " · viewing as {{role}}",
     "passwordModalTitle": "Change password",
