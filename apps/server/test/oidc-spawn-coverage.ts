@@ -55,7 +55,7 @@ function scriptPathFromUrl(url: string): string | undefined {
   return undefined;
 }
 
-/** Merge coverage from the most recently written child blob (if any). */
+/** Merge coverage from one pending child blob (if any). */
 export async function mergeLatestChildV8Coverage(): Promise<void> {
   if (!coverageDir || !fs.existsSync(coverageDir)) return;
 
