@@ -13,7 +13,13 @@
  * (system / 12h / 24h). Date-only values keep their calendar-day semantics.
  */
 import { useSyncExternalStore } from 'react';
-import { DEFAULT_TIME_FORMAT, appliesTime, withTimeFormat, type TimeFormat } from '@campfire/schema';
+import {
+  DEFAULT_TIME_FORMAT,
+  appliesTime,
+  resolveHour12,
+  withTimeFormat,
+  type TimeFormat,
+} from '@campfire/schema';
 import { localeController } from '../i18n/locale';
 
 const subscribeToLocale = (onStoreChange: () => void) => localeController.subscribe(onStoreChange);
@@ -93,6 +99,14 @@ function toDate(value: Date | string | number): Date {
   return new Date(value);
 }
 
+/** When Intl options are omitted, locale defaults still render a clock — pin hour cycle only. */
+function hourCycleOnlyOptions(
+  timeFormat: TimeFormat,
+): Intl.DateTimeFormatOptions | undefined {
+  const hour12 = resolveHour12(timeFormat);
+  return hour12 === undefined ? undefined : { hour12 };
+}
+
 /** Format a date (day granularity). Options default to the browser's locale-native short date. */
 export function createLocaleFormatters(
   getLocale: () => string | undefined,
@@ -104,18 +118,22 @@ export function createLocaleFormatters(
     },
 
     formatDateTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-      const base = options ?? {};
-      const resolved = options === undefined || appliesTime(base)
-        ? withTimeFormat(base, getTimeFormat())
-        : base;
+      const resolved =
+        options === undefined
+          ? hourCycleOnlyOptions(getTimeFormat())
+          : appliesTime(options)
+            ? withTimeFormat(options, getTimeFormat())
+            : options;
       return toDate(value).toLocaleString(getLocale(), resolved);
     },
 
     formatTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-      const base = options ?? {};
-      const resolved = options === undefined || appliesTime(base)
-        ? withTimeFormat(base, getTimeFormat())
-        : base;
+      const resolved =
+        options === undefined
+          ? hourCycleOnlyOptions(getTimeFormat())
+          : appliesTime(options)
+            ? withTimeFormat(options, getTimeFormat())
+            : options;
       return toDate(value).toLocaleTimeString(getLocale(), resolved);
     },
 

@@ -59,6 +59,21 @@ test.describe('time format preference (issue #634)', () => {
     ).toMatch(/12:00\s*AM/);
   });
 
+  test('omitted options still honor the active time format preference', () => {
+    const instant = new Date('2026-01-15T17:00:00.000Z'); // noon Eastern (EST)
+    const format = createLocaleFormatters(() => LOCALE);
+
+    setTimeFormatPreference('12h');
+    expect(format.formatDateTime(instant)).toMatch(/12:00:00\s*PM/);
+    expect(format.formatTime(instant)).toMatch(/12:00:00\s*PM/);
+
+    setTimeFormatPreference('24h');
+    expect(format.formatDateTime(instant)).toMatch(/12:00:00/);
+    expect(format.formatDateTime(instant)).not.toMatch(/PM|AM/);
+    expect(format.formatTime(instant)).toMatch(/12:00:00/);
+    expect(format.formatTime(instant)).not.toMatch(/PM|AM/);
+  });
+
   test('noon and midnight render in 24-hour mode without AM/PM', () => {
     setTimeFormatPreference('24h');
     const format = createLocaleFormatters(() => LOCALE);
