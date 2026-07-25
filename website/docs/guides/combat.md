@@ -144,6 +144,16 @@ Opening the attachment URL, requesting its thumbnail or a byte range, and stale 
 caches cannot bypass the mask. (An AI DM can reveal regions too, via the
 `reveal_map_region` MCP tool.)
 
+### Cast to the table TV (`/screen`)
+
+Open **Player Display** (`/c/:campaignId/screen`) on a TV, projector, or second monitor
+for a **secret-free, table-facing broadcast**. The DM cockpit can switch scenes
+(initiative, party, quests, map, intermission, blackout); the **Map** scene mirrors the
+**player-safe VTT projection** from the run-session page — revealed fog only, visible
+tokens at server-provided positions, and shared AoE templates filtered to what players
+are allowed to see. Combat updates stream over the same SSE channel as the run-session
+screen.
+
 ## End the encounter — HP writes back
 
 Click **End**. The encounter closes and each **character combatant's current HP is

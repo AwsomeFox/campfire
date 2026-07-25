@@ -44,12 +44,13 @@ test.describe('DM navigation', () => {
 test.describe('player navigation', () => {
   test.use({ storageState: stateFor('player') });
 
-  test('player has no DM tools and reads as Player', async ({ page }) => {
+  test('player has no DM tools, sees your data, and reads as Player', async ({ page }) => {
     const { campaignId } = seed();
     await openCampaign(page);
     await expect(page.getByRole('link', { name: 'Members' })).toHaveCount(0);
     await expect(page.locator(`a[href="/c/${campaignId}/trash"]`)).toHaveCount(0);
     await expect(page.getByRole('link', { name: /My proposals/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Your data', exact: true })).toBeVisible();
     await expect(page.getByText('Player', { exact: true }).first()).toBeVisible();
   });
 });
@@ -57,12 +58,13 @@ test.describe('player navigation', () => {
 test.describe('viewer navigation', () => {
   test.use({ storageState: stateFor('viewer') });
 
-  test('viewer has no DM tools and reads as Viewer', async ({ page }) => {
+  test('viewer has no DM tools, sees your data, and reads as Viewer', async ({ page }) => {
     const { campaignId } = seed();
     await openCampaign(page);
     await expect(page.getByRole('link', { name: 'Members' })).toHaveCount(0);
     await expect(page.locator(`a[href="/c/${campaignId}/trash"]`)).toHaveCount(0);
     await expect(page.getByRole('link', { name: /My proposals/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Your data', exact: true })).toBeVisible();
     await expect(page.getByText('Viewer', { exact: true }).first()).toBeVisible();
   });
 });

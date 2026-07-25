@@ -29,6 +29,8 @@ export type AiDmStreamEvent =
       name: string;
       isError: boolean;
       proposed: boolean;
+      /** True when the call is queued for DM confirmation (#474). */
+      pendingConfirmation?: boolean;
       /** Encounter the tool mutated, when derived server-side from validated args/results (#825). */
       encounterId?: number;
       /**
@@ -86,7 +88,17 @@ export type AiDmStreamEvent =
   // #557 — a DM granted or revoked a narrowly-scoped secret-read approval (the seat may now
   // read ONE secret entity under the DM principal). Thin signal: clients refetch GET
   // /ai-dm/session for the authoritative approval list.
-  | { type: 'secret-approval'; campaignId: number; action: 'granted' | 'revoked'; tool: string; entityId: number; at: string };
+  | { type: 'secret-approval'; campaignId: number; action: 'granted' | 'revoked'; tool: string; entityId: number; at: string }
+  // #474 — a confirm-policy tool was queued or resolved by a DM. Thin signal: clients refetch
+  // GET /ai-dm/tool-confirmations for the authoritative pending list.
+  | {
+      type: 'tool-confirmation';
+      campaignId: number;
+      action: 'queued' | 'approved' | 'rejected';
+      confirmationId: string;
+      tool: string;
+      at: string;
+    };
 
 /**
  * In-process pub/sub for the AI DM driver's narration stream (#312), modelled on the

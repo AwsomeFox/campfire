@@ -53,6 +53,7 @@ export function ActionUsePanel({
   spec,
   combatants,
   isDm,
+  applyDisabled = false,
   onDismiss,
   onApplied,
   onError,
@@ -65,6 +66,7 @@ export function ActionUsePanel({
   spec: ActionSpec;
   combatants: Combatant[];
   isDm: boolean;
+  applyDisabled?: boolean;
   onDismiss: () => void;
   onApplied: (undoToken: ActionUndoToken, policy: ActionApplyPolicy) => void;
   onError: (msg: string | null) => void;
@@ -209,7 +211,7 @@ export function ActionUsePanel({
             {(preview.canApply || (isDm && !preview.applied)) && (
               <Btn
                 data-testid="action-use-apply"
-                disabled={commit.isPending || preview.applied}
+                disabled={applyDisabled || commit.isPending || preview.applied}
                 onClick={() => commit.mutate(preview.resolution)}
               >
                 {commit.isPending ? 'Applying…' : 'Apply'}
