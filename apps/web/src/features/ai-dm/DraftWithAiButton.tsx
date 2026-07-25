@@ -378,7 +378,7 @@ function DraftResultCard({
         <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={onClose}>
           Close
         </Btn>
-        <Link to={`/c/${campaignId}/proposals`} className="cf-btn !min-h-0 !py-1.5 text-xs no-underline">
+        <Link to={`/c/${campaignId}/proposals`} className="cf-btn cf-density-compact text-xs no-underline">
           Review in proposals →
         </Link>
       </div>

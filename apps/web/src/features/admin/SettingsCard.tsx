@@ -134,7 +134,7 @@ function SettingToggleRow({
         aria-checked={checked}
         onClick={onToggle}
         disabled={disabled}
-        className="cf-btn !min-h-0 !py-1.5 text-xs"
+        className="cf-btn cf-density-compact text-xs"
       >
         {checked ? 'On' : 'Off'}
       </button>
