@@ -1607,8 +1607,8 @@ function AddRecapForm({
       setFieldErrors({});
       onCreated(created);
       return true;
-    } catch (err) {
-      setError(translateApiError(err, t, { fallbackKey: 'sessions.errors.publishRecap' }));
+    } catch {
+      setError(t('sessions.errors.publishRecap'));
       document.getElementById(fieldIds.title.controlId)?.focus();
       return false;
     } finally {
