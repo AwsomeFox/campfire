@@ -28,7 +28,7 @@ export class CampaignCommentsController {
     description:
       'Requires campaign membership AND visibility of the anchored entity: a thread on a hidden quest/npc/faction or an unexplored location 404s for a non-DM, exactly as the entity itself does (issue #230). Returns a paginated page of root threads (issue #609) — each root includes a bounded reply preview so flat row paging cannot orphan replies. Oldest-first; continue with `cursor` from a previous `nextCursor`.',
   })
-  @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'The entity type the thread is anchored to.' })
+  @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign', 'encounter', 'faction'], description: 'The entity type the thread is anchored to.' })
   @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
   @ApiQuery({
     name: 'limit',
@@ -60,7 +60,7 @@ export class CampaignCommentsController {
     description:
       'Requires campaign membership AND visibility of the anchored entity (issue #230). Returns oldest-first replies for one root thread; continue with `cursor` from a previous `nextCursor` or the inline `replyNextCursor` on a thread preview (issue #609). `entityType` + `entityId` must match the root anchor.',
   })
-  @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'The entity type the thread is anchored to.' })
+  @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign', 'encounter', 'faction'], description: 'The entity type the thread is anchored to.' })
   @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
   @ApiQuery({
     name: 'limit',

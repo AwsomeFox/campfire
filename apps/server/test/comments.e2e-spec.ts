@@ -1035,4 +1035,66 @@ describe('comments / threaded discussion (e2e)', () => {
       expect(bodies).toContain('Extra reply 4');
     });
   });
+
+  describe('issue #439 — every supported anchor type', () => {
+    it('REST create + list works for quest, npc, location, character, encounter, faction, and campaign', async () => {
+      const server = ctx.app.getHttpServer();
+      const quest = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Anchor quest', hidden: false });
+      const npc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/npcs`)
+        .set(dm)
+        .send({ name: 'Anchor NPC', hidden: false });
+      const location = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Anchor location' });
+      await request(server)
+        .post(`/api/v1/locations/${location.body.id}/discover`)
+        .set(dm)
+        .send({ status: 'explored' });
+      const character = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/characters`)
+        .set(authorPlayer)
+        .send({ name: 'Anchor PC' });
+      const faction = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/factions`)
+        .set(dm)
+        .send({ name: 'Anchor faction', hidden: false });
+      const encounter = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Anchor encounter', hidden: false });
+
+      const anchors = [
+        { entityType: 'quest', entityId: quest.body.id, body: 'Quest discussion' },
+        { entityType: 'npc', entityId: npc.body.id, body: 'NPC discussion' },
+        { entityType: 'location', entityId: location.body.id, body: 'Location discussion' },
+        { entityType: 'character', entityId: character.body.id, body: 'Character discussion' },
+        { entityType: 'faction', entityId: faction.body.id, body: 'Faction discussion' },
+        { entityType: 'encounter', entityId: encounter.body.id, body: 'Encounter discussion' },
+        { entityType: 'campaign', entityId: campaignId, body: 'Campaign discussion' },
+        { entityType: 'session', entityId: sessionId, body: 'Session discussion parity' },
+      ] as const;
+
+      for (const anchor of anchors) {
+        const created = await request(server)
+          .post(`/api/v1/campaigns/${campaignId}/comments`)
+          .set(authorPlayer)
+          .send(anchor);
+        expect(created.status).toBe(201);
+        expect(created.body.entityType).toBe(anchor.entityType);
+        expect(created.body.entityId).toBe(anchor.entityId);
+
+        const listed = await request(server)
+          .get(`/api/v1/campaigns/${campaignId}/comments`)
+          .query({ entityType: anchor.entityType, entityId: anchor.entityId })
+          .set(authorPlayer);
+        expect(listed.status).toBe(200);
+        expect(discussionBodies(listed.body)).toContain(anchor.body);
+      }
+    });
+  });
 });
