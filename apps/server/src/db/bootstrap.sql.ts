@@ -733,6 +733,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_snap INTEGER NOT NULL DEFAULT 0,
   fog TEXT,
   grid_type TEXT NOT NULL DEFAULT 'square',
+  hex_orientation TEXT NOT NULL DEFAULT 'pointy',
   aoe TEXT,
   grid_offset_x REAL NOT NULL DEFAULT 0,
   grid_offset_y REAL NOT NULL DEFAULT 0,
