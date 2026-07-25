@@ -16,6 +16,12 @@ test.describe('parseDiceSidesFromExpr (issue #1352)', () => {
     expect(expandDiceSidesFromExpr('2d20kh1+3')).toEqual([20, 20]);
     expect(expandDiceSidesFromExpr('+5')).toEqual([]);
   });
+
+  test('implicit die counts match server-accepted grammar', () => {
+    expect(expandDiceSidesFromExpr('d20')).toEqual([20]);
+    expect(expandDiceSidesFromExpr('d6+2')).toEqual([6]);
+    expect(expandDiceSidesFromExpr('2d6+d8')).toEqual([6, 6, 8]);
+  });
 });
 
 test.describe('buildOverlayDice (issue #1352)', () => {

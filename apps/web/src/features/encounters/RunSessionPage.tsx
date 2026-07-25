@@ -870,7 +870,7 @@ export default function RunSessionPage() {
     setPendingApply(amount > 0 ? { amount, label } : null);
   }, []);
 
-  useRollApplyDamageBridge(onApplyDamageRolled);
+  useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
 
   const onUseActionRequested = useCallback(
     (combatantId: number, actorName: string, actionIndex: number, actionName: string, spec: ActionSpec) => {

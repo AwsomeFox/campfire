@@ -51,7 +51,6 @@ const RollResultToastContext = createContext<RollResultToastContextValue>(noop);
 export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const [roll, setRoll] = useState<DiceRoll | null>(null);
   const [rollApplyHandler, setRollApplyHandler] = useState<ApplyDamageHandler | null>(null);
-  const [applyHandler, setApplyHandler] = useState<ApplyDamageHandler | null>(null);
   const applyHandlerRef = useRef<ApplyDamageHandler | null>(null);
   const [overlay, setOverlay] = useState<OverlayState | null>(null);
 
@@ -75,23 +74,25 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     const sides = expandDiceSidesFromExpr(expr);
     if (sides.length === 0) return;
     tumbleStartedAtRef.current = Date.now();
-    setOverlay({ sides, phase: 'tumbling' });
+    const next: OverlayState = { sides, phase: 'tumbling' };
+    overlayRef.current = next;
+    setOverlay(next);
   }, [clearSettleTimer]);
 
   const cancelRollAnimation = useCallback(() => {
     clearSettleTimer();
     pendingShowRef.current = null;
+    overlayRef.current = null;
     setOverlay(null);
   }, [clearSettleTimer]);
 
   const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
-    setRollApplyHandler((prev: ApplyDamageHandler | null) => options?.onApply ?? applyHandlerRef.current ?? prev);
+    setRollApplyHandler(options?.onApply ?? null);
   }, []);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
-    const handler = options?.onApply ?? applyHandlerRef.current;
-    if (handler) setRollApplyHandler(handler);
+    if (options?.onApply) setRollApplyHandler(options.onApply);
 
     if (prefersReducedMotion() || !overlayRef.current) {
       applyToast(r, options);
@@ -120,6 +121,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const handleOverlaySettled = useCallback(() => {
     const pending = pendingShowRef.current;
+    overlayRef.current = null;
     setOverlay(null);
     pendingShowRef.current = null;
     if (pending) applyToast(pending.roll, pending.options);
@@ -127,7 +129,6 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const setApplyDamageHandler = useCallback((handler: ApplyDamageHandler | null) => {
     applyHandlerRef.current = handler;
-    setApplyHandler(handler);
   }, []);
 
   const dismiss = useCallback(() => {
@@ -149,7 +150,8 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const canApply =
     roll != null &&
-    (activeApplyHandler != null || looksLikeDamageRoll(roll));
+    activeApplyHandler != null &&
+    (rollApplyHandler != null || looksLikeDamageRoll(roll));
 
   const overlayDice = overlay
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
