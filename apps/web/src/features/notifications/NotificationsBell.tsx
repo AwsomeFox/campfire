@@ -396,6 +396,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         item.id === message.id && !item.readAt ? { ...item, readAt: message.readAt } : item
       )) ?? previous);
     } else if (message.type === 'unread') {
+      allReadAtRef.current = null;
       readAtByIdRef.current.delete(message.id);
       setItems((previous) => previous?.map((item) => (
         item.id === message.id ? { ...item, readAt: null } : item
@@ -407,6 +408,7 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
         idSet.has(item.id) && !item.readAt ? { ...item, readAt: message.readAt } : item
       )) ?? previous);
     } else if (message.type === 'unread-bulk') {
+      allReadAtRef.current = null;
       const idSet = new Set(message.ids);
       idSet.forEach((id) => readAtByIdRef.current.delete(id));
       setItems((previous) => previous?.map((item) => (
@@ -761,7 +763,11 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     };
   }, []);
 
-  const dialogRef = useDialog<HTMLDivElement>({ onClose: closePanel, inertBackground: true });
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: closePanel,
+    inertBackground: true,
+    disabled: confirmDialog !== null,
+  });
 
   const campaignIdFromRoute = useMemo(() => {
     const match = /^\/c\/(\d+)/.exec(location.pathname);
@@ -1072,6 +1078,14 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             Notification Center &rarr;
           </button>
         </div>
+        {pendingUndo && (
+          <UndoSnackbar
+            message={pendingUndo.message}
+            onUndo={handleUndo}
+            onExpire={() => setPendingUndo(null)}
+            successMessage="Restored notifications as unread."
+          />
+        )}
       </div>
       {confirmDialog && (
         <ConfirmDialog
@@ -1082,16 +1096,6 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
           onConfirm={() => void handleConfirmExecute()}
           onCancel={() => setConfirmDialog(null)}
         />
-      )}
-      {pendingUndo && (
-        <div onClick={(event) => event.stopPropagation()}>
-          <UndoSnackbar
-            message={pendingUndo.message}
-            onUndo={handleUndo}
-            onExpire={() => setPendingUndo(null)}
-            successMessage="Restored notifications as unread."
-          />
-        </div>
       )}
     </div>
   );
