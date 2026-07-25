@@ -59,7 +59,10 @@ test.describe('encounter dice — apply rolled damage', () => {
       const enc = await (await dm.post(`/api/v1/campaigns/${campaignId}/encounters`, { data: { name: 'Apply-bar drill', hidden: false } })).json();
       encounterId = enc.id;
       await dm.post(`/api/v1/encounters/${enc.id}/combatants`, { data: { kind: 'monster', name: 'Straw Dummy', hpMax: 30 } });
-      await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      const rollInitRes = await dm.post(`/api/v1/encounters/${enc.id}/roll-initiative`);
+      expect(rollInitRes.ok(), `roll initiative: ${await rollInitRes.text()}`).toBeTruthy();
+      const startRes = await dm.post(`/api/v1/encounters/${enc.id}/start`);
+      expect(startRes.ok(), `start encounter: ${await startRes.text()}`).toBeTruthy();
 
       await page.goto(`/c/${campaignId}/encounters/${enc.id}`);
       // The player's own card auto-expands, so the attack is visible without expanding.

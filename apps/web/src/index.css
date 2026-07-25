@@ -1351,7 +1351,7 @@ a:hover .cf-name-reveal {
   right: 16px;
   bottom: calc(
     var(--cf-tabbar-content-height, 0px) + env(safe-area-inset-bottom, 0px) +
-      var(--cf-snackbar-gap, 12px)
+      var(--cf-keyboard-inset, 0px) + var(--cf-snackbar-gap, 12px)
   );
   z-index: var(--cf-layer-snackbar);
   display: flex;

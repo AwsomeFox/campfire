@@ -30,7 +30,6 @@ export function RollResultToast({
   const fumble = flavor === 'fumble';
   const totalColor = crit ? 'var(--cf-crit, #fbbf24)' : fumble ? 'var(--color-danger, #f87171)' : 'var(--color-accent)';
   const totalClass = d20TotalClasses(flavor, true);
-  const assertive = crit || fumble;
 
   useEffect(() => {
     timerRef.current = setTimeout(onDismiss, AUTO_DISMISS_MS);
@@ -56,13 +55,7 @@ export function RollResultToast({
   }
 
   return (
-    <div
-      role="status"
-      aria-live={assertive ? 'assertive' : 'polite'}
-      aria-atomic="true"
-      data-testid="roll-result-toast"
-      className="cf-roll-result-toast"
-    >
+    <div data-testid="roll-result-toast" className="cf-roll-result-toast">
       <div className="cf-roll-result-toast__body">
         <p
           className="cf-roll-result-toast__label cf-name-reveal"

@@ -8,6 +8,13 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import type { DiceRoll } from '@campfire/schema';
 import { looksLikeDamageRoll } from '../lib/looksLikeDamageRoll';
 import { RollResultToast } from './RollResultToast';
+import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
+
+/** Publish tab-bar / keyboard chrome vars while the toast is visible (issue #1315). */
+function RollResultToastChrome() {
+  useUndoSnackbarChrome();
+  return null;
+}
 
 type ApplyDamageHandler = (amount: number, label: string) => void;
 
@@ -50,7 +57,10 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     <RollResultToastContext.Provider value={{ showRoll, setApplyDamageHandler }}>
       {children}
       {roll && (
-        <RollResultToast roll={roll} onDismiss={dismiss} onApply={canApply ? handleApply : undefined} />
+        <>
+          <RollResultToastChrome />
+          <RollResultToast roll={roll} onDismiss={dismiss} onApply={canApply ? handleApply : undefined} />
+        </>
       )}
     </RollResultToastContext.Provider>
   );

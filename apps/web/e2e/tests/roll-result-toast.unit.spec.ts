@@ -51,6 +51,7 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
     expect(toastSource).toMatch(/cf-roll-result-toast/);
     expect(cssSource).toMatch(/\.cf-roll-result-toast/);
     expect(cssSource).toMatch(/var\(--cf-layer-snackbar\)/);
+    expect(cssSource).toMatch(/var\(--cf-keyboard-inset/);
   });
 
   test('toast reuses shared roll flourish classes', () => {
@@ -61,6 +62,7 @@ test.describe('RollResultToast component contract (issue #1315)', () => {
   test('provider wires apply shortcut through looksLikeDamageRoll', () => {
     expect(contextSource).toMatch(/looksLikeDamageRoll/);
     expect(contextSource).toMatch(/useRollApplyDamageBridge/);
+    expect(contextSource).toMatch(/useUndoSnackbarChrome/);
   });
 
   test('useRoller and SharedDiceLog call showRoll after a local roll', () => {
