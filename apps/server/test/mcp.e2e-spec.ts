@@ -1872,11 +1872,11 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const list = parseResult(await client.callTool({ name: 'list_factions', arguments: { campaignId } })) as { id: number }[];
     expect(list.some((f) => f.id === created.id)).toBe(true);
 
-    // Delete unlinks the member NPC (not deletes it).
+    // Soft-delete trashes the faction; the NPC keeps its factionId for restore.
     const del = await client.callTool({ name: 'delete_faction', arguments: { factionId: created.id } });
     expect(del.isError).toBeFalsy();
     const npcAfter = parseResult(await client.callTool({ name: 'get_npc', arguments: { npcId: npc.id } })) as { factionId: number | null };
-    expect(npcAfter.factionId).toBeNull();
+    expect(npcAfter.factionId).toBe(created.id);
   });
 
   it('#159: a second identical upsert_location updates in place instead of duplicating', async () => {

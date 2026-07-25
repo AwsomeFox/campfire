@@ -456,7 +456,7 @@ export class EncountersService {
     const rows = tx
       .select()
       .from(encounters)
-      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running')))
+      .where(and(eq(encounters.campaignId, campaignId), eq(encounters.status, 'running'), notDeleted(encounters.deletedAt)))
       .all();
     return rows[0];
   }
