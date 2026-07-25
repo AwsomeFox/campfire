@@ -687,6 +687,7 @@ export default function RunSessionPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
+  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -711,7 +712,9 @@ export default function RunSessionPage() {
   });
   const difficulty = difficultyQuery.data ?? null;
 
-  // Persistent combat log (issue #61) — refreshes on every mutation / SSE update.
+  // Persistent combat log (issue #61) — 5s backstop poll; the server still
+  // supports ?afterId for future incremental log fetching, but the UI currently
+  // refreshes the full history on invalidation.
   const eventsQuery = useQuery({
     queryKey: queryKeys.encounterEvents(eid),
     queryFn: () => api.get<EncounterEvent[]>(`${API}/encounters/${eid}/events`),
@@ -730,7 +733,6 @@ export default function RunSessionPage() {
     refetchInterval: 10_000,
   });
   const characters = useMemo(() => charactersQuery.data ?? [], [charactersQuery.data]);
-  const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
   const sheetsInteractive = inlineCharacterSheetsInteractive(eventStatus);
   const sheetsStatusLabel = inlineCharacterSheetsStatusLabel(
     eventStatus,

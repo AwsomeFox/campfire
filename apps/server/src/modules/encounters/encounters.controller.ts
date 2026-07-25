@@ -331,13 +331,25 @@ export class EncountersController {
   @ApiOperation({
     summary: "List an encounter's persistent combat log",
     description:
-      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Hidden encounters 404 for non-DMs; hidden NPC identities are masked via current role-aware projection (issue #869). Details record only HP deltas / name-free outcomes, never a monster’s exact HP totals.',
+      'Requires campaign membership. Chronological per-encounter event history (damage/heal, conditions, deaths, turns) that survives reload — issue #61. Hidden encounters 404 for non-DMs; hidden NPC identities are masked via current role-aware projection (issue #869). Details record only HP deltas / name-free outcomes, never a monster’s exact HP totals. `?afterId=<id>` returns only events with an id greater than the cursor, enabling incremental log fetches.',
   })
+  @ApiQuery({ name: 'afterId', required: false, type: Number, description: 'Only return events with id greater than this cursor (for incremental updates).' })
   @ApiResponse({ status: 200, description: 'Encounter events in chronological order.' })
   @ApiResponse({ status: 404, description: 'Encounter not found, or hidden from this viewer.' })
-  async events(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+  async events(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: RequestUser,
+    @Query('afterId') afterId?: string,
+  ) {
     const row = await this.encounters.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
+    if (afterId !== undefined) {
+      const parsed = Number(afterId);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        throw new BadRequestException('afterId must be a non-negative integer');
+      }
+      return this.encounters.listEvents(id, role, parsed);
+    }
     return this.encounters.listEvents(id, role);
   }
 
