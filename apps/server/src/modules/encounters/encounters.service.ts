@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -37,6 +37,7 @@ import {
   resetTurnStateForStart,
   retreatEncounterTurn,
   sortCombatants,
+  sortEncountersForList,
   tickConditionInstancesAtTurnEnd,
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
@@ -120,6 +121,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridUnit: row.gridUnit,
     gridSnap: row.gridSnap,
     gridType: (row.gridType as GridType) ?? 'square',
+    hexOrientation: (row.hexOrientation as HexOrientation) ?? 'pointy',
     // Grid calibration (issue #417). Null-coalesce so rows written before the columns
     // existed (or a legacy NULL) read as the pre-#417 defaults — top-left square grid.
     gridOffsetX: row.gridOffsetX ?? 0,
@@ -867,7 +869,12 @@ export class EncountersService {
    * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
    * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
    */
-  async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
+  async listForCampaign(
+    campaignId: number,
+    status?: EncounterStatus,
+    viewerRole?: Role,
+    q?: string,
+  ): Promise<Encounter[]> {
     const conditions = [
       eq(encounters.campaignId, campaignId),
       notDeleted(encounters.deletedAt),
@@ -882,27 +889,18 @@ export class EncountersService {
     let list = rows.map(encounterToDomain);
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
-    const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
-    // One authoritative live fight (issue #744): when listing 'running' encounters, pin
-    // the campaign's activeEncounterId to the front so consumers (Dashboard / Player
-    // Display / AI Table) that take the first result follow the authoritative fight rather
-    // than an arbitrary DB ordering. With the Start/Reopen transactional guard there is at
-    // most one running encounter anyway; this is the deterministic tiebreaker for any
-    // legacy drift and a no-op otherwise.
-    if (status === 'running' && visible.length > 1) {
-      const activeId = await this.findLiveEncounter(campaignId);
-      if (activeId) {
-        list = visible.sort((a, b) => {
-          if (a.id === activeId.id) return -1;
-          if (b.id === activeId.id) return 1;
-          return 0;
-        });
-      } else {
-        list = visible;
-      }
-    } else {
-      list = visible;
+    list = viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    const folded = q !== undefined ? foldForSearch(q.trim()) : '';
+    if (folded) {
+      list = list.filter((enc) => foldedIncludes(enc.name, folded));
     }
+    const runningCount = list.filter((enc) => enc.status === 'running').length;
+    let pinActiveId: number | null = null;
+    if (runningCount > 1) {
+      const active = await this.findLiveEncounter(campaignId);
+      pinActiveId = active?.id ?? null;
+    }
+    list = sortEncountersForList(list, { pinActiveId });
     return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
   }
 
@@ -1229,6 +1227,10 @@ export class EncountersService {
     if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
+    }
+    if (input.hexOrientation !== undefined && input.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) {
+      set.hexOrientation = input.hexOrientation;
+      changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${input.hexOrientation}`);
     }
     // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
     // nullable (null restores square cells); the others carry non-null defaults. Same

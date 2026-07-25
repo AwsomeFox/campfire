@@ -53,7 +53,7 @@ import {
   hitTestFogRegion,
   moveFogRegion,
 } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
@@ -109,13 +109,23 @@ import {
   computeContainedRect,
   DEFAULT_GRID_OPACITY,
   layerPxToMapPercent,
-  mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
   resolveGridCalibration,
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import {
+  gridCellLabel,
+  gridCellLabelPlural,
+  hexAoeCirclePolygons,
+  hexPolygons,
+  hexKeyboardStepPx,
+  mapPercentGridDistance,
+  snapFogRectToHexGrid,
+  snapMapPercentToHex,
+  tokenFootprintDiameterPx,
+} from './hexGeometry';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
@@ -170,6 +180,7 @@ type EncounterGridPatch = Partial<
     | 'gridUnit'
     | 'gridSnap'
     | 'gridType'
+    | 'hexOrientation'
     // Grid calibration (issue #417) — origin offset, independent cell height, rotation, opacity.
     | 'gridOffsetX'
     | 'gridOffsetY'
@@ -1649,6 +1660,7 @@ export default function RunSessionPage() {
           pings={pings}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
+          ruleSystem={ruleSystem}
         />
       )}
 
@@ -1706,6 +1718,9 @@ export default function RunSessionPage() {
                   gridScale: encounter.gridScale,
                   mapRect: aoeHitLayout.mapRect,
                   cellPx: aoeHitLayout.cellPx,
+                  gridType: encounter.gridType ?? 'square',
+                  hexOrientation: encounter.hexOrientation ?? 'pointy',
+                  calibration: resolveGridCalibration(encounter),
                 }
               : null
           }
@@ -2034,42 +2049,6 @@ function newAoeId(): string {
 }
 
 /**
- * Pointy-top hexagon centres + vertices tiling the surface (issue #238). Returned as SVG
- * `points` strings in pixel space so the overlay can draw them directly. `cellPx` is treated as
- * the hex width; a cap keeps a pathologically fine grid from emitting tens of thousands of nodes.
- */
-function hexPolygons(surfaceW: number, surfaceH: number, cellPx: number): string[] {
-  if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
-  const w = cellPx;
-  const s = w / Math.sqrt(3); // hex side / circumradius for a pointy-top hex of width w
-  const rowH = 1.5 * s;
-  const cols = Math.ceil(surfaceW / w) + 1;
-  const rows = Math.ceil(surfaceH / rowH) + 1;
-  if (cols * rows > 3000) return []; // too fine to draw as discrete polygons — skip the overlay
-  const out: string[] = [];
-  for (let r = 0; r <= rows; r++) {
-    const offset = r % 2 ? w / 2 : 0;
-    for (let c = 0; c <= cols; c++) {
-      const cx = c * w + offset;
-      const cy = r * rowH;
-      out.push(
-        [
-          [cx, cy - s],
-          [cx + w / 2, cy - s / 2],
-          [cx + w / 2, cy + s / 2],
-          [cx, cy + s],
-          [cx - w / 2, cy + s / 2],
-          [cx - w / 2, cy - s / 2],
-        ]
-          .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`)
-          .join(' '),
-      );
-    }
-  }
-  return out;
-}
-
-/**
  * Pixel-space SVG `points` for one AoE template (issue #238). Circle callers use radius instead;
  * this builds the cone (5e quadrant-style triangle, far edge ≈ length) and line (a rectangle of
  * one grid-cell width) polygons. `ox/oy` is the origin in px, `lengthPx` the reach, `angleRad`
@@ -2148,6 +2127,7 @@ function BattleMap({
   pings,
   onError,
   onAoeHitLayoutChange,
+  ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -2175,6 +2155,8 @@ function BattleMap({
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
+  /** Active campaign rule system — selects grid distance rules (issue #467). */
+  ruleSystem: string | null;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -2320,6 +2302,8 @@ function BattleMap({
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
+  const hexOrientation = encounter.hexOrientation ?? 'pointy';
+  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -2596,9 +2580,18 @@ function BattleMap({
           setRuler({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
           announce('Measurement started at map center. Arrow keys adjust the endpoint. Enter to finish, Escape to cancel.');
         } else if (ruler && canMeasure && mapRect) {
-          const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+          const cells = mapPercentGridDistance(
+            ruler.start,
+            ruler.end,
+            mapRect,
+            cellPx,
+            gridType,
+            calibration,
+            hexOrientation,
+            gridDistanceRule,
+          );
           const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} squares · ${feet} ${gridUnit}`);
+          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
         }
         return;
       }
@@ -2628,13 +2621,12 @@ function BattleMap({
         } else {
           const rect = fogRectFromCorners(revealCorners.start, revealCorners.end);
           if (rect.w >= 1 && rect.h >= 1) {
-            const next = tool === 'erase' ? eraseFogRegion(fog, rect) : appendFogReveal(fog, rect);
-            commitFogEdit(next);
-            announce(
-              tool === 'erase'
-                ? `Erased ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`
-                : `Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`,
-            );
+            if (tool === 'erase') {
+              commitFogEdit(eraseFogRegion(fog, rect));
+              announce(`Erased ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
+            } else {
+              commitFogReveal(revealCorners.start, revealCorners.end);
+            }
           }
           setRevealCorners(null);
         }
@@ -2661,10 +2653,25 @@ function BattleMap({
     }
   }
 
-  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
+  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417/#467). */
   function snapPoint(pt: MapPoint): MapPoint {
     if (!mapRect) return pt;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(pt, calibration, mapRect, hexOrientation, encounter.gridSnap);
+    }
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
+  }
+
+  /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
+  function commitFogReveal(start: MapPoint, end: MapPoint): void {
+    let rect = fogRectFromCorners(start, end);
+    if (rect.w >= 1 && rect.h >= 1) {
+      if (gridOn && gridType === 'hex' && calibration && mapRect) {
+        rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
+      }
+      commitFogEdit(appendFogReveal(fog, rect));
+      announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
+    }
   }
 
   /** Keyboard nudge step in layer pixels: one calibrated cell, or 1% of map width if the grid is off. */
@@ -2676,15 +2683,30 @@ function BattleMap({
 
   /** Nudge a map-percent point by one grid cell (Shift = five) and snap to the nearest cell centre. */
   function nudgeMapPoint(pt: MapPoint, e: ReactKeyboardEvent): MapPoint {
-    const step = keyboardStepPx();
     const mult = e.shiftKey ? 5 : 1;
-    const px = mapPercentToLayerPx(pt, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const baseRect = mapRect ?? { left: 0, top: 0, width: 1, height: 1 };
+    const px = mapPercentToLayerPx(pt, baseRect);
+
+    if (gridOn && gridType === 'hex' && calibrationPx && cellPx > 0) {
+      const hexStep = hexKeyboardStepPx(e.key, cellPx, hexOrientation);
+      if (hexStep) {
+        const nextPx = { x: px.x + hexStep.x * mult, y: px.y + hexStep.y * mult };
+        const raw = layerPxToMapPercent(nextPx, baseRect);
+        if (!mapRect) return raw;
+        return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+      }
+    }
+
+    const step = keyboardStepPx();
     const nextPx = {
       x: px.x + (e.key === 'ArrowRight' ? step.x * mult : e.key === 'ArrowLeft' ? -step.x * mult : 0),
       y: px.y + (e.key === 'ArrowDown' ? step.y * mult : e.key === 'ArrowUp' ? -step.y * mult : 0),
     };
-    const raw = layerPxToMapPercent(nextPx, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const raw = layerPxToMapPercent(nextPx, baseRect);
     if (!mapRect) return raw;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+    }
     return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
   }
 
@@ -2939,10 +2961,13 @@ function BattleMap({
       return;
     }
     if (gesture.kind === 'fog') {
-      const rect = fogRectFromCorners(gesture.start, finalPoint ?? gesture.end);
-      if (rect.w >= 1 && rect.h >= 1) {
-        const next = gesture.mode === 'erase' ? eraseFogRegion(fog, rect) : appendFogReveal(fog, rect);
-        commitFogEdit(next);
+      if (gesture.mode === 'erase') {
+        const rect = fogRectFromCorners(gesture.start, finalPoint ?? gesture.end);
+        if (rect.w >= 1 && rect.h >= 1) {
+          commitFogEdit(eraseFogRegion(fog, rect));
+        }
+      } else {
+        commitFogReveal(gesture.start, finalPoint ?? gesture.end);
       }
       setRevealCorners(null);
       return;
@@ -3076,7 +3101,16 @@ function BattleMap({
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
-    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+    const cells = mapPercentGridDistance(
+      ruler.start,
+      ruler.end,
+      mapRect,
+      cellPx,
+      gridType,
+      calibration,
+      hexOrientation,
+      gridDistanceRule,
+    );
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -3105,10 +3139,10 @@ function BattleMap({
   // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
     () =>
-      gridOn && gridType === 'hex' && mapRect
-        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+      gridOn && gridType === 'hex' && mapRect && calibrationPx
+        ? hexPolygons(mapRect.width, mapRect.height, calibrationPx, hexOrientation)
         : [],
-    [gridOn, gridType, mapRect, cellPx],
+    [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
   function changeTool(next: MapTool) {
@@ -3476,6 +3510,19 @@ function BattleMap({
                   <option value="hex">hex</option>
                 </select>
               </label>
+              {gridOn && gridType === 'hex' && (
+                <label className="flex items-center gap-1 text-muted" title="Pointy-top or flat-top hex orientation">
+                  orientation
+                  <select
+                    value={hexOrientation}
+                    onChange={(e) => onSetGrid({ hexOrientation: e.target.value as typeof hexOrientation })}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="pointy">pointy-top</option>
+                    <option value="flat">flat-top</option>
+                  </select>
+                </label>
+              )}
 
               {/* Grid calibration (issue #417) — human-readable alignment controls with a
                   keyboard/numeric alternative to the draggable anchors, plus help + reset. */}
@@ -3855,11 +3902,14 @@ function BattleMap({
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
                   const movable = tool === 'move' && canMoveToken(c);
                   const isCharacter = c.kind === 'character';
-                  const sizePx = tokenDiameterPx({
-                    tokenSize: c.tokenSize,
-                    cellPx,
-                    gridType,
-                  });
+                  const sizePx =
+                    gridOn && gridType === 'hex' && cellPx > 0
+                      ? Math.round(tokenFootprintDiameterPx(c.tokenSize, cellPx, hexOrientation))
+                      : tokenDiameterPx({
+                          tokenSize: c.tokenSize,
+                          cellPx,
+                          gridType,
+                        });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
@@ -3970,6 +4020,17 @@ function BattleMap({
                       const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
+                        if (gridType === 'hex' && calibrationPx) {
+                          const radiusCells = t.sizeFt / gridScale!;
+                          const hexPolys = hexAoeCirclePolygons({ x: ox, y: oy }, radiusCells, calibrationPx, hexOrientation);
+                          return (
+                            <g key={t.id}>
+                              {hexPolys.map((pts, i) => (
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                              ))}
+                            </g>
+                          );
+                        }
                         return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
@@ -4107,7 +4168,7 @@ function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
                       </div>
                     )}
                   </>
