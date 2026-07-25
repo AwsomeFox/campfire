@@ -10,7 +10,17 @@ type ListDetailLinkProps = Omit<ComponentProps<typeof Link>, 'state'> & {
   to: string;
 };
 
-export function ListDetailLink({ to, onClick, ...rest }: ListDetailLinkProps) {
+export function ListDetailLink({
+  to,
+  onClick,
+  target,
+  reloadDocument,
+  replace,
+  relative,
+  preventScrollReset,
+  download,
+  ...rest
+}: ListDetailLinkProps) {
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -18,9 +28,29 @@ export function ListDetailLink({ to, onClick, ...rest }: ListDetailLinkProps) {
     onClick?.(event);
     if (event.defaultPrevented) return;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+    if (target && target !== '_self') return;
+    if (reloadDocument) return;
+    if (download != null) return;
     event.preventDefault();
-    navigate(to, { state: { listOrigin: captureListOrigin(location) } });
+    navigate(to, {
+      state: { listOrigin: captureListOrigin(location) },
+      replace,
+      relative,
+      preventScrollReset,
+    });
   }
 
-  return <Link to={to} onClick={handleClick} {...rest} />;
+  return (
+    <Link
+      to={to}
+      onClick={handleClick}
+      target={target}
+      reloadDocument={reloadDocument}
+      replace={replace}
+      relative={relative}
+      preventScrollReset={preventScrollReset}
+      download={download}
+      {...rest}
+    />
+  );
 }
