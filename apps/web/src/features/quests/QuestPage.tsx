@@ -30,6 +30,7 @@ import { Markdown } from '../../components/Markdown';
 import { NotFoundState } from '../../components/NotFoundState';
 import { NotesRail } from '../../components/NotesRail';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { EncounterBacklinksCard } from '../../components/EncounterBacklinksCard';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
@@ -792,6 +793,8 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               {t('quests.addDmNotes')}
             </button>
           )}
+
+          <EncounterBacklinksCard campaignId={campaignId} encounters={quest.linkedEncounters ?? []} />
 
           <EntityDiscussion campaignId={campaignId} entityType="quest" entityId={quest.id} />
         </div>
