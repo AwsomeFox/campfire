@@ -72,15 +72,16 @@ export function SettingsCard({ settings, onChange }: { settings: ServerSettings 
       <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Server settings</h2>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       <p className="text-[11px] text-secondary">
-        Local username/password sign-in is on by default. Optional OIDC/SSO is configured on{' '}
+        This toggle controls whether non-admin users can sign in with username/password. Optional OIDC/SSO is
+        configured on{' '}
         <Link to="/admin/auth" className="underline hover:text-white">
           Auth
         </Link>
-        . Turning off local sign-in for non-admins makes OIDC the only path for those users — run a successful{' '}
+        . When off, non-admins must use OIDC/SSO — ensure OIDC is enabled and run a successful{' '}
         <Link to="/admin/auth" className="underline hover:text-white">
           Test login (end-to-end)
         </Link>{' '}
-        first to avoid lockouts.
+        before turning this off to avoid lockouts.
       </p>
       <SettingToggleRow
         title="Allow username/password sign-in for non-admin users"
