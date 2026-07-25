@@ -1022,8 +1022,22 @@ CREATE TABLE IF NOT EXISTS combatants (
   -- effects with duration/save timing as a JSON ActiveEffect[] blob. Null = defaults.
   turn_state TEXT,
   active_effects TEXT,
-  condition_instances TEXT
+  condition_instances TEXT,
+  -- Issue #425: inline homebrew statblock JSON for manual monsters.
+  statblock_json TEXT
 );
+
+-- Campaign-scoped homebrew monster library (issue #425).
+CREATE TABLE IF NOT EXISTS campaign_library_monsters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  statblock_json TEXT NOT NULL,
+  source_rule_entry_id INTEGER REFERENCES rule_entries(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_library_monsters_campaign ON campaign_library_monsters(campaign_id);
 
 -- Persistent per-encounter combat log (issue #61). New table, so a plain
 -- CREATE TABLE IF NOT EXISTS in bootstrap (no migrate fn needed). See db/schema.ts

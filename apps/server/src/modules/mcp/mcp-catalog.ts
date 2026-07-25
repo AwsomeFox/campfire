@@ -192,6 +192,11 @@ export const MCP_TOOL_NAMES = [
   'reopen_encounter',
   'dismiss_encounter_aftermath',
   'delete_encounter',
+  'list_campaign_library_monsters',
+  'create_campaign_library_monster',
+  'update_campaign_library_monster',
+  'delete_campaign_library_monster',
+  'clone_campaign_library_monster',
   'ai_dm_narrate',
   'draft_content',
   // write — inventory/timeline/comments/scheduling (issue #257)
