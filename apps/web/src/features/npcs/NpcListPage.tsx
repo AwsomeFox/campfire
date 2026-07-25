@@ -197,15 +197,23 @@ export default function NpcListPage() {
                 className="cf-card cf-card-hover cf-density-compact space-y-2"
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">
-                    <GameIcon
-                      slug={npc.iconSlug}
-                      size={22}
-                      title={npc.name}
-                      className="text-[var(--color-accent)]"
-                      fallback={initials(npc.name)}
+                  {npc.portraitUrl ? (
+                    <img
+                      src={npc.portraitUrl}
+                      alt=""
+                      className="h-9 w-9 shrink-0 rounded-full object-cover border border-[var(--color-divider)]"
                     />
-                  </span>
+                  ) : (
+                    <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">
+                      <GameIcon
+                        slug={npc.iconSlug}
+                        size={22}
+                        title={npc.name}
+                        className="text-[var(--color-accent)]"
+                        fallback={initials(npc.name)}
+                      />
+                    </span>
+                  )}
                   <div className="flex-1 min-w-0">
                     <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={npc.name} aria-label={`NPC: ${npc.name}`}>{npc.name}</p>
                     {npc.role && <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={npc.role}>{npc.role}</p>}

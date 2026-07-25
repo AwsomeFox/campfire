@@ -82,6 +82,7 @@ import {
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
@@ -299,9 +300,17 @@ export default function CharacterPage() {
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
 
       <div className="flex items-center gap-3 flex-wrap">
-        <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
-          {initials(character.name)}
-        </div>
+        {character.portraitUrl ? (
+          <img
+            src={character.portraitUrl}
+            alt=""
+            className="h-14 w-14 shrink-0 rounded-full object-cover border border-[var(--color-neutral-700)]"
+          />
+        ) : (
+          <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
+            {initials(character.name)}
+          </div>
+        )}
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-2xl font-extrabold text-white leading-tight break-words">{character.name}</h1>
@@ -612,6 +621,7 @@ export default function CharacterPage() {
         </div>
       </div>
 
+      <EntityDiscussion campaignId={cid} entityType="character" entityId={character.id} />
       {isOwner && <NotesRail campaignId={cid} entityType="character" entityId={character.id} />}
 
       {pendingUndo && (

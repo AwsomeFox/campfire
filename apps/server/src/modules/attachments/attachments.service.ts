@@ -21,7 +21,7 @@ import type {
   StorageStats,
 } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { attachments, auditLog, campaigns, characters, encounters } from '../../db/schema';
+import { attachments, auditLog, campaigns, characters, encounters, npcs } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { AuditService } from '../audit/audit.service';
 import { FsDeletionService, type FsDeletionOutcome } from './fs-deletion.service';
@@ -899,11 +899,11 @@ export class AttachmentsService implements OnApplicationBootstrap {
    *  - encounter.mapAttachmentId for every encounter whose battle map was this
    *    attachment (issue #695 — one attachment may be the map for several
    *    encounters, so all of them are cleared in the same statement).
-   *  - character.portraitUrl, if it points at this attachment's file route
-   *    (`.../attachments/<id>/file` — portraitUrl is a resolved URL string, not a
-   *    numeric FK, so it's matched by suffix rather than equality).
+   *  - character.portraitUrl and npc.portraitUrl, if either points at this attachment's
+   *    file route (`.../attachments/<id>/file` — portraitUrl is a resolved URL string,
+   *    not a numeric FK, so it's matched by suffix rather than equality).
    * Without this, deleting an attachment still in use left the campaign map / encounter
-   * map / character portrait pointing at a now-404ing file.
+   * map / character or NPC portrait pointing at a now-404ing file.
    */
   async remove(id: number, user: RequestUser, role: Role): Promise<FsDeletionOutcome> {
     const existing = await this.getRowOrThrow(id);
@@ -935,6 +935,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
       tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, id)).run();
       tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, id)).run();
       tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
+      tx.update(npcs).set({ portraitUrl: null }).where(like(npcs.portraitUrl, portraitSuffix)).run();
     });
 
     await this.fsDeletion.auditMetadataComplete(auditCtx, existing.kind);
@@ -1076,8 +1077,8 @@ export class AttachmentsService implements OnApplicationBootstrap {
    * counts are reported but nothing is deleted. Server-admin action.
    *
    * Row deletion also clears dangling references (campaign map / encounter map /
-   * character portrait), mirroring remove(), so cleanup never leaves a pointer to a
-   * row it just dropped.
+   * character portrait / NPC portrait), mirroring remove(), so cleanup never leaves a
+   * pointer to a row it just dropped.
    *
    * FAIL CLOSED (issue #722): before classifying anything as an orphan, the upload
    * root is verified to be present and readable. A missing/unreadable volume is an
@@ -1116,6 +1117,7 @@ export class AttachmentsService implements OnApplicationBootstrap {
           tx.update(campaigns).set({ mapAttachmentId: null }).where(eq(campaigns.mapAttachmentId, r.id)).run();
           tx.update(encounters).set({ mapAttachmentId: null }).where(eq(encounters.mapAttachmentId, r.id)).run();
           tx.update(characters).set({ portraitUrl: null }).where(like(characters.portraitUrl, portraitSuffix)).run();
+          tx.update(npcs).set({ portraitUrl: null }).where(like(npcs.portraitUrl, portraitSuffix)).run();
         });
         this.etagCache.delete(this.filePath(r));
         rowsDeleted += 1;

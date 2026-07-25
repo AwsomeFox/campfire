@@ -28,6 +28,7 @@ import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 import { CatchUpPanel } from './CatchUpPanel';
 import { GameIcon } from '../../components/GameIcon';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 
 // Slow fallback poll for summary entities that do not have campaign events yet.
 // Scheduling is event-driven (#790) and does not add a second polling path.
@@ -304,6 +305,7 @@ export default function DashboardPage() {
           <HandoutsCard campaignId={id} />
           <DiceWidget campaignId={id} />
           <NotesQuickRail campaignId={id} openInboxCount={summary.openInboxCount} />
+          <EntityDiscussion campaignId={id} entityType="campaign" entityId={id} />
         </div>
       </div>
 

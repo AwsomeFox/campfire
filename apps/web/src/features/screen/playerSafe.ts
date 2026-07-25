@@ -165,12 +165,13 @@ export interface SafeNpc {
   name: string;
   role: string;
   disposition: string;
+  portraitUrl: string | null;
 }
 
 export function safeNpcs(npcs: Npc[]): SafeNpc[] {
   return npcs
     .filter((n) => !n.hidden)
-    .map((n) => ({ id: n.id, name: n.name, role: n.role, disposition: n.disposition }));
+    .map((n) => ({ id: n.id, name: n.name, role: n.role, disposition: n.disposition, portraitUrl: n.portraitUrl }));
 }
 
 // ---------------------------------------------------------------------------

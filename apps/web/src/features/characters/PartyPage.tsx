@@ -293,11 +293,19 @@ function CharacterCard({
       <div className="relative">
         <ListDetailLink to={`/c/${campaignId}/characters/${character.id}`} className="block space-y-2.5">
           <div className="flex items-center gap-2.5">
-            <div
-              className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
-            >
-              {initials(character.name)}
-            </div>
+            {character.portraitUrl ? (
+              <img
+                src={character.portraitUrl}
+                alt=""
+                className={`h-10 w-10 shrink-0 rounded-full object-cover border ${tone.border}`}
+              />
+            ) : (
+              <div
+                className={`h-10 w-10 shrink-0 rounded-full ${tone.bg} border ${tone.border} ${tone.text} text-[13px] font-semibold flex items-center justify-center`}
+              >
+                {initials(character.name)}
+              </div>
+            )}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
                 <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
