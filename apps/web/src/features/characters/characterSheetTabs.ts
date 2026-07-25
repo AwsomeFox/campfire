@@ -66,6 +66,7 @@ const FOCUS_ALIASES: Record<string, CharacterSheetFocus> = {
   skill: 'skills',
   slots: 'slots',
   'spell-slots': 'slots',
+  // "spells" maps to spell *slots* (pips), not a spell list — there is no list section yet.
   spells: 'slots',
   xp: 'xp',
   experience: 'xp',
@@ -122,6 +123,23 @@ export function tabForFocus(focus: CharacterSheetFocus): CharacterSheetTab {
 export function characterSheetSectionId(focus: CharacterSheetFocus): string {
   return `character-section-${focus}`;
 }
+
+/** Accessible names for deep-link focus targets (issue #646). */
+export const CHARACTER_SHEET_SECTION_LABEL: Record<CharacterSheetFocus, string> = {
+  abilities: 'Ability scores',
+  hp: 'Hit points and defenses',
+  conditions: 'Conditions',
+  actions: 'Actions',
+  saves: 'Saving throws',
+  skills: 'Skills',
+  slots: 'Spell slots',
+  xp: 'Experience',
+  background: 'Background',
+  inventory: 'Inventory',
+  portrait: 'Portrait',
+  player: 'Player',
+  'dm-secret': 'DM secret notes',
+};
 
 export function isPlayFocus(focus: CharacterSheetFocus): boolean {
   return PLAY_FOCUS.has(focus);

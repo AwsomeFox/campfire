@@ -26,7 +26,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveEncounterState } from '../../lib/useLiveEncounterState';
 import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import { CharacterSheetNav } from './CharacterSheetNav';
-import { characterSheetSectionId } from './characterSheetTabs';
+import { CHARACTER_SHEET_SECTION_LABEL, characterSheetSectionId } from './characterSheetTabs';
 import { useCharacterSheetTab } from './useCharacterSheetTab';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
@@ -146,6 +146,7 @@ export default function CharacterPage() {
   const { tab, setTab, tabRefs, onTabKeyDown } = useCharacterSheetTab({
     campaignId: cid,
     characterId: id,
+    canViewDmSecret: isDm,
   });
 
   const load = useCallback(async () => {
@@ -345,7 +346,11 @@ export default function CharacterPage() {
         className={tab === 'play' ? 'space-y-4 min-w-0' : 'hidden'}
         hidden={tab !== 'play'}
       >
-        <section id={characterSheetSectionId('abilities')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('abilities')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.abilities}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-3">
             <p className="card-kicker">Ability scores</p>
             <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(84px, 1fr))' }}>
@@ -365,7 +370,11 @@ export default function CharacterPage() {
           </Card>
         </section>
 
-        <section id={characterSheetSectionId('hp')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('hp')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.hp}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-3">
             <div className="flex items-baseline gap-2.5 flex-wrap justify-between">
               <p className="card-kicker mb-0">Hit points & Defenses</p>
@@ -414,26 +423,46 @@ export default function CharacterPage() {
           </Card>
         </section>
 
-        <section id={characterSheetSectionId('conditions')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('conditions')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.conditions}
+          className="scroll-mt-24"
+        >
           <Card className="space-y-2.5">
             <p className="card-kicker mb-0">Conditions</p>
             <ConditionsRow character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} />
           </Card>
         </section>
 
-        <section id={characterSheetSectionId('actions')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('actions')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.actions}
+          className="scroll-mt-24"
+        >
           <ActionsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} roller={roller} />
         </section>
 
-        <section id={characterSheetSectionId('saves')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('saves')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.saves}
+          className="scroll-mt-24"
+        >
           <SavingThrowsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
         </section>
 
-        <section id={characterSheetSectionId('skills')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('skills')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.skills}
+          className="scroll-mt-24"
+        >
           <SkillsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} adapter={adapter} roller={roller} />
         </section>
 
-        <section id={characterSheetSectionId('slots')} className="scroll-mt-24">
+        <section
+          id={characterSheetSectionId('slots')}
+          aria-label={CHARACTER_SHEET_SECTION_LABEL.slots}
+          className="scroll-mt-24"
+        >
           <SpellSlotsCard character={character} canEdit={canEdit} onChange={load} onError={setActionError} />
         </section>
       </div>
@@ -448,11 +477,19 @@ export default function CharacterPage() {
         hidden={tab !== 'build'}
       >
         <div className="space-y-4 min-w-0">
-          <section id={characterSheetSectionId('xp')} className="scroll-mt-24">
+          <section
+            id={characterSheetSectionId('xp')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.xp}
+            className="scroll-mt-24"
+          >
             <XpCard character={character} adapter={adapter} canEdit={canEdit} onChange={load} onError={setActionError} />
           </section>
 
-          <section id={characterSheetSectionId('background')} className="scroll-mt-24">
+          <section
+            id={characterSheetSectionId('background')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.background}
+            className="scroll-mt-24"
+          >
             <Card className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="card-kicker mb-0">Background</p>
@@ -471,7 +508,11 @@ export default function CharacterPage() {
             </Card>
           </section>
 
-          <section id={characterSheetSectionId('inventory')} className="scroll-mt-24">
+          <section
+            id={characterSheetSectionId('inventory')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.inventory}
+            className="scroll-mt-24"
+          >
             <Card className="space-y-2">
               <div className="flex items-baseline gap-2.5">
                 <p className="card-kicker mb-0">Inventory</p>
@@ -482,14 +523,22 @@ export default function CharacterPage() {
           </section>
 
           {isDm && (
-            <section id={characterSheetSectionId('dm-secret')} className="scroll-mt-24">
+            <section
+              id={characterSheetSectionId('dm-secret')}
+              aria-label={CHARACTER_SHEET_SECTION_LABEL['dm-secret']}
+              className="scroll-mt-24"
+            >
               <DmSecretCard character={character} onChange={load} onError={setActionError} />
             </section>
           )}
         </div>
 
         <div className="space-y-4 min-w-0">
-          <section id={characterSheetSectionId('portrait')} className="scroll-mt-24">
+          <section
+            id={characterSheetSectionId('portrait')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.portrait}
+            className="scroll-mt-24"
+          >
             <Card className="items-center text-center py-6 space-y-1.5">
               {canEdit ? (
                 <ImageUpload
@@ -515,7 +564,11 @@ export default function CharacterPage() {
               {canEdit && <span className="text-[length:var(--type-label)] text-slate-500">Click or drop to change</span>}
             </Card>
           </section>
-          <section id={characterSheetSectionId('player')} className="scroll-mt-24">
+          <section
+            id={characterSheetSectionId('player')}
+            aria-label={CHARACTER_SHEET_SECTION_LABEL.player}
+            className="scroll-mt-24"
+          >
             <Card className="space-y-2">
               <p className="card-kicker mb-0">Player</p>
               <div className="space-y-1.5 text-[13px]">

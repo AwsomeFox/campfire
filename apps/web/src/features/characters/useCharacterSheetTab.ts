@@ -20,15 +20,23 @@ import {
 type UseCharacterSheetTabOptions = {
   campaignId: number;
   characterId: number;
+  /** When false, `?focus=dm-secret` is ignored (section is DM-only). */
+  canViewDmSecret?: boolean;
 };
 
-export function useCharacterSheetTab({ campaignId, characterId }: UseCharacterSheetTabOptions) {
+export function useCharacterSheetTab({
+  campaignId,
+  characterId,
+  canViewDmSecret = false,
+}: UseCharacterSheetTabOptions) {
   const [searchParams, setSearchParams] = useSearchParams();
   const announce = useAnnounce();
   const storageKey = characterSheetTabStorageKey(campaignId, characterId);
 
   const urlTab = parseCharacterSheetTabParam(searchParams.get('tab'));
-  const urlFocus = parseCharacterSheetFocusParam(searchParams.get('focus'));
+  const parsedFocus = parseCharacterSheetFocusParam(searchParams.get('focus'));
+  const urlFocus =
+    parsedFocus === 'dm-secret' && !canViewDmSecret ? null : parsedFocus;
   const persistedTab = readPersistedCharacterSheetTab(storageKey);
 
   const tab = resolveCharacterSheetTab({
@@ -85,7 +93,16 @@ export function useCharacterSheetTab({ campaignId, characterId }: UseCharacterSh
       const el = document.getElementById(sectionId);
       if (!el) return;
       el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
-      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+      if (!el.hasAttribute('tabindex')) {
+        el.setAttribute('tabindex', '-1');
+        el.addEventListener(
+          'blur',
+          () => {
+            el.removeAttribute('tabindex');
+          },
+          { once: true },
+        );
+      }
       el.focus({ preventScroll: true });
     }, 0);
     return () => window.clearTimeout(timer);

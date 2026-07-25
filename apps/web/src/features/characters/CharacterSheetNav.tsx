@@ -32,7 +32,7 @@ export function CharacterSheetNav({
             <button
               key={t}
               ref={(el) => {
-                if (tabRefs.current) tabRefs.current[t] = el;
+                tabRefs.current[t] = el;
               }}
               type="button"
               role="tab"
