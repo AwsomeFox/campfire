@@ -192,7 +192,7 @@ function AiMapModal({
       <div
         id={id}
         ref={dialogRef}
-        className="cf-card w-full max-w-2xl p-5 space-y-3.5 max-h-[90vh] overflow-y-auto"
+        className="cf-card cf-density-default w-full max-w-2xl space-y-3.5 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

@@ -531,7 +531,7 @@ export class ActionResolverService {
     const round = encounter.round;
     const undoTargets: ActionUndoToken['targets'] = [];
     let concentrationBefore: string | null = null;
-    const logs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note'; target?: string; targetId?: number; detail: string }> = [];
+    const logs: Array<{ type: 'damage' | 'heal' | 'condition' | 'death' | 'effect' | 'note' | 'resource_changed'; target?: string; targetId?: number; detail: string }> = [];
 
     this.db.transaction((tx) => {
       // Log a single structured 'note' for the action use, attributed to the actor.

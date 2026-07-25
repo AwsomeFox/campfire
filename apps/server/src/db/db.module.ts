@@ -2486,9 +2486,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
-  { name: '0085_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
-  { name: '0086_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
-  { name: '0087_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
+  { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
+  { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
+  { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
   { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
 ];
 

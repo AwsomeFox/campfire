@@ -336,7 +336,9 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0069_inventory_qty_idempotency_created_at');
       expect(MIGRATION_NAMES).toContain('0070_notifications_data');
       expect(MIGRATION_NAMES).toContain('0071_ai_dm_usage_history');
-      expect(MIGRATION_NAMES).toContain('0086_campaigns_narration_language');
+      expect(MIGRATION_NAMES).toContain('0085_combatants_condition_instances');
+      expect(MIGRATION_NAMES).toContain('0086_encounters_boss_turn_phase');
+      expect(MIGRATION_NAMES).toContain('0087_campaigns_narration_language');
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ai_dm_usage_history'").get(),
       ).toBeTruthy();
