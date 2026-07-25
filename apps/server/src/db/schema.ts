@@ -294,6 +294,8 @@ export const factions = sqliteTable('factions', {
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   reputation: integer('reputation').notNull().default(0),
   standing: text('standing').notNull().default('neutral'),
+  // Emblem/banner portrait image (issue #1324). Resolved attachment URL; nullable.
+  portraitUrl: text('portrait_url'),
   // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
@@ -314,6 +316,8 @@ export const locations = sqliteTable('locations', {
   mapY: real('map_y'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Landmark/portrait image (issue #1324). Resolved attachment URL; nullable.
+  portraitUrl: text('portrait_url'),
   // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
