@@ -130,6 +130,7 @@ test.describe('RunSessionPage wiring (issue #626)', () => {
     expect(source).toMatch(/combatantsInAoe/);
     expect(source).toMatch(/apply-damage-aoe-/);
     expect(source).toMatch(/onApplyToAll/);
+    expect(source).toMatch(/applyHpDeltaBulk/);
     expect(source).toMatch(/aoeTemplates=/);
     expect(source).toMatch(/onAoeHitLayoutChange/);
     expect(source).toMatch(/aoeHitLayout/);

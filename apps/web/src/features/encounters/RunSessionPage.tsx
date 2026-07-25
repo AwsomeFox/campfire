@@ -974,6 +974,35 @@ export default function RunSessionPage() {
     },
   });
 
+  const applyHpDeltaBulk = useCallback(
+    async (combatantIds: readonly number[], delta: number) => {
+      if (combatantIds.length === 0) return;
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
+      const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      const targets = new Set(combatantIds);
+      if (previous) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
+          ...previous,
+          combatants: previous.combatants.map((c) =>
+            targets.has(c.id) ? applyHpDelta(c, delta, ruleSystem) : c,
+          ),
+        });
+      }
+      try {
+        for (const combatantId of combatantIds) {
+          await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta });
+        }
+        await invalidateEncounter(queryClient, eid);
+      } catch (err) {
+        if (previous) queryClient.setQueryData(queryKeys.encounter(eid), previous);
+        reportError(err);
+        throw err;
+      }
+    },
+    [eid, queryClient, reportError, ruleSystem],
+  );
+
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
     [combatantPatch],
@@ -1546,16 +1575,9 @@ export default function RunSessionPage() {
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            void (async () => {
-              for (const combatantId of combatantIds) {
-                try {
-                  await hpDelta.mutateAsync({ combatantId, delta });
-                } catch {
-                  return;
-                }
-              }
-              setPendingApply(null);
-            })();
+            void applyHpDeltaBulk(combatantIds, delta)
+              .then(() => setPendingApply(null))
+              .catch(() => undefined);
           }}
           onDismiss={() => setPendingApply(null)}
         />
@@ -2173,9 +2195,14 @@ function BattleMap({
   const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
   const canCalibrate = gridOn && !!mapRect; // calibration acts on an enabled grid + loaded map
 
+  const aoeHitLayout = useMemo(
+    () => (mapRect && cellPx > 0 ? { mapRect, cellPx } : null),
+    [mapRect, cellPx],
+  );
   useEffect(() => {
-    onAoeHitLayoutChange?.(mapRect && cellPx > 0 ? { mapRect, cellPx } : null);
-  }, [mapRect, cellPx, onAoeHitLayoutChange]);
+    onAoeHitLayoutChange?.(aoeHitLayout);
+    return () => onAoeHitLayoutChange?.(null);
+  }, [aoeHitLayout, onAoeHitLayoutChange]);
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;

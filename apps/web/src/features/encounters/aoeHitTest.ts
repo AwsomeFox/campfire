@@ -62,7 +62,8 @@ export function aoePolygonVertices(
   const px = -dy;
   const py = dx;
   if (shape === 'cone') {
-    // D&D 5e cone: 90° quadrant; widthPx is unused (line thickness only).
+    // D&D 5e cone: 90° quadrant; widthPx applies to line shape only.
+    void widthPx;
     const fx = ox + dx * lengthPx;
     const fy = oy + dy * lengthPx;
     const half = lengthPx / 2;
