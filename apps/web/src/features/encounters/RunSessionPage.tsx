@@ -5041,7 +5041,7 @@ function CombatLog({ events }: { events: EncounterEvent[] }) {
           </p>
         ) : (
           <ol style={{ display: 'flex', flexDirection: 'column', gap: 4, listStyle: 'none', margin: 0, padding: 0 }}>
-            {chains.map((chain, index) => {
+            {chains.map((chain) => {
               const head = chain.events[0];
               const chainKey = chain.chainId ?? `solo-${head.id}`;
               const expandable = chain.events.length > 1;
