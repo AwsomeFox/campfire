@@ -104,7 +104,7 @@ import {
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
-import { formatRulerReadout, gridCellUnitPlural, measureToolHelp, rulerDistanceFeet } from './rulerReadout';
+import { formatRulerReadout, gridCellUnitPlural, measureToolHelp } from './rulerReadout';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
@@ -2950,8 +2950,7 @@ function BattleMap({
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
     const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
-    const feet = rulerDistanceFeet(cells, gridScale ?? 0);
-    return { cells, feet };
+    return { cells };
   })();
 
   const revealPreview = revealCorners ? rectFromCorners(revealCorners.start, revealCorners.end) : null;
