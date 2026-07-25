@@ -118,7 +118,6 @@ function main() {
     );
   }
 
-  const map = loadCoverageFinal();
   const errors = checkThresholds(map);
   if (errors.length > 0) {
     for (const err of errors) {
