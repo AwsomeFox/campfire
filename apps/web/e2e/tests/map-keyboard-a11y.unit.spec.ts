@@ -20,7 +20,7 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
     expect(src).toMatch(/role="button"/);
     expect(src).toMatch(/tabIndex=\{movable \? 0 : -1\}/);
     expect(src).toMatch(/onKeyDown=\{\(e\) => onTokenKeyDown\(e, c\)\}/);
-    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"/);
+    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
     expect(src).toMatch(/aria-describedby="map-keyboard-help"/);
     expect(src).toMatch(/onTokenKeyDown/);
     expect(src).toMatch(/nudgeMapPoint/);
@@ -32,7 +32,7 @@ test.describe('battle map keyboard accessibility (issue #419)', () => {
     expect(src).toMatch(/role="button"/);
     expect(src).toMatch(/onKeyDown=\{\(e\) => onAoeHandleKeyDown\(e, t\)\}/);
     expect(src).toMatch(/onAoeHandleKeyDown/);
-    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"/);
+    expect(src).toMatch(/aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"/);
   });
 
   test('selected token and AoE panels expose numeric position/size controls', () => {

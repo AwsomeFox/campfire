@@ -2591,7 +2591,7 @@ function BattleMap({
     return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
   }
 
-  function onTokenPointerDown(e: ReactPointerEvent<HTMLSpanElement>, c: Combatant) {
+  function onTokenPointerDown(e: ReactPointerEvent<HTMLDivElement>, c: Combatant) {
     if (!e.isPrimary || activeGestureRef.current || tool !== 'move' || !mapImageUrl || !canMoveToken(c)) return;
     e.currentTarget.focus();
     setSelectedTokenId(c.id);
@@ -2865,8 +2865,12 @@ function BattleMap({
     setAoeDrag({ id: t.id, ...point });
   }
 
-  function onTokenKeyDown(e: ReactKeyboardEvent<HTMLSpanElement>, c: Combatant) {
+  function onTokenKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, c: Combatant) {
     e.stopPropagation();
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
@@ -2886,6 +2890,10 @@ function BattleMap({
 
   function onAoeHandleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>, t: AoeTemplate) {
     e.stopPropagation();
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      return;
+    }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       e.stopPropagation();
@@ -3099,8 +3107,10 @@ function BattleMap({
                   }
                   onBlur={(e) => {
                     const x = clampPercent(Number(e.target.value) || 0);
-                    onMoveToken(selectedToken.id, x, selectedToken.tokenY ?? 0);
-                    setTokenEdit({ x: String(x), y: String(selectedToken.tokenY ?? 0) });
+                    const yRaw = tokenEdit?.y != null && tokenEdit.y !== '' ? Number(tokenEdit.y) : selectedToken.tokenY ?? 0;
+                    const y = clampPercent(Number.isFinite(yRaw) ? yRaw : selectedToken.tokenY ?? 0);
+                    onMoveToken(selectedToken.id, x, y);
+                    setTokenEdit({ x: String(x), y: String(y) });
                   }}
                   style={{ width: 56 }}
                 />
@@ -3119,9 +3129,11 @@ function BattleMap({
                     )
                   }
                   onBlur={(e) => {
+                    const xRaw = tokenEdit?.x != null && tokenEdit.x !== '' ? Number(tokenEdit.x) : selectedToken.tokenX ?? 0;
+                    const x = clampPercent(Number.isFinite(xRaw) ? xRaw : selectedToken.tokenX ?? 0);
                     const y = clampPercent(Number(e.target.value) || 0);
-                    onMoveToken(selectedToken.id, selectedToken.tokenX ?? 0, y);
-                    setTokenEdit({ x: String(selectedToken.tokenX ?? 0), y: String(y) });
+                    onMoveToken(selectedToken.id, x, y);
+                    setTokenEdit({ x: String(x), y: String(y) });
                   }}
                   style={{ width: 56 }}
                 />
@@ -3663,24 +3675,31 @@ function BattleMap({
                   return (
                     <div
                       key={c.id}
-                      className="absolute -translate-x-1/2 -translate-y-1/2"
+                      data-testid={`map-token-${c.id}`}
+                      role="button"
+                      tabIndex={movable ? 0 : -1}
+                      aria-label={tokenLabel}
+                      aria-describedby="map-keyboard-help"
+                      aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
+                      className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                       style={{
                         left: `${left}%`,
                         top: `${top}%`,
+                        // In measure/reveal mode tokens must not eat the surface drag.
+                        pointerEvents: movable ? 'auto' : 'none',
+                        touchAction: 'none',
+                        cursor: movable ? 'grab' : 'default',
                         opacity: isDragging ? 0.85 : 1,
                         zIndex: isDragging ? 10 : 2,
                       }}
-                      role="group"
-                      aria-label={tokenLabel}
+                      onPointerDown={(e) => onTokenPointerDown(e, c)}
+                      onKeyDown={(e) => onTokenKeyDown(e, c)}
+                      onFocus={(e) => {
+                        setSelectedTokenId(c.id);
+                        e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
+                      }}
                     >
                       <span
-                        data-testid={`map-token-${c.id}`}
-                        role="button"
-                        tabIndex={movable ? 0 : -1}
-                        aria-label={tokenLabel}
-                        aria-describedby="map-keyboard-help"
-                        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"
-                        className="cf-map-focusable"
                         style={{
                           display: 'grid',
                           placeItems: 'center',
@@ -3693,16 +3712,7 @@ function BattleMap({
                           background: isCharacter ? 'var(--color-accent)' : 'var(--color-neutral-600)',
                           border: '2px solid rgba(15,23,42,.85)',
                           boxShadow: '0 1px 3px rgba(0,0,0,.5)',
-                          // In measure/reveal mode tokens must not eat the surface drag.
-                          pointerEvents: movable ? 'auto' : 'none',
-                          touchAction: 'none',
-                          cursor: movable ? 'grab' : 'default',
-                        }}
-                        onPointerDown={(e) => onTokenPointerDown(e, c)}
-                        onKeyDown={(e) => onTokenKeyDown(e, c)}
-                        onFocus={(e) => {
-                          setSelectedTokenId(c.id);
-                          e.currentTarget.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest', inline: 'nearest' });
+                          pointerEvents: 'none',
                         }}
                       >
                         {tokenInitials(c.name)}
@@ -3792,7 +3802,7 @@ function BattleMap({
                         tabIndex={tool === 'move' ? 0 : -1}
                         aria-label={aoeLabel}
                         aria-describedby="map-keyboard-help"
-                        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete"
+                        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight Delete Backspace"
                         className="absolute -translate-x-1/2 -translate-y-1/2 cf-map-focusable"
                         style={{
                           left: `${x}%`,
@@ -3958,7 +3968,7 @@ function BattleMap({
           )}
 
           <div id="map-keyboard-help" className="sr-only">
-            Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
+            Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete or Backspace removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
           </div>
           <div
             className="text-muted"
