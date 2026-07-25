@@ -160,7 +160,9 @@ function AiModePopover({
         left: position?.left ?? 0,
         zIndex: 40,
         width: 'min(300px, calc(100vw - 24px))',
+        maxHeight: position?.maxHeight,
         padding: 4,
+        overflow: 'hidden',
         visibility: position ? 'visible' : 'hidden',
       }}
       role="dialog"
@@ -170,7 +172,7 @@ function AiModePopover({
     >
       <div
         className="overflow-y-auto"
-        style={{ maxHeight: position?.maxHeight }}
+        style={{ maxHeight: position?.maxHeight != null ? Math.max(0, position.maxHeight - 8) : undefined }}
         tabIndex={0}
       >
         <AiTransparencyNote />
