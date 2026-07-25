@@ -18,8 +18,9 @@ import { encryptSecret, decryptSecret, secretLast4 } from '../../common/crypto';
 import {
   AI_PROVIDER_BASEURL_NOT_PERMITTED,
   AI_PROVIDER_PROBE_GENERIC_ERROR,
-  evaluateAiProviderBaseUrl,
+  resolveAiProviderBaseUrlPolicy,
 } from '../../common/ai-provider-baseurl';
+import { validateAiProviderOutboundUrl } from '../../common/ai-provider-outbound';
 import { nowIso } from '../../common/time';
 import { auditActor, auditActorRole, type RequestUser } from '../../common/user.types';
 import { AuditService } from '../audit/audit.service';
@@ -265,12 +266,16 @@ export class AiProviderConfigService {
   }
 
   /**
-   * Persist-time SSRF gate (issue #1064). Rejects a `baseUrl` whose host is blocked
-   * by server policy (metadata/link-local always; private/loopback unless opted in;
-   * optional allow/deny lists). Message deliberately omits host-class detail.
+   * Persist-time SSRF gate (issues #1064, #570). Rejects a `baseUrl` whose host is
+   * blocked by server policy and resolves DNS to catch rebinding at config time.
    */
-  private assertBaseUrlPermitted(baseUrl: string | null | undefined): void {
-    const decision = evaluateAiProviderBaseUrl(baseUrl);
+  private async assertBaseUrlPermitted(
+    baseUrl: string | null | undefined,
+    requireDnsResolution = false,
+  ): Promise<void> {
+    const decision = await validateAiProviderOutboundUrl(baseUrl, resolveAiProviderBaseUrlPolicy(), {
+      requireDnsResolution,
+    });
     if (!decision.ok) {
       this.logger.warn(
         `ai-provider baseUrl rejected (host=${decision.hostname || '?'}, class=${decision.hostClass}): ${decision.reason}`,
@@ -288,7 +293,7 @@ export class AiProviderConfigService {
     auditCampaignId?: number,
   ): Promise<void> {
     const ts = nowIso();
-    this.assertBaseUrlPermitted(input.baseUrl);
+    await this.assertBaseUrlPermitted(input.baseUrl);
 
     // apiKey semantics: omitted => keep the stored key; '' => clear it; value => set/rotate.
     let encryptedApiKey = existing?.encryptedApiKey ?? null;
@@ -562,8 +567,8 @@ export class AiProviderConfigService {
   ): Promise<{ model: string; config: AiProviderConfig } | null> {
     const config = await this.resolveEffectiveConfig(campaignId);
     if (!config) return null;
-    // Fail closed on a previously-stored blocked host (issue #1064).
-    this.assertBaseUrlPermitted(config.baseUrl);
+    // Fail closed on a previously-stored blocked host (issues #1064, #570).
+    await this.assertBaseUrlPermitted(config.baseUrl, true);
     const allow = await this.getServerAllowedModels();
     if (allow.length > 0 && !allow.includes(config.model)) {
       throw new BadRequestException(
@@ -606,9 +611,9 @@ export class AiProviderConfigService {
         error: 'No provider is configured for this scope.',
       });
     }
-    // SSRF gate before any outbound request (issue #1064). A blocked host returns the
+    // SSRF gate before any outbound request (issues #1064, #570). A blocked host returns the
     // same generic failure as other probe errors — never host-class / reachability detail.
-    const baseUrlDecision = evaluateAiProviderBaseUrl(config.baseUrl);
+    const baseUrlDecision = await validateAiProviderOutboundUrl(config.baseUrl);
     if (!baseUrlDecision.ok) {
       this.logger.warn(
         `testConnection blocked baseUrl (scope=${scope}, host=${baseUrlDecision.hostname || '?'}, class=${baseUrlDecision.hostClass}): ${baseUrlDecision.reason}`,
@@ -671,7 +676,7 @@ export class AiProviderConfigService {
       : await this.resolveStoredTestCandidate(campaignId);
     const config = resolved.config;
     if (!config) return [];
-    const baseUrlDecision = evaluateAiProviderBaseUrl(config.baseUrl);
+    const baseUrlDecision = await validateAiProviderOutboundUrl(config.baseUrl);
     if (!baseUrlDecision.ok) {
       this.logger.warn(
         `fetchAvailableModels blocked baseUrl (host=${baseUrlDecision.hostname || '?'}, class=${baseUrlDecision.hostClass}): ${baseUrlDecision.reason}`,

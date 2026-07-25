@@ -103,6 +103,7 @@ the server as a blind SSRF proxy on a shared multi-tenant host.
 |---|---|---|
 | `AI_PROVIDER_ALLOW_PRIVATE_HOSTS` | *(unset)* | Set to `1` to allow private/loopback `baseUrl` hosts for **local model servers** (Ollama, llama.cpp, LM Studio on `http://127.0.0.1:11434`, a LAN IP, etc.). Metadata / link-local remain blocked. Only enable on a host you trust; a DM can then point probes at other machines on that private network |
 | `AI_PROVIDER_BASEURL_ALLOW_HOSTS` | *(unset)* | Optional comma-separated hostname allowlist. When set, only listed hosts are accepted (metadata / link-local still blocked). Prefer this over the blanket private opt-in when you know the exact local hostname |
+| `AI_PROVIDER_BASEURL_ALLOW_CIDRS` | *(unset)* | Optional comma-separated CIDR allowlist (e.g. `192.168.1.0/24`). Private addresses in these ranges are permitted without the blanket private opt-in. Metadata / link-local / multicast stay blocked |
 | `AI_PROVIDER_BASEURL_DENY_HOSTS` | *(unset)* | Optional comma-separated hostname denylist — always rejected |
 
 **Backups** — see [Backups & upgrades](../administration/operations.md).

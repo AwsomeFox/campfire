@@ -12,6 +12,8 @@
 import type { AiProvider, AiProviderType } from './ai-provider';
 import { AiProviderError } from './errors';
 import type { FetchLike, RetryConfig } from './http';
+import { createAiProviderGuardedFetch } from '../../../common/ai-provider-outbound';
+import { resolveAiProviderBaseUrlPolicy } from '../../../common/ai-provider-baseurl';
 import { OpenAiProvider } from './openai-provider';
 import { AnthropicProvider } from './anthropic-provider';
 import { GeminiProvider } from './gemini-provider';
@@ -51,11 +53,16 @@ export interface AiProviderConfig {
   mockResponses?: MockResponse[];
 }
 
+function defaultFetchImpl(config: AiProviderConfig): FetchLike {
+  return config.fetchImpl ?? createAiProviderGuardedFetch(resolveAiProviderBaseUrlPolicy());
+}
+
 /**
  * Build a provider from config. Throws a typed `auth` error when a real provider is
  * requested without an API key, so the failure is the same shape #312 handles everywhere.
  */
 export function createAiProvider(config: AiProviderConfig): AiProvider {
+  const fetchImpl = defaultFetchImpl(config);
   switch (config.providerType) {
     case 'openai':
       requireKey(config);
@@ -68,7 +75,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
     case 'anthropic':
       requireKey(config);
@@ -81,7 +88,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
     case 'gemini':
       requireKey(config);
@@ -94,7 +101,7 @@ export function createAiProvider(config: AiProviderConfig): AiProvider {
         timeoutMs: config.timeoutMs,
         retry: config.retry,
         headers: config.headers,
-        fetchImpl: config.fetchImpl,
+        fetchImpl,
       });
     case 'mock':
       return new MockAiProvider({ model: config.model, responses: config.mockResponses });
@@ -141,7 +148,7 @@ export function createAiImageProvider(config: AiProviderConfig, imageModel?: str
       timeoutMs: config.timeoutMs,
       retry: config.retry,
       headers: config.headers,
-      fetchImpl: config.fetchImpl,
+      fetchImpl: defaultFetchImpl(config),
     });
   }
   throw new AiProviderError(
