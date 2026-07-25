@@ -7,10 +7,10 @@ import {
 } from '../../src/common/ai-provider-baseurl';
 
 /**
- * SSRF host policy for AI provider baseUrl (issue #1064).
+ * SSRF host policy for AI provider baseUrl (issues #1064, #570).
  * Pure helpers — no Nest bootstrap.
  */
-describe('classifyAiProviderHostname (issue #1064)', () => {
+describe('classifyAiProviderHostname (issue #1064, #570)', () => {
   it('classifies public hosts', () => {
     expect(classifyAiProviderHostname('api.openai.com')).toBe('public');
     expect(classifyAiProviderHostname('openrouter.ai')).toBe('public');
@@ -31,12 +31,14 @@ describe('classifyAiProviderHostname (issue #1064)', () => {
     expect(classifyAiProviderHostname('fd12:3456:789a::1')).toBe('private');
   });
 
-  it('classifies link-local and cloud metadata as blocked classes', () => {
+  it('classifies link-local, cloud metadata, and multicast as blocked classes', () => {
     expect(classifyAiProviderHostname('169.254.169.254')).toBe('metadata');
     expect(classifyAiProviderHostname('169.254.1.1')).toBe('link-local');
     expect(classifyAiProviderHostname('metadata.google.internal')).toBe('metadata');
     expect(classifyAiProviderHostname('100.100.100.200')).toBe('metadata');
     expect(classifyAiProviderHostname('fe80::1')).toBe('link-local');
+    expect(classifyAiProviderHostname('224.0.0.1')).toBe('multicast');
+    expect(classifyAiProviderHostname('ff02::1')).toBe('multicast');
   });
 
   it('normalizes IPv4-mapped IPv6 loopback', () => {
@@ -45,15 +47,17 @@ describe('classifyAiProviderHostname (issue #1064)', () => {
   });
 });
 
-describe('evaluateAiProviderBaseUrl (issue #1064)', () => {
+describe('evaluateAiProviderBaseUrl (issue #1064, #570)', () => {
   const locked: AiProviderBaseUrlPolicy = {
     allowPrivateHosts: false,
     allowHosts: [],
+    allowCidrs: [],
     denyHosts: [],
   };
   const privateOk: AiProviderBaseUrlPolicy = {
     allowPrivateHosts: true,
     allowHosts: [],
+    allowCidrs: [],
     denyHosts: [],
   };
 
@@ -87,15 +91,23 @@ describe('evaluateAiProviderBaseUrl (issue #1064)', () => {
     expect(evaluateAiProviderBaseUrl('http://localhost:11434/v1', privateOk).ok).toBe(true);
   });
 
-  it('never allows link-local even with private opt-in', () => {
+  it('never allows link-local or multicast even with private opt-in', () => {
     expect(evaluateAiProviderBaseUrl('http://169.254.1.1/', privateOk).ok).toBe(false);
     expect(evaluateAiProviderBaseUrl('http://[fe80::1]/', privateOk).ok).toBe(false);
+    expect(evaluateAiProviderBaseUrl('http://224.0.0.1/', privateOk).ok).toBe(false);
+    expect(evaluateAiProviderBaseUrl('http://[ff02::1]/', privateOk).ok).toBe(false);
+  });
+
+  it('rejects embedded credentials in userinfo', () => {
+    expect(evaluateAiProviderBaseUrl('http://user@evil.example/v1', locked).ok).toBe(false);
+    expect(evaluateAiProviderBaseUrl('http://user:pass@evil.example/v1', locked).ok).toBe(false);
   });
 
   it('honors operator deny list', () => {
     const policy: AiProviderBaseUrlPolicy = {
       allowPrivateHosts: false,
       allowHosts: [],
+      allowCidrs: [],
       denyHosts: ['evil.example', 'api.openai.com'],
     };
     expect(evaluateAiProviderBaseUrl('https://evil.example/v1', policy).ok).toBe(false);
@@ -107,6 +119,7 @@ describe('evaluateAiProviderBaseUrl (issue #1064)', () => {
     const policy: AiProviderBaseUrlPolicy = {
       allowPrivateHosts: false,
       allowHosts: ['localhost', 'ollama.home.arpa'],
+      allowCidrs: [],
       denyHosts: [],
     };
     expect(evaluateAiProviderBaseUrl('http://localhost:11434/v1', policy).ok).toBe(true);
@@ -116,6 +129,7 @@ describe('evaluateAiProviderBaseUrl (issue #1064)', () => {
     const metaListed: AiProviderBaseUrlPolicy = {
       allowPrivateHosts: true,
       allowHosts: ['169.254.169.254', 'metadata.google.internal'],
+      allowCidrs: [],
       denyHosts: [],
     };
     expect(evaluateAiProviderBaseUrl('http://169.254.169.254/', metaListed).ok).toBe(false);
@@ -128,17 +142,30 @@ describe('evaluateAiProviderBaseUrl (issue #1064)', () => {
     expect(evaluateAiProviderBaseUrl('http://127.1/', locked).ok).toBe(false);
     expect(evaluateAiProviderBaseUrl('http://0x7f000001/', locked).ok).toBe(false);
   });
+  it('honors CIDR allowlist for private addresses without blanket private opt-in', () => {
+    const policy: AiProviderBaseUrlPolicy = {
+      allowPrivateHosts: false,
+      allowHosts: [],
+      allowCidrs: ['192.168.1.0/24'],
+      denyHosts: [],
+    };
+    expect(evaluateAiProviderBaseUrl('http://192.168.1.50:11434/v1', policy).ok).toBe(true);
+    expect(evaluateAiProviderBaseUrl('http://192.168.2.50:11434/v1', policy).ok).toBe(false);
+    expect(evaluateAiProviderBaseUrl('http://169.254.169.254/', policy).ok).toBe(false);
+  });
 });
 
 describe('resolveAiProviderBaseUrlPolicy env parsing', () => {
-  it('parses allow/deny lists and the private opt-in flag', () => {
+  it('parses allow/deny lists, CIDR allowlist, and the private opt-in flag', () => {
     const policy = resolveAiProviderBaseUrlPolicy({
       AI_PROVIDER_ALLOW_PRIVATE_HOSTS: 'true',
       AI_PROVIDER_BASEURL_ALLOW_HOSTS: ' Localhost , ollama.home.arpa ',
+      AI_PROVIDER_BASEURL_ALLOW_CIDRS: '192.168.1.0/24, 10.0.0.0/8',
       AI_PROVIDER_BASEURL_DENY_HOSTS: 'evil.example',
     } as NodeJS.ProcessEnv);
     expect(policy.allowPrivateHosts).toBe(true);
     expect(policy.allowHosts).toEqual(['localhost', 'ollama.home.arpa']);
+    expect(policy.allowCidrs).toEqual(['192.168.1.0/24', '10.0.0.0/8']);
     expect(policy.denyHosts).toEqual(['evil.example']);
   });
 
