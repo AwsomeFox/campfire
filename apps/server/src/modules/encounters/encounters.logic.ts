@@ -358,19 +358,42 @@ export function turnIndexFor(sorted: Combatant[], currentCombatantId: number | n
   return i < 0 ? 0 : i;
 }
 
+/** A combatant whose turn was auto-skipped during {@link advanceTurn} (issue #610). */
+export interface SkippedTurnCombatant {
+  id: number;
+  name: string;
+}
+
 /** Result of advancing the turn pointer over a sorted running order. */
 export interface NextTurnState {
   turnIndex: number;
   round: number;
   currentCombatantId: number | null;
+  /** Combatants passed over because they are dead/defeated (issue #610). */
+  skipped: SkippedTurnCombatant[];
+}
+
+/**
+ * Whether a combatant's turn should be auto-skipped when advancing (issue #610).
+ *
+ * 5e rules: dead creatures and defeated monsters/NPCs at 0 HP are skipped; stable
+ * PCs (unconscious, no death saves) are skipped; dying PCs still receive a turn for
+ * death saving throws.
+ */
+export function shouldSkipTurnOnAdvance(c: Combatant): boolean {
+  if (c.deathState === 'dead' || c.deathState === 'stable') return true;
+  if (c.kind !== 'character' && c.hpCurrent != null && c.hpCurrent <= 0) return true;
+  return false;
 }
 
 /**
  * Advance the turn pointer by identity, not raw position (issue #49). Steps
  * from wherever `currentCombatantId` sits in `sorted` to the next combatant,
- * wrapping to the top and incrementing `round` past the end. A missing/unset
- * pointer (legacy row, or the current actor was just removed) restarts at the
- * top of the current round. An empty encounter clears the pointer.
+ * wrapping to the top and incrementing `round` past the end. Auto-skips
+ * dead/defeated combatants per {@link shouldSkipTurnOnAdvance} (issue #610). A
+ * missing/unset pointer (legacy row, or the current actor was just removed)
+ * restarts at the top of the current round. An empty encounter clears the
+ * pointer.
  */
 export function advanceTurn(
   sorted: Combatant[],
@@ -379,16 +402,31 @@ export function advanceTurn(
 ): NextTurnState {
   const count = sorted.length;
   if (count === 0) {
-    return { turnIndex: 0, round, currentCombatantId: null };
+    return { turnIndex: 0, round, currentCombatantId: null, skipped: [] };
   }
   const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
   let nextIdx = currentIdx + 1;
   let nextRound = round;
-  if (nextIdx >= count) {
-    nextIdx = 0;
-    nextRound += 1;
+  const skipped: SkippedTurnCombatant[] = [];
+
+  const stepForward = () => {
+    if (nextIdx >= count) {
+      nextIdx = 0;
+      nextRound += 1;
+    }
+  };
+
+  stepForward();
+
+  let steps = 0;
+  while (steps < count && shouldSkipTurnOnAdvance(sorted[nextIdx])) {
+    skipped.push({ id: sorted[nextIdx].id, name: sorted[nextIdx].name });
+    nextIdx += 1;
+    stepForward();
+    steps += 1;
   }
-  return { turnIndex: nextIdx, round: nextRound, currentCombatantId: sorted[nextIdx].id };
+
+  return { turnIndex: nextIdx, round: nextRound, currentCombatantId: sorted[nextIdx].id, skipped };
 }
 
 /**
@@ -567,12 +605,12 @@ export function retreatTurn(
 ): NextTurnState {
   const count = sorted.length;
   if (count === 0) {
-    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: null };
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: null, skipped: [] };
   }
   const currentIdx = currentCombatantId === null ? -1 : sorted.findIndex((c) => c.id === currentCombatantId);
   // Unset/last-removed pointer: restart at the top of the current round (mirrors advanceTurn).
   if (currentIdx < 0) {
-    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: sorted[0].id };
+    return { turnIndex: 0, round: Math.max(1, round), currentCombatantId: sorted[0].id, skipped: [] };
   }
   let prevIdx = currentIdx - 1;
   let prevRound = round;
@@ -580,7 +618,7 @@ export function retreatTurn(
     prevIdx = count - 1;
     prevRound = Math.max(1, round - 1);
   }
-  return { turnIndex: prevIdx, round: prevRound, currentCombatantId: sorted[prevIdx].id };
+  return { turnIndex: prevIdx, round: prevRound, currentCombatantId: sorted[prevIdx].id, skipped: [] };
 }
 
 /**

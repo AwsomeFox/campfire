@@ -5,6 +5,7 @@ import {
   sortCombatants,
   turnIndexFor,
   advanceTurn,
+  shouldSkipTurnOnAdvance,
   hpBandFor,
   applyCombatantHp,
   parseCr,
@@ -188,28 +189,28 @@ describe('encounters — advanceTurn (current-turn math)', () => {
   const sorted = [combatant({ id: 7 }), combatant({ id: 8 }), combatant({ id: 9 })];
 
   it('steps to the next combatant within the same round', () => {
-    expect(advanceTurn(sorted, 7, 1)).toEqual({ turnIndex: 1, round: 1, currentCombatantId: 8 });
+    expect(advanceTurn(sorted, 7, 1)).toEqual({ turnIndex: 1, round: 1, currentCombatantId: 8, skipped: [] });
   });
 
   it('wraps past the end and increments the round', () => {
-    expect(advanceTurn(sorted, 9, 1)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 7 });
+    expect(advanceTurn(sorted, 9, 1)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 7, skipped: [] });
   });
 
   it('a null pointer restarts at the top of the current round', () => {
-    expect(advanceTurn(sorted, null, 3)).toEqual({ turnIndex: 0, round: 3, currentCombatantId: 7 });
+    expect(advanceTurn(sorted, null, 3)).toEqual({ turnIndex: 0, round: 3, currentCombatantId: 7, skipped: [] });
   });
 
   it('a stale pointer (removed actor) restarts at the top', () => {
-    expect(advanceTurn(sorted, 999, 2)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 7 });
+    expect(advanceTurn(sorted, 999, 2)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 7, skipped: [] });
   });
 
   it('an empty encounter clears the pointer without advancing the round', () => {
-    expect(advanceTurn([], 5, 4)).toEqual({ turnIndex: 0, round: 4, currentCombatantId: null });
+    expect(advanceTurn([], 5, 4)).toEqual({ turnIndex: 0, round: 4, currentCombatantId: null, skipped: [] });
   });
 
   it('a single-combatant encounter loops on itself, bumping the round', () => {
     const solo = [combatant({ id: 1 })];
-    expect(advanceTurn(solo, 1, 1)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 1 });
+    expect(advanceTurn(solo, 1, 1)).toEqual({ turnIndex: 0, round: 2, currentCombatantId: 1, skipped: [] });
   });
 
   it('walks a full round and back to the start', () => {
@@ -221,6 +222,67 @@ describe('encounters — advanceTurn (current-turn math)', () => {
     }
     expect(seen).toEqual([7, 8, 9, 7]);
     expect(state.round).toBe(2);
+  });
+});
+
+describe('encounters — shouldSkipTurnOnAdvance (issue #610)', () => {
+  it('skips dead combatants', () => {
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 1, kind: 'character', deathState: 'dead' }))).toBe(true);
+  });
+
+  it('skips stable PCs', () => {
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 1, kind: 'character', deathState: 'stable', hpCurrent: 0 }))).toBe(true);
+  });
+
+  it('does not skip dying PCs (death-save turn)', () => {
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 1, kind: 'character', deathState: 'dying', hpCurrent: 0 }))).toBe(false);
+  });
+
+  it('skips monsters and NPCs at 0 HP', () => {
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 1, kind: 'monster', hpCurrent: 0, hpMax: 10 }))).toBe(true);
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 2, kind: 'npc', hpCurrent: 0, hpMax: 10 }))).toBe(true);
+  });
+
+  it('does not skip living combatants', () => {
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 1, kind: 'monster', hpCurrent: 5, hpMax: 10 }))).toBe(false);
+    expect(shouldSkipTurnOnAdvance(combatant({ id: 2, kind: 'character', hpCurrent: 5, hpMax: 10, deathState: 'none' }))).toBe(false);
+  });
+});
+
+describe('encounters — advanceTurn skips dead/downed (issue #610)', () => {
+  it('skips a defeated monster between two living combatants', () => {
+    const order = [
+      combatant({ id: 1, hpCurrent: 10, hpMax: 10 }),
+      combatant({ id: 2, hpCurrent: 0, hpMax: 10 }),
+      combatant({ id: 3, hpCurrent: 8, hpMax: 10 }),
+    ];
+    const result = advanceTurn(order, 1, 1);
+    expect(result.currentCombatantId).toBe(3);
+    expect(result.round).toBe(1);
+    expect(result.skipped).toEqual([{ id: 2, name: 'c2' }]);
+  });
+
+  it('still lands on a dying PC for death saves', () => {
+    const order = [
+      combatant({ id: 1, kind: 'character', hpCurrent: 10, hpMax: 10, deathState: 'none' }),
+      combatant({ id: 2, kind: 'character', hpCurrent: 0, hpMax: 10, deathState: 'dying' }),
+      combatant({ id: 3, hpCurrent: 8, hpMax: 10 }),
+    ];
+    const result = advanceTurn(order, 1, 1);
+    expect(result.currentCombatantId).toBe(2);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it('skips multiple consecutive defeated combatants and wraps', () => {
+    const order = [
+      combatant({ id: 1, hpCurrent: 10, hpMax: 10 }),
+      combatant({ id: 2, hpCurrent: 0, hpMax: 10 }),
+      combatant({ id: 3, hpCurrent: 0, hpMax: 10 }),
+    ];
+    const result = advanceTurn(order, 1, 1);
+    expect(result.currentCombatantId).toBe(1);
+    expect(result.round).toBe(2);
+    expect(result.skipped.map((s) => s.id)).toEqual([2, 3]);
   });
 });
 
