@@ -4537,7 +4537,7 @@ export class EncountersService {
         `physical roll logged for ${who}: ` +
         `${label ? `${label} ` : ''}= ${input.total}` +
         (input.natural20 != null ? ` (nat ${input.natural20})` : '') +
-        (input.dc != null ? ` vs DC ${input.dc} (${result.success ? 'success' : 'fail'})` : ''),
+        (input.dc != null ? ` vs DC ${input.dc} (${result.success === true ? 'success' : 'fail'})` : ''),
     });
 
     return persisted;
