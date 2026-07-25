@@ -699,7 +699,7 @@ function YourMembershipCard({
 
   return (
     <Card className="space-y-2.5" data-testid="your-membership-card">
-      <p className="card-kicker mb-0">Your data</p>
+      <p className="card-kicker mb-0">{t('nav.yourData')}</p>
       <p className="text-muted text-[11.5px] m-0">
         Take a copy of what's yours, or leave the table. Your export includes only the characters you own, the
         notes you wrote and the proposals you submitted — not the DM's secrets or anyone else's private data.
