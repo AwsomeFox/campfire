@@ -246,7 +246,6 @@ describe('AiDriverService.assembleSystemPrompt (#1048)', () => {
         get_party: { text: '[]' },
       },
       'en',
-      'ja',
     );
 
     const prompt = await assemble(svc, 'ja');
