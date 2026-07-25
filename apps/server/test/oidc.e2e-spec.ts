@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { createServer } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -8,7 +9,6 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
-  oidcSpawnCoverageEnabled,
 } from './oidc-spawn-coverage';
 
 /**
@@ -153,22 +153,19 @@ async function spawnAppOnce(
     else env[key] = value;
   }
 
-  const collectSpawnCoverage = oidcSpawnCoverageEnabled();
-  const child = spawn('node', [SERVER_DIST_ENTRY], {
+  const child: ChildProcessByStdio<null, Readable, Readable> = spawn('node', [SERVER_DIST_ENTRY], {
     cwd: path.resolve(__dirname, '..'),
     env,
-    stdio: collectSpawnCoverage ? ['ignore', 'ignore', 'ignore'] : ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   let output = '';
-  if (!collectSpawnCoverage) {
-    child.stdout?.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-    child.stderr?.on('data', (chunk) => {
-      output += chunk.toString();
-    });
-  }
+  child.stdout.on('data', (chunk) => {
+    output += chunk.toString();
+  });
+  child.stderr.on('data', (chunk) => {
+    output += chunk.toString();
+  });
 
   type ExitInfo = { code: number | null; signal: NodeJS.Signals | null };
   const exitState: { current: ExitInfo | null } = { current: null };
@@ -177,7 +174,15 @@ async function spawnAppOnce(
   });
 
   const killChild = async (): Promise<void> => {
-    if (exitState.current || child.killed) return;
+    const releaseChild = (): void => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.unref?.();
+    };
+    if (exitState.current || child.killed) {
+      releaseChild();
+      return;
+    }
     child.kill('SIGTERM');
     const deadline = Date.now() + CHILD_KILL_GRACE_MS;
     while (!exitState.current && Date.now() < deadline) {
@@ -187,6 +192,7 @@ async function spawnAppOnce(
       child.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, 200));
     }
+    releaseChild();
   };
 
   try {
