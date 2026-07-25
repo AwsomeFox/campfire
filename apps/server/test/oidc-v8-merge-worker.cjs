@@ -71,8 +71,8 @@ async function mergeDir(dir) {
       if (!sourcePath || !fs.existsSync(sourcePath)) continue;
 
       try {
-        const converter = v8toIstanbul(sourcePath, 0, {
-          source: fs.readFileSync(sourcePath, 'utf8'),
+        const converter = v8toIstanbul(scriptPath, 0, {
+          source: fs.readFileSync(scriptPath, 'utf8'),
         });
         await converter.load();
         converter.applyCoverage(script.functions);

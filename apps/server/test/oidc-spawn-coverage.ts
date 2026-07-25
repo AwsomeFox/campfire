@@ -9,7 +9,7 @@ import libCoverage from 'istanbul-lib-coverage';
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const MERGE_WORKER = path.join(__dirname, 'oidc-v8-merge-worker.cjs');
 /** Post-jest merge target — see test/finalize-oidc-spawn-coverage.cjs (#556). */
-const SPAWN_COVERAGE_SNAPSHOT = path.join(os.tmpdir(), 'campfire-oidc-spawn-cov-snapshot.json');
+const SPAWN_COVERAGE_SNAPSHOT = path.join(SERVER_ROOT, 'coverage', 'oidc-spawn-cov-snapshot.json');
 
 /** Absolute path to oidc.service.ts — used by coverage-threshold guard (#556). */
 export const OIDC_SERVICE_SOURCE = path.join(SERVER_ROOT, 'src', 'modules', 'auth', 'oidc.service.ts');

@@ -9,12 +9,11 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const libCoverage = require('istanbul-lib-coverage');
 
 const SERVER_ROOT = path.resolve(__dirname, '..');
 const COVERAGE_FINAL = path.join(SERVER_ROOT, 'coverage', 'coverage-final.json');
-const SNAPSHOT = path.join(os.tmpdir(), 'campfire-oidc-spawn-cov-snapshot.json');
+const SNAPSHOT = path.join(SERVER_ROOT, 'coverage', 'oidc-spawn-cov-snapshot.json');
 const OIDC_SERVICE_SOURCE = path.join(SERVER_ROOT, 'src', 'modules', 'auth', 'oidc.service.ts');
 const jestConfig = require('../jest.config.js');
 
