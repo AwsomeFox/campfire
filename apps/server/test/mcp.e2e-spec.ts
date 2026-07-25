@@ -1319,17 +1319,21 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
       arguments: { encounterId: encounter.id, kind: 'monster', name: 'MCP Goblin', hpMax: 5 },
     });
     expect(goblin.isError).toBeFalsy();
-    const goblinId = (parseResult(goblin) as { id: number }).id;
 
     await dmClient.callTool({ name: 'roll_initiative', arguments: { encounterId: encounter.id } });
-    await dmClient.callTool({
-      name: 'update_combatant',
-      arguments: { encounterId: encounter.id, combatantId: hero!.id, initiative: 20 },
-    });
-    await dmClient.callTool({
-      name: 'update_combatant',
-      arguments: { encounterId: encounter.id, combatantId: goblinId, initiative: 5 },
-    });
+    const mid = parseResult(
+      await dmClient.callTool({ name: 'get_encounter', arguments: { encounterId: encounter.id } }),
+    ) as { combatants: Array<{ id: number }> };
+    for (const c of mid.combatants) {
+      await dmClient.callTool({
+        name: 'update_combatant',
+        arguments: {
+          encounterId: encounter.id,
+          combatantId: c.id,
+          initiative: c.id === hero!.id ? 99 : 1,
+        },
+      });
+    }
     const begun = parseResult(
       await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } }),
     ) as { status: string; currentCombatantId: number | null; combatants: Array<{ id: number; initiative: number | null }> };
