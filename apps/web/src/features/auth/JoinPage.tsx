@@ -14,6 +14,7 @@ import { api, ApiError, API, isTransientError } from '../../lib/api';
 import { loginHrefWithReturn } from '../../lib/safeInternalPath';
 import { useAuth } from '../../app/auth';
 import { PasswordInput } from '../../components/PasswordInput';
+import { BrandMark } from '../../components/BrandMark';
 import {
   AUTH_ERROR_IDS,
   AUTH_FIELD_IDS,
@@ -24,24 +25,6 @@ import {
   focusAuthError,
   validateNewAccountFields,
 } from './authFormA11y';
-function FlameMark() {
-  return (
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
-        stroke="var(--color-accent)"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M5 21l14-3M19 21L5 18"
-        stroke="var(--color-neutral-600)"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 const ROLE_BLURB: Record<InvitePreview['role'], string> = {
   player: 'a player',
@@ -203,7 +186,7 @@ export function JoinPage() {
     >
       <div className="flex flex-col gap-4" style={{ width: 'min(380px, 100%)' }}>
         <div className="card elev-md items-center text-center" style={{ padding: '28px 26px', gap: 14 }}>
-          <FlameMark />
+          <BrandMark />
 
           {loading || !ready ? (
             <p

@@ -824,6 +824,26 @@ function migrateDiceRollsTableForTerms(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before trash consistency (issue #701): factions,
+ * story_arcs, story_beats, and encounters gained the same nullable `deleted_at`
+ * timestamp the other trashable entities carry. Idempotent per-table ADD COLUMNs.
+ */
+function migrateTrashSoftDeleteColumns701(sqlite: Database.Database): void {
+  const addDeletedAt = (table: string): void => {
+    const exists = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(table);
+    if (!exists) return;
+    const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((c) => c.name === 'deleted_at')) return;
+    sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
+  };
+  for (const table of ['factions', 'story_arcs', 'story_beats', 'encounters']) {
+    addDeletedAt(table);
+  }
+}
+
+/**
  * Migration for DBs created before soft-delete / trash (issue #116): the trashable
  * entities gained a nullable `deleted_at` timestamp — NULL means live, an ISO string
  * means the row is in the trash (excluded from normal reads, restorable). Idempotent
@@ -2512,7 +2532,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
   { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
   { name: '0089_characters_resources', run: migrateCharactersTableForResources },
-  { name: '0090_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0090_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
+  { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
 ];
 
 /**

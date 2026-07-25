@@ -171,12 +171,16 @@ describe('factions (e2e) — issue #221', () => {
       .send({ name: 'Cross', factionId: foreignFaction.body.id });
     expect(crossBad.status).toBe(400);
 
-    // Deleting the faction unlinks the NPC (factionId nulled), not deletes it.
+    // Deleting the faction trashes it; the NPC keeps its factionId and relinks on restore.
     const del = await request(server).delete(`/api/v1/factions/${factionId}`).set(dm);
     expect(del.status).toBe(200);
     const npcAfter = await request(server).get(`/api/v1/npcs/${npcRes.body.id}`).set(dm);
     expect(npcAfter.status).toBe(200);
-    expect(npcAfter.body.factionId).toBeNull();
+    expect(npcAfter.body.factionId).toBe(factionId);
+
+    const restore = await request(server).post(`/api/v1/factions/${factionId}/restore`).set(dm);
+    expect(restore.status).toBe(201);
+    expect((await request(server).get(`/api/v1/factions/${factionId}`).set(dm)).status).toBe(200);
   });
 
   it('a note can pin to entityType "faction" and resolves the faction name', async () => {

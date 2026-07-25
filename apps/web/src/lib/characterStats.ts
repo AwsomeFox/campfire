@@ -32,18 +32,23 @@ export function profBonus(level: number): number {
  * saved with lowercase keys (`{ str: 16 }` — schema-valid, and what some API/MCP
  * writers produce) would miss a canonical-uppercase lookup and read 10 (issue #48).
  * The server now folds keys to uppercase, but this guards data that reaches the
- * client by any other path. Defaults to 10 when the ability is absent.
+ * client by any other path.
+ *
+ * Returns `null` when the ability was never set — draft/incomplete sheets must not
+ * silently display 10 (issue #719). Callers show "—" for null.
  */
-export function abilityScore(character: Character, ability: Ability): number {
+export function abilityScore(character: Character, ability: Ability): number | null {
   const stats = character.stats;
-  return stats[ability] ?? stats[ability.toLowerCase()] ?? 10;
+  const raw = stats[ability] ?? stats[ability.toLowerCase()];
+  if (raw === undefined || raw === null) return null;
+  return raw;
 }
 
-// Ability modifier comes from the active campaign's rule-system adapter (issue #234),
-// not the 5e formula hardcoded here — so a future non-5e adapter's math takes effect.
-// Default (5e) yields floor((score - 10) / 2), unchanged.
-export function modOf(adapter: RuleSystemAdapter, character: Character, ability: Ability): number {
-  return adapter.abilityModifier(abilityScore(character, ability));
+/** Modifier for a set ability score; returns null when the score is unset. */
+export function modOf(adapter: RuleSystemAdapter, character: Character, ability: Ability): number | null {
+  const score = abilityScore(character, ability);
+  if (score === null) return null;
+  return adapter.abilityModifier(score);
 }
 
 export function signed(n: number): string {

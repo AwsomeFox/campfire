@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS story_arcs (
   summary TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'planned',
   sort_order INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -151,6 +152,7 @@ CREATE TABLE IF NOT EXISTS story_beats (
   session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
   quest_id INTEGER REFERENCES quests(id) ON DELETE SET NULL,
   encounter_id INTEGER REFERENCES encounters(id) ON DELETE SET NULL,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -238,6 +240,7 @@ CREATE TABLE IF NOT EXISTS factions (
   hidden INTEGER NOT NULL DEFAULT 0,
   reputation INTEGER NOT NULL DEFAULT 0,
   standing TEXT NOT NULL DEFAULT 'neutral',
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -722,6 +725,7 @@ CREATE TABLE IF NOT EXISTS encounters (
   grid_opacity REAL NOT NULL DEFAULT 0.35,
   hidden INTEGER NOT NULL DEFAULT 0,
   ended_at TEXT,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

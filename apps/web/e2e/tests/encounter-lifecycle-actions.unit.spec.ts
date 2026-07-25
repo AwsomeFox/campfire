@@ -57,7 +57,8 @@ test.describe('encounter lifecycle actions matrix (issue #420)', () => {
 
     const ended = deleteConfirmCopy('ended');
     expect(ended.title).toMatch(/Delete/i);
-    expect(ended.body).toMatch(/cannot be undone/i);
+    expect(ended.body).toMatch(/Trash/i);
+    expect(ended.body).toMatch(/Combatants/i);
   });
 
   test('RunSessionPage renders End from the lifecycle matrix, not status !== ended', () => {

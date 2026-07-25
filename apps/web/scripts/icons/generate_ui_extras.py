@@ -31,12 +31,13 @@ OUT = ICONS_DIR / "uiExtras.generated.ts"
 # NOT in the curated catalog. Keep alphabetised. Add new chrome slugs here.
 UI_SLUGS = [
     "archive-register", "black-flag", "calendar", "cancel", "chat-bubble",
-    "cog", "conversation", "crystal-ball", "database", "envelope", "eyeball",
-    "film-strip", "hand", "hazard-sign", "life-buoy", "light-bulb",
-    "linked-rings", "magnifying-glass", "microphone", "oak-leaf", "padlock",
-    "person", "position-marker", "ringing-bell", "robot-golem", "scales",
-    "secret-book", "shaking-hands", "sight-disabled", "sparkles", "stopwatch",
-    "top-hat", "trash-can", "tv", "vote",
+    "check-mark", "cloud-upload", "cog", "conversation", "crystal-ball",
+    "database", "envelope", "eyeball", "film-strip", "hamburger-menu", "hand",
+    "hazard-sign", "hospital-cross", "life-buoy", "light-bulb", "linked-rings",
+    "magnifying-glass", "microphone", "oak-leaf", "padlock", "person",
+    "position-marker", "ringing-bell", "robot-golem", "scales", "secret-book",
+    "shaking-hands", "sight-disabled", "sparkles", "stopwatch", "top-hat",
+    "trash-can", "tv", "vote",
 ]
 
 

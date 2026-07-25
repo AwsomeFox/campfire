@@ -22,6 +22,7 @@ import { CampaignCover } from '../../components/CampaignCover';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { avatarTone, initials } from './avatar';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
+import { NewCharacterForm } from './NewCharacterForm';
 import { STATUS_LABEL, StatusTag } from './status';
 
 export default function PartyPage() {
@@ -216,6 +217,7 @@ export default function PartyPage() {
       {canCreate && !loading && (creating || characters.length === 0) && (
         <NewCharacterForm
           campaignId={id}
+          adapter={adapter}
           ddbAllowed={ddbAllowed}
           onCancel={characters.length > 0 ? closeCreating : undefined}
           onCreated={() => {
@@ -315,10 +317,14 @@ function CharacterCard({
         <div className="flex justify-between text-[11.5px] text-slate-500">
           <span>HP</span>
           <span>
-            {character.hpCurrent} / {character.hpMax}
+            {character.hpMax > 0 ? `${character.hpCurrent} / ${character.hpMax}` : 'Not set'}
           </span>
         </div>
-        <HpBar current={character.hpCurrent} max={character.hpMax} />
+        {character.hpMax > 0 ? (
+          <HpBar current={character.hpCurrent} max={character.hpMax} />
+        ) : (
+          <p className="text-[10px] text-slate-600">Complete HP on the sheet</p>
+        )}
         {character.conditions.length > 0 && (
           <div className="flex gap-1.5 flex-wrap">
             <span className="tag tag-outline" style={{ fontSize: 10 }}>
@@ -338,7 +344,7 @@ function CharacterCard({
           </div>
         )}
       </div>
-      {canEditHp && <QuickHp character={character} onChange={onChange} />}
+      {canEditHp && character.hpMax > 0 && <QuickHp character={character} onChange={onChange} />}
     </Card>
   );
 }
@@ -556,151 +562,6 @@ function AwardXpForm({
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>Cancel</Btn>
           <Btn type="submit" disabled={saving || !validAmount || recipients.length === 0}>
             {saving ? 'Awarding…' : `Award XP to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}`}
-          </Btn>
-        </div>
-      </form>
-    </Card>
-  );
-}
-
-function NewCharacterForm({
-  campaignId,
-  ddbAllowed,
-  onCancel,
-  onCreated,
-}: {
-  campaignId: number;
-  /**
-   * Whether the campaign's rule system is field-compatible with the D&D Beyond importer
-   * (issue #714). False hides the import affordance entirely; the server re-checks this on
-   * the request, so a stale/hidden UI can't sneak an incompatible import through.
-   */
-  ddbAllowed: boolean;
-  onCancel?: () => void;
-  onCreated: () => void;
-}) {
-  const [name, setName] = useState('');
-  const [species, setSpecies] = useState('');
-  const [className, setClassName] = useState('');
-  const [level, setLevel] = useState('1');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [ddbRef, setDdbRef] = useState('');
-  const [importing, setImporting] = useState(false);
-
-  // Import a PUBLIC D&D Beyond sheet (issue #18): POST the id or character URL and let the
-  // server fetch + map it into a character. The sheet must be set to Public on D&D Beyond;
-  // private/not-found sheets come back as a clean 400/404 the ApiError message surfaces.
-  async function importFromDdb() {
-    const ref = ddbRef.trim();
-    if (!ref) return;
-    setImporting(true);
-    setError(null);
-    try {
-      // Send `url` when it looks like a link, else the bare id — the server accepts either.
-      const body = /^\d+$/.test(ref) ? { ddbId: ref } : { url: ref };
-      await api.post(`${API}/campaigns/${campaignId}/characters/import-ddb`, body);
-      setDdbRef('');
-      onCancel?.();
-      onCreated();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't import from D&D Beyond.");
-    } finally {
-      setImporting(false);
-    }
-  }
-
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await api.post(`${API}/campaigns/${campaignId}/characters`, {
-        name: name.trim(),
-        species: species.trim(),
-        className: className.trim(),
-        level: Math.max(1, Math.min(20, Number(level) || 1)),
-      });
-      setName('');
-      setSpecies('');
-      setClassName('');
-      setLevel('1');
-      onCancel?.();
-      onCreated();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't create the character.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <Card className="space-y-3">
-      <h2 className="font-bold text-white text-sm">New character</h2>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
-
-      {/* Import from D&D Beyond (issue #18) — read-only, public sheets only.
-          Offered only for explicitly-D&D-5e campaigns (issue #714): a DDB sheet is a 5e
-          character, so importing into another system would silently produce a character
-          whose numbers belong to a different game. The server re-checks compatibility, so
-          a stale UI can't bypass it. */}
-      {ddbAllowed && (
-        <div className="space-y-2 rounded-md border border-slate-700/60 p-3">
-          <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Import from D&amp;D Beyond</span>
-          <div className="flex gap-2">
-            <TextInput
-              aria-label="D&D Beyond character id or URL"
-              placeholder="D&D Beyond id or character URL"
-              value={ddbRef}
-              onChange={(e) => setDdbRef(e.target.value)}
-              maxLength={500}
-            />
-            <Btn type="button" onClick={importFromDdb} disabled={importing || !ddbRef.trim()}>
-              {importing ? 'Importing…' : 'Import'}
-            </Btn>
-          </div>
-          <p className="text-xs text-slate-500">The sheet must be set to Public on D&amp;D Beyond.</p>
-        </div>
-      )}
-
-      {ddbAllowed && (
-        <div className="flex items-center gap-2 text-xs text-slate-600">
-          <span className="h-px flex-1 bg-slate-700/60" />
-          or create manually
-          <span className="h-px flex-1 bg-slate-700/60" />
-        </div>
-      )}
-
-      <form onSubmit={submit} className="space-y-3">
-        <TextInput aria-label="Character name" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} maxLength={120} autoFocus />
-        <div className="grid grid-cols-2 gap-3">
-          <TextInput aria-label="Species" placeholder="Species" value={species} onChange={(e) => setSpecies(e.target.value)} />
-          <TextInput aria-label="Class" placeholder="Class" value={className} onChange={(e) => setClassName(e.target.value)} />
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="space-y-1">
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Level</span>
-            <TextInput
-              type="number"
-              min={1}
-              max={20}
-              aria-label="Level"
-              placeholder="Level"
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-            />
-          </label>
-          <div />
-        </div>
-        <div className="flex gap-2 justify-end">
-          {onCancel && (
-            <Btn ghost type="button" onClick={onCancel} disabled={saving}>
-              Cancel
-            </Btn>
-          )}
-          <Btn type="submit" disabled={saving || !name.trim()}>
-            {saving ? 'Creating…' : 'Create'}
           </Btn>
         </div>
       </form>

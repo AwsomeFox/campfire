@@ -6,6 +6,8 @@
  * objective rows; callers control exact sizing via style overrides if needed.
  */
 import type { CSSProperties, KeyboardEvent } from 'react';
+import { GameIcon } from './GameIcon';
+import { UI_CONTROL_ICON } from '../lib/uiIcons';
 
 export function Toggle({
   checked,
@@ -55,7 +57,6 @@ export function Toggle({
         border: '1.5px solid var(--color-neutral-600)',
         display: 'grid',
         placeItems: 'center',
-        fontSize: Math.round(size * 0.65),
         color: 'var(--color-accent-100)',
         cursor: disabled ? 'default' : 'pointer',
         background: checked ? 'var(--color-accent)' : 'transparent',
@@ -64,7 +65,9 @@ export function Toggle({
         ...style,
       }}
     >
-      {checked ? '✓' : ''}
+      {checked ? (
+        <GameIcon slug={UI_CONTROL_ICON.check} size={Math.max(10, Math.round(size * 0.65))} />
+      ) : null}
     </button>
   );
 }

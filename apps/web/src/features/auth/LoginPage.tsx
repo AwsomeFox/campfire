@@ -20,6 +20,7 @@ import { useAnnounce, useClearAnnouncements } from '../../components/Announcer';
 import { BootstrapRecoveryScreen } from '../../app/BootstrapRecoveryScreen';
 import { loginBootstrapSurface, retryAuthBootstrap } from '../../app/authBootstrapState';
 import { GameIcon } from '../../components/GameIcon';
+import { BrandMark } from '../../components/BrandMark';
 import { PasswordInput } from '../../components/PasswordInput';
 import {
   AUTH_CREDENTIALS_ERROR,
@@ -32,24 +33,6 @@ import {
   describedBy,
   focusAuthError,
 } from './authFormA11y';
-function FlameMark({ size = 44 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <path
-        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
-        stroke="var(--color-accent)"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M5 21l14-3M19 21L5 18"
-        stroke="var(--color-neutral-600)"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 /** Footer tagline on the login landing pitch (sourced from the privacy manifest). */
 export const LOGIN_FOOTER_TAGLINE = AI_EXTERNAL_PROVIDER_PRIVACY.loginTagline;
@@ -92,7 +75,7 @@ function BrandIntro() {
   return (
     <header className="login-intro">
       <div className="flex items-center gap-3">
-        <FlameMark size={36} />
+        <BrandMark size={36} />
         <span style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em', color: 'var(--color-text)' }}>Campfire</span>
       </div>
 
@@ -409,7 +392,7 @@ export function LoginPage() {
     <div className="login-auth-stack">
       <div className="card elev-md items-center text-center login-auth-card">
         <div className="login-auth-heading">
-          <span className="login-auth-mark" aria-hidden="true"><FlameMark /></span>
+          <span className="login-auth-mark" aria-hidden="true"><BrandMark /></span>
           <div>
             <h2 id="login-title" ref={headingRef} tabIndex={-1} style={{ margin: 0 }}>
               Sign in

@@ -37,6 +37,7 @@ import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './character-creation';
 export * from './narration-language';
 
 export {
@@ -296,8 +297,20 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
 // and drive Restore. `type` is the entity kind; restore routes are mapped (usually
 // the plural resource name — session -> /sessions/:id/restore — with exceptions such
-// as timeline_event -> /timeline/:id/restore).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location', 'timeline_event']);
+// as story_arc -> /arcs, story_beat -> /beats, timeline_event -> /timeline/:id/restore).
+// See TrashPage TYPE_META.
+export const TrashedEntityType = z.enum([
+  'session',
+  'character',
+  'quest',
+  'npc',
+  'location',
+  'faction',
+  'encounter',
+  'story_arc',
+  'story_beat',
+  'timeline_event',
+]);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({
@@ -364,14 +377,15 @@ export const DeathState = z.enum(['none', 'dying', 'stable', 'dead']);
 export type DeathState = z.infer<typeof DeathState>;
 
 /**
- * Character lifecycle (issue #115). Only `active` PCs are auto-conscripted into a
- * new encounter's combatant list; dead/retired/inactive characters stay on the
- * roster (viewable, full sheet + history intact) but are skipped by the auto-add
+ * Character lifecycle (issue #115, #719). Only `active` PCs are auto-conscripted into a
+ * new encounter's combatant list; `draft` (incomplete sheets), dead, retired, and
+ * inactive characters stay on the roster (viewable, full sheet + history intact) but
+ * are skipped by the auto-add
  * so a long campaign's graveyard of fallen and replaced PCs stops being force-added
  * to every fight. Deleting a character remains the destructive alternative — this
  * is the non-destructive shelf.
  */
-export const CharacterStatus = z.enum(['active', 'dead', 'retired', 'inactive']);
+export const CharacterStatus = z.enum(['active', 'draft', 'dead', 'retired', 'inactive']);
 export type CharacterStatus = z.infer<typeof CharacterStatus>;
 
 /**
@@ -424,18 +438,18 @@ export const Character = z.object({
   level: z.number().int().min(1).max(20).default(1),
   xp: z.number().int().min(0).default(0),
   background: z.string().max(120).default(''),
-  // Lifecycle state (issue #115). `active` is the only status auto-added as a combatant
-  // on encounter create; dead/retired/inactive PCs are kept but skipped. Editable by the
-  // owning player or DM through the normal update path (and upsert_character over MCP).
+  // Lifecycle state (issue #115, #719). `active` is the only status auto-added as a combatant
+  // on encounter create; draft/dead/retired/inactive PCs are kept but skipped. Editable by
+  // the owning player or DM through the normal update path (and upsert_character over MCP).
   status: CharacterStatus.default('active').describe(
-    "Lifecycle status: 'active' (default; auto-added to new encounters), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
+    "Lifecycle status: 'active' (default; auto-added to new encounters), 'draft' (incomplete sheet), 'dead', 'retired', or 'inactive'. Non-active PCs stay on the roster but are skipped by encounter auto-add.",
   ),
   stats: z.record(z.string(), z.number().int()).default({}), // e.g. { STR: 8, DEX: 14 }
   ac: z.number().int().nullable().default(null),
   eac: z.number().int().nullable().default(null),
   kac: z.number().int().nullable().default(null),
   hpCurrent: z.number().int().default(10),
-  hpMax: z.number().int().min(1).default(10),
+  hpMax: z.number().int().min(0).default(10),
   spCurrent: z.number().int().min(0).default(0),
   spMax: z.number().int().min(0).default(0),
   rpCurrent: z.number().int().min(0).default(0),
