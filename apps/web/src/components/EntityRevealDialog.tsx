@@ -68,7 +68,7 @@ export function EntityRevealDialog({
       }
       confirmLabel={t('secrecy.revealConfirm')}
       pendingLabel={t('secrecy.revealPending')}
-      danger={false}
+      danger={true}
       busy={busy}
       onConfirm={onConfirm}
       onCancel={onCancel}

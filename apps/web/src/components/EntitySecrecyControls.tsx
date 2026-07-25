@@ -38,7 +38,7 @@ export function EntitySecrecyControls({
   const [pendingUndo, setPendingUndo] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  if (!hidden && !pendingUndo) return null;
+  if (!hidden && !pendingUndo && !confirming) return null;
 
   async function confirmReveal() {
     setBusy(true);
@@ -64,8 +64,13 @@ export function EntitySecrecyControls({
           message={t('secrecy.revealSuccessUndo')}
           successMessage={t('secrecy.revealUndoSuccess')}
           onUndo={async () => {
-            await onUndoReveal();
-            setPendingUndo(false);
+            try {
+              await onUndoReveal();
+              setPendingUndo(false);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : t('secrecy.revealFailed');
+              announce(msg, { assertive: true });
+            }
           }}
           onExpire={() => setPendingUndo(false)}
         />
