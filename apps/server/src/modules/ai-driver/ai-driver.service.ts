@@ -1304,6 +1304,15 @@ export class AiDriverService {
           providerError = spend.error;
           tokensUsageUnknown = spend.usageUnknown;
           if (spend.text) finalNarration = spend.text;
+          const detail = spend.error?.message ?? 'provider error';
+          await this.audit.log({
+            actor,
+            actorRole: 'dm',
+            action: 'ai-dm.driver.provider_error',
+            entityType: 'ai-dm',
+            campaignId,
+            detail: `${detail} (triggered by ${triggeredBy.id})`,
+          });
           break;
         }
 
@@ -2446,6 +2455,7 @@ export class AiDriverService {
     session.actingDm = { memberId: holder, grantedBy: granter.id, grantedAt: nowIso(), note: note ?? null };
     session.status = 'paused'; // freeze the AI seat while a human holds it
     session.state = 'human_control';
+    session.stuck = null; // human control supersedes the stuck ladder (#560)
     session.takeoverRequestedBy = null;
     session.levers = this.leversFor(session);
     await this.audit.log({
