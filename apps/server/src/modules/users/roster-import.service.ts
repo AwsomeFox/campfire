@@ -146,6 +146,7 @@ export class RosterImportService {
 
         let userId = diag.matchedUserId ?? null;
         if (diag.action === 'create') {
+          if (!row.username) throw new BadRequestException(`Row ${diag.rowIndex} cannot create an account without a username`);
           const inserted = tx
             .insert(users)
             .values({
@@ -310,7 +311,8 @@ export class RosterImportService {
   }
 
   private rowToFields(row: RosterImportRow): Partial<Record<RosterImportField, string>> {
-    const fields: Partial<Record<RosterImportField, string>> = { username: row.username };
+    const fields: Partial<Record<RosterImportField, string>> = {};
+    if (row.username !== undefined) fields.username = row.username;
     if (row.displayName !== undefined) fields.displayName = row.displayName;
     if (row.oidcSub !== undefined) fields.oidcSub = row.oidcSub;
     if (row.campaignId !== undefined) fields.campaignId = String(row.campaignId);
@@ -416,17 +418,20 @@ export class RosterImportService {
         }
       }
 
-      if (matchedUserId != null && campaignId != null && campaignRole && campaignRole !== 'dm') {
-        const member = this.db
-          .select({ role: campaignMembers.role })
-          .from(campaignMembers)
-          .innerJoin(users, eq(campaignMembers.userId, users.id))
-          .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, matchedUserId)))
-          .limit(1)
-          .get();
-        if (member?.role === 'dm' && this.usableDmCount(campaignId, matchedUserId) === 0) {
-          errors.push('Cannot demote the last enabled dm of this campaign');
-          action = 'error';
+      if (matchedUserId != null && campaignId != null) {
+        const desiredRole = campaignRole ?? 'player';
+        if (desiredRole !== 'dm') {
+          const member = this.db
+            .select({ role: campaignMembers.role })
+            .from(campaignMembers)
+            .innerJoin(users, eq(campaignMembers.userId, users.id))
+            .where(and(eq(campaignMembers.campaignId, campaignId), eq(campaignMembers.userId, matchedUserId)))
+            .limit(1)
+            .get();
+          if (member?.role === 'dm' && this.usableDmCount(campaignId, matchedUserId) === 0) {
+            errors.push('Cannot demote the last enabled dm of this campaign');
+            action = 'error';
+          }
         }
       }
 
@@ -450,8 +455,8 @@ export class RosterImportService {
   }
 
   private toCommitRow(diag: RosterImportRowDiagnostic): RosterImportRow {
-    if (!diag.username) {
-      throw new BadRequestException(`Row ${diag.rowIndex} is missing a username`);
+    if (!diag.username && !diag.oidcSub) {
+      throw new BadRequestException(`Row ${diag.rowIndex} is missing a username and oidcSub`);
     }
     return {
       rowIndex: diag.rowIndex,

@@ -101,7 +101,9 @@ export class PasswordResetService {
 
     const user = await this.usersService.getRowOrThrow(row.userId);
     if (user.disabled) throw new ConflictException('This account is disabled — enable it before approving a reset');
-    if (user.passwordHash === null) throw new ConflictException('This account uses SSO and has no local password');
+    // Null passwordHash normally means SSO-only (request() refuses those accounts).
+    // Roster-import activation codes that expire revert to pending; admins must be
+    // able to re-approve those passwordless local accounts.
 
     const code = generateResetCode();
     const ts = nowIso();

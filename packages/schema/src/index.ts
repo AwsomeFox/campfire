@@ -7512,15 +7512,19 @@ export const RosterImportField = z.enum([
 export type RosterImportField = z.infer<typeof RosterImportField>;
 
 /** Canonical row after parsing + mapping (commit payload). */
-export const RosterImportRow = z.object({
-  rowIndex: z.number().int().nonnegative(),
-  username: User.shape.username,
-  displayName: z.string().max(120).optional(),
-  oidcSub: z.string().max(200).optional(),
-  campaignId: Id.optional(),
-  campaignRole: Role.optional(),
-  characterId: Id.nullable().optional(),
-});
+export const RosterImportRow = z
+  .object({
+    rowIndex: z.number().int().nonnegative(),
+    username: User.shape.username.optional(),
+    displayName: z.string().max(120).optional(),
+    oidcSub: z.string().max(200).optional(),
+    campaignId: Id.optional(),
+    campaignRole: Role.optional(),
+    characterId: Id.nullable().optional(),
+  })
+  .refine((row) => row.username != null || row.oidcSub != null, {
+    message: 'Row needs at least one of username or oidcSub',
+  });
 export type RosterImportRow = z.infer<typeof RosterImportRow>;
 
 export const RosterImportRowAction = z.enum(['create', 'update', 'skip', 'error']);
