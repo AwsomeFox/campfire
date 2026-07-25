@@ -621,6 +621,23 @@ function applyHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): 
   return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
 }
 
+/** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
+function hpLogActorId(actorCombatantId: number | undefined | null, targetCombatantId: number): number | undefined {
+  if (actorCombatantId == null || actorCombatantId === targetCombatantId) return undefined;
+  return actorCombatantId;
+}
+
+function hpPatchWithActor(
+  patch: Record<string, unknown>,
+  actorCombatantId: number | undefined | null,
+  targetCombatantId: number,
+): Record<string, unknown> {
+  const actorId = hpLogActorId(actorCombatantId, targetCombatantId);
+  return actorId != null ? { ...patch, actorId } : patch;
+}
+
+const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp', 'deathSaveRoll']);
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -690,7 +707,12 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
-  const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  const [pendingApply, setPendingApply] = useState<{
+    amount: number;
+    label: string;
+    /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
+    actorCombatantId?: number;
+  } | null>(null);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -934,8 +956,8 @@ export default function RunSessionPage() {
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
-  const onApplyDamageRolled = useCallback((amount: number, label: string) => {
-    setPendingApply(amount > 0 ? { amount, label } : null);
+  const onApplyDamageRolled = useCallback((amount: number, label: string, actorCombatantId?: number) => {
+    setPendingApply(amount > 0 ? { amount, label, actorCombatantId } : null);
   }, []);
 
   useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
@@ -1030,8 +1052,11 @@ export default function RunSessionPage() {
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
   const hpDelta = useMutation({
     mutationKey: HP_MUTATION_KEY,
-    mutationFn: ({ combatantId, delta }: { combatantId: number; delta: number }) =>
-      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta }),
+    mutationFn: ({ combatantId, delta, actorId }: { combatantId: number; delta: number; actorId?: number }) =>
+      api.patch(
+        `${API}/encounters/${eid}/combatants/${combatantId}`,
+        hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+      ),
     onMutate: async ({ combatantId, delta }) => {
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1057,7 +1082,7 @@ export default function RunSessionPage() {
   });
 
   const applyHpDeltaBulk = useCallback(
-    async (combatantIds: readonly number[], delta: number) => {
+    async (combatantIds: readonly number[], delta: number, actorId?: number) => {
       if (combatantIds.length === 0) return;
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1073,7 +1098,10 @@ export default function RunSessionPage() {
       }
       try {
         for (const combatantId of combatantIds) {
-          await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta });
+          await api.patch(
+            `${API}/encounters/${eid}/combatants/${combatantId}`,
+            hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+          );
         }
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
@@ -1086,8 +1114,14 @@ export default function RunSessionPage() {
   );
 
   const patchCombatant = useCallback(
-    (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
-    [combatantPatch],
+    (combatantId: number, patch: Record<string, unknown>) => {
+      const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
+      const actorCombatantId =
+        needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+      const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId) : patch;
+      combatantPatch.mutate({ combatantId, patch: enriched });
+    },
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId],
   );
 
   const patchCombatantTurnState = useCallback(
@@ -1751,11 +1785,13 @@ export default function RunSessionPage() {
           }
           isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
-            hpDelta.mutate({ combatantId, delta });
+            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
+            hpDelta.mutate({ combatantId, delta, actorId });
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            void applyHpDeltaBulk(combatantIds, delta)
+            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
+            void applyHpDeltaBulk(combatantIds, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);
           }}
@@ -1838,7 +1874,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={onApplyDamageRolled}
+              onApplyDamage={(amount, label) => onApplyDamageRolled(amount, label, c.id)}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -1852,7 +1888,10 @@ export default function RunSessionPage() {
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
-              onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
+              onHpDelta={(delta) => {
+                const actorId = hpLogActorId(currentCombatantId, c.id);
+                hpDelta.mutate({ combatantId: c.id, delta, actorId });
+              }}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onRollDeathSave={() => rollDeathSave(c)}
