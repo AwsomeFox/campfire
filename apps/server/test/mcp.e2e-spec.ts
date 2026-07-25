@@ -1332,9 +1332,14 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     const begun = parseResult(
       await dmClient.callTool({ name: 'begin_encounter', arguments: { encounterId: encounter.id } }),
-    ) as { status: string; currentCombatantId: number | null };
+    ) as { status: string; currentCombatantId: number | null; combatants: Array<{ id: number; initiative: number | null }> };
     expect(begun.status).toBe('running');
     expect(begun.currentCombatantId).toBe(hero!.id);
+    const turnOrder = [...begun.combatants]
+      .filter((c) => c.initiative != null)
+      .sort((a, b) => (b.initiative ?? 0) - (a.initiative ?? 0));
+    const heroIdx = turnOrder.findIndex((c) => c.id === hero!.id);
+    const expectedNextId = turnOrder[(heroIdx + 1) % turnOrder.length]!.id;
 
     const readyResult = await dmClient.callTool({
       name: 'set_turn_state',
@@ -1351,7 +1356,7 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     });
     expect(endTurnResult.isError).toBeFalsy();
     const afterEnd = parseResult(endTurnResult) as { currentCombatantId: number | null };
-    expect(afterEnd.currentCombatantId).toBe(goblinId);
+    expect(afterEnd.currentCombatantId).toBe(expectedNextId);
 
     await dmClient.callTool({ name: 'end_encounter', arguments: { encounterId: encounter.id } });
   });
