@@ -29,6 +29,7 @@ export function toDomain(row: typeof factions.$inferSelect): Faction {
     hidden: row.hidden,
     reputation: row.reputation,
     standing: row.standing as FactionStanding,
+    portraitUrl: row.portraitUrl,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -104,6 +105,7 @@ export class FactionsService {
         hidden: resolveCreateHidden(input.hidden),
         reputation: input.reputation ?? 0,
         standing: input.standing ?? 'neutral',
+        portraitUrl: input.portraitUrl ?? null,
         createdAt: ts,
         updatedAt: ts,
       })

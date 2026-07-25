@@ -1070,6 +1070,23 @@ function migrateEncountersTableForGridCalibration(sqlite: Database.Database): vo
 }
 
 /**
+ * Migration for DBs created before hex orientation (issue #467): `encounters` gained
+ * `hex_orientation` (NOT NULL DEFAULT 'pointy' — existing hex grids keep pointy-top).
+ */
+function migrateEncountersTableForHexOrientation(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('hex_orientation')) {
+    sqlite.exec("ALTER TABLE encounters ADD COLUMN hex_orientation TEXT NOT NULL DEFAULT 'pointy'");
+  }
+}
+
+/**
  * Migration for DBs created before the optional DM-gated progression flag (issue #270):
  * `campaigns.dm_controls_progression` didn't exist. Plain NOT NULL DEFAULT 0 ADD COLUMN —
  * existing campaigns get 0 (false), preserving the pre-migration behavior where any
@@ -1203,6 +1220,40 @@ function migrateNpcsTableForPortraitUrl(sqlite: Database.Database): void {
   if (columns.some((c) => c.name === 'portrait_url')) return;
 
   sqlite.exec('ALTER TABLE npcs ADD COLUMN portrait_url TEXT');
+}
+
+/**
+ * Migration for DBs created before faction portraits (issue #1324): `factions.portrait_url`
+ * didn't exist. Plain nullable ADD COLUMN — existing factions get NULL, preserving the
+ * initials fallback until a DM uploads an emblem.
+ */
+function migrateFactionsTableForPortraitUrl(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='factions'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(factions)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'portrait_url')) return;
+
+  sqlite.exec('ALTER TABLE factions ADD COLUMN portrait_url TEXT');
+}
+
+/**
+ * Migration for DBs created before location portraits (issue #1324): `locations.portrait_url`
+ * didn't exist. Plain nullable ADD COLUMN — existing locations get NULL, preserving the
+ * status-colored placeholder until a DM uploads landmark art.
+ */
+function migrateLocationsTableForPortraitUrl(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(locations)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'portrait_url')) return;
+
+  sqlite.exec('ALTER TABLE locations ADD COLUMN portrait_url TEXT');
 }
 
 /**
@@ -2658,6 +2709,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0095_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
   { name: '0096_encounter_events_provenance', run: migrateEncounterEventsTableForProvenance },
   { name: '0097_npcs_portrait_url', run: migrateNpcsTableForPortraitUrl },
+  { name: '0098_encounters_hex_orientation', run: migrateEncountersTableForHexOrientation },
+  { name: '0099_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
+  { name: '0100_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
 ];
 
 /**

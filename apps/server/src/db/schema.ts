@@ -294,6 +294,8 @@ export const factions = sqliteTable('factions', {
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
   reputation: integer('reputation').notNull().default(0),
   standing: text('standing').notNull().default('neutral'),
+  // Emblem/banner portrait image (issue #1324). Resolved attachment URL; nullable.
+  portraitUrl: text('portrait_url'),
   // Soft-delete / trash timestamp (issue #701) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
@@ -314,6 +316,8 @@ export const locations = sqliteTable('locations', {
   mapY: real('map_y'),
   body: text('body').notNull().default(''),
   dmSecret: text('dm_secret').notNull().default(''),
+  // Landmark/portrait image (issue #1324). Resolved attachment URL; nullable.
+  portraitUrl: text('portrait_url'),
   // Soft-delete / trash timestamp (issue #116) — see campaigns.deletedAt.
   deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
@@ -929,6 +933,8 @@ export const encounters = sqliteTable('encounters', {
   // Grid geometry + shared AoE templates (issue #238). grid_type is 'square'|'hex' (added by
   // migration on older DBs, backfilled 'square'); aoe is a JSON AoeTemplate[] blob (null = []).
   gridType: text('grid_type').notNull().default('square'),
+  // Hex orientation (issue #467): 'pointy' | 'flat'. Default pointy matches legacy overlay.
+  hexOrientation: text('hex_orientation').notNull().default('pointy'),
   aoe: text('aoe'),
   // Grid calibration (issue #417) — align the overlay to a map's printed grid. All in
   // percent-of-map-width units; defaults reproduce the pre-#417 top-left square grid.

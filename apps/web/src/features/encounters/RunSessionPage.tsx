@@ -42,7 +42,7 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
@@ -97,13 +97,23 @@ import {
   computeContainedRect,
   DEFAULT_GRID_OPACITY,
   layerPxToMapPercent,
-  mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
   resolveGridCalibration,
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import {
+  gridCellLabel,
+  gridCellLabelPlural,
+  hexAoeCirclePolygons,
+  hexPolygons,
+  hexKeyboardStepPx,
+  mapPercentGridDistance,
+  snapFogRectToHexGrid,
+  snapMapPercentToHex,
+  tokenFootprintDiameterPx,
+} from './hexGeometry';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
@@ -136,6 +146,7 @@ import {
   type MapViewportState,
   type PinchGesture,
 } from './mapViewport';
+import { tokenDiameterPx } from './tokenFootprint';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -157,6 +168,7 @@ type EncounterGridPatch = Partial<
     | 'gridUnit'
     | 'gridSnap'
     | 'gridType'
+    | 'hexOrientation'
     // Grid calibration (issue #417) — origin offset, independent cell height, rotation, opacity.
     | 'gridOffsetX'
     | 'gridOffsetY'
@@ -906,7 +918,7 @@ export default function RunSessionPage() {
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163): the interactive
+    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
     if (encounter?.status === 'ended') return false;
@@ -1280,7 +1292,7 @@ export default function RunSessionPage() {
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
-    if (!canDmWrite || !encounter) return;
+    if (!canDmWrite || !encounter || encounter.status === 'ended') return;
     const patch = missingGridDefaults(encounter);
     const encounterPrefix = `${encounter.id}:`;
     if (!patch) {
@@ -1398,6 +1410,8 @@ export default function RunSessionPage() {
 
   if (!encounter) return null;
 
+  const canEditEncounter = canDmWrite && encounter.status !== 'ended';
+
   // The server returns combatants already in initiative order and names the current
   // actor by id (issue #49) — no client-side re-sort, and no positional
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
@@ -1437,7 +1451,7 @@ export default function RunSessionPage() {
           the party sees the same one-tap prompt for their own character. */}
       <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
-      {canDmWrite && (
+      {canEditEncounter && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
@@ -1591,7 +1605,7 @@ export default function RunSessionPage() {
       <EncounterLinks
         campaignId={cid}
         encounter={encounter}
-        canEdit={canDmWrite}
+        canEdit={canEditEncounter}
         onSaved={(updated) =>
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
             prev ? { ...prev, ...updated } : prev,
@@ -1642,7 +1656,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           isDm={isDm}
           viewerUserId={myUserId != null ? String(myUserId) : null}
-          canDmWrite={canDmWrite}
+          canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1652,9 +1666,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
-          onGenerateMap={canDmWrite ? generateAndAttachMap : undefined}
+          onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
-            canDmWrite
+            canEditEncounter
               ? (id) => {
                   setEncounterMap(id);
                   setShowMapGuidance(true);
@@ -1668,6 +1682,7 @@ export default function RunSessionPage() {
           pings={pings}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
+          ruleSystem={ruleSystem}
         />
       )}
 
@@ -1725,6 +1740,9 @@ export default function RunSessionPage() {
                   gridScale: encounter.gridScale,
                   mapRect: aoeHitLayout.mapRect,
                   cellPx: aoeHitLayout.cellPx,
+                  gridType: encounter.gridType ?? 'square',
+                  hexOrientation: encounter.hexOrientation ?? 'pointy',
+                  calibration: resolveGridCalibration(encounter),
                 }
               : null
           }
@@ -2013,18 +2031,8 @@ export default function RunSessionPage() {
 // `tokenInitials` is the shared grapheme-aware helper (issue #631): two-letter
 // token labels from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1").
 
-// Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
-// rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
-const TOKEN_SIZE_SCALE: Record<TokenSize, number> = {
-  tiny: 0.6,
-  small: 0.8,
-  medium: 1,
-  large: 1.6,
-  huge: 2.2,
-  gargantuan: 3,
-};
+// Token footprint categories (issue #40 / #468) — diameters derive from calibrated grid cells.
 const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
-const BASE_TOKEN_PX = 32;
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
 function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: number; h: number } {
@@ -2065,49 +2073,13 @@ type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
-// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+// Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
   const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
   return uuid.slice(0, 40);
-}
-
-/**
- * Pointy-top hexagon centres + vertices tiling the surface (issue #238). Returned as SVG
- * `points` strings in pixel space so the overlay can draw them directly. `cellPx` is treated as
- * the hex width; a cap keeps a pathologically fine grid from emitting tens of thousands of nodes.
- */
-function hexPolygons(surfaceW: number, surfaceH: number, cellPx: number): string[] {
-  if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
-  const w = cellPx;
-  const s = w / Math.sqrt(3); // hex side / circumradius for a pointy-top hex of width w
-  const rowH = 1.5 * s;
-  const cols = Math.ceil(surfaceW / w) + 1;
-  const rows = Math.ceil(surfaceH / rowH) + 1;
-  if (cols * rows > 3000) return []; // too fine to draw as discrete polygons — skip the overlay
-  const out: string[] = [];
-  for (let r = 0; r <= rows; r++) {
-    const offset = r % 2 ? w / 2 : 0;
-    for (let c = 0; c <= cols; c++) {
-      const cx = c * w + offset;
-      const cy = r * rowH;
-      out.push(
-        [
-          [cx, cy - s],
-          [cx + w / 2, cy - s / 2],
-          [cx + w / 2, cy + s / 2],
-          [cx, cy + s],
-          [cx - w / 2, cy + s / 2],
-          [cx - w / 2, cy - s / 2],
-        ]
-          .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`)
-          .join(' '),
-      );
-    }
-  }
-  return out;
 }
 
 /**
@@ -2189,6 +2161,7 @@ function BattleMap({
   pings,
   onError,
   onAoeHitLayoutChange,
+  ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -2216,6 +2189,8 @@ function BattleMap({
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
+  /** Active campaign rule system — selects grid distance rules (issue #467). */
+  ruleSystem: string | null;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -2346,6 +2321,8 @@ function BattleMap({
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
+  const hexOrientation = encounter.hexOrientation ?? 'pointy';
+  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -2562,9 +2539,18 @@ function BattleMap({
           setRuler({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
           announce('Measurement started at map center. Arrow keys adjust the endpoint. Enter to finish, Escape to cancel.');
         } else if (ruler && canMeasure && mapRect) {
-          const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+          const cells = mapPercentGridDistance(
+            ruler.start,
+            ruler.end,
+            mapRect,
+            cellPx,
+            gridType,
+            calibration,
+            hexOrientation,
+            gridDistanceRule,
+          );
           const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} squares · ${feet} ${gridUnit}`);
+          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
         }
         return;
       }
@@ -2590,8 +2576,7 @@ function BattleMap({
         } else {
           const rect = rectFromCorners(revealCorners.start, revealCorners.end);
           if (rect.w >= 1 && rect.h >= 1) {
-            const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-            onSetFog(next);
+            commitFogReveal(revealCorners.start, revealCorners.end);
             announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
           }
           setRevealCorners(null);
@@ -2619,10 +2604,25 @@ function BattleMap({
     }
   }
 
-  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
+  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417/#467). */
   function snapPoint(pt: MapPoint): MapPoint {
     if (!mapRect) return pt;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(pt, calibration, mapRect, hexOrientation, encounter.gridSnap);
+    }
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
+  }
+
+  /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
+  function commitFogReveal(start: MapPoint, end: MapPoint): void {
+    let rect = rectFromCorners(start, end);
+    if (rect.w >= 1 && rect.h >= 1) {
+      if (gridOn && gridType === 'hex' && calibration && mapRect) {
+        rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
+      }
+      const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
+      onSetFog(next);
+    }
   }
 
   /** Keyboard nudge step in layer pixels: one calibrated cell, or 1% of map width if the grid is off. */
@@ -2634,15 +2634,30 @@ function BattleMap({
 
   /** Nudge a map-percent point by one grid cell (Shift = five) and snap to the nearest cell centre. */
   function nudgeMapPoint(pt: MapPoint, e: ReactKeyboardEvent): MapPoint {
-    const step = keyboardStepPx();
     const mult = e.shiftKey ? 5 : 1;
-    const px = mapPercentToLayerPx(pt, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const baseRect = mapRect ?? { left: 0, top: 0, width: 1, height: 1 };
+    const px = mapPercentToLayerPx(pt, baseRect);
+
+    if (gridOn && gridType === 'hex' && calibrationPx && cellPx > 0) {
+      const hexStep = hexKeyboardStepPx(e.key, cellPx, hexOrientation);
+      if (hexStep) {
+        const nextPx = { x: px.x + hexStep.x * mult, y: px.y + hexStep.y * mult };
+        const raw = layerPxToMapPercent(nextPx, baseRect);
+        if (!mapRect) return raw;
+        return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+      }
+    }
+
+    const step = keyboardStepPx();
     const nextPx = {
       x: px.x + (e.key === 'ArrowRight' ? step.x * mult : e.key === 'ArrowLeft' ? -step.x * mult : 0),
       y: px.y + (e.key === 'ArrowDown' ? step.y * mult : e.key === 'ArrowUp' ? -step.y * mult : 0),
     };
-    const raw = layerPxToMapPercent(nextPx, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const raw = layerPxToMapPercent(nextPx, baseRect);
     if (!mapRect) return raw;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+    }
     return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
   }
 
@@ -2858,12 +2873,7 @@ function BattleMap({
       return;
     }
     if (gesture.kind === 'fog') {
-      const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
-      // Ignore an accidental micro-drag (a click) — a real reveal has some area.
-      if (rect.w >= 1 && rect.h >= 1) {
-        const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-        onSetFog(next);
-      }
+      commitFogReveal(gesture.start, finalPoint ?? gesture.end);
       return;
     }
     // A ruler stays on screen after release so the readout can be read; it clears when the
@@ -2984,7 +2994,16 @@ function BattleMap({
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
-    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+    const cells = mapPercentGridDistance(
+      ruler.start,
+      ruler.end,
+      mapRect,
+      cellPx,
+      gridType,
+      calibration,
+      hexOrientation,
+      gridDistanceRule,
+    );
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -3005,10 +3024,10 @@ function BattleMap({
   // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
     () =>
-      gridOn && gridType === 'hex' && mapRect
-        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+      gridOn && gridType === 'hex' && mapRect && calibrationPx
+        ? hexPolygons(mapRect.width, mapRect.height, calibrationPx, hexOrientation)
         : [],
-    [gridOn, gridType, mapRect, cellPx],
+    [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
   function changeTool(next: MapTool) {
@@ -3348,6 +3367,19 @@ function BattleMap({
                   <option value="hex">hex</option>
                 </select>
               </label>
+              {gridOn && gridType === 'hex' && (
+                <label className="flex items-center gap-1 text-muted" title="Pointy-top or flat-top hex orientation">
+                  orientation
+                  <select
+                    value={hexOrientation}
+                    onChange={(e) => onSetGrid({ hexOrientation: e.target.value as typeof hexOrientation })}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="pointy">pointy-top</option>
+                    <option value="flat">flat-top</option>
+                  </select>
+                </label>
+              )}
 
               {/* Grid calibration (issue #417) — human-readable alignment controls with a
                   keyboard/numeric alternative to the draggable anchors, plus help + reset. */}
@@ -3725,7 +3757,14 @@ function BattleMap({
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
                   const movable = tool === 'move' && canMoveToken(c);
                   const isCharacter = c.kind === 'character';
-                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  const sizePx =
+                    gridOn && gridType === 'hex' && cellPx > 0
+                      ? Math.round(tokenFootprintDiameterPx(c.tokenSize, cellPx, hexOrientation))
+                      : tokenDiameterPx({
+                          tokenSize: c.tokenSize,
+                          cellPx,
+                          gridType,
+                        });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
@@ -3836,6 +3875,17 @@ function BattleMap({
                       const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
+                        if (gridType === 'hex' && calibrationPx) {
+                          const radiusCells = t.sizeFt / gridScale!;
+                          const hexPolys = hexAoeCirclePolygons({ x: ox, y: oy }, radiusCells, calibrationPx, hexOrientation);
+                          return (
+                            <g key={t.id}>
+                              {hexPolys.map((pts, i) => (
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                              ))}
+                            </g>
+                          );
+                        }
                         return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
@@ -3950,7 +4000,7 @@ function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
                       </div>
                     )}
                   </>
