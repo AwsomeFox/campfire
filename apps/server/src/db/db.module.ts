@@ -2196,6 +2196,11 @@ function migrateCombatantsTableForStatblockJson(sqlite: Database.Database): void
 
 /** Issue #425: campaign-scoped homebrew monster library for clone/edit/reuse. */
 function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table with FKs.
+
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS campaign_library_monsters (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2212,6 +2217,11 @@ function migrateCampaignLibraryMonstersTable(sqlite: Database.Database): void {
 
 /** Issue #425: upgraded DBs created by migrateCampaignLibraryMonstersTable lack FK cascades. */
 function migrateCampaignLibraryMonstersForeignKeys(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return; // fresh DB — BOOTSTRAP_SQL creates the table with FKs.
+
   const hasTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_library_monsters'")
     .get();
