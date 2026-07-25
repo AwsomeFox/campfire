@@ -87,6 +87,11 @@ export function shouldShowIconPickerClearAction(value: string, autoSlug?: string
   return !!value.trim() && !autoSlug?.trim();
 }
 
+/** Hide the grid "None" tile in inventory auto mode; Auto action covers revert. */
+export function shouldShowIconPickerNoneTile(autoSlug?: string): boolean {
+  return !autoSlug?.trim();
+}
+
 /** Merge recent + contextual suggestions, preserving order and deduping. */
 export function iconPickerSuggestionSlugs(
   recent: readonly string[],

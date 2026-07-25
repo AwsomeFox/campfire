@@ -34,6 +34,7 @@ import {
   recordRecentIconPickerSlug,
   shouldShowIconPickerAutoAction,
   shouldShowIconPickerClearAction,
+  shouldShowIconPickerNoneTile,
 } from '../../src/components/iconPickerA11y';
 
 /**
@@ -46,10 +47,10 @@ import {
  * state (Retry bumps `loadAttempt` only), and wire ErrorNote's accessible alert.
  */
 
-const READY_INDEX: readonly { slug: string; category: string; name: string; artist: string }[] = [
-  { slug: 'sword', category: 'weapons', name: 'Sword', artist: 'lorc' },
-  { slug: 'axe', category: 'weapons', name: 'Axe', artist: 'lorc' },
-];
+const READY_INDEX = [
+  { slug: 'sword', category: 'weapons', name: 'Sword', artist: 'lorc', shard: 0 },
+  { slug: 'axe', category: 'weapons', name: 'Axe', artist: 'lorc', shard: 0 },
+] as const;
 
 test.describe('icon picker surface states (issue #847)', () => {
   test('loading: full index still in flight, with or without curated matches', () => {
@@ -163,6 +164,8 @@ test.describe('icon picker UX helpers (issue #648)', () => {
     expect(shouldShowIconPickerAutoAction('', 'axe')).toBe(false);
     expect(shouldShowIconPickerClearAction('sword', undefined)).toBe(true);
     expect(shouldShowIconPickerClearAction('sword', 'axe')).toBe(false);
+    expect(shouldShowIconPickerNoneTile(undefined)).toBe(true);
+    expect(shouldShowIconPickerNoneTile('axe')).toBe(false);
   });
 
   test('announces result counts, truncation, and offline curated-only scope', () => {

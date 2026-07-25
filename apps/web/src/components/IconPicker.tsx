@@ -71,6 +71,7 @@ import {
   recordRecentIconPickerSlug,
   shouldShowIconPickerAutoAction,
   shouldShowIconPickerClearAction,
+  shouldShowIconPickerNoneTile,
 } from './iconPickerA11y';
 
 function iconDisplayName(slug: string): string {
@@ -371,24 +372,26 @@ export function IconPicker({
             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(56px, 1fr))', maxHeight: 320 }}
             data-icon-picker-surface={surface}
           >
-            {/* Clear affordance — sets the slug back to '' (no icon / auto). */}
-            <button
-              type="button"
-              data-icon-picker-tile="true"
-              data-icon-slug=""
-              onClick={() => selectSlug('')}
-              title="No icon"
-              aria-pressed={!value.trim()}
-              aria-label="No icon"
-              className={`cf-inset flex flex-col items-center justify-center gap-1 !p-2 aspect-square hover:border-[var(--color-accent-700)] ${
-                !value.trim() ? '!border-[var(--color-accent)] text-[var(--color-accent)]' : 'text-[var(--color-neutral-500)]'
-              }`}
-            >
-              <span className="text-lg leading-none" aria-hidden="true">
-                ⊘
-              </span>
-              <span className="text-[9px] leading-tight">None</span>
-            </button>
+            {/* Clear affordance — sets the slug back to '' (no icon). Hidden in auto mode. */}
+            {shouldShowIconPickerNoneTile(autoSlug) && (
+              <button
+                type="button"
+                data-icon-picker-tile="true"
+                data-icon-slug=""
+                onClick={() => selectSlug('')}
+                title="No icon"
+                aria-pressed={!value.trim()}
+                aria-label="No icon"
+                className={`cf-inset flex flex-col items-center justify-center gap-1 !p-2 aspect-square hover:border-[var(--color-accent-700)] ${
+                  !value.trim() ? '!border-[var(--color-accent)] text-[var(--color-accent)]' : 'text-[var(--color-neutral-500)]'
+                }`}
+              >
+                <span className="text-lg leading-none" aria-hidden="true">
+                  ⊘
+                </span>
+                <span className="text-[9px] leading-tight">None</span>
+              </button>
+            )}
 
             {gridResults.map((icon) => renderIconTile(icon))}
 
