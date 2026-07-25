@@ -1351,9 +1351,9 @@ export class EncountersService {
 
     const ts = nowIso();
 
-    // Auto-add only ACTIVE characters (issue #115). Dead/retired/inactive PCs stay on
-    // the roster but are skipped here, so a long campaign's fallen and replaced
-    // characters stop being force-conscripted into every new fight. The DM can still
+    // Auto-add only ACTIVE characters (issue #115, #719). Draft/dead/retired/inactive PCs
+    // stay on the roster but are skipped here, so incomplete sheets and a long
+    // campaign's fallen and replaced characters stop being force-conscripted into
     // add any of them manually via addCombatant. Legacy pre-migration rows all default
     // to 'active', preserving prior behavior.
     const partyRows = await this.db

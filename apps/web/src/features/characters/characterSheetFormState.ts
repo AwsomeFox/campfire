@@ -19,7 +19,10 @@ export type CharacterSheetDraft = {
 
 export function characterSheetDraftFrom(character: Character): CharacterSheetDraft {
   const stats: Record<string, string> = {};
-  for (const key of ABILITY_KEYS) stats[key] = String(abilityScore(character, key));
+  for (const key of ABILITY_KEYS) {
+    const score = abilityScore(character, key);
+    stats[key] = score === null ? '' : String(score);
+  }
   return {
     name: character.name,
     species: character.species,

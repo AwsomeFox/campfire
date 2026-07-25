@@ -5,10 +5,11 @@
  */
 import type { CharacterStatus } from '@campfire/schema';
 
-export const CHARACTER_STATUSES: readonly CharacterStatus[] = ['active', 'dead', 'retired', 'inactive'];
+export const CHARACTER_STATUSES: readonly CharacterStatus[] = ['active', 'draft', 'dead', 'retired', 'inactive'];
 
 export const STATUS_LABEL: Record<CharacterStatus, string> = {
   active: 'Active',
+  draft: 'Draft',
   dead: 'Dead',
   retired: 'Retired',
   inactive: 'Inactive',
@@ -16,8 +17,12 @@ export const STATUS_LABEL: Record<CharacterStatus, string> = {
 
 /** A muted, non-accent tag for a non-active PC. Kept subdued so a corpse doesn't shout on the roster. */
 export function StatusTag({ status, className = '' }: { status: CharacterStatus; className?: string }) {
+  const skipped =
+    status === 'draft'
+      ? 'still being built — not auto-added to new encounters until marked Active'
+      : 'kept on the roster but not auto-added to new encounters';
   return (
-    <span className={`tag tag-neutral ${className}`} style={{ fontSize: 10 }} title={`This character is ${STATUS_LABEL[status].toLowerCase()} — kept on the roster but not auto-added to new encounters`}>
+    <span className={`tag tag-neutral ${className}`} style={{ fontSize: 10 }} title={`This character is ${STATUS_LABEL[status].toLowerCase()} — ${skipped}`}>
       {STATUS_LABEL[status]}
     </span>
   );

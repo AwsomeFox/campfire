@@ -27,6 +27,7 @@ import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
 import { PageTitle } from '../../components/PageTitle';
 import { CampaignCover } from '../../components/CampaignCover';
+import { UIIcon } from '../../components/UIIcon';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
 function NewCampaignTile({ onClick }: { onClick: () => void }) {
@@ -44,10 +45,10 @@ function NewCampaignTile({ onClick }: { onClick: () => void }) {
       }}
     >
       <span
-        className="grid place-items-center rounded-full text-lg"
+        className="grid place-items-center rounded-full"
         style={{ width: 34, height: 34, border: '1px dashed var(--color-neutral-700)' }}
       >
-        +
+        <UIIcon name="add" size="sm" />
       </span>
       New campaign
     </button>
@@ -163,10 +164,10 @@ function ImportCampaignTile({
         }}
       >
         <span
-          className="grid place-items-center rounded-full text-lg"
+          className="grid place-items-center rounded-full"
           style={{ width: 34, height: 34, border: '1px dashed var(--color-neutral-700)' }}
         >
-          ⬆
+          <UIIcon name="upload" size="sm" />
         </span>
         {importing ? 'Importing…' : 'Import from export (.zip / .json)'}
       </button>

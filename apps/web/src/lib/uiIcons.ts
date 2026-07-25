@@ -36,3 +36,27 @@ export const NOTE_VISIBILITY_ICON = {
   party_shared: 'meeple',
   whisper: 'secret-book',
 } as const;
+
+/** Canonical pixel sizes for chrome control icons — keeps +/✓/⋯ affordances aligned. */
+export const UI_ICON_SIZE = {
+  xs: 14,
+  sm: 16,
+  md: 20,
+  lg: 24,
+} as const;
+
+export type UiIconSize = keyof typeof UI_ICON_SIZE;
+
+/**
+ * Control affordance → game-icons slug. Use via <UIIcon name="…" /> in buttons,
+ * toggles, and nav chrome; reserve <GameIcon> for domain/entity art.
+ */
+export const UI_CONTROL_ICON = {
+  add: 'hospital-cross',
+  upload: 'cloud-upload',
+  check: 'check-mark',
+  more: 'hamburger-menu',
+  close: 'cancel',
+} as const;
+
+export type UiControlIcon = keyof typeof UI_CONTROL_ICON;
