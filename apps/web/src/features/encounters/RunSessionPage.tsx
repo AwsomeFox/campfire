@@ -45,7 +45,8 @@ import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError , translateApiError} from '../../lib/api';
+import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
+import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
@@ -109,6 +110,15 @@ import {
   dmLifecycleActions,
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
+import {
+  deriveEncounterSyncState,
+  encounterRiskyActionsBlocked,
+  encounterSyncBannerMessage,
+  encounterSyncChipClass,
+  encounterSyncChipLabel,
+  encounterSyncRevisionFromUpdatedAt,
+  type EncounterSyncRevision,
+} from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
 import {
   armMapPingTap,
@@ -597,7 +607,9 @@ export default function RunSessionPage() {
   const cid = Number(campaignId);
   const eid = Number(encounterId);
   const navigate = useNavigate();
-  const { me } = useAuth();
+  const { me, staleIdentity } = useAuth();
+  const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
@@ -694,6 +706,9 @@ export default function RunSessionPage() {
   const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
+  const [encounterReadStale, setEncounterReadStale] = useState(false);
+  const [resyncPending, setResyncPending] = useState(false);
+  const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -706,6 +721,23 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  useEffect(() => {
+    if (!encounter?.updatedAt) return;
+    setSyncRevision(encounterSyncRevisionFromUpdatedAt(encounter.updatedAt));
+    setEncounterReadStale(false);
+    setResyncPending(false);
+  }, [encounter?.updatedAt]);
+
+  useEffect(() => {
+    if (!encounterQuery.error || encounter == null) return;
+    if (encounterQuery.error instanceof ApiError && encounterQuery.error.status >= 400 && encounterQuery.error.status < 500) {
+      return;
+    }
+    if (isTransientError(encounterQuery.error) || isReadTimeout(encounterQuery.error)) {
+      setEncounterReadStale(true);
+    }
+  }, [encounterQuery.error, encounter]);
 
   // Difficulty is a separate read-only derivation (issue #58) — never let its failure
   // block the encounter view; the badge just stays hidden (retry off, error ignored).
@@ -744,6 +776,22 @@ export default function RunSessionPage() {
     eventStatus,
     charactersQuery.isFetching && !charactersQuery.isLoading,
   );
+  const encounterSync = deriveEncounterSyncState({
+    eventStatus,
+    readStale: encounterReadStale,
+    resyncPending,
+    staleIdentity,
+  });
+  const riskyBlocked = encounterRiskyActionsBlocked(encounterSync);
+  const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
+  const encounterSyncChip = encounterSyncChipLabel(encounterSync);
+  const encounterSyncLastSyncTitle = useMemo(() => {
+    if (syncRevision?.lastSyncAt == null) return undefined;
+    return `Last synced ${formatDateTime(syncRevision.lastSyncAt, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })}`;
+  }, [syncRevision?.lastSyncAt, formattingLocale, timeFormat]);
 
   // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
   const packsQuery = useQuery({
@@ -774,6 +822,10 @@ export default function RunSessionPage() {
   useEffect(() => {
     setActionError(null);
     setShowMapGuidance(false);
+    setEncounterReadStale(false);
+    setResyncPending(false);
+    setSyncRevision(null);
+    setEventStatus(null);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -814,12 +866,14 @@ export default function RunSessionPage() {
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
+      setResyncPending(true);
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
+      setResyncPending(true);
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
@@ -882,7 +936,7 @@ export default function RunSessionPage() {
   // rather than a `.find` over all characters on every render (issue: large encounters).
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
-  function canEditCombatant(c: Combatant): boolean {
+  function canEditCombatantPermission(c: Combatant): boolean {
     // An ended encounter is immutable server-side (assertMutable, #163): the interactive
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
@@ -890,6 +944,11 @@ export default function RunSessionPage() {
     if (canDmWrite) return true;
     if (!canPlayerWrite) return false;
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
+  }
+
+  function canEditCombatant(c: Combatant): boolean {
+    if (riskyBlocked) return false;
+    return canEditCombatantPermission(c);
   }
 
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
@@ -1288,7 +1347,7 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy) return false;
+            if (!encounter || headerBusy || riskyBlocked) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -1428,6 +1487,13 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
+        <span
+          className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
+          data-testid="encounter-sync-chip"
+          title={encounterSyncLastSyncTitle}
+        >
+          {encounterSyncChip}
+        </span>
         {/* AI-DM presence chip (#344) — the seat is in Driver mode, so it may act on
             this encounter from the Table page without anyone here having it open. */}
         {liveActivity.mode === 'driver' && <AiDmPresenceTag turnActive={liveActivity.turnActive} />}
@@ -1462,7 +1528,7 @@ export default function RunSessionPage() {
                     ones). Hidden entirely rather than dead weight once Start is live. */}
                 <Btn
                   ghost
-                  disabled={headerBusy || needsInitiativeCount === 0}
+                  disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
@@ -1470,7 +1536,7 @@ export default function RunSessionPage() {
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
-                    disabled={headerBusy || hasNoCombatants}
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants}
                     onClick={startEncounter}
                     aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
                   >
@@ -1493,14 +1559,14 @@ export default function RunSessionPage() {
                     roll (issue #702), and surface how many still need rolling. */}
                 <Btn
                   ghost
-                  disabled={headerBusy || needsInitiativeCount === 0}
+                  disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn
-                  disabled={headerBusy}
+                  disabled={headerBusy || riskyBlocked}
                   onClick={nextTurn}
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
                   title={`Next turn${nextTurnShortcut.titleSuffix}`}
@@ -1510,14 +1576,14 @@ export default function RunSessionPage() {
               </>
             )}
             {lifecycle.end && (
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
             {lifecycle.reopen && (
               <Btn
                 ghost
-                disabled={headerBusy}
+                disabled={headerBusy || riskyBlocked}
                 onClick={() => {
                   // Default each conflict to pull_sheet (preserve intervening healing/rest).
                   const initial: Record<number, HpResyncDirection> = {};
@@ -1530,13 +1596,26 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.delete && (
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
                 {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
           </div>
         )}
       </div>
+
+      {encounterSyncBanner && (
+        <p
+          className="text-muted"
+          data-testid="encounter-sync-banner"
+          style={{ fontSize: 12, margin: 0 }}
+          role="status"
+          aria-live="polite"
+          title={encounterSyncLastSyncTitle}
+        >
+          {encounterSyncBanner}
+        </p>
+      )}
 
       {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
           events touching encounter or party state (including loot/treasury grants). */}
@@ -1607,7 +1686,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           isDm={isDm}
           viewerUserId={myUserId != null ? String(myUserId) : null}
-          canDmWrite={canDmWrite}
+          canDmWrite={canDmWrite && !riskyBlocked}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1653,7 +1732,7 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy} onClick={nextTurn}>
+              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
                 Done →
               </Btn>
             )}
@@ -1668,6 +1747,7 @@ export default function RunSessionPage() {
           currentCombatantId={currentCombatantId ?? null}
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
+          actionsDisabled={riskyBlocked}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
         />
@@ -1677,7 +1757,8 @@ export default function RunSessionPage() {
         <ApplyDamageBar
           amount={pendingApply.amount}
           label={pendingApply.label}
-          targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
+          applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}
           aoeHitContext={
             encounter.gridSize != null &&
@@ -1717,6 +1798,7 @@ export default function RunSessionPage() {
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
           isDm={isDm}
+          applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
           onApplied={(token, _policy) => {
@@ -4022,6 +4104,7 @@ function ApplyDamageBar({
   aoeTemplates = [],
   aoeHitContext,
   isStarfinder = false,
+  applyDisabled = false,
   onApply,
   onApplyToAll,
   onDismiss,
@@ -4032,6 +4115,7 @@ function ApplyDamageBar({
   aoeTemplates?: AoeTemplate[];
   aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
+  applyDisabled?: boolean;
   onApply: (combatantId: number, delta: number) => void;
   onApplyToAll: (combatantIds: number[], delta: number) => void;
   onDismiss: () => void;
@@ -4114,6 +4198,7 @@ function ApplyDamageBar({
                 className="btn btn-secondary cf-target-44"
                 style={{ fontSize: 12, padding: '0 12px' }}
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
+                disabled={applyDisabled}
                 onClick={() => onApply(c.id, delta)}
               >
                 {c.name}{acLabel}
@@ -4137,7 +4222,7 @@ function ApplyDamageBar({
                   type="button"
                   className="btn btn-secondary cf-target-44"
                   style={{ fontSize: 12, padding: '0 12px' }}
-                  disabled={affectedCombatants.length === 0}
+                  disabled={applyDisabled || affectedCombatants.length === 0}
                   title={
                     affectedCombatants.length === 0
                       ? `No editable targets inside this ${t.shape} template`
