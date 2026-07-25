@@ -939,6 +939,8 @@ function ArcCard({
     </section>
   );
 }
+
+function BeatRow({
   beat,
   beatIndex,
   beatCount,
