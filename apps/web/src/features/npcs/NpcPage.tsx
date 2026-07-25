@@ -304,10 +304,14 @@ export default function NpcPage() {
 
   async function savePortrait(attachment: Attachment) {
     setActionError(null);
-    await api.patch(`${API}/npcs/${id}`, {
-      portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
-    });
-    await load();
+    try {
+      await api.patch(`${API}/npcs/${id}`, {
+        portraitUrl: attachmentFileUrl(attachment.id, { hidden: attachment.hidden, updatedAt: attachment.updatedAt }),
+      });
+      await load();
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : "Couldn't save the portrait.");
+    }
   }
 
   const revealPreview = buildNpcRevealPreview({
