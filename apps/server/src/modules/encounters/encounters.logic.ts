@@ -1,5 +1,7 @@
 import {
   Dnd5eAdapter,
+  LEGENDARY_ACTION_SLOT,
+  LAIR_INITIATIVE_COUNT,
   computeDnd5eEncounterDifficulty,
   crToXp,
   encounterMultiplier,
@@ -18,6 +20,7 @@ import type {
   EncounterEvent,
   EncounterShape,
   EncounterStatus,
+  EncounterTurnPhase,
   EncounterWarning,
   HpBand,
   TurnPrompt,
@@ -388,6 +391,229 @@ export function shouldSkipTurnOnAdvance(c: Combatant): boolean {
   return false;
 }
 
+/** Boss-fight turn advance including lair slot at initiative 20 (issue #618). */
+export interface EncounterTurnAdvanceState extends NextTurnState {
+  phase: EncounterTurnPhase;
+  lairResumeCombatantId: number | null;
+  roundWrapped: boolean;
+}
+
+function initiativeValue(init: number | null): number {
+  return init ?? Number.NEGATIVE_INFINITY;
+}
+
+/** True when this combatant is the last with initiative >= 20 before lower initiatives. */
+export function shouldEnterLairAfterCombatant(combatant: Combatant, sorted: Combatant[]): boolean {
+  const init = combatant.initiative;
+  if (init === null || init < LAIR_INITIATIVE_COUNT) return false;
+  const idx = sorted.findIndex((c) => c.id === combatant.id);
+  if (idx < 0) return false;
+  const next = sorted[idx + 1];
+  if (!next) return true;
+  const nextInit = next.initiative;
+  return nextInit === null || nextInit < LAIR_INITIATIVE_COUNT;
+}
+
+/** Lair fires before anyone when no combatant rolled initiative 20+. */
+export function lairLeadsRound(sorted: Combatant[]): boolean {
+  return !sorted.some((c) => c.initiative !== null && c.initiative >= LAIR_INITIATIVE_COUNT);
+}
+
+/**
+ * Advance the encounter turn pointer, inserting a lair-action slot at initiative count 20
+ * when `hasLairSlot` is true (issue #618). Legendary usage is tracked separately on each
+ * combatant's turn state and resets on round wrap in the service layer.
+ */
+export function advanceEncounterTurn(
+  sorted: Combatant[],
+  currentCombatantId: number | null,
+  round: number,
+  phase: EncounterTurnPhase,
+  hasLairSlot: boolean,
+  lairResumeCombatantId: number | null,
+): EncounterTurnAdvanceState {
+  const count = sorted.length;
+  if (count === 0) {
+    return {
+      turnIndex: 0,
+      round,
+      currentCombatantId: null,
+      skipped: [],
+      phase: 'combatant',
+      lairResumeCombatantId: null,
+      roundWrapped: false,
+    };
+  }
+
+  if (phase === 'lair') {
+    const resumeId = lairResumeCombatantId ?? sorted.find((c) => initiativeValue(c.initiative) < LAIR_INITIATIVE_COUNT)?.id ?? sorted[0]?.id ?? null;
+    const resumeIdx = resumeId === null ? 0 : turnIndexFor(sorted, resumeId);
+    return {
+      turnIndex: resumeIdx,
+      round,
+      currentCombatantId: resumeId,
+      skipped: [],
+      phase: 'combatant',
+      lairResumeCombatantId: null,
+      roundWrapped: false,
+    };
+  }
+
+  const basic = advanceTurn(sorted, currentCombatantId, round);
+  const roundWrapped = basic.round > round;
+  const ending =
+    currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
+  const starting =
+    basic.currentCombatantId === null ? undefined : sorted.find((c) => c.id === basic.currentCombatantId);
+
+  if (!hasLairSlot || !ending) {
+    return {
+      ...basic,
+      phase: 'combatant',
+      lairResumeCombatantId: null,
+      roundWrapped,
+    };
+  }
+
+  if (shouldEnterLairAfterCombatant(ending, sorted) && starting) {
+    return {
+      turnIndex: turnIndexFor(sorted, ending.id),
+      round: basic.round,
+      currentCombatantId: null,
+      skipped: basic.skipped,
+      phase: 'lair',
+      lairResumeCombatantId: starting.id,
+      roundWrapped: false,
+    };
+  }
+
+  return {
+    ...basic,
+    phase: 'combatant',
+    lairResumeCombatantId: null,
+    roundWrapped,
+  };
+}
+
+/** Initial turn state when combat starts — lair may lead the round (issue #618). */
+export function initialEncounterTurnState(
+  sorted: Combatant[],
+  hasLairSlot: boolean,
+): Pick<EncounterTurnAdvanceState, 'currentCombatantId' | 'turnIndex' | 'phase' | 'lairResumeCombatantId'> {
+  if (sorted.length === 0) {
+    return { turnIndex: 0, currentCombatantId: null, phase: 'combatant', lairResumeCombatantId: null };
+  }
+  if (hasLairSlot && lairLeadsRound(sorted)) {
+    const first = sorted[0];
+    return {
+      turnIndex: 0,
+      currentCombatantId: null,
+      phase: 'lair',
+      lairResumeCombatantId: first.id,
+    };
+  }
+  return {
+    turnIndex: 0,
+    currentCombatantId: sorted[0].id,
+    phase: 'combatant',
+    lairResumeCombatantId: null,
+  };
+}
+
+/**
+ * Reverse of {@link advanceEncounterTurn} for DM undo (issue #618). Effect ticks are not
+ * reversed — only the pointer / lair phase are restored.
+ */
+export function retreatEncounterTurn(
+  sorted: Combatant[],
+  currentCombatantId: number | null,
+  round: number,
+  phase: EncounterTurnPhase,
+  hasLairSlot: boolean,
+  lairResumeCombatantId: number | null,
+): EncounterTurnAdvanceState {
+  if (sorted.length === 0) {
+    return {
+      turnIndex: 0,
+      round: Math.max(1, round),
+      currentCombatantId: null,
+      skipped: [],
+      phase: 'combatant',
+      lairResumeCombatantId: null,
+      roundWrapped: false,
+    };
+  }
+
+  if (phase === 'lair') {
+    const resumeId = lairResumeCombatantId ?? sorted[0]?.id ?? null;
+    let prev: Combatant | undefined;
+    let wrappedToPrevRound = false;
+    if (resumeId !== null) {
+      const resumeIdx = sorted.findIndex((c) => c.id === resumeId);
+      if (resumeIdx > 0) prev = sorted[resumeIdx - 1];
+      else {
+        prev = sorted[sorted.length - 1];
+        wrappedToPrevRound = true;
+      }
+    }
+    const retreatRound = wrappedToPrevRound ? Math.max(1, round - 1) : round;
+
+    if (prev && hasLairSlot && shouldEnterLairAfterCombatant(prev, sorted)) {
+      return {
+        turnIndex: turnIndexFor(sorted, prev.id),
+        round: retreatRound,
+        currentCombatantId: prev.id,
+        skipped: [],
+        phase: 'combatant',
+        lairResumeCombatantId: null,
+        roundWrapped: wrappedToPrevRound,
+      };
+    }
+    return {
+      turnIndex: prev ? turnIndexFor(sorted, prev.id) : 0,
+      round: retreatRound,
+      currentCombatantId: prev?.id ?? null,
+      skipped: [],
+      phase: 'combatant',
+      lairResumeCombatantId: null,
+      roundWrapped: wrappedToPrevRound,
+    };
+  }
+
+  const basic = retreatTurn(sorted, currentCombatantId, round);
+  const ending =
+    currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
+  const starting =
+    basic.currentCombatantId === null ? undefined : sorted.find((c) => c.id === basic.currentCombatantId);
+
+  if (hasLairSlot && starting && shouldEnterLairAfterCombatant(starting, sorted)) {
+    return {
+      turnIndex: turnIndexFor(sorted, starting.id),
+      round: basic.round,
+      currentCombatantId: null,
+      skipped: [],
+      phase: 'lair',
+      lairResumeCombatantId: ending?.id ?? currentCombatantId,
+      roundWrapped: false,
+    };
+  }
+
+  return {
+    ...basic,
+    phase: 'combatant',
+    lairResumeCombatantId: null,
+    roundWrapped: basic.round < round,
+  };
+}
+
+/** Clear legendary-action usage for a new round (issue #618). */
+export function resetLegendaryUsage(turnState: CombatantTurnState): CombatantTurnState {
+  if (turnState.used[LEGENDARY_ACTION_SLOT] === undefined) return turnState;
+  const used = { ...turnState.used };
+  delete used[LEGENDARY_ACTION_SLOT];
+  return { ...turnState, used };
+}
+
 /**
  * Advance the turn pointer by identity, not raw position (issue #49). Steps
  * from wherever `currentCombatantId` sits in `sorted` to the next combatant,
@@ -655,8 +881,11 @@ export function retreatTurn(
  * Returns a new turn-state; the input is not mutated.
  */
 export function resetTurnStateForStart(turnState: CombatantTurnState): CombatantTurnState {
+  const legendaryUsed = turnState.used[LEGENDARY_ACTION_SLOT];
+  const used =
+    legendaryUsed === undefined ? {} : ({ [LEGENDARY_ACTION_SLOT]: legendaryUsed } as Record<string, number>);
   return {
-    used: {},
+    used,
     movementUsedFt: 0,
     concentration: turnState.concentration,
     delaying: false,
