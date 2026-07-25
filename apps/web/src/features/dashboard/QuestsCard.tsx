@@ -5,6 +5,7 @@
  */
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
 import type { CampaignSummary, QuestObjective } from '@campfire/schema';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { api, API, ApiError } from '../../lib/api';
@@ -82,7 +83,7 @@ export function QuestsCard({
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, minHeight: 28, flexWrap: 'wrap' }}>
           <QuestStatusBadge status={q.status} />
-          <Link
+          <ListDetailLink
             to={`/c/${campaignId}/quests/${q.id}`}
             style={{
               color: 'var(--color-text)',
@@ -94,7 +95,7 @@ export function QuestsCard({
             }}
           >
             {q.title}
-          </Link>
+          </ListDetailLink>
           <div style={{ flex: 1 }} />
           {q.reward && (
             <span
@@ -135,12 +136,12 @@ export function QuestsCard({
             <span className="text-muted" style={{ fontSize: 12 }}>
               ↳
             </span>
-            <Link
+            <ListDetailLink
               to={`/c/${campaignId}/quests/${s.id}`}
               style={{ color: 'var(--color-neutral-300)', fontSize: 13, textDecoration: 'none' }}
             >
               {s.title}
-            </Link>
+            </ListDetailLink>
             <QuestStatusBadge status={s.status} />
           </div>
         ))}

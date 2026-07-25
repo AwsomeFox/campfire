@@ -345,6 +345,23 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
         (sqlite.pragma('index_list(inventory_qty_idempotency)') as Array<{ name: string }>).map((index) => index.name),
       ).toEqual(expect.arrayContaining(['idx_inventory_qty_idempotency_item', 'idx_inventory_qty_idempotency_created']));
       expect(MIGRATION_NAMES).toContain('0076_campaign_purge_tombstones');
+      expect(MIGRATION_NAMES).toContain('0083_users_time_format');
+      expect(MIGRATION_NAMES).toContain('0084_hot_history_composite_indexes');
+      expect(
+        (sqlite.pragma('index_list(notes)') as Array<{ name: string }>).map((index) => index.name),
+      ).toEqual(expect.arrayContaining(['idx_notes_campaign_id_desc', 'idx_notes_inbox_resolved']));
+      expect(
+        (sqlite.pragma('index_list(comments)') as Array<{ name: string }>).map((index) => index.name),
+      ).toEqual(expect.arrayContaining(['idx_comments_entity', 'idx_comments_campaign_id']));
+      expect(
+        (sqlite.pragma('index_list(scheduled_sessions)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_scheduled_sessions_campaign_at');
+      expect(
+        (sqlite.pragma('index_list(timeline_events)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_timeline_events_campaign_sort');
+      expect(
+        (sqlite.pragma('index_list(dice_rolls)') as Array<{ name: string }>).map((index) => index.name),
+      ).toContain('idx_dice_rolls_campaign_id_desc');
       expect(
         sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaign_purge_tombstones'").get(),
       ).toBeTruthy();
