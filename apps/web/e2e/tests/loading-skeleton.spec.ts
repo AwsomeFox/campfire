@@ -57,4 +57,37 @@ test.describe('loading skeleton slow-network surfaces (issue #677)', () => {
     releaseAiDm();
     await expect(cardSkeleton).toBeHidden({ timeout: 15_000 });
   });
+
+  test('character detail shows a named skeleton while the sheet is delayed', async ({ page }) => {
+    const { campaignId, navigation } = seed();
+    let releaseCharacter: () => void = () => {};
+    const characterGate = new Promise<void>((resolve) => {
+      releaseCharacter = resolve;
+    });
+
+    await page.route(`**/api/v1/characters/${navigation.characterId}`, async (route) => {
+      await characterGate;
+      await route.continue();
+    });
+
+    await page.goto(`/c/${campaignId}/characters/${navigation.characterId}`);
+
+    const loading = page.getByTestId('character-detail-loading');
+    await expect(loading).toBeVisible();
+    await expect(loading).toHaveAttribute('aria-busy', 'true');
+    await expect(loading).toHaveAttribute('aria-label', 'Loading character…');
+    await expect(page.getByRole('heading', { level: 1 })).toHaveCount(0);
+
+    releaseCharacter();
+    await expect(loading).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+  });
+
+  test('character detail distinguishes not-found from the loading shell', async ({ page }) => {
+    const { campaignId } = seed();
+
+    await page.goto(`/c/${campaignId}/characters/999999999`);
+    await expect(page.getByTestId('character-detail-loading')).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByText('Character not found')).toBeVisible();
+  });
 });

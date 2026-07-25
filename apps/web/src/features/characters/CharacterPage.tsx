@@ -47,7 +47,8 @@ import {
 } from './characterSheetFormState';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
-import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, TextArea, ErrorNote, HpBar } from '../../components/ui';
+import { CharacterDetailLoadingSkeleton } from './CharacterDetailLoadingSkeleton';
 import { Field } from '../../components/Field';
 import {
   CHARACTER_AC_LABEL,
@@ -152,6 +153,7 @@ export default function CharacterPage() {
   });
 
   const load = useCallback(async () => {
+    setLoading(true);
     setError(null);
     setNotFound(false);
     try {
@@ -166,6 +168,13 @@ export default function CharacterPage() {
     } finally {
       setLoading(false);
     }
+  }, [id]);
+
+  // Drop stale sheet data immediately when the route id changes so reload and
+  // character-to-character navigation never flash the previous character.
+  useEffect(() => {
+    if (!Number.isFinite(id)) return;
+    setCharacter(null);
   }, [id]);
 
   useEffect(() => {
@@ -205,13 +214,7 @@ export default function CharacterPage() {
   }
 
   if (loading && !character) {
-    return (
-      <div className="max-w-5xl mx-auto px-4 mt-5 space-y-5">
-        <Card>
-          <Skeleton lines={4} />
-        </Card>
-      </div>
-    );
+    return <CharacterDetailLoadingSkeleton />;
   }
 
   if (notFound && !character) {
