@@ -24,6 +24,11 @@ function jestCollectingCoverage(): boolean {
   );
 }
 
+/** Whether OIDC spawn coverage forwarding is active for this jest run. */
+export function oidcSpawnCoverageEnabled(): boolean {
+  return jestCollectingCoverage();
+}
+
 /** Env overlay for spawnApp — forwards NODE_V8_COVERAGE when jest runs with --coverage. */
 export function childV8CoverageEnv(): Record<string, string | undefined> {
   if (!jestCollectingCoverage()) return {};

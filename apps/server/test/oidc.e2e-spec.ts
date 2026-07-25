@@ -9,6 +9,7 @@ import {
   childV8CoverageEnv,
   cleanupChildV8CoverageDir,
   mergeChildV8Coverage,
+  oidcSpawnCoverageEnabled,
 } from './oidc-spawn-coverage';
 
 /**
@@ -153,19 +154,42 @@ async function spawnAppOnce(
     else env[key] = value;
   }
 
+  const collectSpawnCoverage = oidcSpawnCoverageEnabled();
+  const childLogPath = path.join(dataDir, 'child-process.log');
+  let childLogFd: number | undefined;
+  const stdio: ['ignore', number | 'pipe', number | 'pipe'] = collectSpawnCoverage
+    ? (() => {
+        childLogFd = fs.openSync(childLogPath, 'w');
+        return ['ignore', childLogFd, childLogFd];
+      })()
+    : ['ignore', 'pipe', 'pipe'];
+
   const child: ChildProcessByStdio<null, Readable, Readable> = spawn('node', [SERVER_DIST_ENTRY], {
     cwd: path.resolve(__dirname, '..'),
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio,
   });
 
   let output = '';
-  child.stdout.on('data', (chunk) => {
-    output += chunk.toString();
-  });
-  child.stderr.on('data', (chunk) => {
-    output += chunk.toString();
-  });
+  if (!collectSpawnCoverage) {
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+  }
+
+  const readOutput = (): string => {
+    if (collectSpawnCoverage && fs.existsSync(childLogPath)) {
+      try {
+        return fs.readFileSync(childLogPath, 'utf8');
+      } catch {
+        return output;
+      }
+    }
+    return output;
+  };
 
   type ExitInfo = { code: number | null; signal: NodeJS.Signals | null };
   const exitState: { current: ExitInfo | null } = { current: null };
@@ -175,6 +199,14 @@ async function spawnAppOnce(
 
   const killChild = async (): Promise<void> => {
     const releaseChild = (): void => {
+      if (childLogFd !== undefined) {
+        try {
+          fs.closeSync(childLogFd);
+        } catch {
+          /* ignore */
+        }
+        childLogFd = undefined;
+      }
       child.stdout?.destroy();
       child.stderr?.destroy();
       child.unref?.();
@@ -201,7 +233,7 @@ async function spawnAppOnce(
     while (Date.now() < deadline) {
       if (exitState.current) {
         throw new Error(
-          `child process exited before becoming ready (code=${exitState.current.code}, signal=${exitState.current.signal}).\n--- captured output ---\n${output}`,
+          `child process exited before becoming ready (code=${exitState.current.code}, signal=${exitState.current.signal}).\n--- captured output ---\n${readOutput()}`,
         );
       }
       try {
@@ -218,7 +250,7 @@ async function spawnAppOnce(
     if (!ready) {
       await killChild();
       throw new Error(
-        `timed out after ${CHILD_BOOT_TIMEOUT_MS}ms waiting for ${baseUrl}/healthz to become ready.\n--- captured output ---\n${output}`,
+        `timed out after ${CHILD_BOOT_TIMEOUT_MS}ms waiting for ${baseUrl}/healthz to become ready.\n--- captured output ---\n${readOutput()}`,
       );
     }
   } catch (err) {
@@ -230,7 +262,7 @@ async function spawnAppOnce(
   return {
     baseUrl,
     dataDir,
-    output: () => output,
+    output: readOutput,
     kill: async () => {
       await killChild();
       fs.rmSync(dataDir, { recursive: true, force: true });
