@@ -264,8 +264,10 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 </span>
                 <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.label ? `${r.label}: ` : ''}
-                  {r.expr}
-                  {r.dc != null ? ` vs DC ${r.dc}` : ''}
+                  <bdi>
+                    {r.expr}
+                    {r.dc != null ? ` vs DC ${r.dc}` : ''}
+                  </bdi>
                 </span>
               </span>
               <RolledDice rolls={r.rolls} kept={r.kept} />
@@ -287,7 +289,7 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                   {r.success ? t('dice.pass') : t('dice.fail')}
                 </span>
               )}
-              <span
+              <bdi
                 className={totalClass || undefined}
                 style={{
                   fontFamily: 'var(--font-heading)',
@@ -297,10 +299,10 @@ export function SharedDiceLog({ campaignId, compact = false }: { campaignId: num
                 }}
               >
                 {r.total}
-              </span>
-              <span className="text-muted" style={{ fontSize: 10, flex: 'none', minWidth: 26, textAlign: 'right' }}>
+              </bdi>
+              <bdi className="text-muted" style={{ fontSize: 10, flex: 'none', minWidth: 26, textAlign: 'end' }}>
                 {timeAgo(r.createdAt)}
-              </span>
+              </bdi>
             </div>
             );
           })

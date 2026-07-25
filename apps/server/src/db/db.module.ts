@@ -201,6 +201,23 @@ function migrateUsersTableForTextSize(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user time format (issue #634):
+ * `users.time_format` didn't exist. Plain NOT NULL DEFAULT 'system' ADD COLUMN.
+ */
+function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasTimeFormat = columns.some((c) => c.name === 'time_format');
+  if (hasTimeFormat) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN time_format TEXT NOT NULL DEFAULT 'system'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -2262,6 +2279,66 @@ function migrateStarfinderCombatState(sqlite: Database.Database): void {
   }
 }
 
+/**
+ * Issue #617: composite indexes aligned to the hot campaign-scoped history reads
+ * (notes newest-first, comment threads, schedule calendar order, timeline sort,
+ * dice-roll feed + retention prune). Replaces single-column campaign_id indexes
+ * where ORDER BY can now be served from the index rather than a filesort.
+ *
+ * Runs before BOOTSTRAP_SQL — on a fresh DB the tables do not exist yet, so each
+ * block is a no-op and bootstrap creates the composites on first boot instead.
+ */
+function migrateHotHistoryCompositeIndexes(sqlite: Database.Database): void {
+  const hasTable = (name: string) =>
+    !!sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name);
+
+  if (hasTable('notes')) {
+    sqlite.exec(`
+      DROP INDEX IF EXISTS idx_notes_campaign;
+      CREATE INDEX IF NOT EXISTS idx_notes_campaign_id_desc
+        ON notes(campaign_id, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_notes_inbox_resolved
+        ON notes(campaign_id, kind, resolved, updated_at DESC, id DESC);
+    `);
+  }
+
+  if (hasTable('comments')) {
+    sqlite.exec(`
+      -- idx_comments_entity existed as (campaign_id, entity_type, entity_id); add id so
+      -- ORDER BY id ASC can be served from the index without a filesort.
+      DROP INDEX IF EXISTS idx_comments_entity;
+      CREATE INDEX IF NOT EXISTS idx_comments_entity
+        ON comments(campaign_id, entity_type, entity_id, id);
+      CREATE INDEX IF NOT EXISTS idx_comments_campaign_id
+        ON comments(campaign_id, id);
+    `);
+  }
+
+  if (hasTable('scheduled_sessions')) {
+    sqlite.exec(`
+      DROP INDEX IF EXISTS idx_scheduled_sessions_campaign;
+      CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign_at
+        ON scheduled_sessions(campaign_id, scheduled_at, id);
+    `);
+  }
+
+  if (hasTable('timeline_events')) {
+    sqlite.exec(`
+      DROP INDEX IF EXISTS idx_timeline_events_campaign;
+      CREATE INDEX IF NOT EXISTS idx_timeline_events_campaign_sort
+        ON timeline_events(campaign_id, sort_index, id);
+    `);
+  }
+
+  if (hasTable('dice_rolls')) {
+    sqlite.exec(`
+      DROP INDEX IF EXISTS idx_dice_rolls_campaign;
+      CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_id_desc
+        ON dice_rolls(campaign_id, id DESC);
+    `);
+  }
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2344,6 +2421,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0080_starfinder_combat_state', run: migrateStarfinderCombatState },
   { name: '0081_ai_dm_seats_action_queue_depth', run: migrateAiDmSeatsTableForActionQueueDepth },
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
+  { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
+  { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
 ];
 
 /**

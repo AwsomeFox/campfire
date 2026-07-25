@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useId, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { CalendarFeed, RsvpStatus, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
+import type { CalendarFeed, RsvpStatus, ScheduledSessionListPage, ScheduledSessionWithRsvps, SessionRsvp } from '@campfire/schema';
 import {
   endSessionDurationMinutes,
   extendSessionDurationMinutes,
@@ -17,7 +17,7 @@ import {
 import { api, API, ApiError, isStaleWrite } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
-import { formatDateTime, useFormattingLocale } from '../../lib/format';
+import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, EmptyState, Skeleton, ErrorNote } from '../../components/ui';
@@ -91,9 +91,15 @@ const SCHEDULE_CONFLICT_FIELDS: Array<ConflictField<ScheduleDraft>> = [
 export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
   const { canDmWrite } = useCampaignAccess();
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const { me } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const [schedules, setSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
+  const [pastSchedules, setPastSchedules] = useState<ScheduledSessionWithRsvps[]>([]);
+  const [pastTotal, setPastTotal] = useState(0);
+  const [pastHasMore, setPastHasMore] = useState(false);
+  const [pastOffset, setPastOffset] = useState(0);
+  const [loadingPast, setLoadingPast] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAddForm, setShowAddForm] = useState(() => searchParams.get('action') === 'new');
@@ -126,8 +132,8 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     [cancelledId],
   );
   const cancelledCopy = useMemo(
-    () => cancelledScheduleDetailCopy(cancelledDetail, formattingLocale),
-    [cancelledDetail, formattingLocale],
+    () => cancelledScheduleDetailCopy(cancelledDetail, formattingLocale, undefined, timeFormat),
+    [cancelledDetail, formattingLocale, timeFormat],
   );
 
   // RSVP rows store the server-side user id: String(users.id) for real users,
@@ -140,8 +146,15 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const list = await api.get<ScheduledSessionWithRsvps[]>(`${API}/campaigns/${campaignId}/schedule`);
-      setSchedules(list);
+      const [upcoming, pastPage] = await Promise.all([
+        api.get<ScheduledSessionWithRsvps[]>(`${API}/campaigns/${campaignId}/schedule/upcoming`),
+        api.get<ScheduledSessionListPage>(`${API}/campaigns/${campaignId}/schedule/past`),
+      ]);
+      setSchedules(upcoming);
+      setPastSchedules(pastPage.items);
+      setPastTotal(pastPage.total);
+      setPastHasMore(pastPage.hasMore);
+      setPastOffset(pastPage.items.length);
     } catch (e) {
       if (!(e instanceof ApiError && (e.status === 401 || e.status === 403))) {
         setError("Couldn't load the schedule.");
@@ -151,6 +164,28 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
     }
   }, [campaignId]);
 
+  const loadMorePast = useCallback(async () => {
+    if (!pastHasMore || loadingPast) return;
+    setLoadingPast(true);
+    setError(null);
+    try {
+      const pastPage = await api.get<ScheduledSessionListPage>(
+        `${API}/campaigns/${campaignId}/schedule/past?offset=${pastOffset}`,
+      );
+      setPastSchedules((prev) => {
+        const seen = new Set(prev.map((s) => s.id));
+        return [...prev, ...pastPage.items.filter((s) => !seen.has(s.id))];
+      });
+      setPastTotal(pastPage.total);
+      setPastHasMore(pastPage.hasMore);
+      setPastOffset((prev) => prev + pastPage.items.length);
+    } catch {
+      setError("Couldn't load more past sessions.");
+    } finally {
+      setLoadingPast(false);
+    }
+  }, [campaignId, pastHasMore, loadingPast, pastOffset]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -159,7 +194,7 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
   // Wake at the next phase boundary (soonest upcoming start or in-progress end) so
   // "Next session" ↔ "Happening now" flips without a reload.
   const [scheduleNowMs, setScheduleNowMs] = useState(() => Date.now());
-  const { inProgress, upcoming, past } = useMemo(
+  const { inProgress, upcoming } = useMemo(
     () => partitionSchedules(schedules, scheduleNowMs),
     [schedules, scheduleNowMs],
   );
@@ -302,15 +337,26 @@ export function SchedulePanel({ campaignId, isDm }: { campaignId: number; isDm: 
 
       <FeedCard campaignId={campaignId} isDm={isDm} onChange={load} />
 
-      {past.length > 0 && (
+      {pastSchedules.length > 0 && (
         <div className="space-y-1">
           <h2 className="text-sm font-bold text-white m-0">Past</h2>
-          {past.map((s) => (
+          {pastSchedules.map((s) => (
             <p key={s.id} className="text-muted text-xs m-0" {...entityTargetProps('scheduled_session', s.id)}>
               {formatWhen(s.scheduledAt)}
               {s.title ? ` — ${s.title}` : ''}
             </p>
           ))}
+          {pastHasMore && (
+            <Btn
+              ghost
+              type="button"
+              className="!min-h-0 !py-1 text-xs"
+              onClick={() => void loadMorePast()}
+              disabled={loadingPast}
+            >
+              {loadingPast ? 'Loading…' : `Load more past (${pastSchedules.length} of ${pastTotal})`}
+            </Btn>
+          )}
         </div>
       )}
     </div>

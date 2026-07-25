@@ -252,16 +252,30 @@ describe('campaign import (e2e, real cookie sessions)', () => {
       .get(`/api/v1/campaigns/${imported.id}/comments`)
       .query({ entityType: 'quest', entityId: q.id });
     expect(importedComments.status).toBe(200);
-    expect(importedComments.body).toHaveLength(2);
-    const spoken = importedComments.body.find((c: { body: string }) => c.body === 'Rogue takes point.');
-    const reply = importedComments.body.find((c: { body: string }) => c.body === 'The corridor is trapped.');
+    const importedDiscussion = importedComments.body as {
+      items: Array<{ root: Record<string, unknown>; replies: Array<Record<string, unknown>> }>;
+      totalComments: number;
+    };
+    const importedFlat = importedDiscussion.items.flatMap((thread) => [thread.root, ...thread.replies]) as Array<{
+      body: string;
+      id: number;
+      parentId?: number | null;
+      characterId?: number;
+      characterName?: string;
+      characterAvatarUrl?: string;
+      authorName?: string;
+    }>;
+    expect(importedDiscussion.totalComments).toBe(2);
+    expect(importedFlat).toHaveLength(2);
+    const spoken = importedFlat.find((c) => c.body === 'Rogue takes point.');
+    const reply = importedFlat.find((c) => c.body === 'The corridor is trapped.');
     expect(spoken).toMatchObject({
       characterId: chars.body[0].id,
       characterName: 'Rogue',
       characterAvatarUrl: 'https://images.example.test/rogue.png',
       authorName: 'import-player',
     });
-    expect(reply.parentId).toBe(spoken.id);
+    expect(reply!.parentId).toBe(spoken!.id);
 
     // The source campaign is untouched — import never mutates it.
     const sourceLocs = await dmAgent.get(`/api/v1/campaigns/${campaignId}/locations`);

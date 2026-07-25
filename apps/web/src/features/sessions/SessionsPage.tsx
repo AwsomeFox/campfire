@@ -14,9 +14,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import type { Session, SessionListItem, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
-import { RECAP_TEMPLATE } from '@campfire/schema';
+import type { Session, SessionListItem, SessionListPage, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
+import { RECAP_TEMPLATE, SESSIONS_LIST_DEFAULT_LIMIT } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
+import { useAuth } from '../../app/auth';
+import { useProtectedForm } from '../../lib/useProtectedForm';
 import { joinPublicBase } from '../../lib/public-base';
 import { formatDate as formatLocaleDate, formatDateTime, useFormattingLocale } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -31,6 +33,7 @@ import { ScribePanel } from './ScribePanel';
 import { CommentsThread } from '../comments/CommentsThread';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { VirtualList } from '../../components/VirtualList';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
 import { entityTargetProps } from '../../lib/entityLinks';
 import { useCampaign } from '../../app/CampaignContext';
@@ -47,10 +50,15 @@ import {
   RECAP_PLAYED_ON_HELP,
   RECAP_TITLE_HELP,
   editRecapFieldIds,
+  EMPTY_RECAP_EDITOR_DRAFT,
   firstInvalidRecapControlId,
+  isRecapEditorDirty,
   newRecapFieldIds,
   recapDescribedBy,
+  recapEditorDraftFromSession,
+  recapEditorDraftsEqual,
   validateRecapFields,
+  type RecapEditorDraft,
   type RecapFieldErrors,
 } from './recapFormFields';
 
@@ -148,6 +156,10 @@ export default function SessionsPage() {
   // List-shape sessions (issue #71): each carries a `recapExcerpt`, not the full
   // recap body — SessionDetail fetches the full recap for the opened session.
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [totalSessions, setTotalSessions] = useState(0);
+  const [hasMoreSessions, setHasMoreSessions] = useState(false);
+  const [sessionOffset, setSessionOffset] = useState(0);
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
@@ -196,9 +208,15 @@ export default function SessionsPage() {
     setError(null);
     setForbidden(false);
     setLoading(true);
+    setSessionOffset(0);
     try {
-      const list = await api.get<SessionListItem[]>(`${API}/campaigns/${cid}/sessions`);
-      setSessions(list);
+      const page = await api.get<SessionListPage>(
+        `${API}/campaigns/${cid}/sessions?limit=${SESSIONS_LIST_DEFAULT_LIMIT}&offset=0`,
+      );
+      setSessions(page.items);
+      setTotalSessions(page.total);
+      setHasMoreSessions(page.hasMore);
+      setSessionOffset(page.items.length);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
@@ -209,6 +227,28 @@ export default function SessionsPage() {
       setLoading(false);
     }
   }, [cid]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (!hasMoreSessions || loadingMoreSessions || loading) return;
+    setLoadingMoreSessions(true);
+    setError(null);
+    try {
+      const page = await api.get<SessionListPage>(
+        `${API}/campaigns/${cid}/sessions?limit=${SESSIONS_LIST_DEFAULT_LIMIT}&offset=${sessionOffset}`,
+      );
+      setSessions((prev) => {
+        const seen = new Set(prev.map((s) => s.id));
+        return [...prev, ...page.items.filter((s) => !seen.has(s.id))];
+      });
+      setTotalSessions(page.total);
+      setHasMoreSessions(page.hasMore);
+      setSessionOffset((prev) => prev + page.items.length);
+    } catch {
+      setError("Couldn't load more sessions.");
+    } finally {
+      setLoadingMoreSessions(false);
+    }
+  }, [cid, hasMoreSessions, loadingMoreSessions, loading, sessionOffset]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -279,6 +319,7 @@ export default function SessionsPage() {
   }
 
   function nextNumber() {
+    if (sessions.length === 0) return 1;
     return sessions.reduce((max, s) => Math.max(max, s.number), 0) + 1;
   }
 
@@ -450,60 +491,83 @@ export default function SessionsPage() {
               <EmptyState title="No sessions yet — add your first recap" />
             </Card>
           ) : (
-            <ul className="flex flex-col" role="list" aria-label="Session recaps">
-              {sessions.map((s) => {
-                const isActive = selected?.id === s.id;
-                const title = s.title || 'Untitled session';
-                return (
-                  <li key={s.id}>
-                    <button
-                      type="button"
-                      onClick={() => selectSession(s.id)}
-                      aria-current={isActive ? 'true' : undefined}
-                      aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
-                      className="text-left"
-                      style={{
-                        display: 'flex',
-                        gap: 14,
-                        border: 0,
-                        background: 'transparent',
-                        font: 'inherit',
-                        color: 'var(--color-text)',
-                        cursor: 'pointer',
-                        padding: '14px 0 14px 16px',
-                        borderLeft: `2px solid ${isActive ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
-                        position: 'relative',
-                      }}
-                    >
-                      <span
+            <div className="space-y-2">
+              <p className="text-muted text-xs m-0" role="status">
+                {totalSessions > 0
+                  ? `Showing ${sessions.length} of ${totalSessions} session${totalSessions === 1 ? '' : 's'}`
+                  : ''}
+              </p>
+              <div role="list" aria-label="Session recaps">
+              <VirtualList
+                items={sessions}
+                estimateHeight={96}
+                maxHeight="min(70vh, 640px)"
+                className="flex flex-col"
+              >
+                {(s) => {
+                  const isActive = selected?.id === s.id;
+                  const title = s.title || 'Untitled session';
+                  return (
+                    <div key={s.id} role="listitem">
+                      <button
+                        type="button"
+                        onClick={() => selectSession(s.id)}
+                        aria-current={isActive ? 'true' : undefined}
+                        aria-label={`Session ${s.number}${s.title ? `, ${s.title},` : ''}, played ${formatDate(s.playedAt)}${isActive ? '. Selected.' : ''}`}
+                        className="text-left w-full"
                         style={{
-                          position: 'absolute',
-                          left: -5,
-                          top: 20,
-                          width: 8,
-                          height: 8,
-                          borderRadius: '50%',
-                          background: isActive ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                          display: 'flex',
+                          gap: 14,
+                          border: 0,
+                          background: 'transparent',
+                          font: 'inherit',
+                          color: 'var(--color-text)',
+                          cursor: 'pointer',
+                          padding: '14px 0 14px 16px',
+                          borderLeft: `2px solid ${isActive ? 'var(--color-accent)' : 'var(--color-accent-800)'}`,
+                          position: 'relative',
                         }}
-                      />
-                      <span className="flex-1 min-w-0">
-                        <span className="flex gap-2.5 items-baseline flex-wrap">
-                          <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
-                            Session {s.number}
+                      >
+                        <span
+                          style={{
+                            position: 'absolute',
+                            left: -5,
+                            top: 20,
+                            width: 8,
+                            height: 8,
+                            borderRadius: '50%',
+                            background: isActive ? 'var(--color-accent)' : 'var(--color-accent-800)',
+                          }}
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="flex gap-2.5 items-baseline flex-wrap">
+                            <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-accent)' }}>
+                              Session {s.number}
+                            </span>
+                            <span className="font-heading text-[16px]">{title}</span>
+                            <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
                           </span>
-                          <span className="font-heading text-[16px]">{title}</span>
-                          <span className="text-muted text-[11.5px] ml-auto">{formatDate(s.playedAt)}</span>
+                          <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
                         </span>
-                        <span className="text-muted text-[13px] block mt-1 line-clamp-2">{s.recapExcerpt || 'No recap written yet.'}</span>
-                      </span>
-                      {/* sr-only "Selected" flag mirrors aria-current so screen readers
-                          that don't voice aria-current on a <button> still get the state. */}
-                      {isActive && <span className="sr-only">Selected</span>}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+                        {isActive && <span className="sr-only">Selected</span>}
+                      </button>
+                    </div>
+                  );
+                }}
+              </VirtualList>
+              </div>
+              {hasMoreSessions && (
+                <Btn
+                  ghost
+                  type="button"
+                  className="!min-h-0 !py-1.5 text-xs w-full"
+                  onClick={() => void loadMoreSessions()}
+                  disabled={loadingMoreSessions}
+                >
+                  {loadingMoreSessions ? 'Loading…' : 'Load older sessions'}
+                </Btn>
+              )}
+            </div>
           )}
         </aside>
 
@@ -599,6 +663,7 @@ function SessionDetail({
    *  recap is opened from the list so SR users land on the new content. */
   detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
+  const { me } = useAuth();
   const { canDmWrite } = useCampaignAccess();
   const [editing, setEditing] = useState(canDmWrite && startEditing);
   const [titleDraft, setTitleDraft] = useState(session.title);
@@ -607,6 +672,7 @@ function SessionDetail({
   const [recap, setRecap] = useState('');
   const [recapLoading, setRecapLoading] = useState(true);
   const [recapDraft, setRecapDraft] = useState('');
+  const [recapBaseline, setRecapBaseline] = useState<RecapEditorDraft | null>(null);
   const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -631,6 +697,7 @@ function SessionDetail({
     // A's prose editable against B (key= remounts help; sequencer covers races).
     setRecap('');
     setRecapDraft('');
+    setRecapBaseline(null);
     setLoadedSessionId(null);
     setLoadedUpdatedAt(null);
     setConflict(false);
@@ -644,8 +711,17 @@ function SessionDetail({
       .then((full) => {
         const decision = decideRouteBoundCommit(loadSequencerRef.current, generation, session.id, full);
         if (decision.kind !== 'commit') return;
+        setTitleDraft(decision.record.title);
+        setDateDraft(toDateInputValue(decision.record.playedAt));
         setRecap(decision.record.recap);
         setRecapDraft(decision.record.recap);
+        setRecapBaseline(
+          recapEditorDraftFromSession({
+            title: decision.record.title,
+            playedAt: decision.record.playedAt,
+            recap: decision.record.recap,
+          }),
+        );
         setLoadedUpdatedAt(decision.record.updatedAt);
         setLoadedSessionId(decision.record.id);
         setConflict(false);
@@ -672,20 +748,32 @@ function SessionDetail({
     recapLoading,
   );
 
-  async function save() {
-    if (!assertMutationTarget(loadedSessionId, session.id).ok) return;
+  const effectiveRecapBaseline = useMemo<RecapEditorDraft>(
+    () =>
+      recapBaseline ?? {
+        title: session.title,
+        playedAt: toDateInputValue(session.playedAt),
+        recap: '',
+      },
+    [recapBaseline, session.title, session.playedAt],
+  );
+  const recapCurrent = { title: titleDraft, playedAt: dateDraft, recap: recapDraft };
+  const recapDirty =
+    editing && detailReady && recapBaseline != null && isRecapEditorDirty(recapCurrent, effectiveRecapBaseline);
+  const clearPersistedDraftRef = useRef<() => void>(() => {});
+
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!assertMutationTarget(loadedSessionId, session.id).ok) return false;
     const nextErrors = validateRecapFields({
       title: titleDraft,
       playedAt: dateDraft,
       recap: recapDraft,
     });
     setFieldErrors(nextErrors);
-    // Keep an active 409 conflict banner until validation passes and we actually
-    // attempt a save — a failed client check must not dismiss Reload latest.
     const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
     if (invalidId) {
       document.getElementById(invalidId)?.focus();
-      return;
+      return false;
     }
 
     setSaving(true);
@@ -696,8 +784,6 @@ function SessionDetail({
         title: titleDraft,
         playedAt: dateDraft ? dateDraft : null,
         recap: recapDraft,
-        // Optimistic-concurrency guard (#157): echo back the updatedAt we loaded, so a
-        // concurrent edit is caught (409) instead of overwriting the other author's work.
         ...(loadedUpdatedAt ? { expectedUpdatedAt: loadedUpdatedAt } : {}),
       });
       setRecap(updated.recap);
@@ -706,11 +792,11 @@ function SessionDetail({
       setEditing(false);
       onEditActionHandled();
       setHistoryNonce((n) => n + 1);
+      clearPersistedDraftRef.current();
       onChange();
+      return true;
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
-        // Someone saved between our load and this save — keep the user's draft intact,
-        // stop them from clobbering, and prompt a reload of the latest version.
         setConflict(true);
         setError(
           e.message ||
@@ -720,10 +806,50 @@ function SessionDetail({
         setError("Couldn't save the recap.");
       }
       document.getElementById(fieldIds.title.controlId)?.focus();
+      return false;
     } finally {
       setSaving(false);
     }
-  }
+  }, [
+    dateDraft,
+    fieldIds,
+    loadedSessionId,
+    loadedUpdatedAt,
+    onChange,
+    onEditActionHandled,
+    recapDraft,
+    session.id,
+    titleDraft,
+  ]);
+
+  const protectedRecap = useProtectedForm({
+    formId: `session-recap:${session.id}`,
+    userId: me?.user.id,
+    campaignId,
+    active: editing && recapBaseline != null,
+    dirty: recapDirty,
+    draft: recapCurrent,
+    baseline: effectiveRecapBaseline,
+    serverUpdatedAt: loadedUpdatedAt,
+    isDraftEqual: recapEditorDraftsEqual,
+    onRestoreDraft: (restored) => {
+      setTitleDraft(restored.title);
+      setDateDraft(restored.playedAt);
+      setRecapDraft(restored.recap);
+    },
+    onDiscard: () => {
+      setTitleDraft(effectiveRecapBaseline.title);
+      setDateDraft(effectiveRecapBaseline.playedAt);
+      setRecapDraft(effectiveRecapBaseline.recap);
+      setEditing(false);
+      setFieldErrors({});
+      setError(null);
+      setConflict(false);
+      onEditActionHandled();
+    },
+    onSave: save,
+  });
+  clearPersistedDraftRef.current = protectedRecap.clearPersistedDraft;
 
   async function reloadLatest() {
     setError(null);
@@ -732,8 +858,17 @@ function SessionDetail({
     setRecapLoading(true);
     try {
       const full = await api.get<Session>(`${API}/sessions/${session.id}`);
+      setTitleDraft(full.title);
+      setDateDraft(toDateInputValue(full.playedAt));
       setRecap(full.recap);
       setRecapDraft(full.recap);
+      setRecapBaseline(
+        recapEditorDraftFromSession({
+          title: full.title,
+          playedAt: full.playedAt,
+          recap: full.recap,
+        }),
+      );
       setLoadedUpdatedAt(full.updatedAt);
       setLoadedSessionId(full.id);
     } catch {
@@ -782,6 +917,8 @@ function SessionDetail({
 
       {editing ? (
         <Card className="edit-recap-form min-w-0 space-y-3">
+          {protectedRecap.restorePrompt}
+          {protectedRecap.leavePrompt}
           <form
             className="min-w-0 space-y-3"
             noValidate
@@ -896,6 +1033,11 @@ function SessionDetail({
               )}
             </div>
             <div className="flex flex-wrap gap-2 justify-end items-center">
+              {protectedRecap.saveStatusLabel ? (
+                <span className="text-xs text-slate-400 mr-auto" role="status" aria-live="polite">
+                  {protectedRecap.saveStatusLabel}
+                </span>
+              ) : null}
               {conflict && (
                 <Btn ghost type="button" className="!min-h-0 !py-1.5 text-xs" onClick={reloadLatest} disabled={saving}>
                   Reload latest
@@ -906,6 +1048,10 @@ function SessionDetail({
                 type="button"
                 className="!min-h-0 !py-1.5 text-xs"
                 onClick={() => {
+                  protectedRecap.clearPersistedDraft();
+                  setTitleDraft(effectiveRecapBaseline.title);
+                  setDateDraft(effectiveRecapBaseline.playedAt);
+                  setRecapDraft(effectiveRecapBaseline.recap);
                   setEditing(false);
                   setFieldErrors({});
                   setError(null);
@@ -1416,14 +1562,68 @@ function AddRecapForm({
   onCreated: (session: Session) => void;
   onCancel?: () => void;
 }) {
+  const { me } = useAuth();
   const [title, setTitle] = useState('');
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
   const dateWasEdited = useRef(false);
+  const dateFieldFocusedRef = useRef(false);
   const [recap, setRecap] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<RecapFieldErrors>({});
   const fieldIds = newRecapFieldIds();
+  const newRecapDraft = { title, playedAt, recap };
+  const newRecapDirty = title.trim() !== '' || recap.trim() !== '' || dateWasEdited.current;
+
+  const publish = useCallback(async (): Promise<boolean> => {
+    const nextErrors = validateRecapFields({ title, playedAt, recap });
+    setFieldErrors(nextErrors);
+    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
+    if (invalidId) {
+      document.getElementById(invalidId)?.focus();
+      return false;
+    }
+
+    setSaving(true);
+    setError(null);
+    try {
+      const created = await api.post<Session>(`${API}/campaigns/${campaignId}/sessions`, {
+        number: nextNumber,
+        title: title.trim(),
+        playedAt: playedAt || null,
+        recap,
+      });
+      setTitle('');
+      setRecap('');
+      setFieldErrors({});
+      onCreated(created);
+      return true;
+    } catch {
+      setError("Couldn't publish the recap.");
+      document.getElementById(fieldIds.title.controlId)?.focus();
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [campaignId, fieldIds, nextNumber, onCreated, playedAt, recap, title]);
+
+  const protectedNewRecap = useProtectedForm({
+    formId: 'session-recap-new',
+    userId: me?.user.id,
+    campaignId,
+    active: true,
+    dirty: newRecapDirty,
+    draft: newRecapDraft,
+    baseline: EMPTY_RECAP_EDITOR_DRAFT,
+    isDraftEqual: recapEditorDraftsEqual,
+    onRestoreDraft: (restored) => {
+      setTitle(restored.title);
+      setPlayedAt(restored.playedAt);
+      setRecap(restored.recap);
+      dateWasEdited.current = restored.playedAt.trim() !== '';
+    },
+    onSave: publish,
+  });
 
   // A form can stay open while a session runs across midnight. Keep the
   // suggested date aligned with the user's local calendar until they make an
@@ -1465,45 +1665,14 @@ function AddRecapForm({
     };
   }, []);
 
-  async function publish() {
-    const nextErrors = validateRecapFields({ title, playedAt, recap });
-    setFieldErrors(nextErrors);
-    // Keep an existing API failure banner until validation passes and we actually
-    // attempt a publish — a failed client check must not drop formErrorId from
-    // the title's aria-describedby.
-    const invalidId = firstInvalidRecapControlId(nextErrors, fieldIds);
-    if (invalidId) {
-      document.getElementById(invalidId)?.focus();
-      return;
-    }
-
-    setSaving(true);
-    setError(null);
-    try {
-      const created = await api.post<Session>(`${API}/campaigns/${campaignId}/sessions`, {
-        number: nextNumber,
-        title: title.trim(),
-        playedAt: playedAt || null,
-        recap,
-      });
-      setTitle('');
-      setRecap('');
-      setFieldErrors({});
-      onCreated(created);
-    } catch {
-      setError("Couldn't publish the recap.");
-      document.getElementById(fieldIds.title.controlId)?.focus();
-    } finally {
-      setSaving(false);
-    }
-  }
-
   return (
     <Card className="new-recap-form min-w-0 space-y-3">
+      {protectedNewRecap.restorePrompt}
+      {protectedNewRecap.leavePrompt}
       <h2 className="font-bold text-white text-sm">+ Add recap (Session {nextNumber})</h2>
       {error && (
         <div id={fieldIds.formErrorId}>
-          <ErrorNote message={error} onRetry={publish} />
+          <ErrorNote message={error} onRetry={() => { void publish(); }} />
         </div>
       )}
       <form
@@ -1560,9 +1729,22 @@ function AddRecapForm({
             className="min-w-0"
             type="date"
             value={playedAt}
+            onFocus={() => {
+              dateFieldFocusedRef.current = true;
+            }}
+            onBlur={(e) => {
+              const next = e.target.value;
+              if (dateFieldFocusedRef.current && next === '' && !dateWasEdited.current) {
+                dateWasEdited.current = true;
+                setPlayedAt('');
+              }
+              dateFieldFocusedRef.current = false;
+            }}
             onChange={(e) => {
+              const next = e.target.value;
+              if (next === '' && !dateWasEdited.current) return;
               dateWasEdited.current = true;
-              setPlayedAt(e.target.value);
+              setPlayedAt(next);
               setFieldErrors((current) => ({ ...current, playedAt: undefined }));
             }}
             aria-invalid={fieldErrors.playedAt ? true : undefined}
@@ -1616,11 +1798,25 @@ function AddRecapForm({
         </div>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
           <p className="text-[11px] text-slate-400 break-words">
-            Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
+            {protectedNewRecap.saveStatusLabel ? (
+              <span role="status" aria-live="polite">{protectedNewRecap.saveStatusLabel}</span>
+            ) : (
+              <>
+                Tip: start from the template, or ask your AI scribe to <em>"draft a recap from this session"</em>.
+              </>
+            )}
           </p>
           <div className="flex flex-wrap gap-2 sm:shrink-0">
             {onCancel && (
-              <Btn ghost type="button" className="!min-h-0 !py-2 text-sm" onClick={onCancel}>
+              <Btn
+                ghost
+                type="button"
+                className="!min-h-0 !py-2 text-sm"
+                onClick={() => {
+                  protectedNewRecap.clearPersistedDraft();
+                  onCancel();
+                }}
+              >
                 Cancel
               </Btn>
             )}

@@ -6,7 +6,7 @@
  * ping stashes the snapshot and opens a stable cancelled-event detail on the
  * Schedule tab.
  */
-import type { ScheduleNotificationData } from '@campfire/schema';
+import type { ScheduleNotificationData, TimeFormat } from '@campfire/schema';
 import {
   formatScheduleNotificationBody,
   formatScheduleNotificationTitle,
@@ -14,7 +14,7 @@ import {
   scheduleNotificationLabel,
   formatScheduleNotificationInstant,
 } from '@campfire/schema';
-import { activeLocale } from './format';
+import { activeLocale, activeTimeFormat } from './format';
 
 const CANCELLED_STORAGE_PREFIX = 'campfire.cancelledSchedule.';
 
@@ -63,8 +63,9 @@ export function scheduleNotificationDisplayTitle(
   data: ScheduleNotificationData,
   locale: string | undefined = activeLocale(),
   timeZone?: string,
+  timeFormat: TimeFormat = activeTimeFormat(),
 ): string {
-  return formatScheduleNotificationTitle(data, locale, timeZone);
+  return formatScheduleNotificationTitle(data, locale, timeZone, timeFormat);
 }
 
 export function scheduleNotificationDisplayBody(
@@ -98,6 +99,7 @@ export function cancelledScheduleDetailCopy(
   data: ScheduleNotificationData | null,
   locale: string | undefined = activeLocale(),
   timeZone?: string,
+  timeFormat: TimeFormat = activeTimeFormat(),
 ): { heading: string; when: string; body: string } {
   if (!data) {
     return {
@@ -109,7 +111,7 @@ export function cancelledScheduleDetailCopy(
   const label = scheduleNotificationLabel(data.label);
   return {
     heading: `${label} was cancelled`,
-    when: formatScheduleNotificationInstant(data.scheduledAt, locale, timeZone),
+    when: formatScheduleNotificationInstant(data.scheduledAt, locale, timeZone, timeFormat),
     body: 'This game night was removed from the calendar.',
   };
 }

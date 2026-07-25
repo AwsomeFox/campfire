@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type { Faction, FactionStanding, FactionWithMembers, Npc } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -247,11 +248,11 @@ export default function FactionPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('faction', faction.id)}>
-      <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/factions`)}>
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/factions`}
+        defaultLabel="← Back to factions"
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 

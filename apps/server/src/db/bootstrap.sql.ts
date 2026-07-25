@@ -424,6 +424,7 @@ CREATE TABLE IF NOT EXISTS users (
   oidc_sub TEXT,
   accent_color TEXT,
   text_size TEXT NOT NULL DEFAULT 'default',
+  time_format TEXT NOT NULL DEFAULT 'system',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1010,7 +1011,9 @@ CREATE INDEX IF NOT EXISTS idx_story_arcs_campaign ON story_arcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_story_beats_arc ON story_beats(arc_id);
 CREATE INDEX IF NOT EXISTS idx_story_beats_campaign ON story_beats(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_story_branches_beat ON story_branches(beat_id);
-CREATE INDEX IF NOT EXISTS idx_timeline_events_campaign ON timeline_events(campaign_id);
+-- #617: timeline list orders by DM-controlled sort_index, id tiebreaker.
+CREATE INDEX IF NOT EXISTS idx_timeline_events_campaign_sort
+  ON timeline_events(campaign_id, sort_index, id);
 CREATE INDEX IF NOT EXISTS idx_npcs_campaign ON npcs(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_campaign ON locations(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_locations_parent ON locations(parent_id);
@@ -1020,16 +1023,23 @@ CREATE INDEX IF NOT EXISTS idx_session_attendees_character ON session_attendees(
 CREATE INDEX IF NOT EXISTS idx_session_shares_session ON session_shares(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_campaign ON session_shares(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_session_shares_expiry ON session_shares(expires_at);
-CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign ON scheduled_sessions(campaign_id);
+-- #617: schedule calendar reads order by scheduled_at, id tiebreaker.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_campaign_at
+  ON scheduled_sessions(campaign_id, scheduled_at, id);
 CREATE INDEX IF NOT EXISTS idx_session_rsvps_schedule ON session_rsvps(scheduled_session_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_ics_token ON campaigns(ics_token);
 -- #116: normal campaign listings filter deleted_at IS NULL; the trash view filters
 -- IS NOT NULL. Index it so both are index scans rather than full-table filters.
 CREATE INDEX IF NOT EXISTS idx_campaigns_deleted_at ON campaigns(deleted_at);
-CREATE INDEX IF NOT EXISTS idx_notes_campaign ON notes(campaign_id);
--- #123: comment threads are always read for one entity (campaign + type + id),
--- newest-thread-context ordering handled in SQL; this composite covers the lookup.
-CREATE INDEX IF NOT EXISTS idx_comments_entity ON comments(campaign_id, entity_type, entity_id);
+-- #617: notes/inbox lists are always campaign-scoped and newest-first (id DESC);
+-- resolved inbox history orders by updated_at DESC, id DESC.
+CREATE INDEX IF NOT EXISTS idx_notes_campaign_id_desc ON notes(campaign_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_notes_inbox_resolved
+  ON notes(campaign_id, kind, resolved, updated_at DESC, id DESC);
+-- #123 / #617: comment threads are read for one entity (campaign + type + id),
+-- oldest-first (id ASC); campaign-wide search walks (campaign_id, id).
+CREATE INDEX IF NOT EXISTS idx_comments_entity ON comments(campaign_id, entity_type, entity_id, id);
+CREATE INDEX IF NOT EXISTS idx_comments_campaign_id ON comments(campaign_id, id);
 -- #157: revisions are always listed for one entity (type + id), newest-first; this
 -- composite covers the lookup. The campaign index backs the cascade/teardown scans.
 CREATE INDEX IF NOT EXISTS idx_entity_revisions_entity ON entity_revisions(entity_type, entity_id, id DESC);
@@ -1090,7 +1100,8 @@ CREATE INDEX IF NOT EXISTS idx_combatants_encounter ON combatants(encounter_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_character ON combatants(encounter_id, character_id) WHERE character_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_combatants_encounter_npc ON combatants(encounter_id, npc_id) WHERE npc_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_encounter_events_encounter ON encounter_events(encounter_id);
-CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign ON dice_rolls(campaign_id);
+-- #617: shared roll feed and retention prune are campaign-scoped, newest-first.
+CREATE INDEX IF NOT EXISTS idx_dice_rolls_campaign_id_desc ON dice_rolls(campaign_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
 CREATE INDEX IF NOT EXISTS idx_check_requests_campaign ON check_requests(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_check_requests_character ON check_requests(character_id, status);

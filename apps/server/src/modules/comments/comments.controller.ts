@@ -1,16 +1,18 @@
 import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
-import { EntityType } from '@campfire/schema';
+import {
+  COMMENTS_REPLY_MAX_LIMIT,
+  COMMENTS_THREAD_DEFAULT_LIMIT,
+  COMMENTS_THREAD_MAX_LIMIT,
+  EntityType,
+} from '@campfire/schema';
 import type { EntityType as EntityTypeValue } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
-import { parsePageParams } from '../../common/pagination';
 import { CommentsService } from './comments.service';
-import { CommentCreateDto, CommentDto, CommentUpdateDto } from './comments.dto';
-
-/** Upper bound for `?limit` on the comment thread list. */
-const COMMENTS_LIST_MAX_LIMIT = 500;
+import { CommentCreateDto, CommentDto, CommentReplyPageDto, CommentThreadPageDto, CommentUpdateDto } from './comments.dto';
+import { parseCommentsLimit } from './comments-pagination';
 
 @ApiTags('comments')
 @Controller('campaigns/:campaignId/comments')
@@ -22,27 +24,71 @@ export class CampaignCommentsController {
 
   @Get()
   @ApiOperation({
-    summary: 'List comments on an entity',
+    summary: 'List discussion threads on an entity',
     description:
-      'Requires campaign membership AND visibility of the anchored entity: a thread on a hidden quest/npc/faction or an unexplored location 404s for a non-DM, exactly as the entity itself does (issue #230). Returns the discussion thread for one entity (entityType + entityId), oldest-first; comments are then visible to every member who can see the entity.',
+      'Requires campaign membership AND visibility of the anchored entity: a thread on a hidden quest/npc/faction or an unexplored location 404s for a non-DM, exactly as the entity itself does (issue #230). Returns a paginated page of root threads (issue #609) — each root includes a bounded reply preview so flat row paging cannot orphan replies. Oldest-first; continue with `cursor` from a previous `nextCursor`.',
   })
   @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'The entity type the thread is anchored to.' })
   @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max comments to return (default: all, capped at 500).' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Comments to skip, for paging (default 0).' })
-  @ApiResponse({ status: 200, description: 'The comment thread for the entity.', type: CommentDto, isArray: true })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: `Max root threads per page (default ${COMMENTS_THREAD_DEFAULT_LIMIT}, max ${COMMENTS_THREAD_MAX_LIMIT}).`,
+  })
+  @ApiQuery({ name: 'cursor', required: false, type: String, description: "Opaque cursor from a previous page's nextCursor." })
+  @ApiResponse({ status: 200, description: 'Paginated root-thread page (`items`, `total`, `totalComments`, `hasMore`, `nextCursor`).', type: CommentThreadPageDto })
   async list(
     @Param('campaignId', ParseIntPipe) campaignId: number,
     @CurrentUser() user: RequestUser,
     @Query('entityType') entityType: string,
     @Query('entityId') entityId: string,
     @Query('limit') limit?: string,
-    @Query('offset') offset?: string,
+    @Query('cursor') cursor?: string,
   ) {
     const role = await this.access.requireMember(user, campaignId);
     const type = EntityType.parse(entityType) as EntityTypeValue;
-    const page = parsePageParams({ limit, offset }, COMMENTS_LIST_MAX_LIMIT);
-    return this.comments.listForEntity(campaignId, type, Number(entityId), role, page);
+    return this.comments.listThreadsForEntity(campaignId, type, Number(entityId), role, {
+      limit: parseCommentsLimit(limit),
+      cursor,
+    });
+  }
+
+  @Get(':rootId/replies')
+  @ApiOperation({
+    summary: 'List additional replies for a root thread',
+    description:
+      'Requires campaign membership AND visibility of the anchored entity (issue #230). Returns oldest-first replies for one root thread; continue with `cursor` from a previous `nextCursor` or the inline `replyNextCursor` on a thread preview (issue #609). `entityType` + `entityId` must match the root anchor.',
+  })
+  @ApiQuery({ name: 'entityType', required: true, enum: ['quest', 'npc', 'location', 'session', 'character', 'campaign'], description: 'The entity type the thread is anchored to.' })
+  @ApiQuery({ name: 'entityId', required: true, type: Number, description: 'The entity id the thread is anchored to.' })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: `Max replies per page (default ${COMMENTS_REPLY_MAX_LIMIT}, max ${COMMENTS_REPLY_MAX_LIMIT}).`,
+  })
+  @ApiQuery({ name: 'cursor', required: false, type: String, description: "Opaque cursor from a previous page's nextCursor." })
+  @ApiResponse({ status: 200, description: 'Paginated reply page for one root (`items`, `replyCount`, `hasMore`, `nextCursor`).', type: CommentReplyPageDto })
+  async listReplies(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('rootId', ParseIntPipe) rootId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('entityType') entityType: string,
+    @Query('entityId') entityId: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    const role = await this.access.requireMember(user, campaignId);
+    const type = EntityType.parse(entityType) as EntityTypeValue;
+    return this.comments.listRepliesForRoot(
+      campaignId,
+      type,
+      Number(entityId),
+      rootId,
+      role,
+      { limit: parseCommentsLimit(limit), cursor },
+    );
   }
 
   @Post()
