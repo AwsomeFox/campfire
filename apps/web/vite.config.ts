@@ -9,6 +9,7 @@ import {
   API_IMAGE_MAX_ENTRIES,
   API_JSON_CACHE_NAME,
   API_JSON_MAX_ENTRIES,
+  API_NETWORK_TIMEOUT_SECONDS,
   cacheWillUpdateImage,
   cacheWillUpdateJson,
   matchApiImageCache,
@@ -159,6 +160,7 @@ export default defineConfig({
             handler: "NetworkFirst",
             options: {
               cacheName: API_IMAGE_CACHE_NAME,
+              networkTimeoutSeconds: API_NETWORK_TIMEOUT_SECONDS,
               expiration: {
                 maxEntries: API_IMAGE_MAX_ENTRIES,
                 maxAgeSeconds: API_CACHE_MAX_AGE_SECONDS,
@@ -172,6 +174,7 @@ export default defineConfig({
             handler: "NetworkFirst",
             options: {
               cacheName: API_JSON_CACHE_NAME,
+              networkTimeoutSeconds: API_NETWORK_TIMEOUT_SECONDS,
               expiration: {
                 maxEntries: API_JSON_MAX_ENTRIES,
                 maxAgeSeconds: API_CACHE_MAX_AGE_SECONDS,

@@ -29,7 +29,7 @@ import { Btn, TextArea, TextInput } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 
 /** Which lever ids the server may offer (mirrors AiDriverService.leversFor). */
-type Lever = 'retry' | 'nudge' | 'flag' | 'vote' | 'rules_lookup' | 'request_takeover' | 'pause';
+type Lever = 'retry' | 'continue_without_ai' | 'nudge' | 'flag' | 'vote' | 'rules_lookup' | 'request_takeover' | 'pause';
 
 /** Levers the server gates to the DM role — hidden for players (they'd 403). */
 const DM_ONLY_LEVERS = new Set<Lever>(['pause']);
@@ -107,6 +107,7 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
 
   // ---- Individual lever actions -----------------------------------------
   const doRetry = () => run('retry', () => post('nudge', {}));
+  const doContinueWithoutAi = () => run('continue_without_ai', () => post('continue-without-ai'));
   const doNudge = (hint: string) =>
     run('nudge', () => post('nudge', hint.trim() ? { hint: hint.trim() } : {}), () => setDialog(null));
   const doFlag = (objection: string) =>
@@ -308,6 +309,8 @@ export function StuckLadder({ campaignId, session, isDm, canAct, myUserId, onRul
     switch (lever) {
       case 'retry':
         return void doRetry();
+      case 'continue_without_ai':
+        return void doContinueWithoutAi();
       case 'nudge':
         return openDialog('nudge');
       case 'flag':

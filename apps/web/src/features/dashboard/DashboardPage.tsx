@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { CampaignSummary } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, isReadTimeout, isTransientError } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import { usePollWhileVisible } from '../../lib/usePollWhileVisible';
 import { useAuth } from '../../app/auth';
@@ -50,6 +50,9 @@ export default function DashboardPage() {
   projectionRef.current = projection;
   const [failure, setFailure] = useState<{ campaignId: number; message: string } | null>(null);
   const [summaryStale, setSummaryStale] = useState(false);
+  const [loadPending, setLoadPending] = useState(false);
+  const [revalidating, setRevalidating] = useState(false);
+  const loadAbortRef = useRef<AbortController | null>(null);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus>('connecting');
   const requestSequence = useRef(0);
   const activeCampaignId = useRef(id);
@@ -59,11 +62,25 @@ export default function DashboardPage() {
   const error = failure?.campaignId === id ? failure.message : null;
   const liveEncounter = useLiveEncounter();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { background?: boolean }) => {
+    if (opts?.background && loadAbortRef.current) return;
+
     const requestId = ++requestSequence.current;
-    setFailure((current) => (current?.campaignId === id ? null : current));
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
+    if (opts?.background) {
+      setRevalidating(true);
+    } else {
+      setFailure((current) => (current?.campaignId === id ? null : current));
+      setLoadPending(true);
+    }
+
     try {
-      const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`);
+      const data = await api.get<CampaignSummary>(`${API}/campaigns/${id}/summary`, {
+        signal: controller.signal,
+      });
       if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
       // Replace the complete server projection in one state transition. In
       // particular, inProgressSession/nextSession are never field-merged:
@@ -74,13 +91,42 @@ export default function DashboardPage() {
       // campaign from here, and CampaignContext is the shared source for its name.
       void refreshCampaigns();
     } catch (err) {
+      if (controller.signal.aborted) return;
       if (requestId !== requestSequence.current || activeCampaignId.current !== id) return;
       if (!handleAccessError(err)) {
-        setFailure({ campaignId: id, message: err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard." });
-        if (projectionRef.current?.campaignId === id) setSummaryStale(true);
+        const hasProjection = projectionRef.current?.campaignId === id;
+        const timedOut = isReadTimeout(err);
+        const transient = isTransientError(err);
+        if (hasProjection && (timedOut || transient)) {
+          setSummaryStale(true);
+          setFailure(null);
+          // One background revalidation after surfacing last-known data (#581).
+          if (!opts?.background) {
+            setTimeout(() => void load({ background: true }), 0);
+          }
+          return;
+        }
+        setFailure({
+          campaignId: id,
+          message: err instanceof ApiError ? err.message : "Couldn't load the campaign dashboard.",
+        });
+        if (hasProjection) setSummaryStale(true);
+      }
+    } finally {
+      if (loadAbortRef.current === controller) {
+        loadAbortRef.current = null;
+        setLoadPending(false);
+        setRevalidating(false);
       }
     }
   }, [id, refreshCampaigns, handleAccessError]);
+
+  const cancelLoad = useCallback(() => {
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = null;
+    setLoadPending(false);
+    setRevalidating(false);
+  }, []);
 
   useEffect(() => {
     if (Number.isFinite(id)) {
@@ -88,11 +134,15 @@ export default function DashboardPage() {
       setSummaryStale(false);
       void load();
     }
+    return () => {
+      loadAbortRef.current?.abort();
+      loadAbortRef.current = null;
+    };
   }, [id, load]);
 
   // Keep the summary live while the tab is open (issue #113): the quest/party/notes
   // cards have no SSE event, so poll them ~5s and pause when the tab is hidden.
-  usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(id));
+  usePollWhileVisible(() => void load({ background: true }), POLL_MS, Number.isFinite(id));
 
   // One campaign stream invalidates each affected authoritative read. Scheduling
   // events refetch the whole dashboard projection; this is also the reconnect
@@ -143,6 +193,18 @@ export default function DashboardPage() {
   if (!summary && !error) {
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5">
+        {loadPending && (
+          <div role="status" className="cf-inset text-sm text-[var(--color-neutral-400)] flex items-center justify-between gap-3">
+            <span>Loading campaign dashboard…</span>
+            <button
+              type="button"
+              onClick={cancelLoad}
+              className="font-semibold text-[var(--color-neutral-500)] hover:underline shrink-0"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
         <Card>
           <Skeleton lines={3} />
         </Card>
@@ -168,7 +230,7 @@ export default function DashboardPage() {
   if (error && !summary) {
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5">
-        <ErrorNote message={error} onRetry={load} />
+        <ErrorNote message={error} onRetry={() => void load()} pending={loadPending} />
       </div>
     );
   }
@@ -177,9 +239,34 @@ export default function DashboardPage() {
 
   return (
     <div className="reading-surface max-w-7xl mx-auto px-4 mt-5 pb-20 md:pb-10" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {error && <ErrorNote message={error} onRetry={load} />}
+      {error && <ErrorNote message={error} onRetry={() => void load()} pending={loadPending} />}
+      {(loadPending || revalidating) && (
+        <div role="status" className="cf-inset text-sm text-[var(--color-neutral-400)] flex items-center justify-between gap-3">
+          <span>{revalidating && !loadPending ? 'Refreshing in background…' : 'Refreshing dashboard…'}</span>
+          <button
+            type="button"
+            onClick={cancelLoad}
+            className="font-semibold text-[var(--color-neutral-500)] hover:underline shrink-0"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {summaryStale && !error && (
+        <div role="status" className="cf-inset text-sm text-[var(--color-neutral-400)] flex items-center justify-between gap-3">
+          <span>Showing last-known dashboard — live refresh is delayed.</span>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loadPending || revalidating}
+            className="font-semibold text-[var(--cf-accent)] hover:underline shrink-0 disabled:opacity-60"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
-      <StatusHeader campaignId={id} summary={summary} role={role} onChange={load} liveEncounter={liveEncounter} />
+      <StatusHeader campaignId={id} summary={summary} role={role} onChange={() => void load()} liveEncounter={liveEncounter} />
 
       {/* AI-DM live-state relay (#344) — presence + last-action line for everyone, plus
           a DM-only "review it" nudge the instant the AI files a proposal. Renders nothing

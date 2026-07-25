@@ -39,11 +39,27 @@ export type AiDmStreamEvent =
       at: string;
     }
   | {
+      type: 'turn.error';
+      campaignId: number;
+      stopReason: 'provider_error';
+      code: string;
+      message: string;
+      retryable: boolean;
+      steps: number;
+      tokensUsed: number;
+      /** True when no provider usage was reported and partial output could not be estimated (#560). */
+      tokensUsageUnknown?: boolean;
+      budgetRemaining: number;
+      at: string;
+    }
+  | {
       type: 'turn.end';
       campaignId: number;
       stopReason: string;
       steps: number;
       tokensUsed: number;
+      /** True when the turn ended after a provider failure with no meterable usage (#560). */
+      tokensUsageUnknown?: boolean;
       budgetRemaining: number;
       at: string;
     }

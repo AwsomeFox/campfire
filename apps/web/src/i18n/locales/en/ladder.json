@@ -10,7 +10,8 @@
       "max_steps": "The DM ran out of steps",
       "no_narration": "The DM produced no narration",
       "loop": "The DM repeated itself",
-      "dispute": "A ruling was disputed"
+      "dispute": "A ruling was disputed",
+      "provider_error": "The AI provider failed"
     },
 
     "tableTools": "Table tools",
@@ -18,6 +19,7 @@
 
     "lever": {
       "retry": "Retry",
+      "continue_without_ai": "Continue without AI",
       "nudge": "Nudge",
       "flag": "Flag a ruling",
       "vote": "Call a vote",

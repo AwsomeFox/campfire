@@ -28,11 +28,25 @@ export type AiDmStreamEvent =
       at: string;
     }
   | {
+      type: 'turn.error';
+      campaignId: number;
+      stopReason: 'provider_error';
+      code: string;
+      message: string;
+      retryable: boolean;
+      steps: number;
+      tokensUsed: number;
+      tokensUsageUnknown?: boolean;
+      budgetRemaining: number;
+      at: string;
+    }
+  | {
       type: 'turn.end';
       campaignId: number;
       stopReason: string;
       steps: number;
       tokensUsed: number;
+      tokensUsageUnknown?: boolean;
       budgetRemaining: number;
       at: string;
     }
@@ -102,6 +116,31 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
         at: v.at as string,
       };
     }
+    case 'turn.error':
+      if (
+        v.stopReason !== 'provider_error' ||
+        typeof v.code !== 'string' ||
+        typeof v.message !== 'string' ||
+        typeof v.retryable !== 'boolean' ||
+        typeof v.steps !== 'number' ||
+        typeof v.tokensUsed !== 'number' ||
+        typeof v.budgetRemaining !== 'number'
+      ) {
+        return null;
+      }
+      return {
+        type,
+        campaignId: v.campaignId as number,
+        stopReason: 'provider_error',
+        code: v.code,
+        message: v.message,
+        retryable: v.retryable,
+        steps: v.steps,
+        tokensUsed: v.tokensUsed,
+        ...(v.tokensUsageUnknown === true ? { tokensUsageUnknown: true } : {}),
+        budgetRemaining: v.budgetRemaining,
+        at: v.at as string,
+      };
     case 'turn.end':
       if (
         typeof v.stopReason !== 'string' ||
@@ -117,6 +156,7 @@ export function parseAiDmStreamEvent(value: unknown): AiDmStreamEvent | null {
         stopReason: v.stopReason,
         steps: v.steps,
         tokensUsed: v.tokensUsed,
+        ...(v.tokensUsageUnknown === true ? { tokensUsageUnknown: true } : {}),
         budgetRemaining: v.budgetRemaining,
         at: v.at as string,
       };

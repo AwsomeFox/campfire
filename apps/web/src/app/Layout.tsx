@@ -45,6 +45,11 @@ import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
 import { LiveEncounterProvider } from './LiveEncounterContext';
 import { useLiveEncounterState } from '../lib/useLiveEncounterState';
+import {
+  getConnectionSyncSnapshot,
+  subscribeConnectionSync,
+  type ConnectionSyncState,
+} from '../lib/connectionSync';
 import { KeyboardCommandProvider, useKeyboardCommands, useKeyboardCommandHint } from '../components/KeyboardCommandProvider';
 import {
   buildCampaignNavGroups,
@@ -284,6 +289,61 @@ function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   );
 }
 
+/**
+ * Read-sync banner (issue #581). Shown when API reads time out or fail transiently
+ * while the authed shell still renders last-known campaign data. Distinct from the
+ * offline-identity banner (#579), which covers a failed `/me`.
+ */
+function ConnectionSyncBanner({
+  syncState,
+  lastSyncAt,
+}: {
+  syncState: ConnectionSyncState;
+  lastSyncAt: number | null;
+}) {
+  const { t } = useTranslation();
+  const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => tick((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const when = useMemo(() => {
+    if (lastSyncAt == null) return null;
+    const ago = relativeAgo(lastSyncAt);
+    const abs = formatDateTime(lastSyncAt, { dateStyle: 'medium', timeStyle: 'short' });
+    return { ago, abs };
+  }, [lastSyncAt, formattingLocale, timeFormat]);
+
+  const message =
+    syncState === 'offline'
+      ? t('nav.readSyncOffline')
+      : syncState === 'stale'
+        ? t('nav.readSyncStale')
+        : null;
+  if (!message) return null;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="px-4 py-2 text-center"
+      style={{
+        fontSize: 12.5,
+        color: 'var(--color-neutral-200, #e5e7eb)',
+        background: 'color-mix(in srgb, var(--color-neutral-500, #888) 10%, transparent)',
+        borderBottom: '1px solid var(--color-divider)',
+      }}
+      title={when ? when.abs : undefined}
+      data-testid="connection-sync-banner"
+    >
+      {message}
+      {when ? <span className="text-muted">{t('nav.offlineSyncedAt', { when: when.ago })}</span> : null}
+    </div>
+  );
+}
+
 function SidebarNavButton({
   item,
   active,
@@ -371,6 +431,10 @@ export function Layout() {
 function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
+  const [connectionSync, setConnectionSync] = useState(getConnectionSyncSnapshot);
+  useEffect(() => {
+    return subscribeConnectionSync(() => setConnectionSync(getConnectionSyncSnapshot()));
+  }, []);
   const formattingLocale = useFormattingLocale();
   const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();
@@ -897,6 +961,9 @@ function LayoutContent() {
             it so the user knows the data may be stale rather than wiping the cache
             or bouncing to /login. */}
         {staleIdentity && <OfflineBanner lastSyncedAt={lastSyncedAt} />}
+        {!staleIdentity && (connectionSync.state === 'stale' || connectionSync.state === 'offline') && (
+          <ConnectionSyncBanner syncState={connectionSync.state} lastSyncAt={connectionSync.lastSyncAt} />
+        )}
 
         {/* Archived (paused/completed) campaigns are read-only server-side — surface it on every campaign page (#704). */}
         {campaign && campaign.status !== 'active' && (

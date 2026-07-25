@@ -52,6 +52,7 @@ import {
   StoryArcUpdate,
   StoryBeatCreate,
   StoryBeatUpdate,
+  StoryBranchUpdate,
   RollRequest,
   CheckRollRequest,
   CheckRequestCreate,
@@ -2067,6 +2068,25 @@ export class McpToolsService {
           user,
           role,
         );
+      },
+    );
+
+    this.writeTool(
+      server,
+      user,
+      'update_branch',
+      'DM only: update an existing branch on a beat. Change the trigger `label`, retarget `toBeatId` to another beat ' +
+        'in the same campaign, set `toBeatId` to null to clear the target, or adjust `sortOrder`. Omitted fields are left unchanged.',
+      {
+        beatId: Id.describe('Source beat id'),
+        branchId: Id.describe('Branch id'),
+        ...StoryBranchUpdate.shape,
+      },
+      async ({ beatId, branchId, ...fields }) => {
+        const row = await this.storylines.getBeatRowOrThrow(beatId as number);
+        const validated = StoryBranchUpdate.parse(fields);
+        const role = await this.access.requireRole(user, row.campaignId, 'dm');
+        return this.storylines.updateBranch(beatId as number, branchId as number, validated, user, role);
       },
     );
 

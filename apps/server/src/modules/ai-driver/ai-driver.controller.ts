@@ -281,6 +281,18 @@ export class AiDriverController {
     return toPublicAiDmSessionState(await this.driver.requestTakeover(id, user, role));
   }
 
+  @Post('continue-without-ai')
+  @ApiOperation({
+    summary: 'Continue play without the AI after a provider failure',
+    description:
+      'Player+. Offered when the seat is stuck on provider_error: DMs grant themselves the acting-DM seat; players request a human takeover.',
+  })
+  @ApiResponse({ status: 201, description: 'The session state after continuing without the AI.' })
+  async continueWithoutAi(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireRole(user, id, 'player');
+    return toPublicAiDmSessionState(await this.driver.continueWithoutAi(id, user, role));
+  }
+
   @Post('grant-takeover')
   @ApiOperation({
     summary: 'Grant the acting-DM seat to a human',

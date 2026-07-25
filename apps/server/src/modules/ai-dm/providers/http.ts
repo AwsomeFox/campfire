@@ -124,6 +124,9 @@ export async function postJson(
     try {
       res = await fetchImpl(url, { method: 'POST', headers, body, signal: t.signal });
     } catch (cause) {
+      t.cleanup();
+      // Guarded fetch throws typed, non-retryable errors — propagate as-is.
+      if (cause instanceof AiProviderError) throw cause;
       // Distinguish a timeout/abort from a raw transport fault.
       const aborted = t.didTimeout() || opts.signal?.aborted;
       lastErr = t.didTimeout()
@@ -131,7 +134,6 @@ export async function postJson(
         : aborted
           ? new AiProviderError('timeout', `${opts.provider}: request aborted`, { provider: opts.provider, retryable: false, cause })
           : new AiProviderError('transport', `${opts.provider}: network error`, { provider: opts.provider, cause });
-      t.cleanup();
       if (!lastErr.retryable || attempt === opts.retry.maxRetries) throw lastErr;
       await sleep(backoffDelayMs(attempt, opts.retry, undefined, opts.rand));
       continue;
@@ -184,6 +186,7 @@ export async function getJson(
   try {
     return await fetchImpl(url, { method: 'GET', headers, signal: t.signal });
   } catch (cause) {
+    if (cause instanceof AiProviderError) throw cause;
     const aborted = t.didTimeout() || opts.signal?.aborted;
     throw t.didTimeout()
       ? new AiProviderError('timeout', `${opts.provider}: request timed out after ${opts.timeoutMs}ms`, { provider: opts.provider, cause })
