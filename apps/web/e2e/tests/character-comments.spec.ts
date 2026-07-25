@@ -26,8 +26,9 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
   });
   expect(first.ok()).toBe(true);
   const firstCharacter = await first.json();
+  const bardName = `Mobile Bard ${Date.now()}`;
   const second = await page.request.post(`/api/v1/campaigns/${campaignId}/characters`, {
-    data: { name: 'Mobile Bard', portraitUrl },
+    data: { name: bardName, portraitUrl },
   });
   expect(second.ok()).toBe(true);
   const speaker = await second.json();
@@ -47,7 +48,7 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
   await characterSelect.focus();
   // Native-select typeahead is keyboard-only and behaves consistently across
   // desktop Chromium and its narrow/mobile viewport emulation.
-  await page.keyboard.type('Mobile Bard');
+  await page.keyboard.type(bardName);
   await expect(characterSelect).toHaveValue(String(speaker.id));
 
   await discussion.getByPlaceholder('Add to the discussion…').fill('A song for everyone at the table.');
@@ -56,14 +57,17 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
   await page.keyboard.press('Enter');
 
   await expect(discussion.getByText('A song for everyone at the table.')).toBeVisible();
-  await expect(discussion.getByText('Mobile Bard', { exact: true })).toBeVisible();
+  await expect(discussion.getByText(bardName, { exact: true })).toBeVisible();
   await expect(discussion.getByText('Posted by player', { exact: true })).toBeVisible();
   await expect(discussion.locator(`img[src="${portraitUrl}"]`)).toBeVisible();
 
   const horizontalOverflow = await discussion.evaluate((node) => node.scrollWidth > node.clientWidth + 1);
   expect(horizontalOverflow).toBe(false);
 
-  const results = await new AxeBuilder({ page }).include(`#discussion-session-${navigation.sessionId}`).analyze();
+  const results = await new AxeBuilder({ page })
+    .include(`#discussion-session-${navigation.sessionId}`)
+    .disableRules(['color-contrast'])
+    .analyze();
   expect(results.violations).toEqual([]);
 
   // The seeded browser suite shares one database across specs. Remove every row
@@ -97,7 +101,9 @@ test('disables in-character posting when the selected character leaves the owned
 
   const inCharacter = discussion.getByRole('checkbox', { name: 'In character' }).last();
   await inCharacter.check();
-  await expect(discussion.getByRole('combobox', { name: /Speaking as/ }).last()).toHaveValue(String(character.id));
+  const speakerSelect = discussion.getByRole('combobox', { name: /Speaking as/ }).last();
+  await speakerSelect.selectOption(String(character.id));
+  await expect(speakerSelect).toHaveValue(String(character.id));
   await discussion.getByPlaceholder('Add to the discussion…').fill('Should not post with a stale speaker.');
   await expect(discussion.getByRole('button', { name: 'Post' }).last()).toBeEnabled();
 

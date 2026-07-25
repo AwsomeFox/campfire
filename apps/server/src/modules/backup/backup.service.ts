@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import Database from 'better-sqlite3';
 import JSZip from 'jszip';
-import { DB_HOLDER, DbHolder, dbFilePath, resolveDataDir } from '../../db/db.module';
+import { DB_HOLDER, DbHolder, resolveDataDir } from '../../db/db.module';
 import { decryptSecret } from '../../common/crypto';
 import { AiProviderConfigService } from '../ai-provider-config/ai-provider-config.service';
 import { nowIso } from '../../common/time';
@@ -50,6 +50,10 @@ import {
   encryptKeyfile,
   parseKeyEnvelopeJson,
 } from './backup-key-envelope';
+import {
+  applyRestoredState,
+  type RestoreProgressPhase,
+} from './backup-restore-apply';
 
 export { BACKUP_APP, BACKUP_KIND, BACKUP_VERSION, BACKUP_FORMAT_VERSION };
 export type { BackupManifest, BackupInspectResult };
@@ -79,11 +83,15 @@ export const RESTORE_CONFIRM_TOKEN = 'RESTORE';
  */
 const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 
+export type { RestoreProgressPhase };
+
 export interface RestoreResult {
   ok: true;
   restoredAt: string;
   dbBytes: number;
   uploadCount: number;
+  /** #497: ordered phases completed during the restore (including rollback when applicable). */
+  phases: RestoreProgressPhase[];
 }
 
 /** One on-disk scheduled backup archive listed by {@link BackupService.getStatus}. */
@@ -129,6 +137,8 @@ export interface RestoreOptions {
    *  envelope (`ai-config.key.env.json`) inside the archive. Required when
    *  the archive carries an envelope; ignored when it does not. */
   keyPassphrase?: string;
+  /** #497: optional progress callback as each restore phase completes. */
+  onProgress?: (phase: RestoreProgressPhase) => void;
 }
 
 /** All file paths (relative to `root`) under `root`, recursively. Returns [] if root is absent. */
@@ -863,7 +873,8 @@ export class BackupService implements OnApplicationBootstrap {
         }
       }
 
-      // --- Collect + path-check uploads before touching anything ---
+      // --- Collect + path-check uploads, then stage them on disk (#497) ---
+      const stagedUploadsDir = path.join(stageDir, 'uploads');
       const uploadEntries: Array<{ rel: string; data: Buffer }> = [];
       for (const name of Object.keys(zip.files)) {
         const entry = zip.files[name];
@@ -873,49 +884,39 @@ export class BackupService implements OnApplicationBootstrap {
         if (rel === '' || rel.includes('..') || path.isAbsolute(rel)) {
           throw new BadRequestException('Invalid backup archive — unsafe upload path');
         }
-        uploadEntries.push({ rel, data: await entry.async('nodebuffer') });
+        const data = await entry.async('nodebuffer');
+        const dest = path.join(stagedUploadsDir, rel);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, data);
+        uploadEntries.push({ rel, data });
+      }
+      if (restoredKeyBytes && envSetOnHost) {
+        this.logger.warn(
+          'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
+            'The env var takes precedence; if it decrypts the DB rows, no keyfile is needed.',
+        );
       }
 
-      // --- Apply (destructive) — DB is validated, so this is the point of no return ---
+      // --- Apply with atomic swap + automatic rollback (#497) ---
+      const progressPhases: RestoreProgressPhase[] = ['validated', 'staging-uploads'];
+      options?.onProgress?.('validated');
+      options?.onProgress?.('staging-uploads');
+      let applyPhases: RestoreProgressPhase[] = [];
       this.holder.withDatabaseClosed((dataDir) => {
-        const dbPath = dbFilePath(dataDir);
-        for (const suffix of ['', '-wal', '-shm']) {
-          fs.rmSync(dbPath + suffix, { force: true });
-        }
-        fs.copyFileSync(stagedDbPath, dbPath);
-
-        const uploads = uploadsRoot(dataDir);
-        fs.rmSync(uploads, { recursive: true, force: true });
-        for (const { rel, data } of uploadEntries) {
-          const dest = path.join(uploads, rel);
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.writeFileSync(dest, data);
-        }
-
-        // #496: If the archive shipped an encrypted AI keyfile envelope AND
-        // this host is not overriding the key via AI_CONFIG_KEY, write the
-        // decrypted keyfile so stored provider credentials remain decryptable
-        // after the DB restore. When AI_CONFIG_KEY is set the operator has
-        // asserted external key management — do NOT overwrite what they might
-        // already have configured on disk (which would be silently ignored
-        // anyway, but writing it would leak the source keyfile onto a host
-        // that is not supposed to keep one). The env key was already validated
-        // against the staged credentials before this destructive block.
-        if (restoredKeyBytes) {
-          if (!envSetOnHost) {
-            const keyfilePath = path.join(dataDir, AI_KEYFILE_NAME);
-            fs.mkdirSync(path.dirname(keyfilePath), { recursive: true });
-            const stagedKey = `${keyfilePath}.${process.pid}.tmp`;
-            fs.writeFileSync(stagedKey, restoredKeyBytes.toString('utf8'), { mode: 0o600 });
-            fs.renameSync(stagedKey, keyfilePath);
-          } else {
-            this.logger.warn(
-              'restore: AI_CONFIG_KEY is set on this host — skipping keyfile write from the archive envelope. ' +
-                'The env var takes precedence; if it decrypts the DB rows, no keyfile is needed.',
-            );
-          }
-        }
+        options?.onProgress?.('quiescing');
+        progressPhases.push('quiescing');
+        const applied = applyRestoredState({
+          dataDir,
+          stagedDbPath,
+          stagedUploadsDir,
+          restoredKeyBytes,
+          aiKeyfileName: AI_KEYFILE_NAME,
+          envKeyManaged: envSetOnHost,
+          onProgress: options?.onProgress,
+        });
+        applyPhases = applied.phases;
       });
+      progressPhases.push(...applyPhases);
 
       // A backup may have been cut while an upload was between its SQLite
       // reservation and final commit. The restored DB is already reopened here;
@@ -944,6 +945,7 @@ export class BackupService implements OnApplicationBootstrap {
         restoredAt: nowIso(),
         dbBytes: dbBytes.length,
         uploadCount: uploadEntries.length,
+        phases: progressPhases,
       };
 
       // Audit against the freshly-restored DB — records that a restore happened

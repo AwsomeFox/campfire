@@ -50,7 +50,7 @@
     "displayName": "Display name",
     "mcpTitle": "Connect an AI (MCP)",
     "mcpLive": "live",
-    "mcpBlurb": "Point Claude (or any MCP client) at this server to read and write your campaigns — 36+ tools covering quests, NPCs, characters, encounters, dice and more.",
+    "mcpBlurb": "Point Claude (or any MCP client) at this server to read and write your campaigns — {{toolCount}} tools covering quests, NPCs, characters, encounters, dice and more.",
     "mcpEndpoint": "MCP endpoint",
     "mcpCreateToken": "Create an API token",
     "mcpThenConnect": "then connect from the tokens page",
