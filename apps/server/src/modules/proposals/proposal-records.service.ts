@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import type { EntityType, Proposal, ProposalAction, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats } from '../../db/schema';
+import { proposals, quests, npcs, locations, sessions, characters, factions, storyBeats, auditLog } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { fromJsonText, toJsonText } from '../../common/json';
 import { notDeleted } from '../../common/soft-delete';
@@ -20,6 +20,7 @@ import { toDomain as locationToDomain } from '../locations/locations.service';
 import { toDomain as sessionToDomain } from '../sessions/sessions.service';
 import { toDomain as characterToDomain } from '../characters/characters.service';
 import { projectProposal, projectProposals } from './proposal-projection';
+import { hashProposalSnapshot } from './proposal-snapshot';
 
 // The entity types that can be filed as a proposal. Co-DM authoring (issue #313) added
 // `encounter` and `map`: a co-DM draft never writes canon directly, so those two must
@@ -47,6 +48,8 @@ export function toDomain(row: typeof proposals.$inferSelect): Proposal {
     action: row.action as ProposalAction,
     payload: fromJsonText<Record<string, unknown>>(row.payload, {}),
     snapshot: row.snapshot == null ? null : fromJsonText<Record<string, unknown> | null>(row.snapshot, null),
+    baseUpdatedAt: row.baseUpdatedAt ?? null,
+    baseSnapshotHash: row.baseSnapshotHash ?? null,
     proposer: row.proposer,
     proposerUserId: row.proposerUserId ?? '',
     proposerToken: row.proposerToken ?? null,
@@ -106,6 +109,9 @@ export class ProposalRecordsService {
       action !== 'create' && entityId !== null
         ? await this.captureAuthorizedSnapshot(campaignId, entityType, entityId, role)
         : null;
+    const baseUpdatedAt =
+      snapshot !== null && typeof snapshot.updatedAt === 'string' ? snapshot.updatedAt : null;
+    const baseSnapshotHash = snapshot !== null ? hashProposalSnapshot(snapshot) : null;
 
     const ts = nowIso();
     const [row] = await this.db
@@ -117,6 +123,8 @@ export class ProposalRecordsService {
         action,
         payload: toJsonText(payload),
         snapshot: snapshot === null ? null : toJsonText(snapshot),
+        baseUpdatedAt,
+        baseSnapshotHash,
         // Attribution (issue #124): record the actual USER — display name for the
         // human-readable `proposer`, their stable id for the self-view filter — even
         // when the write arrives over a PAT (RequestUser resolves to the token's owning
@@ -160,6 +168,24 @@ export class ProposalRecordsService {
     // Egress projection (#817): non-DM proposers never see the raw DM-review snapshot
     // (or dmSecret in the echoed payload) on the create response.
     return projectProposal(toDomain(row), role);
+  }
+
+  /**
+   * Load the target's current authorized snapshot for approve-time stale checks
+   * (issue #681). Returns null when the entity no longer exists (deleted).
+   */
+  async getCurrentAuthorizedSnapshot(
+    campaignId: number,
+    entityType: ProposableEntityType,
+    entityId: number,
+    role: Role,
+  ): Promise<Record<string, unknown> | null> {
+    try {
+      return await this.captureAuthorizedSnapshot(campaignId, entityType, entityId, role);
+    } catch (err) {
+      if (err instanceof NotFoundException) return null;
+      throw err;
+    }
   }
 
   /**
@@ -313,6 +339,51 @@ export class ProposalRecordsService {
     const [row] = await this.db.select().from(proposals).where(eq(proposals.id, id)).limit(1);
     if (!row) throw new NotFoundException(`Proposal ${id} not found`);
     return row;
+  }
+
+  /**
+   * After a successful entity write, atomically backfill bookkeeping and record
+   * the proposal.approve audit row (issue #681). Guarded on `status = 'approved'`
+   * so a reverted claim is never finalized.
+   */
+  finalizeApproved(
+    id: number,
+    user: RequestUser,
+    role: Role,
+    opts?: { payload?: Record<string, unknown>; entityId?: number },
+  ): void {
+    const ts = nowIso();
+    const actor = auditActor(user);
+    this.db.transaction((tx) => {
+      const row = tx.select().from(proposals).where(eq(proposals.id, id)).limit(1).get();
+      if (!row || row.status !== 'approved') return;
+
+      if (opts?.entityId !== undefined && row.entityId == null) {
+        tx.update(proposals)
+          .set({ entityId: opts.entityId, updatedAt: ts })
+          .where(and(eq(proposals.id, id), eq(proposals.status, 'approved'), isNull(proposals.entityId)))
+          .run();
+      }
+      if (opts?.payload !== undefined) {
+        tx.update(proposals)
+          .set({ payload: toJsonText(opts.payload), updatedAt: ts })
+          .where(and(eq(proposals.id, id), eq(proposals.status, 'approved')))
+          .run();
+      }
+
+      tx.insert(auditLog)
+        .values({
+          campaignId: row.campaignId,
+          actor,
+          actorRole: role,
+          action: 'proposal.approve',
+          entityType: row.entityType,
+          entityId: id,
+          detail: '',
+          createdAt: ts,
+        })
+        .run();
+    });
   }
 
   /**

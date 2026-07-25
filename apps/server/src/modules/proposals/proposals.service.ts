@@ -36,6 +36,7 @@ import { MapsService } from '../maps/maps.service';
 import { FactionsService } from '../factions/factions.service';
 import { StorylinesService } from '../storylines/storylines.service';
 import { ProposalRecordsService, isProposableEntityType, type ProposableEntityType } from './proposal-records.service';
+import { assertProposalTargetFresh } from './proposal-snapshot';
 
 type ProposalResolveInput = z.infer<typeof ProposalResolve>;
 type ProposalApproveInput = z.infer<typeof ProposalApprove>;
@@ -276,6 +277,26 @@ export class ProposalsService {
       throw new BadRequestException(`${action} proposal missing entityId`);
     }
 
+    const baseSnapshot =
+      existing.snapshot == null
+        ? null
+        : fromJsonText<Record<string, unknown> | null>(existing.snapshot, null);
+    if (action === 'update' || action === 'delete') {
+      const currentSnapshot = await this.records.getCurrentAuthorizedSnapshot(
+        existing.campaignId,
+        existing.entityType,
+        existing.entityId!,
+        role,
+      );
+      assertProposalTargetFresh({
+        action,
+        baseSnapshot,
+        baseSnapshotHash: existing.baseSnapshotHash ?? null,
+        currentSnapshot,
+        proposed: action === 'delete' ? null : (validated ?? payload),
+      });
+    }
+
     // Atomically claim the proposal (pending -> approved). A null return means it was
     // already resolved or a concurrent request won the race — do not apply the write.
     const resolved = await this.records.markResolved(id, 'approved', input.note ?? '', user);
@@ -294,32 +315,63 @@ export class ProposalsService {
       } else if (action === 'create') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const created = await (service as any).create(existing.campaignId, validated, user, role);
-        if (created && typeof created.id === 'number') {
-          createdEntityId = created.id;
-          // entity_id was null on a create-proposal; backfill it now that the row exists.
-          await this.records.backfillEntityId(id, created.id);
+        const createdId = created?.id;
+        if (typeof createdId === 'number') {
+          createdEntityId = createdId;
+        } else if (typeof createdId === 'bigint') {
+          if (createdId <= BigInt(Number.MAX_SAFE_INTEGER) && createdId >= BigInt(Number.MIN_SAFE_INTEGER)) {
+            createdEntityId = Number(createdId);
+          }
+        } else if (typeof createdId === 'string' && createdId !== '') {
+          const parsed = BigInt(createdId);
+          if (parsed <= BigInt(Number.MAX_SAFE_INTEGER) && parsed >= BigInt(Number.MIN_SAFE_INTEGER)) {
+            createdEntityId = Number(parsed);
+          }
         }
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         await (service as any).update(existing.entityId, validated, user, role);
       }
-      // Persist the DM's amended body so the record reflects what was actually applied.
-      if (amended) await this.records.updatePayload(id, validated!);
     } catch (err) {
       // The entity write failed — undo the claim so the proposal returns to pending
       // rather than being stranded as approved with no write applied.
-      await this.records.revertToPending(id);
+      try {
+        await this.records.revertToPending(id);
+      } catch (revertErr) {
+        await this.audit
+          .log({
+            actor: auditActor(user),
+            actorRole: role,
+            action: 'proposal.revert_failed',
+            entityType: existing.entityType,
+            entityId: id,
+            campaignId: existing.campaignId,
+            detail: String(revertErr),
+          })
+          .catch(() => {});
+      }
       throw err;
     }
 
-    await this.audit.log({
-      actor: auditActor(user),
-      actorRole: role,
-      action: 'proposal.approve',
-      entityType: existing.entityType,
-      entityId: id,
-      campaignId: existing.campaignId,
-    });
+    // Finalize bookkeeping only after a successful entity write. Failures here must
+    // not revert the claim — the mutation already landed (issue #85 / #681).
+    // finalizeApproved is intentionally synchronous (better-sqlite3 transaction).
+    try {
+      this.records.finalizeApproved(id, user, role, {
+        ...(amended ? { payload: validated! } : {}),
+        ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
+      });
+    } catch (finalizeErr) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'proposal.approve.finalize_failed',
+        entityType: existing.entityType,
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: String(finalizeErr),
+      });
+    }
 
     await this.notifyProposerOfResolution(resolved, 'approved', user);
 

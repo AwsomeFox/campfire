@@ -351,6 +351,25 @@ function migrateProposalsTableForAttribution(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for proposal stale-target detection (issue #681): store the target
+ * entity's revision token and a hash of the base snapshot at propose time so
+ * approve can reject stale targets with a three-way diff. Plain nullable ADD
+ * COLUMNs — pre-existing rows keep NULL and fall back to hashing the persisted
+ * snapshot at approve time.
+ */
+function migrateProposalsTableForBaseSnapshot(sqlite: Database.Database): void {
+  const hasProposalsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='proposals'")
+    .get();
+  if (!hasProposalsTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(proposals)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('base_updated_at')) sqlite.exec('ALTER TABLE proposals ADD COLUMN base_updated_at TEXT');
+  if (!has('base_snapshot_hash')) sqlite.exec('ALTER TABLE proposals ADD COLUMN base_snapshot_hash TEXT');
+}
+
+/**
  * Migration for DBs created before character-sheet depth (issue #1):
  * `characters.save_proficiencies` / `skills` / `actions` / `spell_slots`
  * didn't exist. Plain defaulted ADD COLUMNs — no table rebuild needed, same
@@ -2553,6 +2572,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0090_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
   { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
   { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
+  { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
 ];
 
 /**

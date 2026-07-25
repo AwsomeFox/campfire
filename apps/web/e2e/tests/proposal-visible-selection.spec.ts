@@ -15,6 +15,8 @@ function proposal(
     entityId: id,
     payload: { title },
     snapshot: null,
+    baseUpdatedAt: null,
+    baseSnapshotHash: null,
     proposer: 'Player',
     proposerUserId: '7',
     proposerToken: null,
