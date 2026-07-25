@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * DM-initiated check requests (issue #415) — the interactive
  * DM-request → player-prompt → consequence loop, surfaced inside the run-session view.
@@ -17,7 +18,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type { Character, CheckRequest, CheckRequestResolution, RollCheckDefinition } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys } from '../../lib/query';
 import { Card, Btn, TextInput } from '../../components/ui';
 import { useAnnounce } from '../../components/Announcer';
@@ -47,6 +48,7 @@ export function CheckRequestPanel({
   encounterId?: number;
   onError?: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [characterId, setCharacterId] = useState<number | ''>('');
   const [checkId, setCheckId] = useState('');
@@ -80,7 +82,7 @@ export function CheckRequestPanel({
       setDc('');
       setConsequence('');
     },
-    onError: (err) => onError?.(err instanceof ApiError ? err.message : "Couldn't send the check request."),
+    onError: (err) => onError?.(translateApiError(err, t, { fallbackKey: 'encounters.errors.sendCheck' })),
   });
 
   const canSend = typeof characterId === 'number' && checkId.trim().length > 0 && !send.isPending;
@@ -175,6 +177,7 @@ function PromptCard({
   onResolved: (res: CheckRequestResolution) => void;
   onError?: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const roll = useMutation({
     mutationFn: () => api.post<CheckRequestResolution>(`${API}/check-requests/${request.id}/roll`, {}),
@@ -183,7 +186,7 @@ function PromptCard({
       announce(outcomeText(res));
       onResolved(res);
     },
-    onError: (err) => onError?.(err instanceof ApiError ? err.message : "Couldn't roll the check."),
+    onError: (err) => onError?.(translateApiError(err, t, { fallbackKey: 'encounters.errors.rollCheck' })),
   });
 
   return (

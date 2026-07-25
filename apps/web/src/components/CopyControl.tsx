@@ -19,7 +19,7 @@ import {
   type RefObject,
 } from 'react';
 import { useAnnounce } from './Announcer';
-import { Btn } from './ui';
+import { Btn, type UiDensity } from './ui';
 import {
   COPY_FEEDBACK_MS,
   DEFAULT_COPY_FAILURE,
@@ -55,6 +55,7 @@ type CopyControlProps = {
   /** How long copied/failed feedback stays before resetting. */
   feedbackMs?: number;
   ghost?: boolean;
+  density?: UiDensity;
   /**
    * When true, render a plain `<button>` so callers can supply full chrome
    * (e.g. `btn btn-primary` or an underline link). Default uses {@link Btn}.
@@ -75,6 +76,7 @@ export function CopyControl({
   onResult,
   feedbackMs = COPY_FEEDBACK_MS,
   ghost,
+  density = 'default',
   unstyled = false,
   className = '',
   'aria-label': ariaLabel,
@@ -149,7 +151,7 @@ export function CopyControl({
   const button = unstyled ? (
     <button {...sharedProps}>{buttonLabel}</button>
   ) : (
-    <Btn {...sharedProps} ghost={ghost}>
+    <Btn {...sharedProps} ghost={ghost} density={density}>
       {buttonLabel}
     </Btn>
   );

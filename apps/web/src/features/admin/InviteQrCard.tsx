@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * QR-code handoff card for campaign invite links (issue #822).
  *
@@ -53,6 +54,7 @@ export interface InviteQrCardProps {
 // --- Component --------------------------------------------------------------
 
 export function InviteQrCard({ invite, scannable = true }: InviteQrCardProps) {
+  useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [error, setError] = useState<string | null>(null);

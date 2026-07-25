@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Rule systems card — server admin console, "Rule systems" section.
  * Lists installed rule packs (GET /api/v1/rules/packs), shows which campaigns use
@@ -46,7 +47,7 @@ import type {
   RulePackInstallSection,
   RulePackInstallSource,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { Card, Btn, Skeleton, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { RULE_SYSTEMS, ruleSystemBySource, sectionLabel, SOURCES_REQUIRING_URL } from '../../lib/rules';
@@ -75,6 +76,7 @@ function selectedPackSlug(source: RulePackInstallSource, osrVariant: OsrInstallS
 }
 
 export function RulePacksCard() {
+  const { t } = useTranslation();
   const [packs, setPacks] = useState<RulePack[] | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +98,7 @@ export function RulePacksCard() {
       setPacks(list);
       setCampaigns(camps);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load rule packs.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setLoading(false);
     }
@@ -129,7 +131,7 @@ export function RulePacksCard() {
       {loading && !packs ? (
         <Skeleton lines={3} />
       ) : packs && packs.length === 0 ? (
-        <EmptyState icon="spell-book" title="No rule packs installed" hint="Install one from a source below." />
+        <EmptyState icon="spell-book" title={t('admin.empty.noRulePacks')} hint={t('admin.empty.noRulePacksHint')} />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -189,6 +191,7 @@ function PackRow({
   onChange: () => void;
   installing: boolean;
 }) {
+  const { t } = useTranslation();
   const [uninstalling, setUninstalling] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
@@ -202,7 +205,7 @@ function PackRow({
       setConfirming(false);
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't uninstall this pack.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setUninstalling(false);
     }
@@ -310,6 +313,7 @@ function InstallPanel({
   onInstalled: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [source, setSource] = useState<RulePackInstallSource>('open5e');
   const [osrVariant, setOsrVariant] = useState<OsrInstallSystem>('basic-fantasy');
   const [url, setUrl] = useState('');
@@ -371,7 +375,7 @@ function InstallPanel({
       const enqueued = await api.post<RulePackInstallJob>(`${API}/rules/packs/install`, body);
       const job = await pollInstallJob(enqueued.id, (j) => setProgress(j.progress));
       if (job.status === 'failed') {
-        onError(job.error ?? "Couldn't install the rule pack.");
+        onError(job.error ?? t('admin.errors.installPack'));
         return;
       }
       if (job.outcome === 'updated') {
@@ -381,7 +385,7 @@ function InstallPanel({
       }
       onInstalled();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't install the rule pack.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       onInstallingChange(false);
       setProgress([]);

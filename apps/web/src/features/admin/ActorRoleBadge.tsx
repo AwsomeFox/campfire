@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Visual badge for an audit-log entry's `actorRole`.
  *
@@ -17,23 +18,28 @@
 import type { AuditActorRole } from '@campfire/schema';
 
 export function ActorRoleBadge({ role }: { role: AuditActorRole }) {
+  const { t } = useTranslation();
   if (role === 'admin') {
     return (
       <span
         className="tag"
-        title="Server admin — a privileged operator action (server-scoped)"
+        title={t('admin.actorRole.serverAdminTitle')}
         style={{ fontSize: 9, background: 'rgb(120 53 15 / 0.4)', color: 'rgb(252 211 77)' }}
       >
-        Server admin
+        {t('admin.actorRole.serverAdmin')}
       </span>
     );
   }
-  // Campaign-scoped roles: muted neutral tag. dm/player/viewer only appear on
-  // campaign audit rows; the server-wide log shows them for completeness when
-  // a campaign-scoped action bubbles into recent activity.
-  const label = role === 'dm' ? 'DM' : role === 'player' ? 'Player' : role === 'viewer' ? 'Viewer' : role;
+  const label =
+    role === 'dm'
+      ? t('admin.actorRole.dm')
+      : role === 'player'
+        ? t('admin.actorRole.player')
+        : role === 'viewer'
+          ? t('admin.actorRole.viewer')
+          : role;
   return (
-    <span className="tag tag-neutral" title={`Campaign role: ${role}`} style={{ fontSize: 9 }}>
+    <span className="tag tag-neutral" title={t('admin.actorRole.campaignTitle', { role })} style={{ fontSize: 9 }}>
       {label}
     </span>
   );

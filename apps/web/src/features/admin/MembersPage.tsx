@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Campaign members & roles — /c/:campaignId/members.
  * Mirrors design/claude-design/Campfire.dc.html "Players" (~1508-1559): an invite-link
@@ -14,7 +15,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAnnounce } from '../../components/Announcer';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { Character, CampaignMember, CampaignInvite, InviteRole, Role, AuditEntry, AuditActorRole } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import { usePanelData } from '../../lib/usePanelData';
 import { useAuth } from '../../app/auth';
@@ -62,6 +63,7 @@ const ROLE_CHIP: Record<Role, string> = {
 const ROLE_LABEL: Record<Role, string> = { dm: 'DM', player: 'Player', viewer: 'Viewer' };
 
 export default function MembersPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const { roleIn, me } = useAuth();
@@ -84,12 +86,12 @@ export default function MembersPage() {
   const charactersPanel = usePanelData<Character[]>(
     useCallback(() => api.get<Character[]>(`${API}/campaigns/${id}/characters`), [id]),
     isDm,
-    "Couldn't load characters for linking.",
+    t('admin.errors.loadCharacters'),
   );
   const auditPanel = usePanelData<AuditEntry[]>(
     useCallback(() => api.get<AuditEntry[]>(`${API}/campaigns/${id}/audit`), [id]),
     isDm,
-    "Couldn't load the audit log.",
+    t('admin.errors.loadAuditLog'),
   );
 
   const load = useCallback(async () => {
@@ -99,7 +101,7 @@ export default function MembersPage() {
       const m = await api.get<CampaignMember[]>(`${API}/campaigns/${id}/members`);
       setMembers(m);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load members.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setLoading(false);
     }
@@ -112,7 +114,7 @@ export default function MembersPage() {
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -315,6 +317,7 @@ function isEventPreset(expiryPreset: ExpiryPreset, maxUsesPreset: MaxUsesPreset)
 const INVITE_ROLE_SELECT_ID = 'invite-join-role';
 
 function InviteCard({ campaignId }: { campaignId: number }) {
+  const { t } = useTranslation();
   const campaign = useCampaign(campaignId);
   const { refresh: refreshCampaigns } = useCampaigns();
   const [invites, setInvites] = useState<CampaignInvite[]>([]);
@@ -334,7 +337,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
     try {
       setInvites(await api.get<CampaignInvite[]>(`${API}/campaigns/${campaignId}/invites`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load invites.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, [campaignId]);
 
@@ -355,7 +358,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       });
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't create the invite.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setCreating(false);
     }
@@ -369,7 +372,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       await refreshCampaigns();
       announce('Public invites re-enabled.');
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't re-enable invites.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setReactivating(false);
     }
@@ -381,7 +384,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       await api.delete(`${API}/campaigns/${campaignId}/invites/${inviteId}`);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't revoke the invite.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }
 
@@ -619,7 +622,8 @@ function InviteCard({ campaignId }: { campaignId: number }) {
 }
 
 function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
-  if (members.length === 0) return <EmptyState icon="shield" title="No members yet" />;
+  const { t } = useTranslation();
+  if (members.length === 0) return <EmptyState icon="shield" title={t('admin.empty.noMembers')} />;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -662,6 +666,7 @@ function YourMembershipCard({
   members: CampaignMember[];
   myUserId: number | null;
 }) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { refresh: refreshCampaigns } = useCampaigns();
   const [confirming, setConfirming] = useState(false);
@@ -680,7 +685,7 @@ function YourMembershipCard({
       await refreshCampaigns();
       navigate('/');
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't leave the campaign.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
       setLeaving(false);
       setConfirming(false);
     }
@@ -746,6 +751,7 @@ function MembersCard({
   onRetryCharacters: () => void;
   onChange: () => void;
 }) {
+  const { t } = useTranslation();
   // A failed character roster reads as an empty list. Without this flag the
   // per-member character select would still render (with only "— unlinked —"),
   // and a DM could silently unlink a member from its character by saving the
@@ -794,7 +800,7 @@ function MembersCard({
       )}
 
       {members.length === 0 ? (
-        <EmptyState icon="shield" title="No members yet" hint="Add one above." />
+        <EmptyState icon="shield" title={t('admin.empty.noMembers')} hint={t('admin.empty.noMembersHint')} />
       ) : (
         <div className="flex flex-col" data-testid="members-rows">
           {members.map((m) => (
@@ -841,6 +847,7 @@ function MemberRow({
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [savingRole, setSavingRole] = useState(false);
   const [savingChar, setSavingChar] = useState(false);
@@ -861,7 +868,7 @@ function MemberRow({
       announce(memberRoleSavedAnnouncement(name, ROLE_LABEL[role]));
       onChange();
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Couldn't update role.";
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       onError(msg);
       announce(msg, { assertive: true });
     } finally {
@@ -900,7 +907,7 @@ function MemberRow({
         });
         return;
       }
-      const msg = err instanceof ApiError ? err.message : "Couldn't link character.";
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       onError(msg);
       announce(msg, { assertive: true });
       setPendingTransfer(null);
@@ -940,7 +947,7 @@ function MemberRow({
       setConfirmingRemove(false);
       onChange();
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Couldn't remove member.";
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       onError(msg);
       announce(msg, { assertive: true });
     } finally {
@@ -1066,6 +1073,7 @@ function AddMemberForm({
   onAdded: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const announce = useAnnounce();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<LookupUser[]>([]);
@@ -1117,7 +1125,7 @@ function AddMemberForm({
       announce(memberAddedAnnouncement(memberDisplayName(selected), ROLE_LABEL[role]));
       onAdded();
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "Couldn't add member.";
+      const msg = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       onError(msg);
       announce(msg, { assertive: true });
     } finally {
@@ -1270,7 +1278,8 @@ function resolveActorLabel(actor: string, members: CampaignMember[]): { label: s
 }
 
 function AuditList({ entries, members }: { entries: AuditEntry[]; members: CampaignMember[] }) {
-  if (entries.length === 0) return <EmptyState icon="scroll-unfurled" title="No activity yet" />;
+  const { t } = useTranslation();
+  if (entries.length === 0) return <EmptyState icon="scroll-unfurled" title={t('admin.empty.noActivity')} />;
   return (
     <ul className="text-xs space-y-2 text-slate-400">
       {entries.slice(0, 20).map((e) => {

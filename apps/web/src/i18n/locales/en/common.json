@@ -10,6 +10,7 @@
     "retry": "Retry",
     "undated": "Undated",
     "moreActions": "More actions",
-    "pageActionsMenu": "Page actions"
+    "pageActionsMenu": "Page actions",
+    "noCampaign": "No campaign selected."
   }
 }

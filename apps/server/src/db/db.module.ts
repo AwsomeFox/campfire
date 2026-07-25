@@ -218,6 +218,23 @@ function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user dice overlay skins (issue #1315):
+ * `users.dice_theme` didn't exist. Plain NOT NULL DEFAULT 'nocturne' ADD COLUMN.
+ */
+function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
+  if (hasDiceTheme) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -353,6 +370,7 @@ function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
   if (!has('skills')) sqlite.exec("ALTER TABLE characters ADD COLUMN skills TEXT NOT NULL DEFAULT '{}'");
   if (!has('actions')) sqlite.exec("ALTER TABLE characters ADD COLUMN actions TEXT NOT NULL DEFAULT '[]'");
   if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
+  if (!has('resources')) sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
 }
 
 /**
@@ -2048,6 +2066,22 @@ function migrateCombatantsTableForConditionInstances(sqlite: Database.Database):
 }
 
 /**
+ * Issue #423: `combatants.condition_instances` stores structured condition instances
+ * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
+ * Plain nullable ADD COLUMN — no table rebuild.
+ */
+function migrateCombatantsTableForConditionInstances(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'condition_instances')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN condition_instances TEXT');
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2065,6 +2099,22 @@ function migrateCampaignsTableForTurnControls(sqlite: Database.Database): void {
   }
   if (!columns.some((c) => c.name === 'require_dm_turn_confirmation')) {
     sqlite.exec('ALTER TABLE campaigns ADD COLUMN require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
+/**
+ * Issue #635: campaign AI narration language. Plain NOT NULL DEFAULT 'en' ADD COLUMN —
+ * existing campaigns keep English narration. Fresh DBs never hit this path (BOOTSTRAP_SQL
+ * already declares narration_language).
+ */
+function migrateCampaignsTableForNarrationLanguage(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'narration_language')) {
+    sqlite.exec("ALTER TABLE campaigns ADD COLUMN narration_language TEXT NOT NULL DEFAULT 'en'");
   }
 }
 
@@ -2465,7 +2515,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
   { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
-  { name: '0087_characters_resources', run: migrateCharactersTableForResources },
+  { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
+  { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
+  { name: '0089_characters_resources', run: migrateCharactersTableForResources },
 ];
 
 /**

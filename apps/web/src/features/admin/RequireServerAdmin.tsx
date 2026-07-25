@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Shared server-admin gate for every /admin/* sub-page (issue #350). Extracted
  * from AdminPage's original inline "not an admin" check so each split-out page
@@ -11,6 +12,7 @@ import { Card } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
 
 export function RequireServerAdmin({ children }: { children: ReactNode }) {
+  useTranslation();
   const { isAdmin } = useAuth();
 
   if (!isAdmin) {

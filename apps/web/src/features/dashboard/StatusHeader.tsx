@@ -10,6 +10,7 @@ import { Btn } from '../../components/ui';
 import { CampaignMetadataFields, isCampaignMetadataDirty } from '../../components/CampaignMetadataFields';
 import { AiModeBadge } from '../ai-dm/AiModeBadge';
 import { GameIcon } from '../../components/GameIcon';
+import { CampaignCover } from '../../components/CampaignCover';
 
 const DANGER_LABEL: Record<DangerLevel, string> = {
   low: 'Low',
@@ -120,8 +121,16 @@ export function StatusHeader({
   // Design: header row is just the campaign name + a wrapped chip row
   // (session, danger, location) — no boxed card. See Campfire.dc.html ~L417-425.
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px' }}>
-      <h3 style={{ margin: 0 }}>{campaign.name}</h3>
+    <section className="cf-brand-scene" aria-label="Campaign overview">
+      <CampaignCover
+        campaignId={campaignId}
+        name={campaign.name}
+        variant="banner"
+        className="cf-brand-scene__cover"
+        showMonogram={false}
+      />
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 14px', marginTop: 12 }}>
+      <h3 className="cf-page-title" style={{ margin: 0, fontSize: '1.35rem' }}>{campaign.name}</h3>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         {liveEncounter && (
           <Link
@@ -176,6 +185,7 @@ export function StatusHeader({
           Saved.
         </p>
       )}
-    </div>
+      </div>
+    </section>
   );
 }

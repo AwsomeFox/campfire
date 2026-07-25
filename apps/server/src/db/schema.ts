@@ -29,6 +29,9 @@ export const campaigns = sqliteTable('campaigns', {
   // does NOT flip it back — deliberate reactivation via the invites policy
   // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
   publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #635: AI narration output language (Driver / co-DM / Scribe). Distinct from
+  // the client UI locale. Nullable in older DBs pre-migration; see db.module.ts.
+  narrationLanguage: text('narration_language').notNull().default('en'),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -521,6 +524,8 @@ export const users = sqliteTable('users', {
   textSize: text('text_size').notNull().default('default'),
   // Clock rendering preference: 'system' | '12h' | '24h' (issue #634).
   timeFormat: text('time_format').notNull().default('system'),
+  // Per-player dice overlay skin (issue #1315).
+  diceTheme: text('dice_theme').notNull().default('nocturne'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });

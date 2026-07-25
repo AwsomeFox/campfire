@@ -183,7 +183,7 @@ describe('turn prompts (issue #413)', () => {
 
   it('does not flag an unresolved action once the action slot is used', () => {
     const c = combatant(4, 10);
-    c.turnState.used.action = 1;
+    c.turnState.used = { action: 1 };
     const prompts = deriveEndTurnPrompts(c, slots);
     expect(prompts.some((p) => p.kind === 'unresolved-action')).toBe(false);
   });

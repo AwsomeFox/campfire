@@ -4,6 +4,7 @@ import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import type { z } from 'zod';
 import type {
   Note,
+  NarrationLanguage,
   Role,
   ScribeConfig,
   ScribeConfigUpdate,
@@ -12,6 +13,7 @@ import type {
   ScribeRunResult,
   ScribeTrigger,
 } from '@campfire/schema';
+import { buildNarrationLanguageContract, resolveNarrationLanguage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { aiDmSeats, aiScribeConfigs, aiScribeJobs, campaigns, proposals, scheduledSessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -235,7 +237,7 @@ export class ScribeService implements OnApplicationBootstrap {
     campaignId: number,
     trigger: ScribeTrigger,
     user: RequestUser,
-    opts: { dryRun?: boolean } = {},
+    opts: { dryRun?: boolean; narrationLanguage?: NarrationLanguage } = {},
   ): Promise<ScribeRunResult> {
     const dryRun = opts.dryRun ?? false;
 
@@ -313,6 +315,13 @@ export class ScribeService implements OnApplicationBootstrap {
           providerName?: string;
         };
 
+    const [campaignRow] = await this.db
+      .select({ narrationLanguage: campaigns.narrationLanguage })
+      .from(campaigns)
+      .where(eq(campaigns.id, campaignId))
+      .limit(1);
+    const narrationResolved = resolveNarrationLanguage(campaignRow?.narrationLanguage, opts.narrationLanguage);
+
     const spend: SpendResult = await this.aiDm.withSpendLock(campaignId, async () => {
       const seatAfterLock = await this.aiDm.getSeat(campaignId);
       const remainingAfterLock = seatAfterLock.tokenBudget - seatAfterLock.tokensUsed;
@@ -354,7 +363,9 @@ export class ScribeService implements OnApplicationBootstrap {
           (seatAfterLock.instructions ? `${seatAfterLock.instructions}\n\n` : '') +
           'You are the campaign scribe. Write a concise, in-voice session recap from the source material below. ' +
           'Return only the finished recap prose (markdown allowed); do not include the raw source-notes appendix.' +
-          supportGuidance;
+          supportGuidance +
+          '\n\n' +
+          buildNarrationLanguageContract(narrationResolved.language, narrationResolved.provenance);
         if (config) {
           const provider: AiProvider = createAiProvider({ ...config, params: { ...config.params, maxTokens } });
           const result = await provider.generate({

@@ -12,7 +12,7 @@ const ROOT = resolve(__dirname, '../..');
 const INDEX_CSS = resolve(ROOT, 'src/index.css');
 const RUN_SESSION = resolve(ROOT, 'src/features/encounters/RunSessionPage.tsx');
 const STAT_CARD = resolve(ROOT, 'src/components/CharacterStatCard.tsx');
-const ROLL_BANNER = resolve(ROOT, 'src/components/RollResultBanner.tsx');
+const ROLL_TOAST = resolve(ROOT, 'src/components/RollResultToast.tsx');
 
 test.describe('combat mobile target-size source contracts (issue #428)', () => {
   test('CSS helpers define 44px primary and 24px minimum targets', () => {
@@ -47,9 +47,9 @@ test.describe('combat mobile target-size source contracts (issue #428)', () => {
     expect(source).not.toMatch(/className="cf-linkish"[\s\S]{0,200}padding:\s*0/);
   });
 
-  test('roll-result dismiss uses the shared dismiss target', () => {
-    const source = readFileSync(ROLL_BANNER, 'utf8');
+  test('roll-result toast dismiss uses the shared dismiss target', () => {
+    const source = readFileSync(ROLL_TOAST, 'utf8');
     expect(source).toMatch(/cf-dismiss-target/);
-    expect(source).toMatch(/data-testid="roll-result-dismiss"/);
+    expect(source).toMatch(/data-testid="roll-result-toast-dismiss"/);
   });
 });

@@ -33,9 +33,11 @@ import {
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
 import { ActionSpec } from './action-resolver';
+import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './narration-language';
 
 export {
   DifficultyBand,
@@ -160,6 +162,9 @@ export const Campaign = z.object({
   // (row delete): suspension keeps invite rows so a deliberate reactivation can
   // restore the same codes.
   publicInvitesEnabled: z.boolean().default(true),
+  // Issue #635: language contract for AI-generated campaign content (Driver, co-DM,
+  // Scribe). Distinct from the client UI locale — only governs model narration output.
+  narrationLanguage: NarrationLanguage.default('en'),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -177,7 +182,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 /**
@@ -2420,6 +2425,11 @@ export interface RuleSystemAdapter {
    */
   attributeDicePool?(score: number): AttributeDicePool;
   /**
+   * OPTIONAL — whether this rule system tracks 5e 3-success/3-failure death saving throws (issue #424).
+   * 5e sets this to true; systems without 5e death saves set it to false or omit it.
+   */
+  readonly hasDeathSaves?: boolean;
+  /**
    * Whether this rule system is field-compatible with the D&D Beyond public-sheet importer
    * (issue #714). The importer maps a DDB sheet into the D&D-5e character shape (six
    * abilities, 5e AC/HP math, 5e conditions, 5e skills/saves), so importing into a
@@ -2499,16 +2509,13 @@ export function resourceVocabularyForAdapter(
   }
 
   if (character?.resources) {
-    const rechargeValues = AdapterResourceDef.shape.recharge.options;
     for (const [key, res] of Object.entries(character.resources)) {
       if (!seenKeys.has(key)) {
-        const recharge = rechargeValues.includes(res.recharge as (typeof rechargeValues)[number])
-          ? (res.recharge as AdapterResourceDef['recharge'])
-          : 'long-rest';
+        const rechargeParsed = AdapterResourceDef.shape.recharge.safeParse(res.recharge);
         result.push({
           key,
           name: res.name || key,
-          recharge,
+          recharge: rechargeParsed.success ? rechargeParsed.data : 'long-rest',
           defaultMax: res.max,
         });
         seenKeys.add(key);
@@ -2568,6 +2575,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   id: DND5E_ADAPTER_ID,
   label: 'D&D 5e',
   presentation: DND5E_STATBLOCK_PRESENTATION,
+  hasDeathSaves: true,
   abilityModifier(score: number): number {
     return Math.floor((score - 10) / 2);
   },
@@ -3794,6 +3802,15 @@ export function listRuleSystemAdapters(): RuleSystemAdapter[] {
 }
 
 /**
+ * Determine whether a rule system adapter supports 5e 3-pip death saving throws (issue #424).
+ * Returns true for 5e / 5e-derived adapters, false for non-5e systems unless explicitly enabled.
+ */
+export function hasDeathSavesForAdapter(adapter?: Pick<RuleSystemAdapter, 'id' | 'hasDeathSaves'> | null): boolean {
+  if (!adapter) return true;
+  return adapter.hasDeathSaves ?? (adapter.id === DND5E_ADAPTER_ID || adapter.id === DND5E_PACK_SLUG);
+}
+
+/**
  * Whether the D&D Beyond public-sheet import (issue #18) should be offered for a campaign
  * whose `ruleSystem` is the given slug (issue #714). The importer maps a DDB sheet into the
  * D&D-5e character shape, so it is only field-compatible with an explicitly-5e campaign.
@@ -4073,6 +4090,17 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export const DiceTheme = z.enum([
+  'nocturne',
+  'obsidian_gold',
+  'arcane_amethyst',
+  'dragon_ruby',
+  'celestial_pearl',
+  'cyberpunk_neon',
+  'eldritch_void',
+  'mahogany_wood',
+]);
+export type DiceTheme = z.infer<typeof DiceTheme>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -4086,6 +4114,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Per-player custom 3D dice texture/skin theme. */
+  diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
   ...timestamps,
@@ -4110,6 +4140,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;
@@ -4927,6 +4958,7 @@ export const AiDmTurnRequest = z.object({
   prompt: z.string().min(1).max(20_000),
   kind: AiDmTurnKind.default('narrate'),
   maxTokens: z.number().int().min(1).max(4096).optional(), // cap on this turn's output; provider clamps to the remaining budget
+  narrationLanguage: NarrationLanguage.optional(), // per-run override of the campaign narration language (#635)
 });
 export type AiDmTurnRequest = z.infer<typeof AiDmTurnRequest>;
 
@@ -4980,6 +5012,7 @@ export const CoDmDraftRequest = z.object({
   prompt: z.string().min(1).max(20_000),
   // How many drafts to produce (npc/location/beat/quest/faction; ignored for recap/encounter/map).
   count: z.number().int().min(1).max(10).optional(),
+  narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
   // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
   arcId: Id.optional(),
 });
@@ -5356,6 +5389,7 @@ export type ScribeJob = z.infer<typeof ScribeJob>;
 // generates but files no proposal — a preview the DM can inspect before committing.
 export const ScribeRunRequest = z.object({
   dryRun: z.boolean().default(false),
+  narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
 });
 export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
 
@@ -6740,6 +6774,9 @@ export const TurnActor = z.object({
   characterId: Id.nullable().default(null),
   // The user who owns the linked character (null for monsters/NPCs, or an unlinked PC).
   ownerUserId: z.string().nullable().default(null),
+  deathState: DeathState.default('none'),
+  deathSaveSuccesses: z.number().int().min(0).max(3).default(0),
+  deathSaveFailures: z.number().int().min(0).max(3).default(0),
 });
 export type TurnActor = z.infer<typeof TurnActor>;
 
