@@ -117,10 +117,11 @@ test.describe('encounter mobile combat/map target sizes (#428)', () => {
         await assertMinTarget(page.getByTestId('attack-roll-control').first(), 'attack roll');
         await assertMinTarget(page.getByTestId('damage-roll-control').first(), 'damage roll');
 
-        // Apply-bar dismiss (the ~11px ✕ the audit measured).
+        // Roll-result toast dismiss (replaces the old inline apply-bar dismiss).
         await page.getByTestId('damage-roll-control').first().click();
-        const dismiss = page.getByTestId('apply-damage-dismiss');
-        await assertMinTarget(dismiss, 'apply-damage dismiss');
+        const rollToast = page.getByTestId('roll-result-toast');
+        await expect(rollToast).toBeVisible();
+        await assertMinTarget(rollToast.getByTestId('roll-result-toast-dismiss'), 'roll-result toast dismiss');
 
         // Map tools (were ~21px chips).
         await assertMinTarget(page.getByTestId('map-tool-move'), 'map Move tool');

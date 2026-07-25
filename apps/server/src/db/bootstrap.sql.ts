@@ -427,6 +427,7 @@ CREATE TABLE IF NOT EXISTS users (
   accent_color TEXT,
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
+  dice_theme TEXT NOT NULL DEFAULT 'nocturne',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
