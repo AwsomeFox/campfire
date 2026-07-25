@@ -520,7 +520,7 @@ function RosterSlotRow({
             {slot.pinned ? 'Unpin' : 'Pin'}
           </Btn>
           <Btn ghost type="button" onClick={onRemove} disabled={disabled} title="Remove this slot" aria-label={`Remove ${slot.name}`}>
-            ✕
+            <span aria-hidden="true">✕</span>
           </Btn>
         </div>
       </div>
