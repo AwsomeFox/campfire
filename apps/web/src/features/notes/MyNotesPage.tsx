@@ -2,8 +2,8 @@
  * My notes — mirrors design/claude-design/Campfire.dc.html "My notes" (~1076-1101).
  * Route: /c/:campaignId/notes
  * Shows the caller's own notes (server visibility-filters to mine + shared-with-me).
- * Design: header + "+ New note", each note's visibility badge is tap-to-cycle
- * (private -> shared with DM -> shared with party -> private).
+ * Design: header + "+ New note", each note's visibility badge opens an explicit
+ * audience menu (private / DM / party) with confirmation when sharing with the party.
  *
  * Issue #784: author-only full edit (body / anchor / audience+recipient) with draft
  * preservation, dirty/saving/saved/error status, expectedUpdatedAt conflict compare +
@@ -25,6 +25,7 @@ import { Field, sanitizeFieldPrefix } from '../../components/Field';
 import { NOTES_EDIT_PREFIX, NOTES_FIELD } from '../../components/formFieldLabels';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
+import { useAnnounce } from '../../components/Announcer';
 import { Markdown } from '../../components/Markdown';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { EntityPicker, type EntityLink } from './EntityPicker';
@@ -55,6 +56,13 @@ import {
   type NoteEditBaseline,
   type NoteEditDraft,
 } from './noteEditState';
+import { NoteVisibilityMenuButton } from './NoteVisibilityMenuButton';
+import {
+  isBadgeVisibility,
+  requiresPartyShareConfirmation,
+  type BadgeVisibility,
+  type VisibilityChangeRequest,
+} from './noteVisibilityChange';
 
 type EntityTypeValue = Exclude<Note['entityType'], null>;
 
@@ -65,16 +73,10 @@ const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; lab
   whisper: { chip: 'whisper', slug: NOTE_VISIBILITY_ICON.whisper, label: 'Whisper', short: 'Whisper' },
 };
 
-/**
- * Design's tap-to-cycle order on a note's own visibility badge. `whisper` is
- * deliberately NOT in the cycle — it needs a chosen recipient, so a blind tap can't
- * create one; a whispered note shows a static badge instead (issue #127). Cycling a
- * note INTO whisper happens via the compose/edit recipient picker, not the badge.
- */
-const VIS_CYCLE: Record<'private' | 'dm_shared' | 'party_shared', Note['visibility']> = {
-  private: 'dm_shared',
-  dm_shared: 'party_shared',
-  party_shared: 'private',
+type VisibilityUndo = {
+  noteId: number;
+  previousVisibility: Note['visibility'];
+  newVisibility: Note['visibility'];
 };
 
 const entityIcon: Record<EntityTypeValue, string> = {
@@ -92,6 +94,7 @@ type FilterValue = 'all' | Note['visibility'];
 
 export default function MyNotesPage() {
   const { t } = useTranslation();
+  const announce = useAnnounce();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { me } = useAuth();
@@ -128,6 +131,9 @@ export default function MyNotesPage() {
   const [pendingDelete, setPendingDelete] = useState<Note | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [undoNote, setUndoNote] = useState<Note | null>(null);
+  const [pendingPartyConfirm, setPendingPartyConfirm] = useState<VisibilityChangeRequest | null>(null);
+  const [visibilityUndo, setVisibilityUndo] = useState<VisibilityUndo | null>(null);
+  const [updatingVisibilityId, setUpdatingVisibilityId] = useState<number | null>(null);
   // Pause list polling while an author edit is open so a 5s refresh cannot wipe the draft.
   const [editingNoteId, setEditingNoteId] = useState<number | null>(null);
   const fetchGeneration = useRef(0);
@@ -258,25 +264,61 @@ export default function MyNotesPage() {
     }
   }
 
-  async function setVisibility(note: Note, visibility: Note['visibility']) {
+  async function applyVisibilityChange(
+    note: Note,
+    visibility: Note['visibility'],
+    opts?: { skipUndo?: boolean },
+  ) {
+    const previousVisibility = note.visibility;
+    if (previousVisibility === visibility) return;
+
+    const fromLabel = visMeta[previousVisibility].label;
+    const toLabel = visMeta[visibility].label;
+    announce(t('notes.visibilityUpdating', { from: fromLabel, to: toLabel }));
+
     const prev = notes;
+    setUpdatingVisibilityId(note.id);
     setNotes((cur) => cur.map((n) => (n.id === note.id ? { ...n, visibility } : n)));
     try {
-      // Badge cycle is a deliberate audience change — server notifies on the transition.
       await api.patch(`${API}/notes/${note.id}`, {
         visibility,
         ...(note.updatedAt ? { expectedUpdatedAt: note.updatedAt } : {}),
       });
+      announce(t('notes.visibilityUpdated', { visibility: toLabel }));
+      if (!opts?.skipUndo) {
+        setVisibilityUndo({ noteId: note.id, previousVisibility, newVisibility: visibility });
+      }
       await load();
     } catch (e) {
       setNotes(prev);
+      announce(t('notes.couldntUpdateVisibility'), { assertive: true });
       if (e instanceof ApiError && e.status === 409) {
         setError(t('notes.visibilityConflict'));
         await load();
       } else {
         setError(t('notes.couldntUpdateVisibility'));
       }
+    } finally {
+      setUpdatingVisibilityId(null);
+      setPendingPartyConfirm(null);
     }
+  }
+
+  function requestVisibilityChange(note: Note, visibility: BadgeVisibility) {
+    if (note.visibility === visibility) return;
+    if (requiresPartyShareConfirmation(note.visibility, visibility)) {
+      setPendingPartyConfirm({ noteId: note.id, from: note.visibility, to: visibility });
+      return;
+    }
+    void applyVisibilityChange(note, visibility);
+  }
+
+  async function undoVisibilityChange() {
+    if (!visibilityUndo) return;
+    const note = notes.find((n) => n.id === visibilityUndo.noteId);
+    if (!note) return;
+    await applyVisibilityChange(note, visibilityUndo.previousVisibility, { skipUndo: true });
+    setVisibilityUndo(null);
   }
 
   async function deleteNote(note: Note) {
@@ -368,7 +410,7 @@ export default function MyNotesPage() {
         )}
       </div>
       <p className="text-muted text-xs m-0">
-        Private by default. Share a note with the DM or the whole party — tap the badge to change who sees it, or edit for full control.
+        Private by default. Share a note with the DM or the whole party — open the visibility menu on each note to choose who sees it, or edit for full control.
       </p>
 
       <div className="flex gap-1.5 flex-wrap">
@@ -474,11 +516,12 @@ export default function MyNotesPage() {
                 members={members}
                 editing={editingNoteId === note.id}
                 onEditingChange={(open) => setEditingNoteId(open ? note.id : null)}
-                onCycleVisibility={
-                  note.visibility === 'whisper'
-                    ? undefined
-                    : () => setVisibility(note, VIS_CYCLE[note.visibility as keyof typeof VIS_CYCLE])
+                onVisibilityChange={
+                  isBadgeVisibility(note.visibility)
+                    ? (next) => requestVisibilityChange(note, next)
+                    : undefined
                 }
+                visibilityUpdating={updatingVisibilityId === note.id}
                 onDelete={() => setPendingDelete(note)}
                 onSaved={onNoteSaved}
               />
@@ -539,6 +582,48 @@ export default function MyNotesPage() {
         secret channel for &quot;only the rogue notices the trap door&quot;. Body edits do not re-notify.
       </p>
 
+      {pendingPartyConfirm && (
+        <ConfirmDialog
+          title={t('notes.partyShareConfirmTitle')}
+          body={
+            <p className="m-0 text-sm text-slate-300 space-y-2">
+              <span className="block">
+                {t('notes.partyShareConfirmCurrent', {
+                  visibility: visMeta[pendingPartyConfirm.from].label,
+                })}
+              </span>
+              <span className="block">
+                {t('notes.partyShareConfirmNext', {
+                  visibility: visMeta[pendingPartyConfirm.to].label,
+                })}
+              </span>
+              <span className="block text-slate-400 text-xs">{NOTE_VISIBILITY_HELP.party_shared}</span>
+            </p>
+          }
+          confirmLabel={t('notes.partyShareConfirmAction')}
+          pendingLabel={t('notes.partyShareConfirmPending')}
+          busy={updatingVisibilityId === pendingPartyConfirm.noteId}
+          danger={false}
+          onConfirm={() => {
+            const note = notes.find((n) => n.id === pendingPartyConfirm.noteId);
+            if (note) void applyVisibilityChange(note, pendingPartyConfirm.to);
+          }}
+          onCancel={() => setPendingPartyConfirm(null)}
+        />
+      )}
+      {visibilityUndo && (
+        <UndoSnackbar
+          message={t('notes.visibilityChangedUndo', {
+            from: visMeta[visibilityUndo.previousVisibility].label,
+            to: visMeta[visibilityUndo.newVisibility].label,
+          })}
+          successMessage={t('notes.visibilityReverted', {
+            visibility: visMeta[visibilityUndo.previousVisibility].label,
+          })}
+          onUndo={undoVisibilityChange}
+          onExpire={() => setVisibilityUndo(null)}
+        />
+      )}
       {pendingDelete && (
         <ConfirmDialog
           title="Delete this note?"
@@ -586,7 +671,8 @@ function NoteCard({
   members = [],
   editing = false,
   onEditingChange,
-  onCycleVisibility,
+  onVisibilityChange,
+  visibilityUpdating = false,
   onDelete,
   onSaved,
 }: {
@@ -597,7 +683,8 @@ function NoteCard({
   members?: CampaignMember[];
   editing?: boolean;
   onEditingChange?: (open: boolean) => void;
-  onCycleVisibility?: () => void;
+  onVisibilityChange?: (next: BadgeVisibility) => void;
+  visibilityUpdating?: boolean;
   onDelete?: () => void;
   onSaved?: (updated: Note) => void;
 }) {
@@ -653,10 +740,19 @@ function NoteCard({
               // No tap-to-cycle: a whisper is bound to its recipient, so the badge is a
               // static indicator (re-targeting happens in edit, not by cycling).
               <Chip variant="whisper"><span className="inline-flex items-center gap-1"><GameIcon slug={NOTE_VISIBILITY_ICON.whisper} size={12} /> {whisperLabel}</span></Chip>
+            ) : editable && isBadgeVisibility(liveNote.visibility) && onVisibilityChange ? (
+              <NoteVisibilityMenuButton
+                noteId={liveNote.id}
+                visibility={liveNote.visibility}
+                disabled={visibilityUpdating}
+                onSelect={onVisibilityChange}
+              />
             ) : editable ? (
-              <button onClick={onCycleVisibility} className="cf-chip" style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
-                <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label} · tap to change</span></Chip>
-              </button>
+              <Chip variant={meta.chip}>
+                <span className="inline-flex items-center gap-1">
+                  <GameIcon slug={meta.slug} size={12} /> {meta.label}
+                </span>
+              </Chip>
             ) : (
               <>
                 <Chip variant={meta.chip}><span className="inline-flex items-center gap-1"><GameIcon slug={meta.slug} size={12} /> {meta.label}</span></Chip>
