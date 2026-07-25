@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Current-turn workspace (issue #413) — the focused "what can I do now?" panel for the
  * active combatant during a running encounter. Renders the prominent actor / round / next
@@ -18,7 +19,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
 import { useAnnounce } from '../../components/Announcer';
 import { Card, Btn } from '../../components/ui';
@@ -73,6 +74,7 @@ function SlotChip({
 }
 
 export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: TurnWorkspaceProps) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
@@ -101,7 +103,7 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
       return api.post(`${API}/encounters/${encounterId}/end-turn`, { expectedCurrentCombatantId: cid });
     },
     onMutate: () => setError(null),
-    onError: (e) => setError(e instanceof ApiError ? e.message : String(e)),
+    onError: (err) => setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })),
     onSettled: settle,
   });
 
@@ -112,7 +114,7 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
       return api.post(`${API}/encounters/${encounterId}/combatants/${cid}/turn-state`, patch);
     },
     onMutate: () => setError(null),
-    onError: (e) => setError(e instanceof ApiError ? e.message : String(e)),
+    onError: (err) => setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })),
     onSettled: settle,
   });
 

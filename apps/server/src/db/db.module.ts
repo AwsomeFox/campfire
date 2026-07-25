@@ -2021,6 +2021,22 @@ function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): vo
 }
 
 /**
+ * Issue #423: `combatants.condition_instances` stores structured condition instances
+ * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
+ * Plain nullable ADD COLUMN — no table rebuild.
+ */
+function migrateCombatantsTableForConditionInstances(sqlite: Database.Database): void {
+  const hasCombatantsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='combatants'")
+    .get();
+  if (!hasCombatantsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(combatants)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'condition_instances')) {
+    sqlite.exec('ALTER TABLE combatants ADD COLUMN condition_instances TEXT');
+  }
+}
+
+/**
  * Issue #413: campaign turn-advancement controls. `dm_controls_turns` keeps combat
  * advancement DM-only (a player cannot end their own turn); `require_dm_turn_confirmation`
  * stages a player's end-turn for DM approval instead of advancing immediately. Both plain
@@ -2038,6 +2054,22 @@ function migrateCampaignsTableForTurnControls(sqlite: Database.Database): void {
   }
   if (!columns.some((c) => c.name === 'require_dm_turn_confirmation')) {
     sqlite.exec('ALTER TABLE campaigns ADD COLUMN require_dm_turn_confirmation INTEGER NOT NULL DEFAULT 0');
+  }
+}
+
+/**
+ * Issue #635: campaign AI narration language. Plain NOT NULL DEFAULT 'en' ADD COLUMN —
+ * existing campaigns keep English narration. Fresh DBs never hit this path (BOOTSTRAP_SQL
+ * already declares narration_language).
+ */
+function migrateCampaignsTableForNarrationLanguage(sqlite: Database.Database): void {
+  const hasCampaignsTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='campaigns'")
+    .get();
+  if (!hasCampaignsTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'narration_language')) {
+    sqlite.exec("ALTER TABLE campaigns ADD COLUMN narration_language TEXT NOT NULL DEFAULT 'en'");
   }
 }
 
@@ -2436,7 +2468,9 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
-  { name: '0085_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
+  { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
+  { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
+  { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
 ];
 
 /**

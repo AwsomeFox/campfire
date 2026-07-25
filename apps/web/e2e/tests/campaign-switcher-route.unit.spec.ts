@@ -56,6 +56,7 @@ function campaign(
     status: 'active',
     currentLocationId: null,
     dangerLevel: 'low',
+    narrationLanguage: 'en',
     dmControlsProgression: false,
     dmControlsTurns: false,
     requireDmTurnConfirmation: false,

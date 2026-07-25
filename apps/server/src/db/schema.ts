@@ -29,6 +29,9 @@ export const campaigns = sqliteTable('campaigns', {
   // does NOT flip it back — deliberate reactivation via the invites policy
   // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
   publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #635: AI narration output language (Driver / co-DM / Scribe). Distinct from
+  // the client UI locale. Nullable in older DBs pre-migration; see db.module.ts.
+  narrationLanguage: text('narration_language').notNull().default('en'),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -104,6 +107,7 @@ export const characters = sqliteTable('characters', {
   skills: text('skills').notNull().default('{}'),
   actions: text('actions').notNull().default('[]'),
   spellSlots: text('spell_slots').notNull().default('{}'),
+  resources: text('resources').notNull().default('{}'),
   portraitUrl: text('portrait_url'),
   ddbId: text('ddb_id'),
   notes: text('notes').notNull().default(''),
@@ -1239,6 +1243,8 @@ export const combatants = sqliteTable('combatants', {
   // null = defaults (EMPTY_TURN_STATE / []).
   turnState: text('turn_state'),
   activeEffects: text('active_effects'),
+  // Issue #423: structured condition instances as a JSON ConditionInstance[] blob.
+  conditionInstances: text('condition_instances'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

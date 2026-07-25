@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * API tokens card — shared between AdminPage (server admin console) and
  * TokensPage (per-user, /tokens). Tokens are per-USER: any signed-in user can
@@ -6,7 +7,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ApiToken, Campaign } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import {
   compositionSafeFormSubmit,
   createCompositionSubmitGate,
@@ -105,6 +106,7 @@ function ConnectAiBlock({ token }: { token?: string }) {
 }
 
 export function TokensCard() {
+  const { t } = useTranslation();
   const [tokens, setTokens] = useState<ApiToken[] | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +127,7 @@ export function TokensCard() {
       setTokens(t);
       setCampaigns(c);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load API tokens.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setLoading(false);
     }
@@ -143,7 +145,7 @@ export function TokensCard() {
       setConfirmRevoke(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't revoke token.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setRevoking(false);
     }
@@ -186,7 +188,7 @@ export function TokensCard() {
       {loading && !tokens ? (
         <Skeleton lines={3} />
       ) : tokens && tokens.length === 0 ? (
-        <EmptyState icon="key" title="No tokens yet" hint="Create one above to use the REST API or MCP." />
+        <EmptyState icon="key" title={t('admin.empty.noTokens')} hint={t('admin.empty.noTokensHint')} />
       ) : (
         <div className="space-y-2">
           {(tokens ?? []).map((t) => (
@@ -244,6 +246,7 @@ function NewTokenForm({
   onCreated: (created: ApiTokenCreated) => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [name, setName] = useState('');
   const [scope, setScope] = useState<TokenScope>('player');
   // Safe default for new tokens (issue #575): AI changes land in the DM
@@ -271,7 +274,7 @@ function NewTokenForm({
       });
       onCreated(result);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't create token.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }

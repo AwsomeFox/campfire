@@ -14,7 +14,7 @@ import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { usePanelData } from '../../lib/usePanelData';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
-import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
+import { Card, Chip, Btn, TextInput, Skeleton, ErrorNote, DmPanel, EmptyState, statusVariant } from '../../components/ui';
 import { Field } from '../../components/Field';
 import {
   LOCATION_BODY_HELP,
@@ -492,12 +492,12 @@ export default function LocationPage() {
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {proposeDone && !editing && (
-        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+        <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">✅ Suggestion sent to the DM — it's waiting for approval.</span>
           <Link to={`/c/${cid}/proposals`} className="text-purple-400 hover:underline shrink-0">
             View my proposals
           </Link>
-        </div>
+        </Card>
       )}
 
       {!editing && (
@@ -536,7 +536,7 @@ export default function LocationPage() {
                   ✎ Edit
                 </Btn>
                 <StatusMenuButton
-                  className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs"
+                  className="cf-btn cf-btn-ghost cf-density-compact text-xs"
                   triggerLabel={`Location status: ${LOCATION_STATUS_LABEL[location.status]}`}
                   triggerDescription="DM: set status directly"
                   value={location.status}
@@ -587,7 +587,7 @@ export default function LocationPage() {
                     </Btn>
                   )}
                   {canDmWrite && movingPin && (
-                    <div className="absolute bottom-2 right-2 cf-card p-2 flex flex-col gap-1.5" role="group" aria-labelledby="pin-position-heading">
+                    <Card density="compact" className="absolute bottom-2 right-2 flex flex-col gap-1.5" role="group" aria-labelledby="pin-position-heading">
                       <span id="pin-position-heading" className="text-[9px] text-slate-400 font-bold uppercase">
                         Move {location.name} pin
                       </span>
@@ -596,12 +596,13 @@ export default function LocationPage() {
                           <label htmlFor="pin-x-input" className="text-[9px] text-slate-500 font-bold uppercase">
                             Horizontal position (%)
                           </label>
-                          <input
+                          <TextInput
                             id="pin-x-input"
                             type="number"
                             min={0}
                             max={100}
-                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            density="compact"
+                            className="!w-16 text-xs"
                             value={pinX}
                             onChange={(e) => setPinX(e.target.value)}
                             aria-describedby="pin-position-help"
@@ -611,28 +612,29 @@ export default function LocationPage() {
                           <label htmlFor="pin-y-input" className="text-[9px] text-slate-500 font-bold uppercase">
                             Vertical position (%)
                           </label>
-                          <input
+                          <TextInput
                             id="pin-y-input"
                             type="number"
                             min={0}
                             max={100}
-                            className="cf-input !min-h-0 !py-1 !w-16 text-xs"
+                            density="compact"
+                            className="!w-16 text-xs"
                             value={pinY}
                             onChange={(e) => setPinY(e.target.value)}
                             aria-describedby="pin-position-help"
                           />
                         </div>
-                        <Btn ghost className="!min-h-0 !py-1 text-[10px]" onClick={() => setMovingPin(false)}>
+                        <Btn density="compact" ghost className="text-[10px]" onClick={() => setMovingPin(false)}>
                           Cancel
                         </Btn>
-                        <Btn className="!min-h-0 !py-1 text-[10px]" disabled={pinSaving} onClick={savePin}>
+                        <Btn density="compact" className="text-[10px]" disabled={pinSaving} onClick={savePin}>
                           {pinSaving ? '…' : 'Save'}
                         </Btn>
                       </div>
                       <p id="pin-position-help" className="text-[9px] text-slate-500 m-0">
                         0% = left/top edge, 100% = right/bottom edge
                       </p>
-                    </div>
+                    </Card>
                   )}
                 </div>
 

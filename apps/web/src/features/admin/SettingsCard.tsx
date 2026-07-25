@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Server sign-in settings card (signup/local-login toggles) — extracted from
  * AdminPage.tsx as part of the /admin/* page split (issue #350). Lives on
@@ -9,11 +10,12 @@
  */
 import { useState } from 'react';
 import type { OidcSettings, ServerSettings } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 export function SettingsCard({ settings, onChange }: { settings: ServerSettings | null; onChange: () => void }) {
+  const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmDisableLocal, setConfirmDisableLocal] = useState<null | { reason: string }>(null);
@@ -26,7 +28,7 @@ export function SettingsCard({ settings, onChange }: { settings: ServerSettings 
       await api.patch(`${API}/settings`, { [key]: !settings[key] });
       onChange();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update settings.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setSaving(false);
     }
@@ -134,7 +136,7 @@ function SettingToggleRow({
         aria-checked={checked}
         onClick={onToggle}
         disabled={disabled}
-        className="cf-btn !min-h-0 !py-1.5 text-xs"
+        className="cf-btn cf-density-compact text-xs"
       >
         {checked ? 'On' : 'Off'}
       </button>

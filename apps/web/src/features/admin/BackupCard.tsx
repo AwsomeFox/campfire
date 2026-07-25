@@ -1,10 +1,11 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Backup & export card — extracted from AdminPage.tsx as part of the /admin/*
  * page split (issue #350). Lives on /admin/storage, alongside StorageCard.
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { Campaign } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, ErrorNote } from '../../components/ui';
 
 const CAMPAIGN_SELECT_ID = 'backup-campaign';
@@ -13,6 +14,7 @@ const MARKDOWN_DESCRIPTION_ID = 'backup-markdown-description';
 const PRIVACY_DESCRIPTION_ID = 'backup-privacy-description';
 
 export function BackupCard() {
+  const { t } = useTranslation();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [campaignId, setCampaignId] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +32,7 @@ export function BackupCard() {
     } catch (err) {
       setCampaigns([]);
       setCampaignId('');
-      setError(err instanceof ApiError ? err.message : "Couldn't load campaigns.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setIsLoading(false);
     }
@@ -85,7 +87,7 @@ export function BackupCard() {
       </select>
       <div className="flex flex-col gap-2 sm:flex-row" role="group" aria-label="Campaign export downloads">
         <a
-          className={`cf-btn cf-btn-ghost !min-h-0 !py-2 text-xs sm:w-auto ${!canExport ? 'pointer-events-none opacity-50' : ''}`}
+          className={`cf-btn cf-btn-ghost cf-density-compact text-xs sm:w-auto ${!canExport ? 'pointer-events-none opacity-50' : ''}`}
           href={canExport ? `${API}/campaigns/${campaignId}/export?format=json` : undefined}
           role="link"
           aria-disabled={canExport ? undefined : true}
@@ -100,7 +102,7 @@ export function BackupCard() {
           ⬇ JSON export
         </a>
         <a
-          className={`cf-btn cf-btn-ghost !min-h-0 !py-2 text-xs sm:w-auto ${!canExport ? 'pointer-events-none opacity-50' : ''}`}
+          className={`cf-btn cf-btn-ghost cf-density-compact text-xs sm:w-auto ${!canExport ? 'pointer-events-none opacity-50' : ''}`}
           href={canExport ? `${API}/campaigns/${campaignId}/export?format=mdzip` : undefined}
           role="link"
           aria-disabled={canExport ? undefined : true}

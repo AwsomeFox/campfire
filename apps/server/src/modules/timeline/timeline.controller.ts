@@ -1,11 +1,13 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Res } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Query, Res, BadRequestException } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
+import { TIMELINE_LIST_DEFAULT_LIMIT, TIMELINE_LIST_MAX_LIMIT } from '@campfire/schema';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { TimelineService } from './timeline.service';
 import { TimelineEventCreateDto, TimelineEventUpdateDto, TimelineCalendarUpdateDto } from './timeline.dto';
+import { clampTimelineListLimit } from './timeline-pagination';
 
 @ApiTags('timeline')
 @Controller('campaigns/:campaignId/timeline')
@@ -18,12 +20,31 @@ export class CampaignTimelineController {
   @Get()
   @ApiOperation({
     summary: 'List in-world timeline events for a campaign',
-    description: 'Requires campaign membership. Ordered by DM-controlled sortIndex (then id). dmSecret is stripped and hidden events are excluded for non-DM.',
+    description:
+      'Requires campaign membership. Ordered by DM-controlled sortIndex (then id). dmSecret is stripped and hidden events are excluded for non-DM. Returns a bounded page (`items`, `total`, `hasMore`, `nextCursor`).',
   })
-  @ApiResponse({ status: 200, description: 'Timeline events in narrative order.' })
-  async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: `Page size (default ${TIMELINE_LIST_DEFAULT_LIMIT}, max ${TIMELINE_LIST_MAX_LIMIT}).`,
+  })
+  @ApiQuery({ name: 'cursor', required: false, description: "Opaque cursor from a previous page's nextCursor." })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated timeline events in narrative order (`items`, `total`, `hasMore`, `nextCursor` (null when exhausted)).',
+  })
+  async list(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
     const role = await this.access.requireMember(user, campaignId);
-    return this.timeline.listEvents(campaignId, role);
+    return this.timeline.listEventsPage(campaignId, role, {
+      limit: parseTimelineLimit(limit),
+      cursor,
+    });
   }
 
   @Post()
@@ -106,4 +127,13 @@ export class TimelineController {
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.timeline.removeEvent(id, user, role);
   }
+}
+
+function parseTimelineLimit(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new BadRequestException('`limit` must be a positive integer');
+  }
+  return clampTimelineListLimit(n);
 }

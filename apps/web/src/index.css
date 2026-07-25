@@ -74,7 +74,22 @@
 
   --font-heading: "Inter", system-ui, sans-serif;
   --font-heading-weight: 500;
+  /* Restrained fantasy display voice for page titles + cover monograms (#676). */
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-display-weight: 700;
   --font-body: "Inter", system-ui, sans-serif;
+
+  /* Ember brand layer — warm ambient glow carried from login into signed-in chrome. */
+  --cf-ember-glow: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  --cf-ember-ambient: radial-gradient(
+    90% 55% at 12% 0%,
+    color-mix(in srgb, var(--color-accent) 10%, transparent) 0%,
+    transparent 62%
+  );
+  --cf-ember-grid: radial-gradient(
+    color-mix(in srgb, var(--color-neutral-700) 55%, transparent) 1px,
+    transparent 1px
+  );
 
   /* Semantic type roles. Spatial/control type remains fixed while the three
      reading roles are overridden by an account's reading-mode attribute. */
@@ -151,6 +166,39 @@
   --cf-difficulty-deadly-bg: #7f1d1d;
   --cf-difficulty-deadly-fg: #fecaca;
   --cf-radius: var(--radius-lg);
+
+  /* Issue #674 — canonical density ramp for Card/Button/Input/Chip/Dialog.
+     compact ≈ Nocturne-native (8px radii, ~8.4px padding); default = standard
+     app chrome; comfortable = primary content surfaces (14px card radius, 20px
+     padding). Components consume these via .cf-density-* modifiers — do not
+     restyle geometry locally with Tailwind p-* / rounded-* / !min-h-*. */
+  --cf-density-compact-card-padding: var(--space-3);
+  --cf-density-default-card-padding: var(--space-4);
+  --cf-density-comfortable-card-padding: var(--space-6);
+  --cf-density-compact-card-radius: var(--radius-md);
+  --cf-density-default-card-radius: var(--radius-md);
+  --cf-density-comfortable-card-radius: var(--radius-lg);
+  --cf-density-compact-control-min-height: 36px;
+  --cf-density-default-control-min-height: 44px;
+  --cf-density-comfortable-control-min-height: 44px;
+  --cf-density-compact-control-padding-y: var(--space-2);
+  --cf-density-default-control-padding-y: 0.6rem;
+  --cf-density-comfortable-control-padding-y: 0.65rem;
+  --cf-density-compact-control-padding-x: calc(var(--space-3) * 1.2);
+  --cf-density-default-control-padding-x: 1.15rem;
+  --cf-density-comfortable-control-padding-x: 1.15rem;
+  --cf-density-compact-control-font-size: var(--type-control);
+  --cf-density-default-control-font-size: 0.9rem;
+  --cf-density-comfortable-control-font-size: 0.95rem;
+  --cf-density-compact-chip-padding-y: 0.12rem;
+  --cf-density-default-chip-padding-y: 0.18rem;
+  --cf-density-comfortable-chip-padding-y: 0.22rem;
+  --cf-density-compact-dialog-padding: var(--space-3);
+  --cf-density-default-dialog-padding: var(--space-4);
+  --cf-density-comfortable-dialog-padding: var(--space-6);
+  --cf-density-compact-dialog-radius: var(--radius-md);
+  --cf-density-default-dialog-radius: var(--radius-lg);
+  --cf-density-comfortable-dialog-radius: var(--radius-lg);
 
   /* Overlay stacking (issue #791) — one documented scale for chrome, menus,
      dialogs, notifications, and recovery. Values must stay ordered:
@@ -602,10 +650,84 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Issue #649 — route-level page title. Matches nocturne h3 size so screens that
-   previously used a bare <h3> keep their visual weight when promoted to <h1>. */
+   previously used a bare <h3> keep their visual weight when promoted to <h1>.
+   Issue #676 — display serif for brand moments; body/control type stays Inter. */
 .cf-page-title {
   margin: 4px 0 0;
+  font-family: var(--font-display);
+  font-weight: var(--font-display-weight);
   font-size: 1.5625rem;
+  letter-spacing: -0.02em;
+}
+
+/* Signed-in ambient layer — fixed behind scrollable content, never traps focus. */
+.cf-ember-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: var(--cf-ember-ambient);
+}
+.cf-ember-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.22;
+  background-image: var(--cf-ember-grid);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(180deg, black 0%, transparent 72%);
+}
+.cf-authed-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* Campaign cover — gradient + motif texture + legibility overlay (#676). */
+.cf-campaign-cover {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.cf-campaign-cover__texture,
+.cf-campaign-cover__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.cf-campaign-cover__texture {
+  opacity: 0.35;
+  mix-blend-mode: soft-light;
+}
+.cf-campaign-cover__overlay {
+  opacity: 1;
+}
+.cf-campaign-cover__content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+.cf-cover-monogram {
+  font-family: var(--font-display);
+  font-weight: var(--font-display-weight);
+  font-size: 30px;
+  line-height: 1;
+  text-shadow: 0 1px 18px color-mix(in srgb, var(--color-bg) 55%, transparent);
+}
+.cf-campaign-cover[data-variant='strip'] .cf-cover-monogram {
+  font-size: 22px;
+}
+.cf-campaign-cover[data-variant='hero'] .cf-cover-monogram {
+  font-size: 42px;
+}
+.cf-brand-scene {
+  position: relative;
+  margin-bottom: 0.75rem;
+}
+.cf-brand-scene__cover {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-divider);
 }
 
 ::-webkit-scrollbar {
@@ -624,13 +746,44 @@ h1, h2, h3, h4, h5, h6 {
 .cf-card {
   background: var(--cf-card);
   border: 1px solid var(--color-divider);
-  border-radius: var(--cf-radius);
+  border-radius: var(--cf-density-default-card-radius);
   box-shadow: var(--shadow-sm);
+}
+/* Issue #674 — per-density card geometry. Compose on Card / cf-card surfaces. */
+.cf-card.cf-density-compact {
+  padding: var(--cf-density-compact-card-padding);
+  border-radius: var(--cf-density-compact-card-radius);
+}
+.cf-card.cf-density-default {
+  padding: var(--cf-density-default-card-padding);
+  border-radius: var(--cf-density-default-card-radius);
+}
+.cf-card.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-card-padding);
+  border-radius: var(--cf-density-comfortable-card-radius);
+}
+/* Media / split tiles that paint their own inner padding (issue #674). */
+.cf-card.cf-card-flush {
+  padding: 0;
+}
+/* Nocturne .card aliases the compact density shell (issue #674). */
+.card {
+  padding: var(--cf-density-compact-card-padding);
+  border-radius: var(--cf-density-compact-card-radius);
 }
 .cf-inset {
   background: var(--cf-surface);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-md);
+}
+.cf-inset.cf-density-compact {
+  padding: var(--cf-density-compact-card-padding);
+}
+.cf-inset.cf-density-default {
+  padding: var(--cf-density-default-card-padding);
+}
+.cf-inset.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-card-padding);
 }
 /* Card hover affordance — the ONE place a clickable card's border tints on
    hover (issue #644). Replaces the per-screen `hover:border-amber-500/*`
@@ -652,8 +805,15 @@ h1, h2, h3, h4, h5, h6 {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding: 0.18rem 0.55rem;
+  padding: var(--cf-density-default-chip-padding-y) 0.55rem;
   border-radius: 9999px;
+}
+.cf-chip.cf-density-compact {
+  padding: var(--cf-density-compact-chip-padding-y) 0.45rem;
+  font-size: 0.68rem;
+}
+.cf-chip.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-chip-padding-y) 0.65rem;
 }
 
 /*
@@ -835,12 +995,35 @@ h1, h2, h3, h4, h5, h6 {
   border: 1px solid var(--color-accent);
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
-  font-size: 0.9rem;
-  padding: 0.6rem 1.15rem;
+  font-size: var(--cf-density-default-control-font-size);
+  padding: var(--cf-density-default-control-padding-y) var(--cf-density-default-control-padding-x);
   border-radius: var(--radius-md);
   cursor: pointer;
-  min-height: 44px; /* tap target */
+  min-height: var(--cf-density-default-control-min-height);
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.cf-btn.cf-density-compact {
+  font-size: var(--cf-density-compact-control-font-size);
+  padding: var(--cf-density-compact-control-padding-y) var(--cf-density-compact-control-padding-x);
+  min-height: var(--cf-density-compact-control-min-height);
+}
+.cf-btn.cf-density-comfortable {
+  font-size: var(--cf-density-comfortable-control-font-size);
+  padding: var(--cf-density-comfortable-control-padding-y) var(--cf-density-comfortable-control-padding-x);
+  min-height: var(--cf-density-comfortable-control-min-height);
+}
+/* Nocturne .btn aliases default-density controls (issue #674). */
+.btn {
+  min-height: var(--cf-density-default-control-min-height);
+  padding: var(--cf-density-default-control-padding-y) var(--cf-density-default-control-padding-x);
+  font-size: var(--cf-density-default-control-font-size);
+  border-radius: var(--radius-md);
+}
+.btn.cf-density-compact,
+.btn.btn-density-compact {
+  min-height: var(--cf-density-compact-control-min-height);
+  padding: var(--cf-density-compact-control-padding-y) var(--cf-density-compact-control-padding-x);
+  font-size: var(--cf-density-compact-control-font-size);
 }
 .cf-btn:not(:disabled):hover {
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
@@ -927,9 +1110,26 @@ h1, h2, h3, h4, h5, h6 {
   caret-color: var(--color-accent);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-md);
-  padding: 0.65rem 0.85rem;
-  font-size: 0.95rem;
-  min-height: 44px;
+  padding: var(--cf-density-comfortable-control-padding-y) 0.85rem;
+  font-size: var(--cf-density-comfortable-control-font-size);
+  min-height: var(--cf-density-comfortable-control-min-height);
+}
+.cf-input.cf-density-compact {
+  padding: 6px 10px;
+  font-size: var(--type-control);
+  min-height: var(--cf-density-compact-control-min-height);
+}
+.cf-input.cf-density-default {
+  padding: var(--cf-density-default-control-padding-y) 0.85rem;
+  font-size: var(--cf-density-default-control-font-size);
+  min-height: var(--cf-density-default-control-min-height);
+}
+/* Nocturne .input aliases compact density (issue #674). */
+.input {
+  min-height: var(--cf-density-compact-control-min-height);
+  padding: 6px 10px;
+  font-size: var(--type-control);
+  border-radius: var(--radius-md);
 }
 .cf-input:hover {
   border-color: color-mix(in srgb, var(--color-text) 45%, transparent);
@@ -949,9 +1149,21 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--cf-ink);
   border: 1px solid var(--color-divider);
   border-radius: var(--radius-md);
-  padding: 0.65rem 0.85rem;
-  font-size: 0.95rem;
-  min-height: 44px;
+  padding: var(--cf-density-comfortable-control-padding-y) 0.85rem;
+  font-size: var(--cf-density-comfortable-control-font-size);
+  min-height: var(--cf-density-comfortable-control-min-height);
+}
+.cf-textarea.cf-density-compact,
+.cf-select.cf-density-compact {
+  padding: 6px 10px;
+  font-size: var(--type-control);
+  min-height: var(--cf-density-compact-control-min-height);
+}
+.cf-textarea.cf-density-default,
+.cf-select.cf-density-default {
+  padding: var(--cf-density-default-control-padding-y) 0.85rem;
+  font-size: var(--cf-density-default-control-font-size);
+  min-height: var(--cf-density-default-control-min-height);
 }
 .cf-textarea {
   font-family: ui-monospace, Menlo, monospace;
@@ -970,6 +1182,15 @@ h1, h2, h3, h4, h5, h6 {
   background: color-mix(in srgb, var(--color-accent) 7%, transparent);
   border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
   border-radius: var(--radius-md);
+}
+.cf-dm-panel.cf-density-compact {
+  padding: var(--cf-density-compact-card-padding);
+}
+.cf-dm-panel.cf-density-default {
+  padding: var(--cf-density-default-card-padding);
+}
+.cf-dm-panel.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-card-padding);
 }
 
 /* HP bar */
@@ -1232,6 +1453,27 @@ h1, h2, h3, h4, h5, h6 {
 .dialog-title,
 .dialog-body {
   overflow-wrap: anywhere;
+}
+
+/* Issue #674 — dialog density aliases the canonical ramp. */
+.dialog.cf-density-compact {
+  padding: var(--cf-density-compact-dialog-padding);
+  border-radius: var(--cf-density-compact-dialog-radius);
+  gap: var(--space-2);
+}
+.dialog.cf-density-default {
+  padding: var(--cf-density-default-dialog-padding);
+  border-radius: var(--cf-density-default-dialog-radius);
+}
+.dialog.cf-density-comfortable {
+  padding: var(--cf-density-comfortable-dialog-padding);
+  border-radius: var(--cf-density-comfortable-dialog-radius);
+  gap: var(--space-4);
+}
+
+/* Status menus use compact density with a tighter shell (issue #674). */
+.cf-status-menu {
+  padding: var(--space-1);
 }
 
 /* Accessible name reveal on focus/hover/touch (issue #632) */

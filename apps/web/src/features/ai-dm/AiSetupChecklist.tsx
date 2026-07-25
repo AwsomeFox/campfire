@@ -27,6 +27,7 @@ import { useAiDmSeat } from '../../lib/query';
 import { classifyAiGate } from './aiGate';
 import { CopyControl } from '../../components/CopyControl';
 import { GameIcon } from '../../components/GameIcon';
+import { Btn, Card } from '../../components/ui';
 
 /** One computed checklist step. `done: null` = state is unknown (e.g. flag, for a non-admin). */
 interface Step {
@@ -203,7 +204,7 @@ function StepRow({ step }: { step: Step }) {
         <p className="text-xs text-[var(--color-neutral-400)] mt-0.5">{step.body}</p>
         {step.extra}
         {step.fix && (
-          <Link to={step.fix.to} className="cf-btn cf-btn-ghost !min-h-0 !py-1 text-xs mt-1.5 inline-flex no-underline">
+          <Link to={step.fix.to} className="cf-btn cf-btn-ghost cf-density-compact text-xs mt-1.5 inline-flex no-underline">
             {step.fix.label} →
           </Link>
         )}
@@ -227,7 +228,8 @@ function CopyRequest({ text }: { text: string }) {
         label={t('aiOnboarding.checklist.steps.flag.copy')}
         copiedLabel={t('aiOnboarding.checklist.steps.flag.copied')}
         ghost
-        className="!min-h-0 !py-1 text-[11px]"
+        density="compact"
+        className="text-[11px]"
       />
     </div>
   );
@@ -275,7 +277,7 @@ export function AiGateExplainer({
       <p className="font-semibold text-[var(--color-text)]">{t(info.titleKey)}</p>
       <p className="text-sm text-[var(--color-neutral-400)]">{t(info.bodyKey)}</p>
       {canFix && to && (
-        <Link to={to} className="cf-btn cf-btn-ghost !min-h-0 !py-1 text-xs inline-flex no-underline">
+        <Link to={to} className="cf-btn cf-btn-ghost cf-density-compact text-xs inline-flex no-underline">
           {t('aiOnboarding.gate.openFix')} →
         </Link>
       )}
@@ -325,7 +327,7 @@ export function AiDmDashboardOnboarding({
   }
 
   return (
-    <section className="cf-card p-4">
+    <Card density="default">
       {!expanded ? (
         // Mobile reflow (issue #675): below `sm` the actions used to sit in the
         // same row as the icon + copy. Because the copy block carries `min-w-0`
@@ -346,24 +348,24 @@ export function AiDmDashboardOnboarding({
             </div>
           </div>
           <div className="flex items-center gap-2 sm:shrink-0 w-full sm:w-auto sm:ml-auto">
-            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={dismiss}>
+            <Btn type="button" density="compact" ghost className="text-xs flex-1 sm:flex-none" onClick={dismiss}>
               {t('aiOnboarding.dashboard.hide')}
-            </button>
-            <button type="button" className="cf-btn !min-h-0 !py-1.5 text-xs flex-1 sm:flex-none" onClick={() => setExpanded(true)}>
+            </Btn>
+            <Btn type="button" density="compact" className="text-xs flex-1 sm:flex-none" onClick={() => setExpanded(true)}>
               {t('aiOnboarding.dashboard.setUp')}
-            </button>
+            </Btn>
           </div>
         </div>
       ) : (
         <div className="space-y-3">
           <div className="flex justify-end">
-            <button type="button" className="cf-btn cf-btn-ghost !min-h-0 !py-1 text-xs" onClick={dismiss}>
+            <Btn type="button" density="compact" ghost className="text-xs" onClick={dismiss}>
               {t('aiOnboarding.dashboard.dismiss')}
-            </button>
+            </Btn>
           </div>
           <AiSetupChecklist campaignId={campaignId} isAdmin={isAdmin} />
         </div>
       )}
-    </section>
+    </Card>
   );
 }

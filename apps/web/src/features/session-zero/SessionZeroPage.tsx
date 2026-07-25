@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Session zero / table charter — issue #122.
  *
@@ -18,7 +19,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
 import type { ParticipantSupportPreference, SessionZero, SupportPreferenceVisibility } from '@campfire/schema';
-import { api, API, ApiError, isStaleWrite } from '../../lib/api';
+import { api, API, ApiError, isStaleWrite, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useProtectedForm } from '../../lib/useProtectedForm';
@@ -31,19 +32,9 @@ import { Markdown } from '../../components/Markdown';
 import { Field } from '../../components/Field';
 import {
   SESSION_ZERO_FIELD,
-  SESSION_ZERO_HOUSE_RULES_HELP,
-  SESSION_ZERO_HOUSE_RULES_LABEL,
-  SESSION_ZERO_LINES_HELP,
-  SESSION_ZERO_LINES_LABEL,
   SESSION_ZERO_PREFIX,
   SESSION_ZERO_SUPPORT_HELP,
   SESSION_ZERO_SUPPORT_LABEL,
-  SESSION_ZERO_TONE_HELP,
-  SESSION_ZERO_TONE_LABEL,
-  SESSION_ZERO_TOOLS_HELP,
-  SESSION_ZERO_TOOLS_LABEL,
-  SESSION_ZERO_VEILS_HELP,
-  SESSION_ZERO_VEILS_LABEL,
 } from '../../components/formFieldLabels';
 import { Skeleton, ErrorNote, EmptyState, Btn } from '../../components/ui';
 import { PageTitle } from '../../components/PageTitle';
@@ -107,6 +98,7 @@ function isEmptyCharter(c: SessionZero): boolean {
 }
 
 export default function SessionZeroPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
   const { me } = useAuth();
@@ -157,7 +149,7 @@ export default function SessionZeroPage() {
     } catch (e) {
       if (sequence !== loadSequence.current) return;
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setForbidden(true);
-      else setError("Couldn't load the session-zero charter.");
+      else setError(t('sessionZero.errors.load'));
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
@@ -217,10 +209,10 @@ export default function SessionZeroPage() {
           setExpectedUpdatedAt(latest.updatedAt);
           setCharter(latest);
         } catch {
-          setActionError("The charter changed, but the latest version couldn't be loaded. Your draft is still here.");
+          setActionError(t('sessionZero.charterStale'));
         }
       } else {
-        setActionError("Couldn't save the charter.");
+        setActionError(t('sessionZero.errors.save'));
       }
       return false;
     } finally {
@@ -270,7 +262,7 @@ export default function SessionZeroPage() {
       setVisibleSupports((rows) => [...rows.filter((row) => row.id !== saved.id), saved]);
       setSupportMessage('Your support preference was saved.');
     } catch (e) {
-      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't save your support preference.");
+      setSupportMessage(translateApiError(e, t, { fallbackKey: 'sessionZero.errors.saveSupport' }));
     } finally {
       setSupportBusy(false);
     }
@@ -288,7 +280,7 @@ export default function SessionZeroPage() {
       setConfirmDeleteSupport(false);
       setSupportMessage('Your support preference was deleted.');
     } catch (e) {
-      setSupportMessage(e instanceof ApiError ? e.message : "Couldn't delete your support preference.");
+      setSupportMessage(translateApiError(e, t, { fallbackKey: 'sessionZero.errors.deleteSupport' }));
     } finally {
       setSupportBusy(false);
     }
@@ -297,7 +289,7 @@ export default function SessionZeroPage() {
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -305,7 +297,7 @@ export default function SessionZeroPage() {
   if (forbidden) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <EmptyState icon="padlock" title="You don't have access to this campaign" />
+        <EmptyState icon="padlock" title={t('sessions.accessDenied')} />
       </div>
     );
   }
@@ -341,8 +333,8 @@ export default function SessionZeroPage() {
       ) : charter && isEmptyCharter(charter) ? (
         <EmptyState
           icon="life-buoy"
-          title="No session-zero charter yet"
-          hint={isDm ? 'Record your table’s lines & veils, safety tools, and house rules with "Edit charter".' : "The DM hasn’t recorded the table's charter yet."}
+          title={t('sessionZero.empty.title')}
+          hint={isDm ? t('sessionZero.empty.hintDm') : t('sessionZero.empty.hintPlayer')}
         />
       ) : charter ? (
         <CharterView charter={charter} />
@@ -565,24 +557,25 @@ function ChipList({ items }: { items: string[] }) {
 }
 
 function CharterView({ charter }: { charter: SessionZero }) {
+  const { t } = useTranslation();
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <Section title="Lines" hint="Hard limits — content that never appears at the table.">
+      <Section title={t('sessionZero.charter.lines.title')} hint={t('sessionZero.charter.lines.hint')}>
         <ChipList items={charter.lines} />
       </Section>
-      <Section title="Veils" hint="Soft limits — content that stays off-screen (fade to black).">
+      <Section title={t('sessionZero.charter.veils.title')} hint={t('sessionZero.charter.veils.hint')}>
         <ChipList items={charter.veils} />
       </Section>
-      <Section title="Safety tools" hint="Tools the table has agreed to use (X-Card, Open Door, Script Change…).">
+      <Section title={t('sessionZero.charter.safetyTools.title')} hint={t('sessionZero.charter.safetyTools.hint')}>
         <ChipList items={charter.safetyTools} />
       </Section>
       {charter.houseRules.trim() !== '' && (
-        <Section title="House rules">
+        <Section title={t('sessionZero.charter.houseRules.title')}>
           <Markdown>{charter.houseRules}</Markdown>
         </Section>
       )}
       {charter.toneAndExpectations.trim() !== '' && (
-        <Section title="Tone & content expectations">
+        <Section title={t('sessionZero.charter.tone.title')}>
           <Markdown>{charter.toneAndExpectations}</Markdown>
         </Section>
       )}
@@ -624,6 +617,7 @@ function ListEditor({
 }
 
 function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | null) => void }) {
+  const { t } = useTranslation();
   return (
     <div
       className="card elev-sm"
@@ -632,25 +626,25 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
     >
       <ListEditor
         name={SESSION_ZERO_FIELD.lines}
-        label={SESSION_ZERO_LINES_LABEL}
-        help={SESSION_ZERO_LINES_HELP}
-        placeholder={'Harm to children\nSexual violence\nSpiders'}
+        label={t('sessionZero.charter.lines.formLabel')}
+        help={t('sessionZero.charter.lines.formHelp')}
+        placeholder={t('sessionZero.charter.lines.placeholder')}
         items={draft.lines}
         onChange={(lines) => setDraft({ ...draft, lines })}
       />
       <ListEditor
         name={SESSION_ZERO_FIELD.veils}
-        label={SESSION_ZERO_VEILS_LABEL}
-        help={SESSION_ZERO_VEILS_HELP}
-        placeholder={'On-screen torture\nGraphic gore'}
+        label={t('sessionZero.charter.veils.formLabel')}
+        help={t('sessionZero.charter.veils.formHelp')}
+        placeholder={t('sessionZero.charter.veils.placeholder')}
         items={draft.veils}
         onChange={(veils) => setDraft({ ...draft, veils })}
       />
       <ListEditor
         name={SESSION_ZERO_FIELD.safetyTools}
-        label={SESSION_ZERO_TOOLS_LABEL}
-        help={SESSION_ZERO_TOOLS_HELP}
-        placeholder={'X-Card\nOpen Door\nScript Change'}
+        label={t('sessionZero.charter.safetyTools.formLabel')}
+        help={t('sessionZero.charter.safetyTools.formHelp')}
+        placeholder={t('sessionZero.charter.safetyTools.placeholder')}
         items={draft.safetyTools}
         onChange={(safetyTools) => setDraft({ ...draft, safetyTools })}
       />
@@ -658,10 +652,10 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
         idPrefix={SESSION_ZERO_PREFIX}
         name={SESSION_ZERO_FIELD.houseRules}
         as="textarea"
-        label={SESSION_ZERO_HOUSE_RULES_LABEL}
-        help={SESSION_ZERO_HOUSE_RULES_HELP}
+        label={t('sessionZero.charter.houseRules.formLabel')}
+        help={t('sessionZero.charter.houseRules.formHelp')}
         value={draft.houseRules}
-        placeholder="Table conventions, rules-as-written deviations…"
+        placeholder={t('sessionZero.charter.houseRules.placeholder')}
         onChange={(e) => setDraft({ ...draft, houseRules: e.target.value })}
         rows={4}
         minHeight={96}
@@ -671,10 +665,10 @@ function CharterForm({ draft, setDraft }: { draft: Draft; setDraft: (d: Draft | 
         idPrefix={SESSION_ZERO_PREFIX}
         name={SESSION_ZERO_FIELD.tone}
         as="textarea"
-        label={SESSION_ZERO_TONE_LABEL}
-        help={SESSION_ZERO_TONE_HELP}
+        label={t('sessionZero.charter.tone.formLabel')}
+        help={t('sessionZero.charter.tone.formHelp')}
         value={draft.toneAndExpectations}
-        placeholder="Gritty vs. heroic, comedic vs. serious, spotlight & PvP norms…"
+        placeholder={t('sessionZero.charter.tone.placeholder')}
         onChange={(e) => setDraft({ ...draft, toneAndExpectations: e.target.value })}
         rows={4}
         minHeight={96}

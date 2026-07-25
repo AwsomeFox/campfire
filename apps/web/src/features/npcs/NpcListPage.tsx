@@ -194,7 +194,7 @@ export default function NpcListPage() {
               <ListDetailLink
                 key={npc.id}
                 to={`/c/${id}/npcs/${npc.id}`}
-                className="cf-card cf-card-hover p-3.5 space-y-2"
+                className="cf-card cf-card-hover cf-density-compact space-y-2"
               >
                 <div className="flex items-center gap-2.5">
                   <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)] overflow-hidden">

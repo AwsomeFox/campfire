@@ -6,6 +6,8 @@
  * remounts and multi-editor pages never collide.
  */
 
+import inventoryEn from '../i18n/locales/en/inventory.json';
+
 /** Character sheet metadata editor (SheetEditForm). */
 export const CHARACTER_EDIT_PREFIX = 'character-edit';
 export const CHARACTER_ACTION_PREFIX = 'character-action';
@@ -125,12 +127,12 @@ export const INVENTORY_FIELD = {
   notes: 'notes',
 } as const;
 
-export const INVENTORY_NAME_LABEL = 'Item name';
-export const INVENTORY_NAME_HELP = 'Required. Shown on the party stash and character sheets.';
-export const INVENTORY_OWNER_LABEL = 'Owner';
-export const INVENTORY_OWNER_HELP = 'Party stash or a specific character.';
-export const INVENTORY_NOTES_LABEL = 'Notes';
-export const INVENTORY_NOTES_HELP = 'Optional short description or usage notes.';
+export const INVENTORY_NAME_LABEL = inventoryEn.inventory.fields.name.label;
+export const INVENTORY_NAME_HELP = inventoryEn.inventory.fields.name.help;
+export const INVENTORY_OWNER_LABEL = inventoryEn.inventory.fields.owner.label;
+export const INVENTORY_OWNER_HELP = inventoryEn.inventory.fields.owner.help;
+export const INVENTORY_NOTES_LABEL = inventoryEn.inventory.fields.notes.label;
+export const INVENTORY_NOTES_HELP = inventoryEn.inventory.fields.notes.help;
 
 /** Map import attribution form (GetAMapPanel). */
 export const MAP_IMPORT_PREFIX = 'map-import';

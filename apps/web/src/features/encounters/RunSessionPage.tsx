@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Run session — live combat tracker. /c/:campaignId/encounters/:encounterId.
  * Mirrors design/claude-design/Campfire.dc.html "Run session" live state
@@ -44,7 +45,7 @@ import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
@@ -247,6 +248,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSaved: (updated: Partial<EncounterWithCombatants>) => void;
 }) {
+  const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
@@ -290,7 +292,7 @@ function EncounterLinks({
       const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
       onSaved(updated);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update links.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.updateLinks' }));
     } finally {
       setSaving(false);
     }
@@ -566,6 +568,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function RunSessionPage() {
+  const { t } = useTranslation();
   const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
   const cid = Number(campaignId);
   const eid = Number(encounterId);
@@ -727,9 +730,7 @@ export default function RunSessionPage() {
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
     encounterQuery.error && !notFound
-      ? encounterQuery.error instanceof ApiError
-        ? encounterQuery.error.message
-        : "Couldn't load this encounter."
+      ? translateApiError(encounterQuery.error, t, { fallbackKey: 'encounters.errors.loadEncounter' })
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
   // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
@@ -884,9 +885,8 @@ export default function RunSessionPage() {
   }, []);
 
   const reportError = useCallback((err: unknown) => {
-    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
-  }, []);
-  /** BattleMap / card rollers pass a plain string (or null to clear). */
+    setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })));
+  }, [t]);
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);
@@ -1293,7 +1293,7 @@ export default function RunSessionPage() {
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="Encounter not found." />
+        <ErrorNote message={t('encounters.notFoundDetail')} />
       </div>
     );
   }
@@ -1311,7 +1311,7 @@ export default function RunSessionPage() {
   if (notFound && !encounter) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <NotFoundState title="Encounter not found" backTo={`/c/${cid}/encounters`} backLabel="← Back to encounters" />
+        <NotFoundState title={t('encounters.notFound')} backTo={`/c/${cid}/encounters`} backLabel={t('encounters.backToList')} />
       </div>
     );
   }
@@ -1712,13 +1712,13 @@ export default function RunSessionPage() {
           <div style={{ padding: 16 }}>
             <EmptyState
               icon="crossed-swords"
-              title="No combatants yet"
+              title={t('encounters.empty.noCombatants')}
               hint={
                 isDm
                   ? characters.some((c) => c.status === 'active')
-                    ? 'Add the party from the Party tab, then enemies.'
-                    : 'Add combatants below — this campaign has no active party to auto-add.'
-                  : 'Waiting on the DM.'
+                    ? t('encounters.empty.noCombatantsHintDmActive')
+                    : t('encounters.empty.noCombatantsHintDmNoParty')
+                  : t('encounters.empty.noCombatantsHintPlayer')
               }
             />
           </div>
@@ -2122,6 +2122,7 @@ function BattleMap({
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
+  const { t } = useTranslation();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
@@ -2310,7 +2311,7 @@ function BattleMap({
       const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
       onSetMap(attachment.id);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+      onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.uploadMap' }));
     } finally {
       setUploading(false);
     }
@@ -3968,7 +3969,64 @@ function CombatantRow({
               onRoll={onRollDeathSave}
             />
           )}
-        {combatant.conditions.length > 0 && (
+        {(combatant.conditionInstances?.length ?? 0) > 0 ? (
+          <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
+            {combatant.conditionInstances!.map((inst) => {
+              const details = [
+                inst.source ? `Source: ${inst.source}` : '',
+                inst.notes ? `Notes: ${inst.notes}` : '',
+                inst.saveAbility ? `Save: DC ${inst.saveDc ?? '?'} ${inst.saveAbility}` : '',
+              ].filter(Boolean).join(' · ');
+              return (
+                <span
+                  key={inst.id || inst.name}
+                  className="tag tag-outline"
+                  title={details || inst.name}
+                  style={{ gap: 6, display: 'inline-flex', alignItems: 'center' }}
+                >
+                  <span>
+                    {inst.name}
+                    {inst.stacks > 1 && <strong style={{ marginLeft: 3 }}>×{inst.stacks}</strong>}
+                    {inst.isConcentration && (
+                      <span role="img" aria-label="Concentration linked" title="Concentration linked" style={{ marginLeft: 4 }}>
+                        🔮
+                      </span>
+                    )}
+                    {inst.roundsRemaining != null && (
+                      <span className="tag tag-neutral text-[10px]" style={{ marginLeft: 4, padding: '0 4px' }}>
+                        {inst.roundsRemaining}r
+                      </span>
+                    )}
+                    {inst.saveAbility && (
+                      <span className="text-[10px] text-muted" style={{ marginLeft: 4 }}>
+                        [{inst.saveAbility}{inst.saveDc != null ? ` ${inst.saveDc}` : ''}]
+                      </span>
+                    )}
+                  </span>
+                  {canEdit && (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${inst.name}`}
+                      onClick={() => onPatchCombatant ? onPatchCombatant({ removeConditionInstanceId: inst.id }) : onRemoveCondition(inst.name)}
+                      disabled={busy}
+                      style={{
+                        cursor: busy ? 'default' : 'pointer',
+                        opacity: 0.7,
+                        background: 'transparent',
+                        border: 0,
+                        padding: 0,
+                        font: 'inherit',
+                        color: 'inherit',
+                      }}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        ) : combatant.conditions.length > 0 ? (
           <div style={{ display: 'flex', gap: 4, marginTop: 4, flexWrap: 'wrap' }}>
             {combatant.conditions.map((cond) => (
               <span key={cond} className="tag tag-outline" style={{ gap: 6 }}>
@@ -3995,7 +4053,7 @@ function CombatantRow({
               </span>
             ))}
           </div>
-        )}
+        ) : null}
         {canEdit && (
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {addingCondition ? (
@@ -4448,7 +4506,7 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
       : `${sessionsPath}?session=${sessionId}&action=edit-recap`;
 
   return (
-    <section className="cf-card p-5 space-y-3" aria-labelledby="encounter-next-heading">
+    <Card density="comfortable" className="space-y-3" aria-labelledby="encounter-next-heading">
       <div className="space-y-1">
         <h2 id="encounter-next-heading" className="text-sm font-bold text-white m-0">
           Next
@@ -4482,7 +4540,7 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
           </Link>
         )}
       </nav>
-    </section>
+    </Card>
   );
 }
 
@@ -4505,6 +4563,7 @@ function AddCombatantPanel({
   rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<AddTab>('manual');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -4620,7 +4679,7 @@ function AddCombatantPanel({
       setManualCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4642,7 +4701,7 @@ function AddCombatantPanel({
       setCompCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4678,7 +4737,7 @@ function AddCombatantPanel({
       }
       await addFromCompendium(entry);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4696,7 +4755,7 @@ function AddCombatantPanel({
       });
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4730,7 +4789,7 @@ function AddCombatantPanel({
       setNpcInit('');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }

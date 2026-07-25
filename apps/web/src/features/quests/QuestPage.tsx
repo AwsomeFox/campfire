@@ -515,7 +515,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
               {t('quests.editQuest')}
             </Btn>
             <StatusMenuButton
-              className="cf-btn cf-btn-ghost !min-h-0 !py-1.5 text-xs"
+              className="cf-btn cf-btn-ghost cf-density-compact text-xs"
               triggerLabel={t('quests.statusMenuLabel', { status: questStatusWord(t, quest.status) })}
               triggerDescription={t('quests.statusMenuHint')}
               value={quest.status}
@@ -550,12 +550,12 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
       </div>
 
       {proposalDone && !editingBody && (
-        <div className="cf-card p-3 flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
+        <Card density="compact" className="flex items-center justify-between gap-3 border border-[var(--color-accent-700)] text-sm">
           <span className="text-slate-200">{t('quests.suggestDone')}</span>
           <Link to={`/c/${campaignId}/proposals`} className="text-purple-400 hover:underline shrink-0">
             {t('quests.viewMyProposals')}
           </Link>
-        </div>
+        </Card>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">

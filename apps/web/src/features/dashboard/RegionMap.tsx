@@ -14,6 +14,7 @@ import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { ErrorNote } from '../../components/ui';
 import { ImageUpload, MapUploadButton, attachmentFileUrl, uploadAttachment } from '../../components/ImageUpload';
 import { GetAMapPanel } from '../../components/GetAMapPanel';
+import { CampaignCover } from '../../components/CampaignCover';
 import { clampPercentInt } from './mapPercent';
 
 export { clampPercentInt };
@@ -496,6 +497,12 @@ export function RegionMap({
 
   return (
     <div className="card elev-sm reading-exempt" data-testid="dashboard-map" style={{ padding: 0, overflow: 'hidden' }}>
+      <CampaignCover
+        campaignId={campaignId}
+        name={campaign.name}
+        variant="strip"
+        showMonogram={false}
+      />
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">World map</span>
         <div style={{ flex: 1 }} />
