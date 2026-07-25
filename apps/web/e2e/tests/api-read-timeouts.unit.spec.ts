@@ -106,9 +106,9 @@ test.describe('fetchWithBudget (#581)', () => {
           '/api/v1/campaigns/1/summary',
           { method: 'GET' },
           'read',
-          { connectMs: 5, headersMs: 10, overallMs: 20 },
+          { connectMs: 5, headersMs: 10, overallMs: 20 } as unknown as typeof API_READ_BUDGET,
         );
-        expect.fail('should throw');
+        throw new Error('should throw');
       } catch (e) {
         err = e;
       }
@@ -129,9 +129,9 @@ test.describe('fetchWithBudget (#581)', () => {
           '/api/v1/campaigns/1',
           { method: 'PATCH', body: '{}' },
           'write',
-          { connectMs: 5, overallMs: 10 },
+          { connectMs: 5, overallMs: 10 } as unknown as typeof API_WRITE_BUDGET,
         );
-        expect.fail('should throw');
+        throw new Error('should throw');
       } catch (e) {
         err = e;
       }
@@ -209,7 +209,7 @@ test.describe('fetchWithBudget (#581)', () => {
         '/api/v1/campaigns/1/summary',
         { method: 'GET' },
         'read',
-        { connectMs: 5, headersMs: 10, overallMs: 20 },
+        { connectMs: 5, headersMs: 10, overallMs: 20 } as unknown as typeof API_READ_BUDGET,
       );
       await expect(pending).rejects.toBeInstanceOf(ApiReadTimeoutError);
       noteReadStale();
