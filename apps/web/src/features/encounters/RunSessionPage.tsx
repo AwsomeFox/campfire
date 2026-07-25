@@ -2014,7 +2014,7 @@ type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
-// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+// Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
@@ -3677,7 +3677,6 @@ function BattleMap({
                   const sizePx = tokenDiameterPx({
                     tokenSize: c.tokenSize,
                     cellPx,
-                    mapWidthPx: mapRect.width,
                     gridType,
                   });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;

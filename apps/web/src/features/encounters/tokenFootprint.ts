@@ -8,8 +8,11 @@
 
 import type { GridType, TokenSize } from '@campfire/schema';
 
-/** Default grid cell width (% of map width) when the grid is off — matches the DM UI default. */
-export const DEFAULT_FALLBACK_GRID_SIZE_PCT = 8;
+/**
+ * Nominal cell width when the grid is off — preserves pre-#468 medium = 32px sizing.
+ * Grid-on encounters always pass calibrated `cellPx` instead.
+ */
+export const GRID_OFF_FALLBACK_CELL_PX = 32;
 
 /**
  * Creature footprint in grid cells (D&D 5e space). Medium occupies 1×1; Large 2×2;
@@ -35,24 +38,19 @@ export type TokenDiameterInput = {
   tokenSize: TokenSize;
   /** Calibrated cell width in layer pixels (0 when grid is off). */
   cellPx: number;
-  /** Map layer width — used to infer a cell when `cellPx` is 0. */
-  mapWidthPx?: number;
   gridType?: GridType;
 };
 
 /**
  * Rendered token diameter in layer pixels. Square and hex grids both use the
  * calibrated cell width as the unit; hex treats `cellPx` as the hex width.
+ * When the grid is off, falls back to {@link GRID_OFF_FALLBACK_CELL_PX}.
  */
 export function tokenDiameterPx(input: TokenDiameterInput): number {
   const cells = tokenFootprintCells(input.tokenSize);
-  let cellPx = input.cellPx;
-  if (!(cellPx > 0) && input.mapWidthPx != null && input.mapWidthPx > 0) {
-    cellPx = (DEFAULT_FALLBACK_GRID_SIZE_PCT / 100) * input.mapWidthPx;
-  }
-  if (!(cellPx > 0)) return MIN_TOKEN_DIAMETER_PX;
+  const cellPx = input.cellPx > 0 ? input.cellPx : GRID_OFF_FALLBACK_CELL_PX;
   // Hex and square share the same cell-width unit; gridType is accepted for callers
   // that may specialize later.
   void input.gridType;
-  return Math.max(MIN_TOKEN_DIAMETER_PX, Math.round(cellPx * cells));
+  return Math.max(MIN_TOKEN_DIAMETER_PX, cellPx * cells);
 }

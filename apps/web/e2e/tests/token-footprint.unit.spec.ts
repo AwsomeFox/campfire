@@ -7,7 +7,7 @@ import { expect, test } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  DEFAULT_FALLBACK_GRID_SIZE_PCT,
+  GRID_OFF_FALLBACK_CELL_PX,
   MIN_TOKEN_DIAMETER_PX,
   tokenDiameterPx,
   tokenFootprintCells,
@@ -58,11 +58,13 @@ test.describe('tokenDiameterPx scales with grid (issue #468)', () => {
     expect(tokenDiameterPx({ tokenSize: 'tiny', cellPx: 10 })).toBe(MIN_TOKEN_DIAMETER_PX);
   });
 
-  test('falls back to default grid % of map width when cellPx is 0', () => {
-    const mapWidth = 500;
-    const expected = Math.round((DEFAULT_FALLBACK_GRID_SIZE_PCT / 100) * mapWidth);
-    expect(tokenDiameterPx({ tokenSize: 'medium', cellPx: 0, mapWidthPx: mapWidth })).toBe(expected);
-    expect(tokenDiameterPx({ tokenSize: 'large', cellPx: 0, mapWidthPx: mapWidth })).toBe(expected * 2);
+  test('preserves legacy fixed sizing when grid is off (cellPx = 0)', () => {
+    expect(tokenDiameterPx({ tokenSize: 'medium', cellPx: 0 })).toBe(GRID_OFF_FALLBACK_CELL_PX);
+    expect(tokenDiameterPx({ tokenSize: 'large', cellPx: 0 })).toBe(GRID_OFF_FALLBACK_CELL_PX * 2);
+  });
+
+  test('keeps sub-pixel diameters for fractional calibrated cells', () => {
+    expect(tokenDiameterPx({ tokenSize: 'medium', cellPx: 33.3 })).toBeCloseTo(33.3, 5);
   });
 });
 
