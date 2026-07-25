@@ -602,7 +602,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             <div className="hr" style={{ margin: '6px 0' }} />
 
             <span className="card-kicker">{t('quests.objectives')}</span>
-            {quest.objectives.length === 0 && <p className="text-xs text-slate-600">{t('quests.noObjectives')}</p>}
+            {quest.objectives.length === 0 && <p className="text-xs text-secondary">{t('quests.noObjectives')}</p>}
             {quest.objectives.map((o, i) => (
               <div key={o.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 34 }}>
                 <Toggle
@@ -626,7 +626,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                     </button>
                     <button
                       onClick={() => setEditingObjectiveId(null)}
-                      className="text-xs text-slate-500 hover:text-slate-300 shrink-0"
+                      className="text-xs text-secondary hover:text-[var(--color-neutral-300)] shrink-0"
                     >
                       {t('quests.cancel')}
                     </button>
@@ -649,7 +649,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                           onClick={() => reorderObjective(i, -1)}
                           disabled={i === 0}
                           aria-label={t('quests.moveUp', { text: o.text })}
-                          className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
+                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-[var(--color-text-secondary)] shrink-0"
                         >
                           ↑
                         </button>
@@ -657,11 +657,11 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                           onClick={() => reorderObjective(i, 1)}
                           disabled={i === quest.objectives.length - 1}
                           aria-label={t('quests.moveDown', { text: o.text })}
-                          className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-30 disabled:hover:text-slate-500 shrink-0"
+                          className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-30 disabled:hover:text-[var(--color-text-secondary)] shrink-0"
                         >
                           ↓
                         </button>
-                        <button onClick={() => startEditObjective(o)} className="text-xs text-slate-500 hover:text-slate-300 shrink-0">
+                        <button onClick={() => startEditObjective(o)} className="text-xs text-secondary hover:text-[var(--color-neutral-300)] shrink-0">
                           ✎
                         </button>
                       </>
@@ -687,7 +687,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 <button
                   type="submit"
                   disabled={addingObjective || !newObjective.trim()}
-                  className="text-xs text-slate-500 hover:text-slate-300 disabled:opacity-50"
+                  className="text-xs text-secondary hover:text-[var(--color-neutral-300)] disabled:opacity-50"
                 >
                   {t('quests.addObjective')}
                 </button>
@@ -717,7 +717,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
             {canDmWrite && (
               <Link
                 to={`/c/${campaignId}/quests/new?parent=${questId}`}
-                className="text-xs text-slate-500 hover:text-slate-300 pl-1 inline-block"
+                className="text-xs text-secondary hover:text-[var(--color-neutral-300)] pl-1 inline-block"
                 style={{ marginTop: hasSubs ? 0 : 6 }}
               >
                 {t('quests.addSubquest')}
@@ -771,7 +771,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                         setDmSecretDraft(quest.dmSecret);
                         setEditingDmSecret(true);
                       }}
-                      className="text-[10px] text-slate-500 hover:text-slate-300 shrink-0"
+                      className="text-[10px] text-secondary hover:text-[var(--color-neutral-300)] shrink-0"
                     >
                       {t('quests.editSmall')}
                     </button>
@@ -786,7 +786,7 @@ function QuestDetailPage({ campaignId, questId }: { campaignId: number; questId:
                 setDmSecretDraft('');
                 setEditingDmSecret(true);
               }}
-              className="text-xs text-slate-500 hover:text-slate-300"
+              className="text-xs text-secondary hover:text-[var(--color-neutral-300)]"
             >
               {t('quests.addDmNotes')}
             </button>
@@ -987,7 +987,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
           ) : (
             <div className="space-y-3">
               <div className="space-y-1">
-                <label htmlFor={titleId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                <label htmlFor={titleId} className="text-xs font-bold text-secondary uppercase tracking-wide">
                   {QUEST_TITLE_LABEL}
                 </label>
                 <TextInput
@@ -1002,7 +1002,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                   placeholder={t('quests.titlePlaceholder')}
                   maxLength={200}
                 />
-                <p id={titleHelpId} className="text-[11px] text-slate-500 m-0">
+                <p id={titleHelpId} className="text-[11px] text-secondary m-0">
                   {QUEST_TITLE_HELP}
                 </p>
                 {titleError && (
@@ -1012,7 +1012,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                 )}
               </div>
               <div className="space-y-1">
-                <label htmlFor={bodyId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                <label htmlFor={bodyId} className="text-xs font-bold text-secondary uppercase tracking-wide">
                   {QUEST_BODY_LABEL}
                 </label>
                 <TextArea
@@ -1023,12 +1023,12 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                   onChange={(e) => setBody(e.target.value)}
                   placeholder={t('quests.bodyPlaceholder')}
                 />
-                <p id={bodyHelpId} className="text-[11px] text-slate-500 m-0">
+                <p id={bodyHelpId} className="text-[11px] text-secondary m-0">
                   {QUEST_BODY_HELP}
                 </p>
               </div>
               <div className="space-y-1">
-                <label htmlFor={rewardId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                <label htmlFor={rewardId} className="text-xs font-bold text-secondary uppercase tracking-wide">
                   {QUEST_REWARD_LABEL}
                 </label>
                 <TextInput
@@ -1038,12 +1038,12 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                   onChange={(e) => setReward(e.target.value)}
                   placeholder={t('quests.rewardPlaceholder')}
                 />
-                <p id={rewardHelpId} className="text-[11px] text-slate-500 m-0">
+                <p id={rewardHelpId} className="text-[11px] text-secondary m-0">
                   {QUEST_REWARD_HELP}
                 </p>
               </div>
               <div className="space-y-1">
-                <label htmlFor={giverId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                <label htmlFor={giverId} className="text-xs font-bold text-secondary uppercase tracking-wide">
                   {QUEST_GIVER_LABEL}
                 </label>
                 <select
@@ -1060,12 +1060,12 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                     </option>
                   ))}
                 </select>
-                <p id={giverHelpId} className="text-[11px] text-slate-500 m-0">
+                <p id={giverHelpId} className="text-[11px] text-secondary m-0">
                   {QUEST_GIVER_HELP}
                 </p>
               </div>
               <div className="space-y-1">
-                <label htmlFor={parentFieldId} className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                <label htmlFor={parentFieldId} className="text-xs font-bold text-secondary uppercase tracking-wide">
                   {QUEST_PARENT_LABEL}
                 </label>
                 <select
@@ -1082,7 +1082,7 @@ function QuestCreatePage({ campaignId }: { campaignId: number }) {
                     </option>
                   ))}
                 </select>
-                <p id={parentHelpId} className="text-[11px] text-slate-500 m-0">
+                <p id={parentHelpId} className="text-[11px] text-secondary m-0">
                   {QUEST_PARENT_HELP}
                 </p>
               </div>

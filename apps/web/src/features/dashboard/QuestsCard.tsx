@@ -86,10 +86,9 @@ export function QuestsCard({
           <ListDetailLink
             to={`/c/${campaignId}/quests/${q.id}`}
             style={{
-              color: 'var(--color-text)',
+              color: isFaded ? 'var(--color-text-disabled)' : 'var(--color-text)',
               fontSize: 14.5,
               textDecoration: 'none',
-              opacity: isFaded ? 0.6 : 1,
               minWidth: 0,
               textDecorationLine: q.status === 'completed' ? 'line-through' : 'none',
             }}
@@ -121,9 +120,8 @@ export function QuestsCard({
               <span
                 style={{
                   fontSize: 13,
-                  color: 'var(--color-neutral-300)',
+                  color: done ? 'var(--color-text-disabled)' : 'var(--color-neutral-300)',
                   textDecorationLine: done ? 'line-through' : 'none',
-                  opacity: done ? 0.6 : 1,
                 }}
               >
                 {obj.text}

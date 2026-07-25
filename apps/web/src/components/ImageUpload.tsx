@@ -435,7 +435,7 @@ export function ImageUpload({
           />
         ) : (
           <div className="w-full h-full flex flex-col items-center justify-center gap-1 text-center p-4">
-            <span className="text-[11px] text-[var(--color-neutral-600)]">{isUploading ? 'Uploading…' : label}</span>
+            <span className="text-[11px] text-secondary">{isUploading ? 'Uploading…' : label}</span>
           </div>
         )}
 

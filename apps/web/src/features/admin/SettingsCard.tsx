@@ -128,7 +128,7 @@ function SettingToggleRow({
     <div className="cf-inset p-3.5 flex items-center justify-between gap-3 flex-wrap">
       <div>
         <p className="text-sm font-semibold text-white">{title}</p>
-        <p className="text-[11px] text-slate-500">{hint}</p>
+        <p className="text-[11px] text-secondary">{hint}</p>
       </div>
       <button
         type="button"

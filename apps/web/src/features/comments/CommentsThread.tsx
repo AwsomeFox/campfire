@@ -265,9 +265,9 @@ export function CommentsThread({
       {error && <ErrorNote message={error} onRetry={load} />}
 
       {loading ? (
-        <p className="text-sm text-slate-600">Loading discussion…</p>
+        <p className="text-sm text-secondary">Loading discussion…</p>
       ) : threads.length === 0 ? (
-        <p className="text-sm text-slate-600">No comments yet — start the conversation.</p>
+        <p className="text-sm text-secondary">No comments yet — start the conversation.</p>
       ) : (
         <>
         <ul className="space-y-3 list-none p-0 m-0">
@@ -439,16 +439,16 @@ function CommentCard({
           <span className="font-bold text-slate-300 break-words">{characterLabel || accountLabel}</span>
           {comment.inCharacter && <span className="tag tag-accent">In character</span>}
           {characterLabel && (
-            <span className="text-slate-500" aria-label={`Posted by account ${accountLabel}`}>
+            <span className="text-secondary" aria-label={`Posted by account ${accountLabel}`}>
               Posted by {accountLabel}
             </span>
           )}
-          <span className="text-slate-600">{timeAgo(comment.createdAt)}</span>
+          <span className="text-timestamp">{timeAgo(comment.createdAt)}</span>
           {comment.updatedAt !== comment.createdAt && (
             // Issue #783: when a NON-author edited the comment (editedBy set), say so
             // honestly instead of a bare "edited" — the author of record never wrote
             // the current body. A self-edit has no editedBy, so it stays a plain badge.
-            <span className="text-slate-600 italic">
+            <span className="text-secondary italic">
               {comment.editedBy ? `edited by ${comment.editedBy}` : 'edited'}
             </span>
           )}
@@ -496,7 +496,7 @@ function CommentCard({
       {!editing && (
         <div className="flex gap-3 text-xs">
           {onReply && (
-            <button onClick={onReply} className="text-slate-500 hover:text-slate-300">
+            <button onClick={onReply} className="text-secondary hover:text-[var(--color-neutral-300)]">
               Reply
             </button>
           )}
@@ -509,7 +509,7 @@ function CommentCard({
                 setConflict(null);
                 setEditing(true);
               }}
-              className="text-slate-500 hover:text-slate-300"
+              className="text-secondary hover:text-[var(--color-neutral-300)]"
             >
               Edit
             </button>
@@ -672,7 +672,7 @@ function ComposeBox({
       />
       <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 sm:justify-end">
         <label
-          className={`flex items-center gap-1.5 text-xs mr-auto ${ownedCharacters.length ? 'text-slate-500 cursor-pointer' : 'text-slate-600 cursor-not-allowed'}`}
+          className={`flex items-center gap-1.5 text-xs mr-auto ${ownedCharacters.length ? 'text-secondary cursor-pointer' : 'text-secondary cursor-not-allowed'}`}
           title={ownedCharacters.length ? undefined : 'Create or claim a character before posting in character.'}
         >
           <input

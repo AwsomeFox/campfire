@@ -388,7 +388,7 @@ function SidebarNavButton({
     return (
       <div
         className="flex items-center gap-2 px-2.5 text-sm cursor-not-allowed select-none"
-        style={{ ...sharedStyle, color: 'var(--color-neutral-600)' }}
+        style={{ ...sharedStyle, color: 'var(--color-text-secondary)' }}
       >
         {inner}
       </div>
@@ -1231,7 +1231,7 @@ function MoreSheetItem({
     return (
       <div
         className="flex items-center gap-2.5 min-h-[46px] px-2.5 text-left"
-        style={{ fontSize: 14.5, color: 'var(--color-neutral-600)' }}
+        style={{ fontSize: 14.5, color: 'var(--color-text-secondary)' }}
       >
         {item.label}
         <span className="tag tag-neutral ml-auto" style={{ fontSize: 9 }}>soon</span>

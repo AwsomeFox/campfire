@@ -57,7 +57,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
     <div className="cf-inset p-3.5 space-y-3" role="region" aria-label="Backup inspection results">
       <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">Format version</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">Format version</dt>
           <dd className="font-semibold text-white">
             {result.formatVersion}
             {result.sourceFormatVersion !== result.formatVersion && (
@@ -66,34 +66,34 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">App version</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">App version</dt>
           <dd className="font-semibold text-white">{result.appVersion ?? '—'}</dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">Schema version</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">Schema version</dt>
           <dd className="font-semibold text-white">
             {result.schemaVersion === null ? '—' : result.schemaVersion.toLocaleString()}
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">Created</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">Created</dt>
           <dd className="font-semibold text-white">{formatTimestamp(result.createdAt)}</dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">Database entry</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">Database entry</dt>
           <dd className="font-semibold text-white truncate" title={result.dbEntry ?? undefined}>
             {result.dbEntry ?? '—'}
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] uppercase tracking-widest text-slate-500">Database size</dt>
+          <dt className="text-[10px] uppercase tracking-widest text-secondary">Database size</dt>
           <dd className="font-semibold text-white">
             {result.dbBytes === null ? '—' : formatBytes(result.dbBytes)}
           </dd>
         </div>
         {result.aiKeySource && (
           <div className="sm:col-span-2">
-            <dt className="text-[10px] uppercase tracking-widest text-slate-500">AI credential key</dt>
+            <dt className="text-[10px] uppercase tracking-widest text-secondary">AI credential key</dt>
             <dd className="font-semibold text-white">
               {result.aiKeySource}
               {result.aiKeyIncluded ? ' · encrypted envelope included' : ''}
@@ -107,23 +107,23 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
 
       {result.reconciliation && (
         <div className="text-xs space-y-1">
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Reconciliation</p>
+          <p className="text-[10px] font-bold text-secondary uppercase tracking-widest">Reconciliation</p>
           <p className={result.reconciliation.clean ? 'text-emerald-400' : 'text-amber-400'}>
             {result.reconciliation.clean
               ? 'Archive is fully reconciled — DB snapshot matches captured files.'
               : `Archive has reconciliation issues — missing ${result.reconciliation.missing}, changed ${result.reconciliation.changed}, orphans ${result.reconciliation.orphanCount}. Review before restoring.`}
           </p>
-          <p className="text-slate-500 font-mono text-[11px]">generation {result.reconciliation.generation}</p>
+          <p className="text-secondary font-mono text-[11px]">generation {result.reconciliation.generation}</p>
         </div>
       )}
 
       <div>
-        <p id={uploadsId} className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+        <p id={uploadsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
           Upload contents ({result.uploads.length.toLocaleString()}
           {result.uploadCount !== null ? ` · manifest count ${result.uploadCount.toLocaleString()}` : ''})
         </p>
         {result.uploads.length === 0 ? (
-          <p className="text-xs text-slate-500">No upload files in this archive.</p>
+          <p className="text-xs text-secondary">No upload files in this archive.</p>
         ) : (
           <ul
             className="max-h-40 overflow-y-auto text-[11px] text-slate-300 font-mono divide-y divide-slate-800 border border-slate-800 rounded"
@@ -140,7 +140,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
 
       {result.attachmentChecksums.length > 0 && (
         <div>
-          <p id={checksumsId} className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+          <p id={checksumsId} className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
             Attachment checksums ({result.attachmentChecksums.length.toLocaleString()})
           </p>
           <ul
@@ -150,7 +150,7 @@ function InspectResults({ result }: { result: BackupInspectResult }) {
             {result.attachmentChecksums.map((entry) => (
               <li key={entry.path} className="px-2 py-1" title={entry.sha256}>
                 <span className="truncate block">{entry.path}</span>
-                <span className="text-slate-500">
+                <span className="text-secondary">
                   {formatBytes(entry.size)} · sha256 {entry.sha256.slice(0, 16)}…
                 </span>
               </li>
@@ -350,7 +350,7 @@ export function ServerBackupWorkflowCard() {
           Disaster recovery for the entire Campfire install — database and uploads. Actions are audited as server-admin
           operations.
         </p>
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           Acting as <span className="text-slate-300">{operator}</span>
         </p>
       </div>
@@ -401,7 +401,7 @@ export function ServerBackupWorkflowCard() {
           <h3 id="server-backup-schedule-heading" className="text-xs font-bold text-white uppercase tracking-widest">
             Scheduled backups
           </h3>
-          <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={() => void loadStatus()}>
+          <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={() => void loadStatus()}>
             refresh
           </button>
         </div>
@@ -416,21 +416,21 @@ export function ServerBackupWorkflowCard() {
             {status.cadence && (
               <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
                 <div>
-                  <dt className="text-[10px] uppercase tracking-widest text-slate-500">Last success</dt>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Last success</dt>
                   <dd className="font-semibold text-white">{formatTimestamp(status.cadence.lastSuccessAt)}</dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] uppercase tracking-widest text-slate-500">Next run</dt>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Next run</dt>
                   <dd className="font-semibold text-white">{formatTimestamp(status.cadence.nextRunAt)}</dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] uppercase tracking-widest text-slate-500">Last archive size</dt>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Last archive size</dt>
                   <dd className="font-semibold text-white">
                     {status.cadence.lastSize === null ? '—' : formatBytes(status.cadence.lastSize)}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-[10px] uppercase tracking-widest text-slate-500">Last checksum</dt>
+                  <dt className="text-[10px] uppercase tracking-widest text-secondary">Last checksum</dt>
                   <dd className="font-semibold text-white font-mono truncate" title={status.cadence.lastChecksum ?? undefined}>
                     {status.cadence.lastChecksum ? `${status.cadence.lastChecksum.slice(0, 16)}…` : '—'}
                   </dd>
@@ -442,7 +442,7 @@ export function ServerBackupWorkflowCard() {
             )}
             {status.onDisk.length > 0 && (
               <div>
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">
+                <p className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-1">
                   On-disk archives (copy off-box for retention)
                 </p>
                 <ul className="divide-y divide-slate-800 border border-slate-800 rounded text-[11px] font-mono">
@@ -451,7 +451,7 @@ export function ServerBackupWorkflowCard() {
                       <span className="truncate text-slate-300" title={entry.name}>
                         {entry.name}
                       </span>
-                      <span className="text-slate-500 whitespace-nowrap">
+                      <span className="text-secondary whitespace-nowrap">
                         {formatBytes(entry.bytes)} · {formatTimestamp(entry.mtime)}
                       </span>
                     </li>
@@ -558,7 +558,7 @@ export function ServerBackupWorkflowCard() {
                 {healthResult.version ? ` (v${healthResult.version})` : ''}.
               </p>
             )}
-            <p className="text-slate-500">
+            <p className="text-secondary">
               This action is recorded in the server audit log as <code className="text-amber-400">server.restore</code>{' '}
               for {operator}.
             </p>

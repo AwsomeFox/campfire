@@ -239,7 +239,7 @@ export default function LocationListPage() {
                 className="cf-card cf-card-hover cf-density-compact flex items-center gap-3"
                 style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
-                {depth > 0 && <span className="text-slate-600 shrink-0" aria-hidden>↳</span>}
+                {depth > 0 && <span className="text-secondary shrink-0" aria-hidden>↳</span>}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={loc.name} aria-label={`Location: ${loc.name}`}>{loc.name}</p>
@@ -252,7 +252,7 @@ export default function LocationListPage() {
                   <p className="text-xs text-slate-400 truncate cf-name-reveal mt-0.5" title={loc.kind || firstLine(loc.body) || undefined} aria-label={loc.kind || firstLine(loc.body) || undefined}>{loc.kind || firstLine(loc.body) || ' '}</p>
                 </div>
                 {loc.mapX != null && loc.mapY != null && (
-                  <span className="text-[11px] text-slate-500 shrink-0">
+                  <span className="text-[11px] text-secondary shrink-0">
                     <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
                   </span>
                 )}

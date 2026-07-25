@@ -38,7 +38,7 @@ export function CharacterCompletionBanner({
           <li key={item.id} className="flex gap-2 items-start">
             <span
               aria-hidden
-              className={`mt-0.5 shrink-0 ${item.done ? 'text-emerald-400' : 'text-slate-500'}`}
+              className={`mt-0.5 shrink-0 ${item.done ? 'text-emerald-400' : 'text-secondary'}`}
             >
               {item.done ? '✓' : '○'}
             </span>

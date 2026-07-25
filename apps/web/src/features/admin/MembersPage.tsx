@@ -520,14 +520,14 @@ function InviteCard({ campaignId }: { campaignId: number }) {
       >
         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest m-0">Preview</p>
         <p className="text-[12px] text-slate-300 m-0">
-          <span className="text-slate-500">Role:</span>{' '}
+          <span className="text-secondary">Role:</span>{' '}
           <span className={`cf-chip ${ROLE_CHIP[role]}`}>{ROLE_LABEL[role]}</span>
         </p>
         <p className="text-[12px] text-slate-300 m-0">
-          <span className="text-slate-500">Expires:</span> {describeExpiry(expiryPreset, customDate)}
+          <span className="text-secondary">Expires:</span> {describeExpiry(expiryPreset, customDate)}
         </p>
         <p className="text-[12px] text-slate-300 m-0">
-          <span className="text-slate-500">Max admissions:</span> {describeMaxUses(maxUsesPreset, customMaxUses)}
+          <span className="text-secondary">Max admissions:</span> {describeMaxUses(maxUsesPreset, customMaxUses)}
         </p>
         <p className="text-[11px] text-amber-400/80 m-0 mt-1.5">
           ⚠ Anyone with this link can join — treat it like a password.
@@ -628,7 +628,7 @@ function ReadOnlyMemberTable({ members }: { members: CampaignMember[] }) {
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-[10px] uppercase text-slate-500 text-left">
+          <tr className="text-[10px] uppercase text-secondary text-left">
             <th className="py-2 pr-4 font-bold">User</th>
             <th className="pr-4 font-bold">Role</th>
           </tr>
@@ -819,7 +819,7 @@ function MembersCard({
           ))}
         </div>
       )}
-      <p id={linkHelpId} className="text-[11px] text-slate-500">
+      <p id={linkHelpId} className="text-[11px] text-secondary">
         {MEMBER_CHARACTER_LINK_HELP}
       </p>
     </Card>
@@ -1025,7 +1025,7 @@ function MemberRow({
       </select>
       <button
         type="button"
-        className="text-[12px] text-slate-500 hover:text-rose-400"
+        className="text-[12px] text-secondary hover:text-rose-400"
         aria-label={memberRemoveLabel(name)}
         onClick={() => setConfirmingRemove(true)}
       >
@@ -1154,11 +1154,11 @@ function AddMemberForm({
       {selected ? (
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <p className="text-sm text-white">
-            {selected.displayName || selected.username} <span className="text-slate-500">{selected.username}</span>
+            {selected.displayName || selected.username} <span className="text-secondary">{selected.username}</span>
           </p>
           <button
             type="button"
-            className="text-[11px] text-slate-500 hover:text-white"
+            className="text-[11px] text-secondary hover:text-white"
             onClick={() => {
               setSelected(null);
               setQuery('');
@@ -1169,7 +1169,7 @@ function AddMemberForm({
         </div>
       ) : (
         <div className="space-y-1">
-          <label htmlFor={searchId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+          <label htmlFor={searchId} className="block text-[10px] font-bold uppercase tracking-wide text-secondary">
             {ADD_MEMBER_SEARCH_LABEL}
           </label>
           <TextInput
@@ -1179,9 +1179,9 @@ function AddMemberForm({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          {searching && <p className="text-[11px] text-slate-500">Searching…</p>}
+          {searching && <p className="text-[11px] text-secondary">Searching…</p>}
           {!searching && query.trim().length >= 2 && results.length === 0 && (
-            <p className="text-[11px] text-slate-500">No matching users.</p>
+            <p className="text-[11px] text-secondary">No matching users.</p>
           )}
           {results.length > 0 && (
             <ul className="cf-inset divide-y divide-slate-800" role="listbox" aria-label="Matching users">
@@ -1192,7 +1192,7 @@ function AddMemberForm({
                     className="w-full text-left px-3 py-2 text-sm text-slate-200 hover:bg-slate-800/60"
                     onClick={() => setSelected(u)}
                   >
-                    {u.displayName || u.username} <span className="text-slate-500">{u.username}</span>
+                    {u.displayName || u.username} <span className="text-secondary">{u.username}</span>
                   </button>
                 </li>
               ))}
@@ -1202,7 +1202,7 @@ function AddMemberForm({
       )}
       <div className="grid sm:grid-cols-3 gap-2">
         <div className="space-y-1">
-          <label htmlFor={roleId} className="block text-[10px] font-bold uppercase tracking-wide text-slate-500">
+          <label htmlFor={roleId} className="block text-[10px] font-bold uppercase tracking-wide text-secondary">
             {ADD_MEMBER_ROLE_LABEL}
           </label>
           <select
@@ -1216,7 +1216,7 @@ function AddMemberForm({
             <option value="player">Player</option>
             <option value="viewer">Viewer</option>
           </select>
-          <p id={roleHelpId} className="text-[11px] text-slate-500 m-0">
+          <p id={roleHelpId} className="text-[11px] text-secondary m-0">
             {ADD_MEMBER_ROLE_HELP}
           </p>
         </div>
@@ -1286,7 +1286,7 @@ function AuditList({ entries, members }: { entries: AuditEntry[]; members: Campa
         const { label, isToken } = resolveActorLabel(e.actor, members);
         return (
           <li key={e.id}>
-            <span className="text-slate-600">{timeAgo(e.createdAt)}</span> <GameIcon slug={ACTOR_ICON[e.actorRole]} size={12} className="inline align-text-bottom" />{' '}
+            <span className="text-secondary">{timeAgo(e.createdAt)}</span> <GameIcon slug={ACTOR_ICON[e.actorRole]} size={12} className="inline align-text-bottom" />{' '}
             <b className="text-slate-300">{label}</b>{' '}
             {isToken && (
               <span className="tag tag-neutral" style={{ fontSize: 9 }}>
@@ -1294,7 +1294,7 @@ function AuditList({ entries, members }: { entries: AuditEntry[]; members: Campa
               </span>
             )}{' '}
             {e.action}
-            {e.detail && <span className="text-slate-500"> — {e.detail}</span>}
+            {e.detail && <span className="text-secondary"> — {e.detail}</span>}
           </li>
         );
       })}

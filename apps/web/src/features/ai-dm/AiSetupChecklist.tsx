@@ -81,7 +81,7 @@ export function AiSetupChecklist({
   const flagOn = flagQuery.data?.killSwitchEnabled ?? null;
 
   if (seatQuery.isLoading) {
-    return <p className="text-xs text-[var(--color-neutral-600)]">{t('aiOnboarding.checklist.loading')}</p>;
+    return <p className="text-xs text-secondary">{t('aiOnboarding.checklist.loading')}</p>;
   }
 
   const mode = seat?.mode ?? 'off';
@@ -167,7 +167,7 @@ export function AiSetupChecklist({
         </div>
       )}
 
-      <p className="text-[11px] text-[var(--color-neutral-600)]">
+      <p className="text-[11px] text-secondary">
         {t('aiOnboarding.checklist.progress', { done: doneCount, total: gating.length })}
       </p>
 
@@ -195,7 +195,7 @@ function StepRow({ step }: { step: Step }) {
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-sm font-semibold text-[var(--color-neutral-200)]">{step.title}</span>
-          <span className="text-[10px] text-[var(--color-neutral-600)]">
+          <span className="text-[10px] text-secondary">
             {step.done === true
               ? t('aiOnboarding.checklist.completedBy', { actor: actorLabel })
               : t('aiOnboarding.checklist.todoBy', { actor: actorLabel })}
