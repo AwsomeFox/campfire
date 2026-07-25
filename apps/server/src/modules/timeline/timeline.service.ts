@@ -7,6 +7,7 @@ import { DB, type DrizzleDb } from '../../db/db.module';
 import { timelineEvents, timelineCalendars } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
+import { notDeleted } from '../../common/soft-delete';
 import { buildCursorListPage } from '../../common/cursor-pagination';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
@@ -68,7 +69,7 @@ export class TimelineService {
     const limit = clampTimelineListLimit(opts.limit);
     const cursor = decodeTimelineCursor(opts.cursor);
 
-    const visibilityConds = [eq(timelineEvents.campaignId, campaignId)];
+    const visibilityConds = [eq(timelineEvents.campaignId, campaignId), notDeleted(timelineEvents.deletedAt)];
     if (role !== 'dm') visibilityConds.push(eq(timelineEvents.hidden, false));
 
     const pageConds = [...visibilityConds];
@@ -109,14 +110,14 @@ export class TimelineService {
     const rows = await this.db
       .select()
       .from(timelineEvents)
-      .where(eq(timelineEvents.campaignId, campaignId))
+      .where(and(eq(timelineEvents.campaignId, campaignId), notDeleted(timelineEvents.deletedAt)))
       .orderBy(asc(timelineEvents.sortIndex), asc(timelineEvents.id));
     return redactSecrets(filterHidden(rows.map(toEventDomain), role), role);
   }
 
-  async getEventRowOrThrow(id: number) {
+  async getEventRowOrThrow(id: number, includeDeleted = false) {
     const [row] = await this.db.select().from(timelineEvents).where(eq(timelineEvents.id, id)).limit(1);
-    if (!row) throw new NotFoundException(`Timeline event ${id} not found`);
+    if (!row || (!includeDeleted && row.deletedAt != null)) throw new NotFoundException(`Timeline event ${id} not found`);
     return row;
   }
 
@@ -199,10 +200,16 @@ export class TimelineService {
     return redactSecret(toEventDomain(row), role);
   }
 
+  /**
+   * Soft-delete (trash) a timeline event (issue #693) — reversible. Only stamps
+   * `deleted_at`; the event vanishes from normal reads but survives for restore().
+   */
   async removeEvent(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getEventRowOrThrow(id);
-    await this.db.delete(timelineEvents).where(eq(timelineEvents.id, id));
-    await this.revisions.removeForEntity('timeline_event', id);
+    await this.db
+      .update(timelineEvents)
+      .set({ deletedAt: nowIso(), updatedAt: nowIso() })
+      .where(eq(timelineEvents.id, id));
     await this.audit.log({
       actor: auditActor(user),
       actorRole: role,
@@ -210,7 +217,28 @@ export class TimelineService {
       entityType: 'timeline_event',
       entityId: id,
       campaignId: existing.campaignId,
+      detail: 'soft-delete (trashed)',
     });
+  }
+
+  /** Restore a trashed timeline event (issue #693) — clears `deleted_at`. */
+  async restoreEvent(id: number, user: RequestUser, role: Role): Promise<TimelineEvent> {
+    const existing = await this.getEventRowOrThrow(id, true);
+    if (existing.deletedAt == null) throw new NotFoundException(`Timeline event ${id} is not in the trash`);
+    const [row] = await this.db
+      .update(timelineEvents)
+      .set({ deletedAt: null, updatedAt: nowIso() })
+      .where(eq(timelineEvents.id, id))
+      .returning();
+    await this.audit.log({
+      actor: auditActor(user),
+      actorRole: role,
+      action: 'timeline.event.restore',
+      entityType: 'timeline_event',
+      entityId: id,
+      campaignId: existing.campaignId,
+    });
+    return redactSecret(toEventDomain(row), role);
   }
 
   // ---------- calendar (one "current in-world date" per campaign) ----------

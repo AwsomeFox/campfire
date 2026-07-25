@@ -120,12 +120,22 @@ export class TimelineController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a timeline event', description: 'dm role required.' })
-  @ApiResponse({ status: 200, description: 'Deleted.' })
+  @ApiOperation({ summary: 'Delete (trash) a timeline event', description: 'dm role required. Soft-delete (issue #693): the event moves to the Trash and is restorable via POST /timeline/:id/restore.' })
+  @ApiResponse({ status: 200, description: 'Trashed.' })
   async remove(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.timeline.getEventRowOrThrow(id);
     const role = await this.access.requireRole(user, row.campaignId, 'dm');
     return this.timeline.removeEvent(id, user, role);
+  }
+
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Restore a trashed timeline event', description: 'dm role required. Undo a soft-delete (issue #693) — the event returns exactly as it was.' })
+  @ApiResponse({ status: 201, description: 'The restored timeline event.' })
+  async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser, @Res({ passthrough: true }) res: Response) {
+    const row = await this.timeline.getEventRowOrThrow(id, true);
+    const role = await this.access.requireRole(user, row.campaignId, 'dm');
+    res.status(201);
+    return this.timeline.restoreEvent(id, user, role);
   }
 }
 

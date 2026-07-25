@@ -33,6 +33,8 @@ import { entityTargetProps } from '../../lib/entityLinks';
 import { PageTitle } from '../../components/PageTitle';
 import { StaleWriteConflict, type ConflictField } from '../../components/StaleWriteConflict';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
+import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { UndoSnackbar } from '../../components/UndoSnackbar';
 import {
   TIMELINE_BODY_HELP,
   TIMELINE_BODY_LABEL,
@@ -147,12 +149,16 @@ export default function TimelinePage() {
   const [eventConflict, setEventConflict] = useState<{ base: EventDraft; theirs: EventDraft } | null>(null);
   const [historyNonce, setHistoryNonce] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState<{ id: number; title: string } | null>(null);
+  const [pendingUndo, setPendingUndo] = useState<{ id: number; title: string } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Selected timeline event for the Visible-to-players bar (#754). Set on public
   // create and when the DM opens Edit on an event so existing visible events get the bar.
   const [visibilityEventId, setVisibilityEventId] = useState<number | null>(null);
 
   const newEventTriggerRef = useRef<HTMLButtonElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement>(null);
   const editTriggerRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const calendarEditTriggerRef = useRef<HTMLButtonElement>(null);
   const restoreNewEventFocusRef = useRef(false);
@@ -363,17 +369,17 @@ export default function TimelinePage() {
     }
   };
 
-  const deleteEvent = async (id: number) => {
-    setBusy(true);
+  async function removeEvent(id: number) {
+    setDeleting(true);
     setActionError(null);
     try {
       await api.delete(`${API}/timeline/${id}`);
+      const deleted = events.find((event) => event.id === id);
+      setConfirmingDelete(null);
       setEditFieldErrors({});
       setEditingId(null);
+      if (deleted) setPendingUndo({ id, title: deleted.title });
       await load();
-      // The deleted row's Edit trigger is gone. Prefer "+ New event" when it is
-      // mounted; while creating=true that control is not rendered, so focus a
-      // stable visible control in the open create form instead.
       requestAnimationFrame(() => {
         if (newEventTriggerRef.current) {
           newEventTriggerRef.current.focus();
@@ -386,9 +392,16 @@ export default function TimelinePage() {
     } catch {
       setActionError("Couldn't delete the event.");
     } finally {
-      setBusy(false);
+      setDeleting(false);
     }
-  };
+  }
+
+  async function undoDelete() {
+    if (!pendingUndo) return;
+    await api.post(`${API}/timeline/${pendingUndo.id}/restore`);
+    setPendingUndo(null);
+    await load();
+  }
 
   if (!Number.isFinite(cid)) {
     return (
@@ -632,7 +645,15 @@ export default function TimelinePage() {
                       Cancel
                     </Btn>
                     <div style={{ flex: 1 }} />
-                    <Btn danger ghost onClick={() => deleteEvent(e.id)} busy={busy}>Delete</Btn>
+                    <Btn
+                      ref={deleteTriggerRef}
+                      danger
+                      ghost
+                      onClick={() => setConfirmingDelete({ id: e.id, title: e.title })}
+                      busy={deleting}
+                    >
+                      Delete
+                    </Btn>
                   </div>
                 </div>
               ) : (
@@ -741,6 +762,28 @@ export default function TimelinePage() {
             {loadingMore ? 'Loading…' : 'Load more'}
           </Btn>
         </div>
+      )}
+
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete ${confirmingDelete.title}?`}
+          body="This moves the event to the Trash — you can undo it right away, or restore it later from the campaign Trash."
+          confirmLabel="Delete event"
+          busy={deleting}
+          onConfirm={() => removeEvent(confirmingDelete.id)}
+          onCancel={() => {
+            setConfirmingDelete(null);
+            requestAnimationFrame(() => deleteTriggerRef.current?.focus());
+          }}
+        />
+      )}
+
+      {pendingUndo && (
+        <UndoSnackbar
+          message={`${pendingUndo.title} moved to the Trash.`}
+          onUndo={undoDelete}
+          onExpire={() => setPendingUndo(null)}
+        />
       )}
     </div>
   );
