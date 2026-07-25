@@ -609,6 +609,23 @@ export const campaignMembers = sqliteTable('campaign_members', {
   updatedAt: text('updated_at').notNull(),
 });
 
+// Issue #549 — per-user, per-campaign catch-up cursor independent of auth sessions.
+// `lastCaughtUpAt` is bumped when the member marks caught up on the dashboard.
+export const campaignCatchUpCursors = sqliteTable(
+  'campaign_catch_up_cursors',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    userId: integer('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    campaignId: integer('campaign_id').notNull().references(() => campaigns.id, { onDelete: 'cascade' }),
+    lastCaughtUpAt: text('last_caught_up_at').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    userCampaign: uniqueIndex('idx_campaign_catch_up_user_campaign').on(t.userId, t.campaignId),
+  }),
+);
+
 // Safe, server-admin-visible history of membership rows repaired while adding
 // the campaign_members.user_id FK (#849). This deliberately has no campaign/user
 // FKs: it records references that were already missing and remains useful after

@@ -71,7 +71,8 @@ test('dashboard next-session projection stays live across remote writes, campaig
     );
     await page.goto(`/c/${campaignId}`);
     await initialStream;
-    await expect(page.locator('.dashboard-session-log')).toBeVisible();
+    const sessionLog = page.locator('.dashboard-session-log');
+    await expect(sessionLog).toBeVisible();
 
     const created = await json<ScheduledSessionWithRsvps>(
       await writer.request.post(`/api/v1/campaigns/${campaignId}/schedule`, {
@@ -79,7 +80,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
       }),
       'create remote schedule',
     );
-    await expect(page.getByText('E2E790 Alpha', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Alpha', { exact: true })).toBeVisible();
 
     await json<ScheduledSessionWithRsvps>(
       await writer.request.patch(`/api/v1/schedule/${created.id}`, {
@@ -87,8 +88,8 @@ test('dashboard next-session projection stays live across remote writes, campaig
       }),
       'reschedule remotely',
     );
-    await expect(page.getByText('E2E790 Beta', { exact: true })).toBeVisible();
-    await expect(page.getByText('E2E790 Alpha', { exact: true })).toHaveCount(0);
+    await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Alpha', { exact: true })).toHaveCount(0);
 
     // The card is a real touch-sized link and remains keyboard-operable/axe-clean
     // at the narrow mobile breakpoint.
@@ -103,7 +104,7 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(`/c/${campaignId}/sessions?tab=schedule`);
     await page.goBack();
-    await expect(page.getByText('E2E790 Beta', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toBeVisible();
 
     // Delay the other campaign's projection so the assertion can observe the
     // transition boundary: no title from campaign A may flash under campaign B.
@@ -118,16 +119,16 @@ test('dashboard next-session projection stays live across remote writes, campaig
       window.dispatchEvent(new PopStateEvent('popstate'));
     }, `/c/${secondCampaign.id}`);
     await expect(page).toHaveURL(`/c/${secondCampaign.id}`);
-    await expect(page.getByText('E2E790 Beta', { exact: true })).toHaveCount(0);
+    await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toHaveCount(0);
     releaseSecondSummary();
-    await expect(page.getByText('E2E790 Other campaign', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Other campaign', { exact: true })).toBeVisible();
     await page.unroute(`**/api/v1/campaigns/${secondCampaign.id}/summary`);
 
     await page.evaluate((url) => {
       window.history.pushState({}, '', url);
       window.dispatchEvent(new PopStateEvent('popstate'));
     }, `/c/${campaignId}`);
-    await expect(page.getByText('E2E790 Beta', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toBeVisible();
 
     // Drop only the reader. The writer can move the session while the dashboard
     // explicitly labels its old projection offline. Keep SSE blocked briefly on
@@ -141,8 +142,8 @@ test('dashboard next-session projection stays live across remote writes, campaig
       }),
       'reschedule while reader is offline',
     );
-    await expect(page.getByText('E2E790 Beta', { exact: true })).toBeVisible();
-    await expect(page.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
+    await expect(sessionLog.getByText('E2E790 Beta', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
 
     blockEvents = true;
     const attemptsBeforeRestore = eventAttempts;
@@ -151,11 +152,11 @@ test('dashboard next-session projection stays live across remote writes, campaig
     await expect(page.getByText('Live updates interrupted — showing last-known next-session details.')).toBeVisible();
 
     blockEvents = false;
-    await expect(page.getByText('E2E790 Gamma', { exact: true })).toBeVisible();
+    await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toBeVisible();
     await expect(page.getByText(/showing last-known next-session details/)).toHaveCount(0);
 
     await json<unknown>(await writer.request.delete(`/api/v1/schedule/${created.id}`), 'cancel remotely');
-    await expect(page.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
+    await expect(sessionLog.getByText('E2E790 Gamma', { exact: true })).toHaveCount(0);
     // The global-setup seed 'DLRNAV Saturday Game' (2032-07-24) is the
     // campaign's only remaining future session, so once the test-authored
     // Gamma session is cancelled the live projection falls back to it —
