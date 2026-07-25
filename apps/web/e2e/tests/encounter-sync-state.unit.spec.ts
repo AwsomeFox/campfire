@@ -18,6 +18,9 @@ const RUN_SESSION_PAGE = resolve(__dirname, '../../src/features/encounters/RunSe
 test.describe('encounter sync state (issue #471)', () => {
   test('maps SSE + read freshness into live/connecting/reconnecting/offline/stale', () => {
     expect(
+      deriveEncounterSyncState({ eventStatus: null, readStale: false, resyncPending: false }),
+    ).toBe('connecting');
+    expect(
       deriveEncounterSyncState({ eventStatus: 'connected', readStale: false, resyncPending: false }),
     ).toBe('live');
     expect(

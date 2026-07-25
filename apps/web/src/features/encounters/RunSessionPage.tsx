@@ -724,11 +724,13 @@ export default function RunSessionPage() {
   const encounter = encounterQuery.data ?? null;
 
   useEffect(() => {
-    if (!encounter?.updatedAt) return;
-    setSyncRevision(encounterSyncRevisionFromUpdatedAt(encounter.updatedAt));
+    if (!encounterQuery.isSuccess || encounterQuery.isFetching || encounterQuery.dataUpdatedAt === 0) return;
     setEncounterReadStale(false);
     setResyncPending(false);
-  }, [encounter?.updatedAt]);
+    if (encounter?.updatedAt) {
+      setSyncRevision(encounterSyncRevisionFromUpdatedAt(encounter.updatedAt, encounterQuery.dataUpdatedAt));
+    }
+  }, [encounter?.updatedAt, encounterQuery.dataUpdatedAt, encounterQuery.isFetching, encounterQuery.isSuccess]);
 
   useEffect(() => {
     if (!encounterQuery.error || encounter == null) return;

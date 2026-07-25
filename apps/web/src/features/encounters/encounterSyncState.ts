@@ -28,7 +28,7 @@ export function deriveEncounterSyncState(input: EncounterSyncInput): EncounterSy
   if (input.eventStatus === 'reconnecting') return 'reconnecting';
   if (input.resyncPending || input.readStale) return 'stale';
   if (input.eventStatus === 'stopped') return 'stale';
-  if (input.eventStatus === 'connecting') return 'connecting';
+  if (input.eventStatus === 'connecting' || input.eventStatus == null) return 'connecting';
   return 'live';
 }
 
