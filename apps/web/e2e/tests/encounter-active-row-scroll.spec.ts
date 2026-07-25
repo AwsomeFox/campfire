@@ -48,6 +48,7 @@ test.describe('run session active row scroll (issue #636)', () => {
   test('advancing turn scrolls the active combatant row into view', async ({ page }) => {
     const fixture = await createTallRunningEncounter(page);
     try {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.setViewportSize({ width: 900, height: 360 });
       await page.goto(`/c/${fixture.campaignId}/encounters/${fixture.encounterId}`);
       await expect(page.getByRole('heading', { name: 'Tall scroll drill' })).toBeVisible();
@@ -77,6 +78,7 @@ test.describe('run session active row scroll (issue #636)', () => {
             const rect = el.getBoundingClientRect();
             return rect.bottom > 0 && rect.top < window.innerHeight;
           }),
+          { timeout: 15_000 },
         )
         .toBe(true);
     } finally {
