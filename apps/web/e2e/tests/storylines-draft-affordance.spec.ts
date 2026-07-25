@@ -5,6 +5,7 @@ import { seed, stateFor } from './seed';
  * Issue #639 / #1307: the "Draft a beat with AI" affordance belongs on Storylines (the
  * surface that owns beats), not on Quests. Per-arc drafting is offered once arcs exist;
  * the page header button is only for initial drafting when the story is still empty.
+ * Quests hosts "Draft a quest with AI" instead.
  */
 
 test.describe('Storylines draft-a-beat IA (issue #639 / #1307)', () => {
@@ -39,24 +40,33 @@ test.describe('Storylines draft-a-beat IA (issue #639 / #1307)', () => {
       await expect(dialog).toBeHidden();
     });
 
-    test('Quests no longer hosts the beat-drafting affordance', async ({ page }) => {
+    test('Quests offers "Draft a quest with AI" in its header', async ({ page }) => {
       const { campaignId } = seed();
       await page.goto(`/c/${campaignId}/quests`);
 
       await expect(page.getByRole('button', { name: 'Draft a beat with AI' })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: /Draft .* with AI/i })).toHaveCount(0);
+
+      const trigger = page.getByRole('button', { name: 'Draft a quest with AI' });
+      await expect(trigger).toBeVisible();
+
+      await trigger.click();
+      const dialog = page.getByRole('dialog', { name: 'Draft a quest with AI' });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('textbox', { name: 'Describe the quest you want to draft' })).toBeVisible();
+      await dialog.getByRole('button', { name: 'Close AI drafting dialog' }).click();
+      await expect(dialog).toBeHidden();
     });
   });
 
   test.describe('player never sees the misplaced affordance', () => {
     test.use({ storageState: stateFor('player') });
 
-    test('Quests has no beat-drafting button for a player', async ({ page }) => {
+    test('Quests has no AI drafting buttons for a player', async ({ page }) => {
       const { campaignId } = seed();
       await page.goto(`/c/${campaignId}/quests`);
 
       await expect(page.getByRole('button', { name: 'Draft a beat with AI' })).toHaveCount(0);
-      await expect(page.getByRole('button', { name: /Draft .* with AI/i })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Draft a quest with AI' })).toHaveCount(0);
     });
   });
 });
