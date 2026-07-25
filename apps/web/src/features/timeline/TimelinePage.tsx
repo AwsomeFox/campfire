@@ -198,7 +198,7 @@ export default function TimelinePage() {
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore || loading) return;
-    const sequence = loadSequence.current;
+    const sequence = ++loadSequence.current;
     setLoadingMore(true);
     setError(null);
     try {
@@ -214,7 +214,7 @@ export default function TimelinePage() {
     } catch {
       if (sequence === loadSequence.current) setError("Couldn't load more events.");
     } finally {
-      setLoadingMore(false);
+      if (sequence === loadSequence.current) setLoadingMore(false);
     }
   }, [nextCursor, loadingMore, loading, buildTimelineQuery]);
 

@@ -1385,7 +1385,7 @@ export class McpToolsService {
         'bounded page (`items`, `total`, `hasMore`, `nextCursor`); pass `cursor` from a previous `nextCursor` to continue.',
       {
         campaignId: CampaignIdArg,
-        limit: z.number().int().positive().optional().describe('Page size (default 50, max 200).'),
+        limit: LimitArg(200, 50),
         cursor: z.string().max(512).optional().describe("Opaque cursor from a previous page's nextCursor."),
       },
       async ({ campaignId, limit, cursor }) => {

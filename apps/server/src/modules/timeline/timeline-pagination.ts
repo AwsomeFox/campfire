@@ -1,8 +1,10 @@
 /**
  * Timeline list pagination helpers (issue #615).
  *
- * Opaque cursors encode the last row's sort keys so pages are keyset-stable under
- * mid-list reordering. Mode:
+ * Opaque cursors encode the last row's sort keys for keyset paging. The id
+ * tiebreaker keeps ordering stable among rows that share a sortIndex, but
+ * changing sortIndex between page fetches can still skip or duplicate rows.
+ * Mode:
  *   - sort — narrative order by sortIndex ASC, id ASC
  */
 import { BadRequestException } from '@nestjs/common';
@@ -34,7 +36,7 @@ export function decodeTimelineCursor(raw: string | undefined): TimelineSortCurso
     !Number.isInteger(c.s) ||
     typeof c.i !== 'number' ||
     !Number.isInteger(c.i) ||
-    c.i < 1
+    c.i <= 0
   ) {
     throw new BadRequestException('`cursor` is invalid or does not match this list');
   }
