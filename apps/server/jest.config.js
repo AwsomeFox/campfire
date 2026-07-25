@@ -43,6 +43,14 @@ module.exports = {
       functions: 55,
       lines: 55,
     },
+    // OIDC e2e spawns dist/main.js in a child process; #556 forwards NODE_V8_COVERAGE
+    // and merges back so these live flow tests register in the coverage report.
+    './src/modules/auth/oidc.service.ts': {
+      statements: 35,
+      branches: 55,
+      functions: 55,
+      lines: 35,
+    },
     './src/modules/rules/': {
       statements: 78,
       branches: 54,

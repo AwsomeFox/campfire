@@ -46,6 +46,7 @@ describe('jest coverageThreshold (#562)', () => {
     }
     const carveOuts = [
       './src/modules/auth/',
+      './src/modules/auth/oidc.service.ts',
       './src/modules/rules/',
       './src/modules/ai-dm/',
       './src/modules/mcp/',
@@ -64,5 +65,22 @@ describe('jest coverageThreshold (#562)', () => {
       // Carve-outs must be below the global floor (otherwise they are not carve-outs).
       expect(entry.branches).toBeLessThan(global.branches);
     }
+  });
+
+  it('requires oidc.service.ts branch floor at the level live e2e flows exercise (#556)', () => {
+    const threshold = config.coverageThreshold;
+    expect(threshold).toBeDefined();
+    if (threshold === undefined) {
+      throw new Error('coverageThreshold must be defined');
+    }
+    const oidcService = threshold['./src/modules/auth/oidc.service.ts'];
+    expect(oidcService).toBeDefined();
+    if (oidcService === undefined) {
+      throw new Error('coverageThreshold for oidc.service.ts must be defined');
+    }
+    // Observed with oidc.e2e-spec.ts child-process merge alone: ~63% branches.
+    // Keep the floor a few points below so CI has headroom without silent regression.
+    expect(oidcService.branches).toBeGreaterThanOrEqual(55);
+    expect(oidcService.branches).toBeLessThan(63);
   });
 });

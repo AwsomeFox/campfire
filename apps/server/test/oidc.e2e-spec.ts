@@ -5,6 +5,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startFakeIdp, type FakeIdp } from './fake-idp';
+import {
+  childV8CoverageEnv,
+  cleanupChildV8CoverageDir,
+  mergeChildV8Coverage,
+  mergeLatestChildV8Coverage,
+} from './oidc-spawn-coverage';
 
 /**
  * This suite boots the REAL Nest app (`dist/main.js`) in a child process for
@@ -27,6 +33,11 @@ import { startFakeIdp, type FakeIdp } from './fake-idp';
  * All requests go through native fetch() against real HTTP, with a small
  * manual cookie jar (no supertest — supertest binds to an in-process Nest
  * HttpServer, which isn't available for a separate OS process).
+ *
+ * Coverage (#556): when `npm run test:cov` runs, each spawned child gets
+ * NODE_V8_COVERAGE forwarded (see test/oidc-spawn-coverage.ts) and the
+ * resulting V8 blobs are merged into jest's istanbul report after each
+ * child exits.
  */
 
 const SERVER_DIST_ENTRY = path.resolve(__dirname, '..', 'dist', 'main.js');
@@ -135,6 +146,7 @@ async function spawnAppOnce(
     PORT: String(port),
     DATA_DIR: dataDir,
     NODE_ENV: 'test',
+    ...childV8CoverageEnv(),
   };
   delete env.DEV_AUTH;
   for (const [key, value] of Object.entries(resolvedOverrides)) {
@@ -173,6 +185,7 @@ async function spawnAppOnce(
       child.kill('SIGKILL');
       await new Promise((r) => setTimeout(r, 200));
     }
+    await mergeLatestChildV8Coverage();
   };
 
   try {
@@ -390,6 +403,8 @@ describe('OIDC login (e2e, fake IdP, real child-process app)', () => {
 
   afterAll(async () => {
     await idp.close();
+    await mergeChildV8Coverage();
+    cleanupChildV8CoverageDir();
   });
 
   /** Boots a fresh app on a fresh free port + fresh DATA_DIR, tracked for cleanup even on failure. */
