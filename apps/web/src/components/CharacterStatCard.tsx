@@ -35,7 +35,6 @@ import {
   advFromEvent,
 } from '../lib/characterStats';
 import { useRoller, type CheckRollMode } from '../lib/useRoller';
-import { RollResultBanner } from './RollResultBanner';
 import { useDisclosure } from './useDisclosure';
 
 /** Map a modifier-key click to a catalog roll mode (shift = advantage, alt/ctrl/⌘ = disadvantage). */
@@ -223,8 +222,6 @@ export function CharacterStatCard({
             )}
           </div>
 
-          {interactive && roller.last && <RollResultBanner roll={roller.last} onDismiss={roller.dismiss} />}
-
           {/* Ability scores — click for an ability check when interactive (server-resolved) */}
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
             {ABILITY_KEYS.map((k) => {
@@ -330,13 +327,12 @@ export function CharacterStatCard({
                             type="button"
                             className="cf-roll-control"
                             disabled={roller.rolling}
-                            title={`Roll ${a.name} damage${onApplyDamage ? ' — then apply to a target' : ''}`}
-                            onClick={async () => {
-                              const res = await roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`);
-                              // Normalize to a non-negative amount — a damage expr
-                              // like 1d4-1 can net 0/negative; damage is never < 0.
-                              if (res && onApplyDamage) onApplyDamage(Math.max(0, res.total), `${a.name} (${character.name})`);
-                            }}
+                            title={`Roll ${a.name} damage${onApplyDamage ? ' — apply from the roll toast in combat' : ''}`}
+                            onClick={() =>
+                              void roller.roll(dmgExpr!, `${character.name} · ${a.name} damage`, {
+                                onApply: onApplyDamage,
+                              })
+                            }
                             data-testid="damage-roll-control"
                           >
                             {a.damage}

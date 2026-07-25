@@ -6,6 +6,7 @@ import { queryClient } from './lib/query';
 import { AuthProvider } from './app/AuthProvider';
 import { AuthStatusProvider } from './app/AuthStatusGate';
 import { AnnounceProvider } from './components/Announcer';
+import { RollResultToastProvider } from './components/RollResultToastContext';
 import { PwaUpdateBanner } from './components/PwaUpdateBanner';
 import { router } from './app/router';
 
@@ -16,8 +17,10 @@ export default function App() {
         <AuthStatusProvider>
           <AuthProvider>
             <AnnounceProvider>
-              <PwaUpdateBanner />
-              <RouterProvider router={router} />
+              <RollResultToastProvider>
+                <PwaUpdateBanner />
+                <RouterProvider router={router} />
+              </RollResultToastProvider>
             </AnnounceProvider>
           </AuthProvider>
         </AuthStatusProvider>
