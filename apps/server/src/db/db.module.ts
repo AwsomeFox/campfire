@@ -218,6 +218,23 @@ function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user dice overlay skins (issue #1315):
+ * `users.dice_theme` didn't exist. Plain NOT NULL DEFAULT 'nocturne' ADD COLUMN.
+ */
+function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
+  if (hasDiceTheme) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -353,6 +370,7 @@ function migrateCharactersTableForSheetDepth(sqlite: Database.Database): void {
   if (!has('skills')) sqlite.exec("ALTER TABLE characters ADD COLUMN skills TEXT NOT NULL DEFAULT '{}'");
   if (!has('actions')) sqlite.exec("ALTER TABLE characters ADD COLUMN actions TEXT NOT NULL DEFAULT '[]'");
   if (!has('spell_slots')) sqlite.exec("ALTER TABLE characters ADD COLUMN spell_slots TEXT NOT NULL DEFAULT '{}'");
+  if (!has('resources')) sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
 }
 
 /**
@@ -2491,7 +2509,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
   { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
   { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
-  { name: '0088_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
+  { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
+  { name: '0089_trash_soft_delete_701', run: migrateTrashSoftDeleteColumns701 },
 ];
 
 /**
