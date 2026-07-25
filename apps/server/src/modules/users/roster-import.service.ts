@@ -388,7 +388,15 @@ export class RosterImportService {
       if (errors.length === 0) {
         if (matchedUserId != null) {
           action = 'update';
-          if (byUsername?.disabled || byOidc?.disabled) warnings.push('Matched account is disabled');
+          const matchedDisabled = byUsername?.disabled || byOidc?.disabled;
+          if (matchedDisabled) {
+            if (campaignId != null) {
+              errors.push('Matched account is disabled — enable it before assigning campaign membership');
+              action = 'error';
+            } else {
+              warnings.push('Matched account is disabled');
+            }
+          }
         } else if (username) {
           action = 'create';
         } else {

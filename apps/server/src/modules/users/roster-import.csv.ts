@@ -31,7 +31,7 @@ function splitCsvLines(content: string): string[] {
     const ch = content[i];
     if (ch === '"') {
       if (inQuotes && content[i + 1] === '"') {
-        current += '"';
+        current += '""';
         i++;
       } else {
         inQuotes = !inQuotes;
