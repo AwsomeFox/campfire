@@ -639,6 +639,16 @@ export class ExportService {
         path: 'attachments.md',
         note: 'Human-readable attachment cross-reference; machine note lives in campaign.json',
       },
+      compendiumDependencies: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Open-license compendium pack manifest for combatant statblock resolution on import; machine copy in campaign.json.',
+      },
+      compendiumNote: {
+        kind: 'embedded',
+        path: 'campaign.json',
+        note: 'Human-readable compendium portability note; machine copy in campaign.json.',
+      },
       participantSupportNote: {
         kind: 'excluded',
         reason:
