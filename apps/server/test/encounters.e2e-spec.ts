@@ -4418,6 +4418,14 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
 
   async function seedRunningFight(): Promise<{ encounterId: number; ariaId: number; monsterId: number }> {
     const server = ctx.app.getHttpServer();
+    const running = await request(server)
+      .get(`/api/v1/campaigns/${campaignId}/encounters`)
+      .query({ status: 'running' })
+      .set(dm);
+    for (const e of running.body as Array<{ id: number }>) {
+      await request(server).post(`/api/v1/encounters/${e.id}/end`).set(dm);
+    }
+
     const res = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/encounters`)
       .set(dm)
@@ -4438,6 +4446,7 @@ describe('encounters — issue #487: player end-turn + ready/delay (e2e)', () =>
       .set(dm)
       .send({ initiative: 5 });
     await request(server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
+    expect((await request(server).get(`/api/v1/encounters/${encounterId}`).set(dm)).body.status).toBe('running');
     return { encounterId, ariaId, monsterId };
   }
 
