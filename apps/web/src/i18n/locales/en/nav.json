@@ -53,6 +53,8 @@
     "moreNavigation": "More navigation",
     "soon": "soon",
     "more": "More",
+    "live": "Live",
+    "liveEncounterTab": "Live combat — round {{round}}",
     "home": "Home",
     "notes": "Notes",
     "lostAccessTitle": "You no longer have access to this campaign",

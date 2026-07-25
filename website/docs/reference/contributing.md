@@ -27,6 +27,12 @@ The **schema package is the contract** — API validation, OpenAPI shapes, and M
 schemas all derive from the Zod definitions in `packages/schema`. Don't redefine
 domain types elsewhere.
 
+**Mobile nav contract** (`apps/web/src/app/Layout.tsx`, issue #637): the bottom tab
+bar shows five primary targets — Home, Quests, Party, Notes, and either **More** or a
+temporary **Live** shortcut to the running encounter. Overflow destinations stay in the
+More sheet (reachable from the role chip in the mobile top bar when Live occupies the
+tab-bar slot). Do not add a sixth tab without condensing or replacing an existing one.
+
 ## Testing — the regression safety net
 
 Four layers run together so a change that breaks combat turn order, leaks a DM
