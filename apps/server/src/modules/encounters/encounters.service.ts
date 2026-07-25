@@ -4166,4 +4166,79 @@ export class EncountersService {
 
     return persisted;
   }
+
+  /** Inline spend or restore of spell slots or character resources during combat (issue #422). */
+  async adjustCombatantResource(
+    encounterId: number,
+    combatantId: number,
+    patch: { key?: string; spellLevel?: number; delta?: number },
+    user: RequestUser,
+    role: Role,
+  ) {
+    const encounter = await this.getRowOrThrow(encounterId);
+    const combatant = this.db.select().from(combatants).where(and(eq(combatants.id, combatantId), eq(combatants.encounterId, encounterId))).limit(1).all()[0];
+    if (!combatant) throw new NotFoundException(`No such combatant ${combatantId} in encounter ${encounterId}`);
+
+    if (combatant.characterId === null) {
+      throw new BadRequestException('Only character combatants have sheet resources');
+    }
+
+    const delta = patch.delta ?? 1;
+    const characterId = combatant.characterId;
+
+    let eventDetail = '';
+
+    this.db.transaction((tx) => {
+      const character = tx.select().from(characters).where(eq(characters.id, characterId)).limit(1).all()[0];
+      if (!character) throw new NotFoundException(`No such character ${characterId}`);
+
+      if (patch.spellLevel !== undefined && patch.spellLevel >= 1 && patch.spellLevel <= 9) {
+        const slots = fromJsonText<Record<string, { max: number; used: number }>>(character.spellSlots, {});
+        const levelKey = String(patch.spellLevel);
+        const slot = slots[levelKey];
+        if (!slot || slot.max <= 0) {
+          throw new BadRequestException(`No spell slots at level ${patch.spellLevel}`);
+        }
+        const nextUsed = slot.used + delta;
+        if (nextUsed < 0 || nextUsed > slot.max) {
+          throw new BadRequestException(`Spell slot adjustment would exceed bounds [0, ${slot.max}] (resulting used: ${nextUsed})`);
+        }
+        slot.used = nextUsed;
+        slots[levelKey] = slot;
+        tx.update(characters).set({ spellSlots: toJsonText(slots), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} Level ${patch.spellLevel} spell slot`;
+      } else if (patch.key) {
+        const resources = fromJsonText<Record<string, { max: number; used: number; name?: string; recharge?: string }>>(character.resources, {});
+        const res = resources[patch.key] ?? { max: 1, used: 0, name: patch.key, recharge: 'long-rest' };
+        const nextUsed = res.used + delta;
+        if (nextUsed < 0 || nextUsed > res.max) {
+          throw new BadRequestException(`Resource '${patch.key}' adjustment would exceed bounds [0, ${res.max}] (resulting used: ${nextUsed})`);
+        }
+        res.used = nextUsed;
+        resources[patch.key] = res;
+        tx.update(characters).set({ resources: toJsonText(resources), updatedAt: nowIso() }).where(eq(characters.id, characterId)).run();
+        eventDetail = `${delta > 0 ? 'spent' : 'restored'} ${Math.abs(delta)} ${res.name || patch.key}`;
+      } else {
+        throw new BadRequestException('Must supply either spellLevel or key to adjust');
+      }
+
+      tx.insert(encounterEvents)
+        .values({
+          encounterId,
+          round: encounter.round,
+          type: 'resource_changed',
+          actor: combatant.name,
+          actorId: combatant.id,
+          target: null,
+          targetId: null,
+          detail: eventDetail,
+          createdAt: nowIso(),
+        })
+        .run();
+    });
+
+    if (!encounter.hidden) this.events.emit({ type: 'encounter.updated', campaignId: encounter.campaignId, encounterId: encounter.id });
+
+    return this.getRowOrThrow(encounterId);
+  }
 }
