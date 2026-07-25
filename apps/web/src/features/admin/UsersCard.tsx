@@ -179,7 +179,7 @@ function NewUserForm({
         setFieldErrors({ username: 'That username is already in use.' });
         document.getElementById(usernameId)?.focus();
       } else {
-        setSubmitError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
+        setSubmitError(translateApiError(err, t, { fallbackKey: 'admin.errors.createUser' }));
       }
       savingRef.current = false;
       setSaving(false);

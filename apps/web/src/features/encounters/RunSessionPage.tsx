@@ -884,8 +884,7 @@ export default function RunSessionPage() {
 
   const reportError = useCallback((err: unknown) => {
     setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })));
-  }, []);
-  /** BattleMap / card rollers pass a plain string (or null to clear). */
+  }, [t]);
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);

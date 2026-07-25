@@ -303,7 +303,7 @@ export default function SessionZeroPage() {
         <EmptyState
           icon="life-buoy"
           title={t('sessionZero.empty.title')}
-          hint={isDm ? 'Record your table’s lines & veils, safety tools, and house rules with "Edit charter".' : "The DM hasn’t recorded the table's charter yet."}
+          hint={isDm ? t('sessionZero.empty.hintDm') : t('sessionZero.empty.hintPlayer')}
         />
       ) : charter ? (
         <CharterView charter={charter} />

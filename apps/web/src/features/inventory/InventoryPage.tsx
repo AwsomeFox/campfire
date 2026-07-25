@@ -20,12 +20,6 @@ import { Field } from '../../components/Field';
 import {
   INVENTORY_ADD_PREFIX,
   INVENTORY_FIELD,
-  INVENTORY_NAME_HELP,
-  INVENTORY_NAME_LABEL,
-  INVENTORY_NOTES_HELP,
-  INVENTORY_NOTES_LABEL,
-  INVENTORY_OWNER_HELP,
-  INVENTORY_OWNER_LABEL,
 } from '../../components/formFieldLabels';
 import { GameIcon } from '../../components/GameIcon';
 import { entityTargetProps } from '../../lib/entityLinks';
@@ -35,7 +29,6 @@ import { getIcon } from '../../lib/icons';
 import { itemIconSlug, COIN_ICON, COIN_COLORS } from '../../lib/inventoryIcons';
 import { parseLocalizedInteger } from '../../lib/i18nNumbers';
 import { useFormattingLocale } from '../../lib/format';
-import inventoryEn from '../../i18n/locales/en/inventory.json';
 
 const COIN_KEYS = [
   { key: 'pp', labelKey: 'inventory.coins.pp' },
@@ -895,13 +888,13 @@ function AddItemForm({
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.name}
-            label={INVENTORY_NAME_LABEL}
+            label={t('inventory.fields.name.label')}
             value={name}
             onChange={(e) => setName(e.target.value)}
             autoFocus
             required
-            help={INVENTORY_NAME_HELP}
-            placeholder={inventoryEn.inventory.fields.name.placeholder}
+            help={t('inventory.fields.name.help')}
+            placeholder={t('inventory.fields.name.placeholder')}
           />
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
@@ -926,10 +919,10 @@ function AddItemForm({
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.owner}
             as="select"
-            label={INVENTORY_OWNER_LABEL}
+            label={t('inventory.fields.owner.label')}
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
-            help={INVENTORY_OWNER_HELP}
+            help={t('inventory.fields.owner.help')}
           >
             <option value="party">{t('inventory.partyStash')}</option>
             {owners.map((c) => (
@@ -941,10 +934,10 @@ function AddItemForm({
           <Field
             idPrefix={INVENTORY_ADD_PREFIX}
             name={INVENTORY_FIELD.notes}
-            label={INVENTORY_NOTES_LABEL}
+            label={t('inventory.fields.notes.label')}
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            help={INVENTORY_NOTES_HELP}
+            help={t('inventory.fields.notes.help')}
             placeholder={t('inventory.notesPlaceholder')}
             optional
           />

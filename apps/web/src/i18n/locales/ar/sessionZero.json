@@ -8,10 +8,10 @@
       "hintPlayer": "The DM hasn't recorded the table's charter yet."
     },
     "errors": {
-      "load": "تعذّر تحميل the session-zero charter.",
-      "save": "تعذّر الحفظ the charter.",
-      "saveSupport": "تعذّر الحفظ your support preference.",
-      "deleteSupport": "تعذّر الحذف your support preference."
+      "load": "تعذّر تحميل ميثاق الجلسة الصفرية.",
+      "save": "تعذّر حفظ الميثاق.",
+      "saveSupport": "تعذّر حفظ تفضيل الدعم الخاص بك.",
+      "deleteSupport": "تعذّر حذف تفضيل الدعم الخاص بك."
     },
     "savedSupport": "Your support preference was saved.",
     "deletedSupport": "Your support preference was deleted.",
