@@ -6,7 +6,9 @@
  * for the DM, cards linking to the live tracker.
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -50,6 +52,7 @@ export default function EncounterListPage() {
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
   const [loading, setLoading] = useState(true);
@@ -168,7 +171,7 @@ function EncounterCard({
   showHidden?: boolean;
 }) {
   return (
-    <Link
+    <ListDetailLink
       to={`/c/${campaignId}/encounters/${encounter.id}`}
       className="card elev-sm"
       style={{ color: 'var(--color-text)', textDecoration: 'none', gap: 10 }}
@@ -195,7 +198,7 @@ function EncounterCard({
           </Chip>
         )}
       </div>
-    </Link>
+    </ListDetailLink>
   );
 }
 

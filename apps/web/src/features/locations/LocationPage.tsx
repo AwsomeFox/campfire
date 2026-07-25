@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type { Campaign, Location, Npc, Quest } from '@campfire/schema';
 import { LocationStatus } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
@@ -473,11 +474,20 @@ export default function LocationPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('location', location.id)}>
-      <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/locations`)}>
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/locations`}
+        defaultLabel="← Back to locations"
+        trail={
+          !editing && ancestors.length > 0
+            ? ancestors.map((a) => ({
+                label: a.name,
+                to: `/c/${cid}/locations/${a.id}`,
+              }))
+            : undefined
+        }
+        currentLabel={!editing ? location.name : undefined}
+      />
 
       {error && <ErrorNote message={error} onRetry={load} />}
 
@@ -492,26 +502,6 @@ export default function LocationPage() {
 
       {!editing && (
         <>
-          {ancestors.length > 0 && (
-            <nav aria-label="Location breadcrumb" className="flex items-center gap-1.5 flex-wrap text-xs text-slate-400 -mb-1">
-              {ancestors.map((a) => (
-                <span key={a.id} className="flex items-center gap-1.5">
-                  <a
-                    href={`/c/${cid}/locations/${a.id}`}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      navigate(`/c/${cid}/locations/${a.id}`);
-                    }}
-                    className="hover:text-amber-400"
-                  >
-                    {a.name}
-                  </a>
-                  <span className="text-slate-600" aria-hidden>›</span>
-                </span>
-              ))}
-              <span className="text-slate-500">{location.name}</span>
-            </nav>
-          )}
           <div className="flex items-center gap-2.5 flex-wrap">
             <h1 className="text-2xl font-extrabold text-white min-w-0 break-words">{location.name}</h1>
             <Chip variant={statusVariant(location.status)}><LocationStatusLabel status={location.status} /></Chip>
