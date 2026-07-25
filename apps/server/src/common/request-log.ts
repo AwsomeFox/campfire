@@ -35,7 +35,9 @@ const SECRET_VALUE_PATTERNS: RegExp[] = [
 export function redactLogSecrets(value: string): string {
   let out = value;
   for (const pattern of SECRET_VALUE_PATTERNS) {
-    out = out.replace(pattern, '<redacted>');
+    out = out.replace(pattern, (_match, prefix: string | undefined) =>
+      prefix ? `${prefix}<redacted>` : '<redacted>',
+    );
   }
   return out;
 }
