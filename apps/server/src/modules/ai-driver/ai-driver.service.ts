@@ -26,6 +26,24 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from '../ai-dm/providers/http';
 import { AI_PROVIDER_RESOLVER, resolveProviderForExecution, type AiProviderResolver } from './ai-provider-resolver';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { extractToolResourceIdentity, type ToolResourceIdentity } from './ai-dm-tool-resource';
+import {
+  checkDriverPolicyRateLimits,
+  DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE,
+  DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+  DRIVER_UNDOABLE_TOOLS,
+  isDriverForbiddenToolName,
+  MAX_PENDING_TOOL_CONFIRMATIONS,
+  noteDriverConfirmToolAttempt,
+  noteDriverPolicyViolation,
+  pendingConfirmationKey,
+  resetDriverTurnPolicyCounters,
+  resolveDriverSessionProfile,
+  resolveDriverToolPolicy,
+  type AiDmPendingToolConfirmation,
+  type DriverSessionProfile,
+  type DriverToolPolicyClass,
+} from './driver-tool-policy';
 import { SupportPreferencesService } from '../session-zero/support-preferences.service';
 import {
   formatCalendarForPrompt,
@@ -110,6 +128,8 @@ export interface AiDmExecutedTool {
   isError: boolean;
   /** True when the call was routed to the proposal queue (a canon write the seat can't make directly). */
   proposed: boolean;
+  /** True when execution is queued for DM confirmation (#474). */
+  pendingConfirmation?: boolean;
   /** Encounter mutated by this call, when known from validated args/results (#825). */
   encounterId?: number;
 }
@@ -234,8 +254,17 @@ export interface AiDmSessionState {
    * stay off-limits so hidden handouts cannot be exposed via update_encounter.
    */
   driverGeneratedMapIds?: number[];
-  /** generate_map calls consumed this turn — reset at turn start (#488 / #474 policy-lite). */
+  /** generate_map calls consumed this turn — reset at turn start (#488 / #474). */
   generateMapCallsThisTurn?: number;
+  /** Confirm-policy tool attempts consumed this turn (#474). */
+  confirmToolAttemptsThisTurn?: number;
+  /** Policy violations (deny / guard / rate-limit) this turn (#474). */
+  policyViolationsThisTurn?: number;
+  /**
+   * Pending DM confirmations for irreversible live-play tools (#474). Keyed
+   * `${tool}:${toolCallId}`; each entry executes once when a DM approves it.
+   */
+  pendingToolConfirmations?: Record<string, AiDmPendingToolConfirmation>;
   /**
    * Set when {@link AiDriverService.teardownSession} detaches this object from the live map
    * (#1071). An in-flight `runTurn` that still holds this reference must stop streaming and
@@ -245,14 +274,30 @@ export interface AiDmSessionState {
 }
 
 /** Session fields used only for internal execution guard bookkeeping, never exposed to members. */
-type AiDmSessionPrivateGuardFields = 'secretReadApprovals' | 'driverGeneratedMapIds' | 'generateMapCallsThisTurn' | 'detached';
+type AiDmSessionPrivateGuardFields =
+  | 'secretReadApprovals'
+  | 'driverGeneratedMapIds'
+  | 'generateMapCallsThisTurn'
+  | 'confirmToolAttemptsThisTurn'
+  | 'policyViolationsThisTurn'
+  | 'pendingToolConfirmations'
+  | 'detached';
 
 /** Member-visible AI-DM session shape (sanitized projection of {@link AiDmSessionState}). */
 export type AiDmPublicSessionState = Omit<AiDmSessionState, AiDmSessionPrivateGuardFields>;
 
 /** Strip internal execution-guard bookkeeping before serializing session state to API clients. */
 export function toPublicAiDmSessionState(session: AiDmSessionState): AiDmPublicSessionState {
-  const { secretReadApprovals: _approvals, driverGeneratedMapIds: _mapIds, generateMapCallsThisTurn: _mapCalls, detached: _detached, ...rest } = session;
+  const {
+    secretReadApprovals: _approvals,
+    driverGeneratedMapIds: _mapIds,
+    generateMapCallsThisTurn: _mapCalls,
+    confirmToolAttemptsThisTurn: _confirmAttempts,
+    policyViolationsThisTurn: _violations,
+    pendingToolConfirmations: _pendingTools,
+    detached: _detached,
+    ...rest
+  } = session;
   return rest;
 }
 
@@ -418,13 +463,10 @@ const DRIVER_LIVE_PLAY_TOOLS: ReadonlySet<string> = new Set([
   'add_note',
 ]);
 
-/** Tool-name prefixes the driver seat may never call — every hard delete (delete_*), even proposed. */
-const DRIVER_FORBIDDEN_PREFIXES = ['delete_'] as const;
-
-/** Per-turn cap on generate_map calls (#488 / #474 policy-lite: bounded, not unbounded). */
-export const DRIVER_GENERATE_MAP_BUDGET_PER_TURN = 1;
-/** Per-call treasury grant cap (per denomination) for autonomous live play. */
-export const DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION = 10_000;
+export {
+  DRIVER_GENERATE_MAP_BUDGET_PER_TURN,
+  DRIVER_TREASURY_GRANT_MAX_PER_DENOMINATION,
+} from './driver-tool-policy';
 
 /** Economy/loot tools that persist a combat-log note on the active encounter (#1021). */
 const DRIVER_LOOT_COMBAT_LOG_TOOLS = new Set(['adjust_treasury', 'add_inventory_item', 'update_inventory_item']);
@@ -486,7 +528,7 @@ export type DriverLivePlayArgGuardResult =
 
 /** Reset per-turn live-play counters at the start of each driver turn. */
 export function resetDriverTurnCounters(session: AiDmSessionState): void {
-  session.generateMapCallsThisTurn = 0;
+  resetDriverTurnPolicyCounters(session);
 }
 
 /** Record a generate_map quota consumption for the current turn. */
@@ -786,7 +828,7 @@ export function isDriverApprovableEntityRead(toolName: string): boolean {
  * refuses them with no hand-maintained enumeration to drift out of sync.
  */
 export function isDriverToolAllowed(tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>): boolean {
-  if (DRIVER_FORBIDDEN_PREFIXES.some((p) => tool.name.startsWith(p))) return false;
+  if (isDriverForbiddenToolName(tool.name)) return false;
   if (!tool.mutating) return true; // reads are always allowed (permission-checked in the tool)
   if (tool.proposalCapable) return true; // canon writes → the runtime forces propose:true below
   return DRIVER_LIVE_PLAY_TOOLS.has(tool.name); // direct writes: explicit live-play allow-list only
@@ -875,6 +917,7 @@ export class AiDriverService {
   private readonly lastInputs = new Map<number, string>();
   private readonly actionQueues = new Map<number, ActionQueueEntry[]>();
   private voteSeq = 0;
+  private confirmationSeq = 0;
 
   constructor(
     private readonly aiDm: AiDmService,
@@ -1049,7 +1092,33 @@ export class AiDriverService {
       vote: null,
       takeoverRequestedBy: null,
       secretReadApprovals: {},
+      pendingToolConfirmations: {},
     };
+  }
+
+  /** Resolve the driver session profile from encounter state (#474). */
+  private async resolveSessionProfile(campaignId: number): Promise<DriverSessionProfile> {
+    const [running, preparing, ended] = await Promise.all([
+      this.encounters.listForCampaign(campaignId, 'running', 'dm'),
+      this.encounters.listForCampaign(campaignId, 'preparing', 'dm'),
+      this.encounters.listForCampaign(campaignId, 'ended', 'dm'),
+    ]);
+    return resolveDriverSessionProfile({
+      hasRunningEncounter: running.length > 0,
+      hasPreparingEncounter: preparing.length > 0,
+      hasEndedEncounter: ended.length > 0,
+    });
+  }
+
+  private policyForTool(
+    profile: DriverSessionProfile,
+    tool: Pick<DriverTool, 'name' | 'mutating' | 'proposalCapable'>,
+  ) {
+    return resolveDriverToolPolicy({
+      profile,
+      tool,
+      onLivePlayAllowList: DRIVER_LIVE_PLAY_TOOLS.has(tool.name),
+    });
   }
 
   private ensureSession(campaignId: number): AiDmSessionState {
@@ -1206,12 +1275,16 @@ export class AiDriverService {
     // registry per call from classifyDriverRead + the on-file approvals.
     const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
     const contextToolset = this.mcpTools.buildToolset(contextPrincipal);
-    // Tool-scoping (#317 + #557): only OFFER the model tools this seat may call — destructive/
-    // admin tools AND bulk DM-only aggregate reads (export/audit/arcs/…) are withheld from the
-    // schema. This is a hint only; executeToolCalls still enforces the same allow-lists server-
-    // side, so a hallucinated or injection-induced forbidden call never runs.
+    const sessionProfile = await this.resolveSessionProfile(campaignId);
+    // Tool-scoping (#317 + #557 + #474): only OFFER tools this seat may call in the current
+    // session profile — destructive/admin tools, bulk DM-only aggregate reads, and profile-
+    // denied live-play tools are withheld from the schema. Execution still enforces the same
+    // policy server-side so a hallucinated or injection-induced forbidden call never runs.
     const toolSchemas: AiToolSchema[] = seatToolset.tools
-      .filter((t) => isDriverToolAllowed(t) && !DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name))
+      .filter((t) => {
+        if (!isDriverToolAllowed(t) || DRIVER_DM_ONLY_AGGREGATE_TOOLS.has(t.name)) return false;
+        return this.policyForTool(sessionProfile, t).offer;
+      })
       .map((t) => ({
         name: t.name,
         description:
@@ -1483,6 +1556,7 @@ export class AiDriverService {
         const { toolErrored, authorityStop } = await this.executeToolCalls(
           campaignId,
           session,
+          sessionProfile,
           generationSignal,
           actor,
           triggeredBy,
@@ -1770,6 +1844,7 @@ export class AiDriverService {
   private async executeToolCalls(
     campaignId: number,
     session: AiDmSessionState,
+    sessionProfile: DriverSessionProfile,
     generationSignal: AbortSignal,
     actor: string,
     triggeredBy: RequestUser,
@@ -1786,22 +1861,33 @@ export class AiDriverService {
         return { toolErrored: false, authorityStop: authority };
       }
 
-      const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
-
-      // (0) Tool-scoping (#317/#378): the seat physically cannot call destructive/admin/economy
-      // tools, regardless of what the (untrusted-input-driven) model asked for. Default-deny at
-      // EXECUTION (not merely by withholding the schema) so a hallucinated or injection-induced
-      // forbidden call never reaches a service. A known tool that fails the allow-list is a
-      // security anomaly (audited + logged); an unknown tool falls through to a plain 404 below.
-      if (tool && !isDriverToolAllowed(tool)) {
+      const rateLimit = checkDriverPolicyRateLimits(session);
+      if (!rateLimit.ok) {
+        if (rateLimit.emergencyPause) {
+          await this.triggerEmergencyPause(campaignId, session, actor, rateLimit.message);
+        }
         const text = JSON.stringify(
-          buildMcpEnvelope(
-            new ForbiddenException({
-              code: 'forbidden_tool',
-              message: `The AI DM seat is not permitted to call ${call.name}.`,
-            }),
-          ),
+          buildMcpEnvelope(new ForbiddenException({ code: rateLimit.code, message: rateLimit.message })),
         );
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
+        const rateIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, call.arguments ?? {}, undefined, true);
+        this.emitToolEvent(campaignId, call.name, true, false, rateIdentity);
+        executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(rateIdentity) });
+        toolErrored = true;
+        continue;
+      }
+
+      const tool = seatToolset.get(call.name) ?? contextToolset.get(call.name);
+      const policyDecision = tool ? this.policyForTool(sessionProfile, tool) : null;
+
+      // (0) Tool-scoping (#317/#378/#474): default-deny at EXECUTION so a hallucinated or
+      // injection-induced forbidden call never reaches a service.
+      if (tool && (!isDriverToolAllowed(tool) || policyDecision?.policy === 'deny')) {
+        const code = policyDecision?.policy === 'deny' ? 'forbidden_tool_policy' : 'forbidden_tool';
+        const message =
+          policyDecision?.reason ??
+          `The AI DM seat is not permitted to call ${call.name} during ${sessionProfile} play.`;
+        const text = JSON.stringify(buildMcpEnvelope(new ForbiddenException({ code, message })));
         messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: text });
         const blockedIdentity = await this.resolveToolResourceIdentity(
           campaignId,
@@ -1813,14 +1899,20 @@ export class AiDriverService {
         this.emitToolEvent(campaignId, call.name, true, false, blockedIdentity);
         executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(blockedIdentity) });
         this.logger.warn(`Blocked out-of-scope tool ${call.name} for ${actor} (triggered by ${triggeredBy.id})`);
+        const violations = noteDriverPolicyViolation(session);
         await this.audit.log({
           actor,
           actorRole: 'dm',
           action: 'ai-dm.driver.blocked',
           entityType: 'ai-dm',
           campaignId,
-          detail: `blocked out-of-scope tool ${call.name} (triggered by ${triggeredBy.id})`,
+          detail:
+            `blocked ${call.name} profile=${sessionProfile} policy=${policyDecision?.policy ?? 'deny'} ` +
+            `violations=${violations} (triggered by ${triggeredBy.id})`,
         });
+        if (violations >= DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE) {
+          await this.triggerEmergencyPause(campaignId, session, actor, `policy violations reached ${violations}`);
+        }
         toolErrored = true;
         continue;
       }
@@ -1861,14 +1953,20 @@ export class AiDriverService {
           this.emitToolEvent(campaignId, call.name, true, false, liveIdentity);
           executed.push({ name: call.name, isError: true, proposed: false, ...pickExecutedIdentity(liveIdentity) });
           this.logger.warn(`Blocked live-play guard on ${call.name} for ${actor} (triggered by ${triggeredBy.id}): ${liveGuard.code}`);
+          const violations = noteDriverPolicyViolation(session);
           await this.audit.log({
             actor,
             actorRole: 'dm',
             action: 'ai-dm.driver.blocked',
             entityType: 'ai-dm',
             campaignId,
-            detail: `blocked ${call.name}: ${liveGuard.code} (triggered by ${triggeredBy.id})`,
+            detail:
+              `blocked ${call.name}: ${liveGuard.code} profile=${sessionProfile} violations=${violations} ` +
+              `(triggered by ${triggeredBy.id})`,
           });
+          if (violations >= DRIVER_POLICY_VIOLATIONS_BEFORE_EMERGENCY_PAUSE) {
+            await this.triggerEmergencyPause(campaignId, session, actor, `policy violations reached ${violations}`);
+          }
           toolErrored = true;
           continue;
         }
@@ -1878,6 +1976,56 @@ export class AiDriverService {
         if (call.name === 'generate_map' || call.name === 'generate_ai_map' || call.name === 'refine_ai_map') {
           noteDriverGenerateMapCall(session);
         }
+      }
+
+      // (1c) Confirm-policy tools (#474): queue for DM review instead of executing directly.
+      if (tool?.mutating && policyDecision?.policy === 'confirm') {
+        noteDriverConfirmToolAttempt(session);
+        const pending = this.queueToolConfirmation(
+          session,
+          call,
+          args,
+          sessionProfile,
+          policyDecision.policy,
+          actor,
+          triggeredBy.id,
+        );
+        const pendingText = JSON.stringify({
+          status: 'pending_dm_confirmation',
+          confirmationId: pending.id,
+          tool: call.name,
+          profile: sessionProfile,
+          undoable: policyDecision.undoable || DRIVER_UNDOABLE_TOOLS.has(call.name),
+          message: policyDecision.reason ?? `${call.name} requires DM confirmation before it executes.`,
+        });
+        messages.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: pendingText });
+        const pendingIdentity = await this.resolveToolResourceIdentity(campaignId, call.name, args, undefined, false);
+        this.emitToolEvent(campaignId, call.name, false, false, pendingIdentity, true);
+        executed.push({
+          name: call.name,
+          isError: false,
+          proposed: false,
+          pendingConfirmation: true,
+          ...pickExecutedIdentity(pendingIdentity),
+        });
+        await this.audit.log({
+          actor,
+          actorRole: 'dm',
+          action: 'ai-dm.driver.confirmation.queued',
+          entityType: 'ai-dm',
+          campaignId,
+          detail:
+            `queued ${call.name} profile=${sessionProfile} confirmation=${pending.id} ` +
+            `(triggered by ${triggeredBy.id})`,
+        });
+        this.stream.emit({
+          type: 'tool-confirmation',
+          campaignId,
+          action: 'queued',
+          confirmationId: pending.id,
+          tool: call.name,
+        });
+        continue;
       }
 
       // (2) Secrecy policy (#557): pick the principal this read runs under. Writes always run
@@ -2063,6 +2211,7 @@ export class AiDriverService {
     isError: boolean,
     proposed: boolean,
     identity: ToolResourceIdentity,
+    pendingConfirmation = false,
   ): void {
     this.stream.emit({
       type: 'tool',
@@ -2070,9 +2219,69 @@ export class AiDriverService {
       name,
       isError,
       proposed,
+      pendingConfirmation,
       ...(identity.encounterId !== undefined ? { encounterId: identity.encounterId } : {}),
       ...(identity.encounterHidden !== undefined ? { encounterHidden: identity.encounterHidden } : {}),
     });
+  }
+
+  private queueToolConfirmation(
+    session: AiDmSessionState,
+    call: AiToolCall,
+    args: Record<string, unknown>,
+    profile: DriverSessionProfile,
+    policy: DriverToolPolicyClass,
+    actor: string,
+    triggeredBy: string,
+  ): AiDmPendingToolConfirmation {
+    session.pendingToolConfirmations = session.pendingToolConfirmations ?? {};
+    const key = pendingConfirmationKey(call.name, call.id);
+    const existing = session.pendingToolConfirmations[key];
+    if (existing) return existing;
+
+    const keysByAge = Object.keys(session.pendingToolConfirmations).sort((a, b) =>
+      session.pendingToolConfirmations![a].requestedAt.localeCompare(session.pendingToolConfirmations![b].requestedAt),
+    );
+    while (keysByAge.length >= MAX_PENDING_TOOL_CONFIRMATIONS) {
+      const oldest = keysByAge.shift()!;
+      delete session.pendingToolConfirmations[oldest];
+    }
+
+    const pending: AiDmPendingToolConfirmation = {
+      id: `confirm-${++this.confirmationSeq}`,
+      tool: call.name,
+      args: { ...args },
+      toolCallId: call.id,
+      profile,
+      policy,
+      requestedAt: nowIso(),
+      actor,
+      triggeredBy,
+      turnNumber: session.turnCount,
+    };
+    session.pendingToolConfirmations[key] = pending;
+    return pending;
+  }
+
+  private async triggerEmergencyPause(
+    campaignId: number,
+    session: AiDmSessionState,
+    actor: string,
+    reason: string,
+  ): Promise<void> {
+    if (session.status === 'paused' || session.state === 'paused') return;
+    session.status = 'paused';
+    session.state = 'paused';
+    session.levers = this.leversFor(session);
+    await this.audit.log({
+      actor,
+      actorRole: 'dm',
+      action: 'ai-dm.driver.emergency-pause',
+      entityType: 'ai-dm',
+      campaignId,
+      detail: reason,
+    });
+    this.stream.emit({ type: 'state', campaignId, state: session.state });
   }
 
   // ===================================================================================
@@ -2270,6 +2479,111 @@ export class AiDriverService {
     const key = approvalKey(tool, entityId);
     const a = approvals[key];
     return a && !a.consumed ? a : null;
+  }
+
+  // ===================================================================================
+  // Confirm-policy tool gate (#474): irreversible live-play tools queue for DM review
+  // before executing. Mirrors the in-memory secret-read approval pattern.
+  // ===================================================================================
+
+  /** Pending confirm-policy tool calls awaiting DM action (#474). */
+  listPendingToolConfirmations(campaignId: number): AiDmPendingToolConfirmation[] {
+    const session = this.ensureSession(campaignId);
+    return Object.values(session.pendingToolConfirmations ?? {});
+  }
+
+  /**
+   * Approve or reject a queued confirm-policy tool call (#474). Approval executes the stored
+   * args under the seat principal with full audit provenance; rejection drops the pending entry.
+   */
+  async resolveToolConfirmation(
+    campaignId: number,
+    granter: RequestUser,
+    confirmationId: string,
+    action: 'approve' | 'reject',
+    role: Role = 'dm',
+  ): Promise<{ confirmation: AiDmPendingToolConfirmation | null; result?: { isError: boolean; text: string } }> {
+    if (role !== 'dm') {
+      throw new ForbiddenException('Only a DM may resolve AI DM tool confirmations.');
+    }
+    const session = this.ensureSession(campaignId);
+    const pendingMap = session.pendingToolConfirmations ?? {};
+    const pending = Object.values(pendingMap).find((entry) => entry.id === confirmationId) ?? null;
+    if (!pending) {
+      throw new BadRequestException(`No pending tool confirmation ${confirmationId}.`);
+    }
+    const key = pendingConfirmationKey(pending.tool, pending.toolCallId);
+    delete pendingMap[key];
+    session.pendingToolConfirmations = pendingMap;
+
+    if (action === 'reject') {
+      await this.audit.log({
+        actor: auditActor(granter),
+        actorRole: role,
+        action: 'ai-dm.driver.confirmation.rejected',
+        entityType: 'ai-dm',
+        campaignId,
+        detail:
+          `rejected ${pending.tool} confirmation=${confirmationId} profile=${pending.profile} ` +
+          `actor=${pending.actor} triggeredBy=${pending.triggeredBy}`,
+      });
+      this.stream.emit({
+        type: 'tool-confirmation',
+        campaignId,
+        action: 'rejected',
+        confirmationId,
+        tool: pending.tool,
+      });
+      return { confirmation: null };
+    }
+
+    const seatPrincipal = this.seatPrincipal(campaignId);
+    const seatToolset = this.mcpTools.buildToolset(seatPrincipal);
+    const res = await seatToolset.call(pending.tool, pending.args);
+
+    if (!res.isError && DRIVER_LOOT_COMBAT_LOG_TOOLS.has(pending.tool)) {
+      const detail = formatDriverLootCombatLogDetail(pending.tool, pending.args);
+      if (detail) {
+        try {
+          await this.encounters.appendActiveEncounterNote(campaignId, detail);
+        } catch (err) {
+          this.logger.warn(
+            `Failed to append loot combat-log note after confirmed ${pending.tool} for campaign ${campaignId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
+
+    await this.audit.log({
+      actor: pending.actor,
+      actorRole: 'dm',
+      action: 'ai-dm.driver.confirmation.approved',
+      entityType: 'ai-dm',
+      campaignId,
+      detail:
+        `approved ${pending.tool} confirmation=${confirmationId} profile=${pending.profile} ` +
+        `approvedBy=${granter.id} triggeredBy=${pending.triggeredBy}${res.isError ? ' [error]' : ''}`,
+    });
+    await this.audit.log({
+      actor: pending.actor,
+      actorRole: 'dm',
+      action: 'ai-dm.driver.tool',
+      entityType: 'ai-dm',
+      campaignId,
+      detail:
+        `${pending.tool} (confirmed) profile=${pending.profile} approvedBy=${granter.id} ` +
+        `triggeredBy=${pending.triggeredBy}${res.isError ? ' [error]' : ''}`,
+    });
+    this.stream.emit({
+      type: 'tool-confirmation',
+      campaignId,
+      action: 'approved',
+      confirmationId,
+      tool: pending.tool,
+    });
+    return { confirmation: pending, result: { isError: res.isError, text: res.text } };
   }
 
   /**

@@ -139,9 +139,19 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
   });
 
   // ── #1021 ────────────────────────────────────────────────────────────────────
-  it('#1021 driver can directly execute adjust_treasury and add_inventory_item during live play', async () => {
+  it('#1021 driver executes adjust_treasury and add_inventory_item after DM confirmation during live play', async () => {
     const campaignId = await h.createCampaign('Loot Live Play');
     await h.configureSeat(campaignId, { mode: 'driver', tokenBudget: 100_000 });
+
+    const enc = await request(h.server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Loot Room' });
+    expect(enc.status).toBe(201);
+    const encounterId = enc.body.id as number;
+    await request(h.server)
+      .post(`/api/v1/encounters/${encounterId}/combatants`)
+      .set(dm)
+      .send({ kind: 'monster', name: 'Goblin', hpMax: 7, initMod: 2 });
+    await request(h.server).post(`/api/v1/encounters/${encounterId}/roll-initiative`).set(dm);
+    await request(h.server).post(`/api/v1/encounters/${encounterId}/start`).set(dm);
 
     h.script(
       {
@@ -156,9 +166,18 @@ describe('ai-dm driver — security + correctness regressions (#375–#387, e2e)
     const res = await h.sendMessage(campaignId, { input: 'loot the room' });
     expect(res.status).toBe(201);
     expect(res.body.toolCalls).toEqual([
-      { name: 'adjust_treasury', isError: false, proposed: false },
-      { name: 'add_inventory_item', isError: false, proposed: false },
+      { name: 'adjust_treasury', isError: false, proposed: false, pendingConfirmation: true },
+      { name: 'add_inventory_item', isError: false, proposed: false, pendingConfirmation: true },
     ]);
+
+    const pending = await request(h.server).get(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmations`).set(dm);
+    expect(pending.body).toHaveLength(2);
+    for (const entry of pending.body as Array<{ id: string }>) {
+      await request(h.server)
+        .post(`/api/v1/campaigns/${campaignId}/ai-dm/tool-confirmation`)
+        .set(dm)
+        .send({ action: 'approve', confirmationId: entry.id });
+    }
 
     // Verify treasury and inventory persistence directly on campaign resources.
     const treasury = await request(h.server).get(`/api/v1/campaigns/${campaignId}/treasury`).set(dm);
