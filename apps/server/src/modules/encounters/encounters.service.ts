@@ -3487,7 +3487,7 @@ export class EncountersService {
       }
       const hasLairSlot = encounterHasLairSlotFromStatblocks(statblocks);
       const freshPhase = (fresh.turnPhase as EncounterTurnPhase) ?? 'combatant';
-      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId } = retreatEncounterTurn(
+      const { turnIndex, round, currentCombatantId, phase, lairResumeCombatantId, roundWrapped } = retreatEncounterTurn(
         sorted,
         fresh.currentCombatantId,
         fresh.round,
@@ -3497,8 +3497,30 @@ export class EncountersService {
       );
       newRound = round;
       newCurrentId = currentCombatantId;
-      const back = currentCombatantId === null ? undefined : sorted.find((c) => c.id === currentCombatantId);
-      newCurrentName = phase === 'lair' ? 'Lair' : back?.name ?? null;
+
+      if (roundWrapped) {
+        for (const row of rows) {
+          const domain = combatantToDomain(row);
+          if (domain.ruleEntryId === null) continue;
+          const mapped = statblocks.get(domain.ruleEntryId);
+          if (!mapped || !statblockSectionHasEntries(mapped.legendaryActions)) continue;
+          const reset = resetLegendaryUsage(domain.turnState);
+          if (reset !== domain.turnState) {
+            tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, row.id)).run();
+          }
+        }
+      }
+
+      const restored =
+        phase === 'combatant' && currentCombatantId !== null
+          ? sorted.find((c) => c.id === currentCombatantId)
+          : undefined;
+      newCurrentName = phase === 'lair' ? 'Lair' : restored?.name ?? null;
+      if (restored) {
+        const reset = resetTurnStateForStart(restored.turnState);
+        tx.update(combatants).set({ turnState: toJsonText(reset) }).where(eq(combatants.id, restored.id)).run();
+      }
+
       tx.update(encounters)
         .set({
           turnIndex,
