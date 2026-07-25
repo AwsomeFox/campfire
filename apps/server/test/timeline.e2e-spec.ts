@@ -56,7 +56,7 @@ describe('timeline / in-world calendar (e2e)', () => {
     expect(listRes.body.items.map((e: { id: number }) => e.id)).toEqual([first.body.id, second.body.id, third.body.id]);
   });
 
-  it('get / update / delete a single event', async () => {
+  it('get / update / soft-delete / restore a single event', async () => {
     const server = ctx.app.getHttpServer();
     const created = await request(server)
       .post(`/api/v1/campaigns/${campaignId}/timeline`)
@@ -80,6 +80,18 @@ describe('timeline / in-world calendar (e2e)', () => {
     expect(removed.status).toBe(200);
     const gone = await request(server).get(`/api/v1/timeline/${id}`).set(dm);
     expect(gone.status).toBe(404);
+
+    const trash = await request(server).get(`/api/v1/campaigns/${campaignId}/trash`).set(dm);
+    expect(trash.status).toBe(200);
+    expect(trash.body.some((row: { type: string; id: number }) => row.type === 'timeline_event' && row.id === id)).toBe(true);
+
+    const restored = await request(server).post(`/api/v1/timeline/${id}/restore`).set(dm);
+    expect(restored.status).toBe(201);
+    expect(restored.body.title).toBe('The Battle of Flamerule');
+
+    const back = await request(server).get(`/api/v1/timeline/${id}`).set(dm);
+    expect(back.status).toBe(200);
+    expect(back.body.title).toBe('The Battle of Flamerule');
   });
 
   it('unknown key in create/update body -> 400 (strict DTO), not silently stripped', async () => {
