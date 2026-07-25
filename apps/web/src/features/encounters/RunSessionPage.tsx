@@ -1245,7 +1245,11 @@ export default function RunSessionPage() {
     const el = combatantRowRefs.current.get(currentCombatantId);
     if (!el) return;
     const frame = requestAnimationFrame(() => {
-      el.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() });
+      const rect = el.getBoundingClientRect();
+      const inView = rect.bottom > 0 && rect.top < window.innerHeight;
+      if (inView) return;
+      const targetTop = window.scrollY + rect.top - (window.innerHeight - rect.height) / 2;
+      window.scrollTo({ top: Math.max(0, targetTop), behavior: scrollBehavior() });
     });
     return () => cancelAnimationFrame(frame);
   }, [encounter?.status, currentCombatantId]);
