@@ -160,9 +160,17 @@ export default function FactionListPage() {
                 className="cf-card cf-card-hover cf-density-compact space-y-2"
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
-                    {initials(faction.name)}
-                  </span>
+                  {faction.portraitUrl ? (
+                    <img
+                      src={faction.portraitUrl}
+                      alt=""
+                      className="h-9 w-9 shrink-0 rounded-full object-cover border border-[var(--color-divider)]"
+                    />
+                  ) : (
+                    <span className="h-9 w-9 shrink-0 rounded-full bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center text-[13px] text-[var(--color-neutral-400)]">
+                      {initials(faction.name)}
+                    </span>
+                  )}
                   <div className="flex-1 min-w-0">
                     <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={faction.name} aria-label={`Faction: ${faction.name}`}>{faction.name}</p>
                     {faction.kind && <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={faction.kind}>{faction.kind}</p>}

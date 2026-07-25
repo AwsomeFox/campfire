@@ -769,6 +769,14 @@ export class CampaignsService {
       for (const e of encounterRows) {
         if (e.mapAttachmentId != null) attachmentIds.add(e.mapAttachmentId);
       }
+      for (const f of factionRows) {
+        const aid = f.portraitUrl ? historicalAvatarAttachmentId(f.portraitUrl) : null;
+        if (aid != null) attachmentIds.add(aid);
+      }
+      for (const l of locationRows) {
+        const aid = l.portraitUrl ? historicalAvatarAttachmentId(l.portraitUrl) : null;
+        if (aid != null) attachmentIds.add(aid);
+      }
     }
     const attachmentRows = attachmentIds.size
       ? await this.db
@@ -1030,6 +1038,14 @@ export class CampaignsService {
       for (const e of encounterRows) {
         if (e.mapAttachmentId != null) attachmentSrcIds.add(e.mapAttachmentId);
       }
+      for (const f of factionRows) {
+        const aid = f.portraitUrl ? historicalAvatarAttachmentId(f.portraitUrl) : null;
+        if (aid != null) attachmentSrcIds.add(aid);
+      }
+      for (const l of locationRows) {
+        const aid = l.portraitUrl ? historicalAvatarAttachmentId(l.portraitUrl) : null;
+        if (aid != null) attachmentSrcIds.add(aid);
+      }
     }
     const attachmentAttRows = attachmentSrcIds.size
       ? await this.db
@@ -1180,6 +1196,27 @@ export class CampaignsService {
         if (historicalAvatarAttachmentId(safe) != null) return null;
         return safe;
       };
+
+      // Factions and locations were inserted before attachment rows so that npcs could
+      // remap through them; now that attMap exists, patch their portrait URLs (#1324).
+      for (const f of factionRows) {
+        const newId = factionMap.get(f.id);
+        if (newId != null) {
+          tx.update(factions)
+            .set({ portraitUrl: remapClonedPortraitUrl(f.portraitUrl) })
+            .where(eq(factions.id, newId))
+            .run();
+        }
+      }
+      for (const l of locationRows) {
+        const newId = locMap.get(l.id);
+        if (newId != null) {
+          tx.update(locations)
+            .set({ portraitUrl: remapClonedPortraitUrl(l.portraitUrl) })
+            .where(eq(locations.id, newId))
+            .run();
+        }
+      }
 
       const npcMap = new Map<number, number>();
       for (const n of npcRows) {
@@ -2051,6 +2088,7 @@ export class CampaignsService {
             hidden: hiddenOf(f.hidden),
             reputation: intOr(f.reputation, 0),
             standing: str(f.standing, 'neutral'),
+            portraitUrl: remapPortraitUrl(f.portraitUrl),
             createdAt: ts,
             updatedAt: ts,
           })
@@ -2077,6 +2115,7 @@ export class CampaignsService {
             mapY: realOrNull(l.mapY),
             body: str(l.body),
             dmSecret: str(l.dmSecret),
+            portraitUrl: remapPortraitUrl(l.portraitUrl),
             createdAt: ts,
             updatedAt: ts,
           })

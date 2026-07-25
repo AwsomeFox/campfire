@@ -28,6 +28,7 @@ export function toDomain(row: typeof locations.$inferSelect): Location {
     mapY: row.mapY,
     body: row.body,
     dmSecret: row.dmSecret,
+    portraitUrl: row.portraitUrl,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -155,6 +156,7 @@ export class LocationsService {
         mapY: input.mapY ?? null,
         body: input.body ?? '',
         dmSecret: input.dmSecret ?? '',
+        portraitUrl: input.portraitUrl ?? null,
         createdAt: ts,
         updatedAt: ts,
       })
