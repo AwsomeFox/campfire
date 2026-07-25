@@ -1,4 +1,5 @@
-import { describe, expect, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
+import type { TFunction } from 'i18next';
 import {
   buildCampaignNavGroups,
   flattenNavGroups,
@@ -7,9 +8,9 @@ import {
   navGroupsForMoreSheet,
 } from '../../src/app/campaignNav';
 
-const t = (key: string) => key;
+const t = ((key: string) => key) as TFunction;
 
-describe('campaign nav IA (#643)', () => {
+test.describe('campaign nav IA (#643)', () => {
   test('groups routes into Play, Prepare, World, Records, Manage', () => {
     const groups = buildCampaignNavGroups(t, 42, {
       isDm: true,
