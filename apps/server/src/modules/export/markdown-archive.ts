@@ -183,6 +183,8 @@ export const MACHINE_EXPORT_MODULES = [
   'sessionAttendance',
   'attachments',
   'attachmentsNote',
+  'compendiumDependencies',
+  'compendiumNote',
   'participantSupportNote',
 ] as const;
 
