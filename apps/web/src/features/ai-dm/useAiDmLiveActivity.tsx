@@ -134,6 +134,7 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
     case 'turn.start':
       return { ...prev, turnActive: true };
     case 'turn.end':
+    case 'turn.error':
       return { ...prev, turnActive: false };
     case 'narration.message':
       return { ...prev, lastNarration: event.text };

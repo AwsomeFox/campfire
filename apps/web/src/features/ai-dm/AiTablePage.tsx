@@ -251,7 +251,7 @@ export default function AiTablePage() {
         if (campaignId === undefined) return;
         dispatch({ type: 'stream', event });
         if (event.type === 'turn.start') setStreaming(true);
-        else if (event.type === 'turn.end') setStreaming(false);
+        else if (event.type === 'turn.end' || event.type === 'turn.error') setStreaming(false);
         else if (event.type === 'tool') {
           invalidateForToolEvent(queryClient, event, {
             campaignId,
@@ -894,8 +894,14 @@ function TranscriptRow({
           {entry.status === 'streaming' && text && <span className="cf-typing"> ▍</span>}
           {entry.meta && (
             <div className="text-[10px] text-[var(--color-neutral-600)] mt-1.5 pt-1.5 border-t border-[var(--color-divider)]">
-              {entry.meta.stopReason} · {entry.meta.steps} steps · {entry.meta.tokensUsed.toLocaleString()} tokens ·{' '}
-              {entry.meta.budgetRemaining.toLocaleString()} left
+              {entry.meta.stopReason} · {entry.meta.steps} steps ·{' '}
+              {entry.meta.tokensUsageUnknown
+                ? t('table.tokensUnknown')
+                : t('table.tokensUsedInline', { count: entry.meta.tokensUsed.toLocaleString() })}{' '}
+              · {entry.meta.budgetRemaining.toLocaleString()} left
+              {entry.meta.errorMessage ? (
+                <span className="block mt-1 text-rose-400/90">{entry.meta.errorMessage}</span>
+              ) : null}
             </div>
           )}
         </div>

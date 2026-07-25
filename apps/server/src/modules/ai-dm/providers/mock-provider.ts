@@ -48,6 +48,10 @@ export interface MockResponse {
    * Simulates a provider stream that stalls mid-body with no error.
    */
   stallAfterChunks?: number;
+  /** Throw after emitting the usage frame but before `done` (#560). */
+  throwAfterUsage?: boolean;
+  /** Throw when the first tool_call delta is yielded (#560). */
+  throwDuringToolCall?: boolean;
   /** Throw this error from `generate`/`stream` instead of returning a reply (#1046). */
   throwError?: Error;
 }
@@ -149,6 +153,7 @@ export class MockAiProvider implements AiProvider {
     }
     for (let index = 0; index < result.toolCalls.length; index++) {
       const tc = result.toolCalls[index];
+      if (canned.throwError && canned.throwDuringToolCall) throw canned.throwError;
       yield {
         type: 'tool_call',
         index,
@@ -158,6 +163,7 @@ export class MockAiProvider implements AiProvider {
       };
     }
     yield { type: 'usage', usage: result.usage };
+    if (canned.throwError && canned.throwAfterUsage) throw canned.throwError;
     yield { type: 'done', result };
   }
 }
