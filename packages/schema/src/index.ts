@@ -290,13 +290,14 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 
 // ---------- per-campaign trash (issue #269) ----------
 // The soft-delete/undo feature (#116) gave every trashable entity a `deleted_at`
-// column + a POST /<type>/:id/restore endpoint, but the only Trash UI was for whole
+// column + a POST /<route>/:id/restore endpoint, but the only Trash UI was for whole
 // trashed *campaigns* on the home page — a soft-deleted entity was unrecoverable once
 // its Undo toast expired. GET /campaigns/:id/trash lists a campaign's soft-deleted
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
-// and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
-// its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location']);
+// and drive Restore. `type` is the entity kind; restore routes are mapped (usually
+// the plural resource name — session -> /sessions/:id/restore — with exceptions such
+// as timeline_event -> /timeline/:id/restore).
+export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location', 'timeline_event']);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({
@@ -454,6 +455,7 @@ export const Character = z.object({
   skills: z.record(z.string().max(40), SkillRank).default({}), // skill name -> rank; absent = unproficient
   actions: z.array(CharacterAction).max(100).default([]),
   spellSlots: z.record(z.string().regex(/^[1-9]$/), SpellSlotLevel).default({}), // spell level "1".."9" -> slots
+  resources: z.record(z.string().max(80), CharacterResource).default({}),
   portraitUrl: z.string().max(500).nullable().default(null),
   ddbId: z.string().max(40).nullable().default(null),
   notes: z.string().max(20_000).default(''), // public character bio/story
@@ -6378,7 +6380,7 @@ export type ActiveEffect = z.infer<typeof ActiveEffect>;
 /**
  * One structured condition instance on a combatant (issue #423). Carries source/rule-entry provenance,
  * duration/expiry timing, repeat saves, concentration link, stack count, notes, and custom condition flag.
- * Kept in dual-sync with combatant.conditions (string[]) for complete backward compatibility.
+ * The legacy `combatant.conditions` string array is derived from instances via `deriveConditionNames()`.
  */
 export const ConditionInstance = z.object({
   id: z.string().min(1).max(40),

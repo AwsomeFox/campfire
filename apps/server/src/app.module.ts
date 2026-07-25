@@ -1,6 +1,6 @@
 import { join } from 'path';
 import { Module, type DynamicModule } from '@nestjs/common';
-import { APP_GUARD, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
+import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ServeStaticModule } from '@nestjs/serve-static';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ZodValidationPipe } from 'nestjs-zod';
@@ -60,7 +60,7 @@ import { ScribeModule } from './modules/scribe/scribe.module';
 import { TimelineModule } from './modules/timeline/timeline.module';
 import { SessionZeroModule } from './modules/session-zero/session-zero.module';
 import { RevisionsModule } from './modules/revisions/revisions.module';
-import { RequestObservabilityInterceptor } from './common/interceptors/request-observability.interceptor';
+import { RequestContextActorGuard } from './common/guards/request-context-actor.guard';
 
 /**
  * Single-image production packaging: the compiled web SPA can be served directly by
@@ -184,13 +184,14 @@ function serveStaticImports(): DynamicModule[] {
   ],
   providers: [
     { provide: APP_PIPE, useClass: ZodValidationPipe },
-    { provide: APP_INTERCEPTOR, useClass: RequestObservabilityInterceptor },
     // ThrottlerGuard runs FIRST (Nest applies APP_GUARD providers in registration order) so
     // unauthenticated floods are rejected (429) before route work. The custom subclass keeps
     // that order while resolving identity only for strict AI buckets, making authenticated AI
     // throttling per-user with IP fallback.
     { provide: APP_GUARD, useClass: IdentityAwareThrottlerGuard },
     { provide: APP_GUARD, useClass: SessionAuthGuard },
+    // After SessionAuthGuard — stamp audit actor into ALS (#684).
+    { provide: APP_GUARD, useClass: RequestContextActorGuard },
     { provide: APP_GUARD, useClass: ServerRolesGuard },
     // Runs after SessionAuthGuard has populated req.tokenContext: enforces the
     // token's server-side writeScope (issue #158) — a 'none' token can't write,

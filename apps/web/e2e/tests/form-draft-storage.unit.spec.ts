@@ -88,6 +88,7 @@ function character(overrides: Partial<Character> = {}): Character {
     skills: {},
     actions: [],
     spellSlots: {},
+    resources: {},
     portraitUrl: null,
     ddbId: null,
     notes: '',

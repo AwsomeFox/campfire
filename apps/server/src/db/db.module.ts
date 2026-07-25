@@ -839,7 +839,7 @@ function migrateSoftDeleteColumns(sqlite: Database.Database): void {
     if (columns.some((c) => c.name === 'deleted_at')) return;
     sqlite.exec(`ALTER TABLE ${table} ADD COLUMN deleted_at TEXT`);
   };
-  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters']) {
+  for (const table of ['campaigns', 'quests', 'npcs', 'locations', 'sessions', 'notes', 'characters', 'timeline_events']) {
     addDeletedAt(table);
   }
 }
@@ -2038,6 +2038,17 @@ function migrateCombatantsTableForInitiativeGroup(sqlite: Database.Database): vo
   }
 }
 
+function migrateCharactersTableForResources(sqlite: Database.Database): void {
+  const hasCharactersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='characters'")
+    .get();
+  if (!hasCharactersTable) return;
+  const columns = sqlite.prepare('PRAGMA table_info(characters)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'resources')) {
+    sqlite.exec("ALTER TABLE characters ADD COLUMN resources TEXT NOT NULL DEFAULT '{}'");
+  }
+}
+
 /**
  * Issue #423: `combatants.condition_instances` stores structured condition instances
  * (provenance, duration, save timing/DC, concentration, stacks, notes, custom).
@@ -2500,7 +2511,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0086_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
   { name: '0087_campaigns_narration_language', run: migrateCampaignsTableForNarrationLanguage },
   { name: '0088_users_dice_theme', run: migrateUsersTableForDiceTheme },
-  { name: '0089_audit_log_request_id', run: migrateAuditLogForRequestId },
+  { name: '0089_characters_resources', run: migrateCharactersTableForResources },
+  { name: '0090_audit_log_request_id', run: migrateAuditLogForRequestId },
 ];
 
 /**
