@@ -12,7 +12,7 @@ import { buildOverlayDice, DiceRollOverlay, DICE_ROLL_MIN_TUMBLE_MS, type DiceRo
 import { RollResultToast } from './RollResultToast';
 import { useUndoSnackbarChrome } from './useUndoSnackbarChrome';
 
-import { useAuth } from '../app/AuthProvider';
+import { useAuth } from '../app/auth';
 
 /** Publish tab-bar / keyboard chrome vars while the toast is visible (issue #1315). */
 function RollResultToastChrome() {

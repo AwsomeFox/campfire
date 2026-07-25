@@ -118,6 +118,17 @@ export default function PreferencesPage() {
     return paletteToCssVars(draftPalette) as CSSProperties;
   }, [draftPalette]);
 
+  const { beginRollAnimation, showRoll } = useRollResultToast();
+  const [selectedDiceTheme, setSelectedDiceTheme] = useState<DiceTheme>(
+    () => me?.user?.diceTheme ?? 'nocturne',
+  );
+
+  useEffect(() => {
+    if (me?.user?.diceTheme) {
+      setSelectedDiceTheme(me.user.diceTheme);
+    }
+  }, [me?.user?.diceTheme]);
+
   if (!user) {
     return (
       <div className="w-full mx-auto px-5 pt-7 pb-12" style={{ maxWidth: 640 }}>
@@ -130,25 +141,10 @@ export default function PreferencesPage() {
 
   const profileDirty =
     displayName !== (user.displayName ?? '') ||
-<<<<<<< HEAD
-    textSize !== (user.textSize ?? 'default');
-=======
     textSize !== (user.textSize ?? 'default') ||
     timeFormat !== (user.timeFormat ?? 'system');
   const accentDirty = accentColor !== appliedAccent;
->>>>>>> origin/main
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
-
-  const { beginRollAnimation, showRoll } = useRollResultToast();
-  const [selectedDiceTheme, setSelectedDiceTheme] = useState<DiceTheme>(
-    () => me?.user?.diceTheme ?? 'nocturne',
-  );
-
-  useEffect(() => {
-    if (me?.user?.diceTheme) {
-      setSelectedDiceTheme(me.user.diceTheme);
-    }
-  }, [me?.user?.diceTheme]);
 
   async function selectDiceTheme(theme: DiceTheme) {
     setSelectedDiceTheme(theme);
@@ -165,9 +161,14 @@ export default function PreferencesPage() {
     window.setTimeout(() => {
       const val = 1 + Math.floor(Math.random() * 20);
       showRoll({
+        id: 0,
+        campaignId: 0,
+        rollerUserId: 'test',
+        rollerName: '',
+        createdAt: new Date().toISOString(),
         expr: '1d20',
         total: val,
-        rolls: [{ sides: 20, value: val }],
+        rolls: [val],
         label: t('dice.testRollLabel', 'Test Roll (1d20)'),
       });
     }, 700);
@@ -432,7 +433,7 @@ export default function PreferencesPage() {
         <p className="text-muted reading-supporting" style={{ fontSize: 12.5, marginTop: 4 }}>
           {t('preferences.accentNote')}
         </p>
-      </Card>
+      </div>
 
       <Card className="flex flex-col gap-4">
         <div>
@@ -533,7 +534,7 @@ export default function PreferencesPage() {
         <p id="reading-mode-help" className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.themeNote')}
         </p>
-      </div>
+      </Card>
 
       <div className="card elev-sm">
         <span className="card-kicker">{t('preferences.language')}</span>

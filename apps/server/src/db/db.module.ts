@@ -218,6 +218,23 @@ function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user dice overlay skins (issue #1315):
+ * `users.dice_theme` didn't exist. Plain NOT NULL DEFAULT 'nocturne' ADD COLUMN.
+ */
+function migrateUsersTableForDiceTheme(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasDiceTheme = columns.some((c) => c.name === 'dice_theme');
+  if (hasDiceTheme) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN dice_theme TEXT NOT NULL DEFAULT 'nocturne'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -2441,6 +2458,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
   { name: '0085_combatants_condition_instances', run: migrateCombatantsTableForConditionInstances },
+  { name: '0086_users_dice_theme', run: migrateUsersTableForDiceTheme },
 ];
 
 /**
