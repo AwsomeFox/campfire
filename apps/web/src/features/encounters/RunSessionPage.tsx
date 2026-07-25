@@ -2390,7 +2390,7 @@ function BattleMap({
       if (track.pointers.size < 2) track.gesture = null;
     }
 
-    if (track.pointers.size < 2) return track.pointers.size > 0;
+    if (track.pointers.size < 2) return false;
 
     const pts = [...track.pointers.values()];
     const local = surfaceLocalFromEvent({ clientX: (pts[0].x + pts[1].x) / 2, clientY: (pts[0].y + pts[1].y) / 2 });
