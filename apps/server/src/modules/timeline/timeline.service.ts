@@ -104,17 +104,14 @@ export class TimelineService {
     }));
   }
 
-  /** Full timeline for internal consumers (search, export, MCP walk). */
+  /** Full timeline for internal consumers (search, export, campaign summaries). */
   async listEvents(campaignId: number, role: Role): Promise<TimelineEvent[]> {
-    const all: TimelineEvent[] = [];
-    let cursor: string | undefined;
-    for (;;) {
-      const page = await this.listEventsPage(campaignId, role, { cursor });
-      all.push(...page.items);
-      if (!page.hasMore) break;
-      cursor = page.nextCursor ?? undefined;
-    }
-    return all;
+    const rows = await this.db
+      .select()
+      .from(timelineEvents)
+      .where(eq(timelineEvents.campaignId, campaignId))
+      .orderBy(asc(timelineEvents.sortIndex), asc(timelineEvents.id));
+    return redactSecrets(filterHidden(rows.map(toEventDomain), role), role);
   }
 
   async getEventRowOrThrow(id: number) {
