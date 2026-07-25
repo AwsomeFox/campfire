@@ -45,7 +45,11 @@ for (const role of ['player', 'viewer'] as const) {
       await page.goto(`/c/${campaignId}`);
       await expect(page.locator('.cf-tabbar')).toBeVisible();
 
-      await page.locator('.cf-tabbar').getByRole('button', { name: /More/ }).click();
+      // Role chip in the top bar opens the same More sheet and stays available when a
+      // live encounter swaps the tab-bar More slot for Live (issue #637).
+      const roleChip = page.getByRole('button', { name: new RegExp(`^${role === 'player' ? 'Player' : 'Viewer'}`, 'i') });
+      await expect(roleChip).toBeVisible();
+      await roleChip.click();
       const sheet = page.getByRole('dialog', { name: /More navigation/i });
       await expect(sheet).toBeVisible();
       const yourData = sheet.getByRole('link', { name: 'Your data', exact: true });
