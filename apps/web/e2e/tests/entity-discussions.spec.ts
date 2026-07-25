@@ -1,9 +1,16 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import { seed, stateFor } from './seed';
+import { seed, stateFor, restoreSeedEncounter } from './seed';
 
 test.describe('entity discussions (issue #439)', () => {
   test.use({ storageState: stateFor('player') });
+
+  test.beforeAll(async ({ browser }) => {
+    const context = await browser.newContext({ storageState: stateFor('dm') });
+    const page = await context.newPage();
+    await restoreSeedEncounter(page);
+    await context.close();
+  });
 
   const surfaces = () => {
     const { campaignId: c, navigation: n } = seed();

@@ -2,8 +2,8 @@
  * Threaded discussion (issue #123). Renders the comment thread for any campaign
  * entity (quest, NPC, location, session, character, campaign, encounter, faction)
  * via EntityDiscussion on each supported detail surface (issue #439). Comments are
- * visible to every campaign member; author-or-DM may edit/delete. One level of
- * threading: top-level comments, with replies nested one deep.
+ * visible to every campaign member who can see the anchored entity; author-or-DM may
+ * edit/delete. One level of threading: top-level comments, with replies nested one deep.
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Character, Comment, CommentReplyPage, CommentThread, CommentThreadPage, EntityType } from '@campfire/schema';
