@@ -38,7 +38,7 @@ export function RolledDice({ rolls, kept, fontSize = 11 }: RolledDiceProps) {
   const flags = keptFlags(rolls, kept);
   const hasDropped = flags.some((k) => !k);
   return (
-    <span
+    <bdi
       className="text-muted"
       style={{ fontSize, whiteSpace: 'nowrap' }}
       aria-label={
@@ -63,6 +63,6 @@ export function RolledDice({ rolls, kept, fontSize = 11 }: RolledDiceProps) {
         </span>
       ))}
       ]
-    </span>
+    </bdi>
   );
 }
