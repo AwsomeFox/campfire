@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type KeyboardEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAnnounce } from '../../components/Announcer';
+import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   CHARACTER_SHEET_TAB_LABEL,
   CHARACTER_SHEET_TAB_ORDER,
@@ -19,10 +20,9 @@ import {
 type UseCharacterSheetTabOptions = {
   campaignId: number;
   characterId: number;
-  liveEncounter: boolean;
 };
 
-export function useCharacterSheetTab({ campaignId, characterId, liveEncounter }: UseCharacterSheetTabOptions) {
+export function useCharacterSheetTab({ campaignId, characterId }: UseCharacterSheetTabOptions) {
   const [searchParams, setSearchParams] = useSearchParams();
   const announce = useAnnounce();
   const storageKey = characterSheetTabStorageKey(campaignId, characterId);
@@ -35,7 +35,6 @@ export function useCharacterSheetTab({ campaignId, characterId, liveEncounter }:
     urlTab,
     urlFocus,
     persistedTab,
-    liveEncounter,
   });
 
   const tabRefs = useRef<Record<CharacterSheetTab, HTMLButtonElement | null>>({
@@ -52,7 +51,7 @@ export function useCharacterSheetTab({ campaignId, characterId, liveEncounter }:
           if (next === 'play') params.delete('tab');
           else params.set('tab', next);
           if (options?.focus) params.set('focus', options.focus);
-          else if (options?.focus === null) params.delete('focus');
+          else params.delete('focus');
           return params;
         },
         { replace: options?.replace ?? next === 'play' },
@@ -85,7 +84,7 @@ export function useCharacterSheetTab({ campaignId, characterId, liveEncounter }:
     const timer = window.setTimeout(() => {
       const el = document.getElementById(sectionId);
       if (!el) return;
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      el.scrollIntoView({ behavior: scrollBehavior(), block: 'start' });
       if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
       el.focus({ preventScroll: true });
     }, 0);

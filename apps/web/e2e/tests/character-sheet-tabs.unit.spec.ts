@@ -15,7 +15,7 @@ import {
  * Issue #646 — Character sheet Play vs Build/Profile IA.
  *
  * Pins tab resolution, deep-link focus aliases, section ordering (mobile scroll
- * reduction), and encounter-aware defaults without a browser.
+ * reduction), and tab defaults without a browser.
  */
 
 test.describe('character sheet tabs (issue #646)', () => {
@@ -38,13 +38,12 @@ test.describe('character sheet tabs (issue #646)', () => {
     expect(characterSheetSectionId('actions')).toBe('character-section-actions');
   });
 
-  test('resolves tab precedence: url tab, focus, persisted, encounter default', () => {
+  test('resolves tab precedence: url tab, focus, persisted, default', () => {
     expect(
       resolveCharacterSheetTab({
         urlTab: 'build',
         urlFocus: 'hp',
         persistedTab: 'play',
-        liveEncounter: true,
       }),
     ).toBe('build');
 
@@ -53,7 +52,6 @@ test.describe('character sheet tabs (issue #646)', () => {
         urlTab: null,
         urlFocus: 'xp',
         persistedTab: 'play',
-        liveEncounter: false,
       }),
     ).toBe('build');
 
@@ -62,7 +60,6 @@ test.describe('character sheet tabs (issue #646)', () => {
         urlTab: null,
         urlFocus: null,
         persistedTab: 'build',
-        liveEncounter: false,
       }),
     ).toBe('build');
 
@@ -71,7 +68,6 @@ test.describe('character sheet tabs (issue #646)', () => {
         urlTab: null,
         urlFocus: null,
         persistedTab: null,
-        liveEncounter: true,
       }),
     ).toBe('play');
   });

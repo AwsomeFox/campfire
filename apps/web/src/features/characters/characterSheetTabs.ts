@@ -2,9 +2,9 @@
  * Character sheet Play vs Build/Profile IA (issue #646).
  *
  * Pure helpers for tab validation, deep-link focus targets, local persistence,
- * and encounter-aware defaults. The URL (`?tab=`, `?focus=`) is authoritative;
+ * and a Play-first default. The URL (`?tab=`, `?focus=`) is authoritative;
  * when absent, the last tab per character is restored from localStorage; when
- * that is also absent, a live encounter nudges the default toward Play.
+ * that is also absent, Play is shown first.
  */
 
 export type CharacterSheetTab = 'play' | 'build';
@@ -136,19 +136,16 @@ export function isBuildFocus(focus: CharacterSheetFocus): boolean {
  *  1. Explicit `?tab=` deep link
  *  2. `?focus=` deep link (opens the tab that owns the section)
  *  3. Persisted per-character preference
- *  4. Encounter-aware default (`play` when a fight is live, otherwise `play`)
+ *  4. Default `play`
  */
 export function resolveCharacterSheetTab(input: {
   urlTab: CharacterSheetTab | null;
   urlFocus: CharacterSheetFocus | null;
   persistedTab: CharacterSheetTab | null;
-  liveEncounter: boolean;
 }): CharacterSheetTab {
   if (input.urlTab) return input.urlTab;
   if (input.urlFocus) return tabForFocus(input.urlFocus);
   if (input.persistedTab) return input.persistedTab;
-  // Encounter-aware: at the table during combat, land on Play first.
-  if (input.liveEncounter) return 'play';
   return 'play';
 }
 
