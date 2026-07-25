@@ -41,8 +41,8 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
+import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, buildDifficultyExplanation } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
@@ -75,6 +75,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
+import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
@@ -97,13 +98,23 @@ import {
   computeContainedRect,
   DEFAULT_GRID_OPACITY,
   layerPxToMapPercent,
-  mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
   resolveGridCalibration,
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import {
+  gridCellLabel,
+  gridCellLabelPlural,
+  hexAoeCirclePolygons,
+  hexPolygons,
+  hexKeyboardStepPx,
+  mapPercentGridDistance,
+  snapFogRectToHexGrid,
+  snapMapPercentToHex,
+  tokenFootprintDiameterPx,
+} from './hexGeometry';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
@@ -136,6 +147,7 @@ import {
   type MapViewportState,
   type PinchGesture,
 } from './mapViewport';
+import { tokenDiameterPx } from './tokenFootprint';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -157,6 +169,7 @@ type EncounterGridPatch = Partial<
     | 'gridUnit'
     | 'gridSnap'
     | 'gridType'
+    | 'hexOrientation'
     // Grid calibration (issue #417) — origin offset, independent cell height, rotation, opacity.
     | 'gridOffsetX'
     | 'gridOffsetY'
@@ -207,46 +220,71 @@ const DIFFICULTY_NEUTRAL_STYLE = {
 };
 
 /**
- * Difficulty badge shown in the encounter header (issues #58 + #429). Reads
+ * Difficulty badge shown in the encounter header (issues #58 + #429, #476). Reads
  * GET /encounters/:id/difficulty. Hidden when there are no monsters. Zero-data
  * fights show the adapter's "Unknown—add XP/CR" label (never a fake Trivial);
- * unsupported rulesets explain the limitation. `title` surfaces XP math + warnings.
+ * unsupported rulesets explain the limitation. A focusable details control exposes
+ * the XP math and warnings visibly (not hover-title-only).
  */
 function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
+  const { open, buttonProps, regionProps } = useDisclosure({
+    focusManagement: true,
+    regionLabel: 'Encounter difficulty details',
+  });
+
   if (!difficulty) return null;
   if (difficulty.monsterCount === 0) return null;
 
-  if (difficulty.status === 'unsupported') {
-    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
-    return (
-      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
-        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-        {difficulty.label}
-      </span>
-    );
-  }
+  const explanation = buildDifficultyExplanation(difficulty);
+  const style =
+    difficulty.status === 'unsupported' || difficulty.status === 'unknown' || difficulty.band === null
+      ? DIFFICULTY_NEUTRAL_STYLE
+      : DIFFICULTY_STYLE[difficulty.band];
+  const { onClick: toggleDetails, ...detailsButtonProps } = buttonProps;
 
-  if (difficulty.status === 'unknown' || difficulty.band === null) {
-    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
-    return (
-      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
-        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-        {difficulty.label}
-      </span>
-    );
-  }
-
-  const breakdown =
-    `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
-    `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
-    `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
-    `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
-  const title = [breakdown, ...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' · ');
   return (
-    <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
-      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-      {difficulty.label}
-    </span>
+    <div
+      className="inline-flex flex-col items-start gap-1"
+      data-testid="difficulty-badge"
+      style={{ maxWidth: 'min(100%, 24rem)' }}
+    >
+      <div className="inline-flex items-center gap-1">
+        <span className="tag" style={style}>
+          <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+          {difficulty.label}
+        </span>
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-24"
+          style={{ fontSize: 11, padding: '0 4px', lineHeight: 1 }}
+          data-testid="difficulty-help-toggle"
+          aria-label="Show encounter difficulty details"
+          {...detailsButtonProps}
+          onClick={(e) => toggleDetails?.(e)}
+        >
+          <GameIcon slug="info" size={12} aria-hidden="true" />
+        </button>
+      </div>
+      {open && (
+        <div
+          {...regionProps}
+          className="cf-inset"
+          data-testid="difficulty-help-panel"
+          style={{ padding: '8px 12px', fontSize: 12, width: '100%' }}
+        >
+          <p style={{ margin: 0, fontWeight: 600 }}>{explanation.headline}</p>
+          {explanation.detail.length > 0 && (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {explanation.detail.map((line, i) => (
+                <li key={i} className="text-muted" style={{ fontSize: 11 }}>
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -583,6 +621,23 @@ function applyHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): 
   return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
 }
 
+/** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
+function hpLogActorId(actorCombatantId: number | undefined | null, targetCombatantId: number): number | undefined {
+  if (actorCombatantId == null || actorCombatantId === targetCombatantId) return undefined;
+  return actorCombatantId;
+}
+
+function hpPatchWithActor(
+  patch: Record<string, unknown>,
+  actorCombatantId: number | undefined | null,
+  targetCombatantId: number,
+): Record<string, unknown> {
+  const actorId = hpLogActorId(actorCombatantId, targetCombatantId);
+  return actorId != null ? { ...patch, actorId } : patch;
+}
+
+const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp', 'deathSaveRoll']);
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -652,7 +707,12 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
-  const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  const [pendingApply, setPendingApply] = useState<{
+    amount: number;
+    label: string;
+    /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
+    actorCombatantId?: number;
+  } | null>(null);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -884,7 +944,7 @@ export default function RunSessionPage() {
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
   function canEditCombatant(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163): the interactive
+    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
     if (encounter?.status === 'ended') return false;
@@ -896,8 +956,8 @@ export default function RunSessionPage() {
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
-  const onApplyDamageRolled = useCallback((amount: number, label: string) => {
-    setPendingApply(amount > 0 ? { amount, label } : null);
+  const onApplyDamageRolled = useCallback((amount: number, label: string, actorCombatantId?: number) => {
+    setPendingApply(amount > 0 ? { amount, label, actorCombatantId } : null);
   }, []);
 
   useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
@@ -992,8 +1052,11 @@ export default function RunSessionPage() {
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
   const hpDelta = useMutation({
     mutationKey: HP_MUTATION_KEY,
-    mutationFn: ({ combatantId, delta }: { combatantId: number; delta: number }) =>
-      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta }),
+    mutationFn: ({ combatantId, delta, actorId }: { combatantId: number; delta: number; actorId?: number }) =>
+      api.patch(
+        `${API}/encounters/${eid}/combatants/${combatantId}`,
+        hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+      ),
     onMutate: async ({ combatantId, delta }) => {
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1019,7 +1082,7 @@ export default function RunSessionPage() {
   });
 
   const applyHpDeltaBulk = useCallback(
-    async (combatantIds: readonly number[], delta: number) => {
+    async (combatantIds: readonly number[], delta: number, actorId?: number) => {
       if (combatantIds.length === 0) return;
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1035,7 +1098,10 @@ export default function RunSessionPage() {
       }
       try {
         for (const combatantId of combatantIds) {
-          await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta });
+          await api.patch(
+            `${API}/encounters/${eid}/combatants/${combatantId}`,
+            hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+          );
         }
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
@@ -1048,8 +1114,14 @@ export default function RunSessionPage() {
   );
 
   const patchCombatant = useCallback(
-    (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
-    [combatantPatch],
+    (combatantId: number, patch: Record<string, unknown>) => {
+      const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
+      const actorCombatantId =
+        needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+      const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId) : patch;
+      combatantPatch.mutate({ combatantId, patch: enriched });
+    },
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId],
   );
 
   const patchCombatantTurnState = useCallback(
@@ -1246,7 +1318,7 @@ export default function RunSessionPage() {
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
-    if (!canDmWrite || !encounter) return;
+    if (!canDmWrite || !encounter || encounter.status === 'ended') return;
     const patch = missingGridDefaults(encounter);
     const encounterPrefix = `${encounter.id}:`;
     if (!patch) {
@@ -1364,6 +1436,8 @@ export default function RunSessionPage() {
 
   if (!encounter) return null;
 
+  const canEditEncounter = canDmWrite && encounter.status !== 'ended';
+
   // The server returns combatants already in initiative order and names the current
   // actor by id (issue #49) — no client-side re-sort, and no positional
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
@@ -1403,7 +1477,7 @@ export default function RunSessionPage() {
           the party sees the same one-tap prompt for their own character. */}
       <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
-      {canDmWrite && (
+      {canEditEncounter && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
@@ -1549,6 +1623,17 @@ export default function RunSessionPage() {
         </div>
       )}
 
+      {/* AI-DM driver dock (#427): transcript + composer + recovery without leaving tracker. */}
+      {liveActivity.mode === 'driver' && encounter && (
+        <EncounterAiDriverPanel
+          campaignId={cid}
+          encounterId={eid}
+          encounter={encounter}
+          isDm={isDm}
+          canCompose={canPlayerWrite}
+        />
+      )}
+
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterNextSteps campaignId={cid} sessionId={encounter.sessionId} />
@@ -1557,7 +1642,7 @@ export default function RunSessionPage() {
       <EncounterLinks
         campaignId={cid}
         encounter={encounter}
-        canEdit={canDmWrite}
+        canEdit={canEditEncounter}
         onSaved={(updated) =>
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
             prev ? { ...prev, ...updated } : prev,
@@ -1608,7 +1693,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           isDm={isDm}
           viewerUserId={myUserId != null ? String(myUserId) : null}
-          canDmWrite={canDmWrite}
+          canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1618,9 +1703,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
-          onGenerateMap={canDmWrite ? generateAndAttachMap : undefined}
+          onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
-            canDmWrite
+            canEditEncounter
               ? (id) => {
                   setEncounterMap(id);
                   setShowMapGuidance(true);
@@ -1634,6 +1719,7 @@ export default function RunSessionPage() {
           pings={pings}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
+          ruleSystem={ruleSystem}
         />
       )}
 
@@ -1691,16 +1777,21 @@ export default function RunSessionPage() {
                   gridScale: encounter.gridScale,
                   mapRect: aoeHitLayout.mapRect,
                   cellPx: aoeHitLayout.cellPx,
+                  gridType: encounter.gridType ?? 'square',
+                  hexOrientation: encounter.hexOrientation ?? 'pointy',
+                  calibration: resolveGridCalibration(encounter),
                 }
               : null
           }
           isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
-            hpDelta.mutate({ combatantId, delta });
+            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
+            hpDelta.mutate({ combatantId, delta, actorId });
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            void applyHpDeltaBulk(combatantIds, delta)
+            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
+            void applyHpDeltaBulk(combatantIds, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);
           }}
@@ -1783,7 +1874,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={onApplyDamageRolled}
+              onApplyDamage={(amount, label) => onApplyDamageRolled(amount, label, c.id)}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -1797,7 +1888,10 @@ export default function RunSessionPage() {
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
-              onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
+              onHpDelta={(delta) => {
+                const actorId = hpLogActorId(currentCombatantId, c.id);
+                hpDelta.mutate({ combatantId: c.id, delta, actorId });
+              }}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onRollDeathSave={() => rollDeathSave(c)}
@@ -1974,18 +2068,8 @@ export default function RunSessionPage() {
 // `tokenInitials` is the shared grapheme-aware helper (issue #631): two-letter
 // token labels from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1").
 
-// Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
-// rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
-const TOKEN_SIZE_SCALE: Record<TokenSize, number> = {
-  tiny: 0.6,
-  small: 0.8,
-  medium: 1,
-  large: 1.6,
-  huge: 2.2,
-  gargantuan: 3,
-};
+// Token footprint categories (issue #40 / #468) — diameters derive from calibrated grid cells.
 const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
-const BASE_TOKEN_PX = 32;
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
 function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: number; h: number } {
@@ -2026,49 +2110,13 @@ type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
-// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+// Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
   const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
   return uuid.slice(0, 40);
-}
-
-/**
- * Pointy-top hexagon centres + vertices tiling the surface (issue #238). Returned as SVG
- * `points` strings in pixel space so the overlay can draw them directly. `cellPx` is treated as
- * the hex width; a cap keeps a pathologically fine grid from emitting tens of thousands of nodes.
- */
-function hexPolygons(surfaceW: number, surfaceH: number, cellPx: number): string[] {
-  if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
-  const w = cellPx;
-  const s = w / Math.sqrt(3); // hex side / circumradius for a pointy-top hex of width w
-  const rowH = 1.5 * s;
-  const cols = Math.ceil(surfaceW / w) + 1;
-  const rows = Math.ceil(surfaceH / rowH) + 1;
-  if (cols * rows > 3000) return []; // too fine to draw as discrete polygons — skip the overlay
-  const out: string[] = [];
-  for (let r = 0; r <= rows; r++) {
-    const offset = r % 2 ? w / 2 : 0;
-    for (let c = 0; c <= cols; c++) {
-      const cx = c * w + offset;
-      const cy = r * rowH;
-      out.push(
-        [
-          [cx, cy - s],
-          [cx + w / 2, cy - s / 2],
-          [cx + w / 2, cy + s / 2],
-          [cx, cy + s],
-          [cx - w / 2, cy + s / 2],
-          [cx - w / 2, cy - s / 2],
-        ]
-          .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`)
-          .join(' '),
-      );
-    }
-  }
-  return out;
 }
 
 /**
@@ -2150,6 +2198,7 @@ function BattleMap({
   pings,
   onError,
   onAoeHitLayoutChange,
+  ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -2177,6 +2226,8 @@ function BattleMap({
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
+  /** Active campaign rule system — selects grid distance rules (issue #467). */
+  ruleSystem: string | null;
 }) {
   const { t } = useTranslation();
   const announce = useAnnounce();
@@ -2307,6 +2358,8 @@ function BattleMap({
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
+  const hexOrientation = encounter.hexOrientation ?? 'pointy';
+  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -2523,9 +2576,18 @@ function BattleMap({
           setRuler({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
           announce('Measurement started at map center. Arrow keys adjust the endpoint. Enter to finish, Escape to cancel.');
         } else if (ruler && canMeasure && mapRect) {
-          const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+          const cells = mapPercentGridDistance(
+            ruler.start,
+            ruler.end,
+            mapRect,
+            cellPx,
+            gridType,
+            calibration,
+            hexOrientation,
+            gridDistanceRule,
+          );
           const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} squares · ${feet} ${gridUnit}`);
+          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
         }
         return;
       }
@@ -2551,8 +2613,7 @@ function BattleMap({
         } else {
           const rect = rectFromCorners(revealCorners.start, revealCorners.end);
           if (rect.w >= 1 && rect.h >= 1) {
-            const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-            onSetFog(next);
+            commitFogReveal(revealCorners.start, revealCorners.end);
             announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
           }
           setRevealCorners(null);
@@ -2580,10 +2641,25 @@ function BattleMap({
     }
   }
 
-  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
+  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417/#467). */
   function snapPoint(pt: MapPoint): MapPoint {
     if (!mapRect) return pt;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(pt, calibration, mapRect, hexOrientation, encounter.gridSnap);
+    }
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
+  }
+
+  /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
+  function commitFogReveal(start: MapPoint, end: MapPoint): void {
+    let rect = rectFromCorners(start, end);
+    if (rect.w >= 1 && rect.h >= 1) {
+      if (gridOn && gridType === 'hex' && calibration && mapRect) {
+        rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
+      }
+      const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
+      onSetFog(next);
+    }
   }
 
   /** Keyboard nudge step in layer pixels: one calibrated cell, or 1% of map width if the grid is off. */
@@ -2595,15 +2671,30 @@ function BattleMap({
 
   /** Nudge a map-percent point by one grid cell (Shift = five) and snap to the nearest cell centre. */
   function nudgeMapPoint(pt: MapPoint, e: ReactKeyboardEvent): MapPoint {
-    const step = keyboardStepPx();
     const mult = e.shiftKey ? 5 : 1;
-    const px = mapPercentToLayerPx(pt, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const baseRect = mapRect ?? { left: 0, top: 0, width: 1, height: 1 };
+    const px = mapPercentToLayerPx(pt, baseRect);
+
+    if (gridOn && gridType === 'hex' && calibrationPx && cellPx > 0) {
+      const hexStep = hexKeyboardStepPx(e.key, cellPx, hexOrientation);
+      if (hexStep) {
+        const nextPx = { x: px.x + hexStep.x * mult, y: px.y + hexStep.y * mult };
+        const raw = layerPxToMapPercent(nextPx, baseRect);
+        if (!mapRect) return raw;
+        return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+      }
+    }
+
+    const step = keyboardStepPx();
     const nextPx = {
       x: px.x + (e.key === 'ArrowRight' ? step.x * mult : e.key === 'ArrowLeft' ? -step.x * mult : 0),
       y: px.y + (e.key === 'ArrowDown' ? step.y * mult : e.key === 'ArrowUp' ? -step.y * mult : 0),
     };
-    const raw = layerPxToMapPercent(nextPx, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const raw = layerPxToMapPercent(nextPx, baseRect);
     if (!mapRect) return raw;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+    }
     return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
   }
 
@@ -2819,12 +2910,7 @@ function BattleMap({
       return;
     }
     if (gesture.kind === 'fog') {
-      const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
-      // Ignore an accidental micro-drag (a click) — a real reveal has some area.
-      if (rect.w >= 1 && rect.h >= 1) {
-        const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-        onSetFog(next);
-      }
+      commitFogReveal(gesture.start, finalPoint ?? gesture.end);
       return;
     }
     // A ruler stays on screen after release so the readout can be read; it clears when the
@@ -2945,7 +3031,16 @@ function BattleMap({
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
-    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+    const cells = mapPercentGridDistance(
+      ruler.start,
+      ruler.end,
+      mapRect,
+      cellPx,
+      gridType,
+      calibration,
+      hexOrientation,
+      gridDistanceRule,
+    );
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -2966,10 +3061,10 @@ function BattleMap({
   // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
     () =>
-      gridOn && gridType === 'hex' && mapRect
-        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+      gridOn && gridType === 'hex' && mapRect && calibrationPx
+        ? hexPolygons(mapRect.width, mapRect.height, calibrationPx, hexOrientation)
         : [],
-    [gridOn, gridType, mapRect, cellPx],
+    [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
   function changeTool(next: MapTool) {
@@ -2986,7 +3081,7 @@ function BattleMap({
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
     <button
       type="button"
-      className="cf-map-tool"
+      className="cf-map-tool cf-map-focusable"
       data-testid={`map-tool-${value}`}
       disabled={disabled}
       title={hint}
@@ -3060,7 +3155,7 @@ function BattleMap({
                   className="btn btn-ghost"
                   style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
                 >
-                  ✕
+                  <span aria-hidden="true">✕</span>
                 </button>
               </div>
               <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
@@ -3076,7 +3171,13 @@ function BattleMap({
           )}
 
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
-          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
+          <div
+            className="flex flex-wrap gap-2 items-center"
+            style={{ padding: '8px 14px 0' }}
+            data-testid="map-toolbar"
+            role="toolbar"
+            aria-label="Map tools"
+          >
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
@@ -3085,16 +3186,16 @@ function BattleMap({
             {canDmWrite && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
               </>
             )}
             <div style={{ flex: 1 }} />
             {canDmWrite && (
               <button
                 type="button"
-                className="cf-map-tool"
+                className="cf-map-tool cf-map-focusable"
                 {...gridDisclosure.buttonProps}
                 title="Grid & fog settings"
                 style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
@@ -3309,6 +3410,19 @@ function BattleMap({
                   <option value="hex">hex</option>
                 </select>
               </label>
+              {gridOn && gridType === 'hex' && (
+                <label className="flex items-center gap-1 text-muted" title="Pointy-top or flat-top hex orientation">
+                  orientation
+                  <select
+                    value={hexOrientation}
+                    onChange={(e) => onSetGrid({ hexOrientation: e.target.value as typeof hexOrientation })}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="pointy">pointy-top</option>
+                    <option value="flat">flat-top</option>
+                  </select>
+                </label>
+              )}
 
               {/* Grid calibration (issue #417) — human-readable alignment controls with a
                   keyboard/numeric alternative to the draggable anchors, plus help + reset. */}
@@ -3453,7 +3567,7 @@ function BattleMap({
           >
             <button
               type="button"
-              className="cf-map-tool"
+              className="cf-map-tool cf-map-focusable"
               data-testid="map-viewport-pan"
               aria-pressed={viewportPan}
               title="Drag to pan the map (touch: one finger when Pan is on; two fingers to pinch-zoom)"
@@ -3686,7 +3800,14 @@ function BattleMap({
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
                   const movable = tool === 'move' && canMoveToken(c);
                   const isCharacter = c.kind === 'character';
-                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  const sizePx =
+                    gridOn && gridType === 'hex' && cellPx > 0
+                      ? Math.round(tokenFootprintDiameterPx(c.tokenSize, cellPx, hexOrientation))
+                      : tokenDiameterPx({
+                          tokenSize: c.tokenSize,
+                          cellPx,
+                          gridType,
+                        });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
@@ -3770,7 +3891,7 @@ function BattleMap({
                             zIndex: 3,
                           }}
                         >
-                          ×
+                          <span aria-hidden="true">×</span>
                         </button>
                       )}
                     </div>
@@ -3797,6 +3918,17 @@ function BattleMap({
                       const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
+                        if (gridType === 'hex' && calibrationPx) {
+                          const radiusCells = t.sizeFt / gridScale!;
+                          const hexPolys = hexAoeCirclePolygons({ x: ox, y: oy }, radiusCells, calibrationPx, hexOrientation);
+                          return (
+                            <g key={t.id}>
+                              {hexPolys.map((pts, i) => (
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                              ))}
+                            </g>
+                          );
+                        }
                         return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
@@ -3911,7 +4043,7 @@ function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
                       </div>
                     )}
                   </>
@@ -4159,13 +4291,13 @@ function ApplyDamageBar({
       )}
       <button
         type="button"
-        aria-label="Dismiss"
+        aria-label={`Dismiss apply ${amount} ${label} bar`}
         onClick={onDismiss}
         className="cf-dismiss-target"
         style={{ marginLeft: 'auto' }}
         data-testid="apply-damage-dismiss"
       >
-        ✕
+        <span aria-hidden="true">✕</span>
       </button>
     </div>
   );
@@ -4613,7 +4745,7 @@ function CombatantRow({
                         color: 'inherit',
                       }}
                     >
-                      ✕
+                      <span aria-hidden="true">✕</span>
                     </button>
                   )}
                 </span>
@@ -4641,8 +4773,8 @@ function CombatantRow({
                       color: 'inherit',
                     }}
                   >
-                    ✕
-                  </button>
+                    <span aria-hidden="true">✕</span>
+                    </button>
                 )}
               </span>
             ))}
@@ -4900,10 +5032,9 @@ function CombatantRow({
           style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
-          title="Remove combatant"
           aria-label={`Remove ${combatant.name}`}
         >
-          ✕
+          <span aria-hidden="true">✕</span>
         </button>
       )}
     </div>
@@ -5182,6 +5313,13 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
 // ---------------------------------------------------------------------------
 
 type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
+const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'party', 'npc'];
+const ADD_TAB_LABELS: Record<AddTab, string> = {
+  manual: 'Manual',
+  compendium: 'Compendium',
+  party: 'Party',
+  npc: 'NPC',
+};
 
 function AddCombatantPanel({
   encounterId,
@@ -5199,7 +5337,14 @@ function AddCombatantPanel({
   onAdded: () => Promise<void> | void;
 }) {
   const { t } = useTranslation();
+  const announce = useAnnounce();
   const [tab, setTab] = useState<AddTab>('manual');
+  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
+    manual: null,
+    compendium: null,
+    party: null,
+    npc: null,
+  });
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -5230,6 +5375,47 @@ function AddCombatantPanel({
     const n = Math.floor(Number(raw));
     if (!Number.isFinite(n) || n < 1) return 1;
     return Math.min(50, n);
+  }
+
+  function selectAddTab(next: AddTab) {
+    setTab(next);
+    announce(`${ADD_TAB_LABELS[next]} tab selected.`);
+  }
+
+  function focusAddTab(which: AddTab) {
+    tabRefs.current[which]?.focus();
+  }
+
+  function onAddTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    const idx = ADD_TAB_ORDER.indexOf(tab);
+    if (idx < 0) return;
+    let next: AddTab | null = null;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = ADD_TAB_ORDER[(idx + 1) % ADD_TAB_ORDER.length];
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = ADD_TAB_ORDER[(idx - 1 + ADD_TAB_ORDER.length) % ADD_TAB_ORDER.length];
+        break;
+      case 'Home':
+        next = ADD_TAB_ORDER[0];
+        break;
+      case 'End':
+        next = ADD_TAB_ORDER[ADD_TAB_ORDER.length - 1];
+        break;
+      default:
+        return;
+    }
+    if (next && next !== tab) {
+      event.preventDefault();
+      selectAddTab(next);
+      requestAnimationFrame(() => focusAddTab(next));
+    } else if (next) {
+      event.preventDefault();
+      focusAddTab(next);
+    }
   }
 
   // Campaign NPCs for the NPC tab's picker. Low-churn, fetched once.
@@ -5445,31 +5631,56 @@ function AddCombatantPanel({
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
-      <div className="seg self-start inline-flex">
-        {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
-          <button
-            key={t}
-            style={{
-              padding: '7px 13px',
-              font: 'inherit',
-              fontSize: 12,
-              border: 0,
-              background: 'transparent',
-              cursor: 'pointer',
-              color: tab === t ? 'var(--color-accent)' : 'var(--color-text)',
-              boxShadow: tab === t ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-              minHeight: 32,
-            }}
-            onClick={() => setTab(t)}
-          >
-            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : t === 'party' ? 'Party' : 'NPC'}
-          </button>
-        ))}
+      <div
+        className="seg self-start inline-flex"
+        role="tablist"
+        aria-label="Add combatant"
+        data-testid="add-combatant-tabs"
+      >
+        {ADD_TAB_ORDER.map((t) => {
+          const selectedTab = tab === t;
+          return (
+            <button
+              key={t}
+              ref={(el) => {
+                tabRefs.current[t] = el;
+              }}
+              type="button"
+              role="tab"
+              id={`add-combatant-tab-${t}`}
+              aria-selected={selectedTab}
+              aria-controls={`add-combatant-panel-${t}`}
+              tabIndex={selectedTab ? 0 : -1}
+              onClick={() => selectAddTab(t)}
+              onKeyDown={onAddTabKeyDown}
+              style={{
+                padding: '7px 13px',
+                font: 'inherit',
+                fontSize: 12,
+                border: 0,
+                background: 'transparent',
+                cursor: 'pointer',
+                color: selectedTab ? 'var(--color-accent)' : 'var(--color-text)',
+                boxShadow: selectedTab ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+                minHeight: 32,
+              }}
+            >
+              {ADD_TAB_LABELS[t]}
+            </button>
+          );
+        })}
       </div>
 
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
-      {tab === 'manual' && (
+      <div
+        id="add-combatant-panel-manual"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-manual"
+        tabIndex={0}
+        hidden={tab !== 'manual'}
+        className={tab === 'manual' ? '' : 'hidden'}
+      >
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
             <label htmlFor="add-combatant-name">Name</label>
@@ -5491,16 +5702,21 @@ function AddCombatantPanel({
             {saving ? 'Adding…' : 'Add'}
           </Btn>
         </form>
-      )}
+      </div>
 
-      {tab === 'compendium' && (
-        <div className="space-y-2">
-          <TextInput
+      <div
+        id="add-combatant-panel-compendium"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-compendium"
+        tabIndex={0}
+        hidden={tab !== 'compendium'}
+        className={tab === 'compendium' ? 'space-y-2' : 'hidden'}
+      >
+        <TextInput
             aria-label="Search monsters and hazards in the compendium"
             placeholder="Search monsters and hazards…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            autoFocus
           />
           {/* Quantity + optional name override for the next pick (issue #114): adding
               N monsters auto-numbers them "Goblin 1".."Goblin N" so they're distinguishable. */}
@@ -5548,12 +5764,17 @@ function AddCombatantPanel({
               ))}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
-      {tab === 'party' && (
-        <div className="space-y-1.5">
-          {(() => {
+      <div
+        id="add-combatant-panel-party"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-party"
+        tabIndex={0}
+        hidden={tab !== 'party'}
+        className={tab === 'party' ? 'space-y-1.5' : 'hidden'}
+      >
+        {(() => {
             const available = characters.filter((c) => !existingCombatantCharacterIds.has(c.id));
             if (characters.length === 0) {
               return (
@@ -5594,13 +5815,18 @@ function AddCombatantPanel({
                 </span>
               </button>
             ));
-          })()}
-        </div>
-      )}
+        })()}
+      </div>
 
-      {tab === 'npc' && (
-        <div className="space-y-2">
-          {npcs.length === 0 ? (
+      <div
+        id="add-combatant-panel-npc"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-npc"
+        tabIndex={0}
+        hidden={tab !== 'npc'}
+        className={tab === 'npc' ? 'space-y-2' : 'hidden'}
+      >
+        {npcs.length === 0 ? (
             <p className="text-muted" style={{ fontSize: 12 }}>
               No NPCs in this campaign yet — create one on the NPCs page.
             </p>
@@ -5683,8 +5909,7 @@ function AddCombatantPanel({
               )}
             </>
           )}
-        </div>
-      )}
+      </div>
     </Card>
   );
 }

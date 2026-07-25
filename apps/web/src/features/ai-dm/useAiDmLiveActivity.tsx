@@ -14,6 +14,9 @@
  * each page opening its own stream — this is the "single shared subscription" the
  * issue calls for.
  *
+ * Issue #427 extends the shared subscription with the running transcript so the
+ * encounter-page driver dock can render narration without opening a second stream.
+ *
  * `PlayerDisplayPage` lives OUTSIDE `Layout` (issue #60 mounts it with no chrome), so
  * it cannot reach this context; it may call `useAiDmLiveActivityState` directly for
  * its optional narration ticker. Because the two routes are siblings (never both
@@ -24,12 +27,20 @@
  * here, so the encounter tracker / party sheet / map / proposals queue reconcile
  * against server truth even while the Table page is closed.
  */
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AiDmMode } from '@campfire/schema';
-import { useAiDmSeat, invalidateAiDm } from '../../lib/query';
+import { useAiDmSeat, useAiDmSession, invalidateAiDm } from '../../lib/query';
 import { useAiDmStream, type AiDmStreamEvent } from '../../lib/useAiDmStream';
 import { invalidateForToolEvent, resolveToolActivity, toolResource, type ToolChip, type ToolStreamEvent } from './toolActivity';
+import {
+  transcriptReducer,
+  loadTranscript,
+  saveTranscript,
+  emptyTranscript,
+  type TranscriptAction,
+  type TranscriptState,
+} from './transcript';
 
 /** One resolved encounter-tool activity, timestamped for "just happened" styling + auto-dismiss. */
 export interface AiDmEncounterActivity {
@@ -61,9 +72,13 @@ export interface AiDmLiveActivityState {
   proposalFiledCount: number;
   /** The last fully-aggregated narration line (`narration.message`) — the player-display ticker's feed. */
   lastNarration: string | null;
+  /** Client-assembled narration transcript (#427 encounter dock). */
+  transcript: TranscriptState;
+  /** Dispatch local transcript actions (echo player lines, rules answers, …). */
+  dispatchTranscript: (action: TranscriptAction) => void;
 }
 
-const INITIAL_STATE: AiDmLiveActivityState = {
+const INITIAL_STATE: Omit<AiDmLiveActivityState, 'transcript' | 'dispatchTranscript'> = {
   mode: undefined,
   live: false,
   turnActive: false,
@@ -74,6 +89,8 @@ const INITIAL_STATE: AiDmLiveActivityState = {
   lastNarration: null,
 };
 
+const NOOP_DISPATCH: (action: TranscriptAction) => void = () => {};
+
 /**
  * Subscribe to one campaign's AI-DM stream (when its seat is in Driver mode) and
  * reduce events into a live-activity snapshot. Also performs the shared
@@ -83,37 +100,93 @@ const INITIAL_STATE: AiDmLiveActivityState = {
 export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLiveActivityState {
   const queryClient = useQueryClient();
   const seatQuery = useAiDmSeat(campaignId);
+  const sessionQuery = useAiDmSession(campaignId);
   const mode = seatQuery.data?.mode;
+  const session = sessionQuery.data;
   const enabled = mode === 'driver' && campaignId !== undefined;
 
-  const [state, setState] = useState<AiDmLiveActivityState>(INITIAL_STATE);
-  // Reset the reduced activity (but not `mode`, which the seat query owns) whenever we
-  // stop watching — switching campaigns, or the seat leaving Driver mode — so a stale
-  // "AI just acted" chip from a previous campaign never lingers.
+  const [state, setState] = useState(INITIAL_STATE);
+  const [transcript, dispatchTranscript] = useReducer(
+    transcriptReducer,
+    campaignId,
+    (id) => (id !== undefined ? loadTranscript(id) : emptyTranscript),
+  );
+
+  const seededRef = useRef(false);
+
+  // Reset activity + transcript when campaign or driver mode changes.
   const prevKeyRef = useRef<string>('');
   const key = `${campaignId ?? ''}:${enabled}`;
   useEffect(() => {
     if (prevKeyRef.current !== key) {
       prevKeyRef.current = key;
       setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
+      seededRef.current = false;
+      if (campaignId !== undefined) {
+        dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId) : emptyTranscript });
+      } else {
+        dispatchTranscript({ type: 'reset' });
+      }
     }
-  }, [key]);
+  }, [key, campaignId, enabled]);
 
   useEffect(() => {
     setState((s) => (s.mode === mode ? s : { ...s, mode }));
   }, [mode]);
+
+  useEffect(() => {
+    if (!enabled || campaignId === undefined) return;
+    saveTranscript(campaignId, transcript);
+  }, [campaignId, enabled, transcript]);
+
+  // Seed join-context from thin session state when local transcript is empty.
+  useEffect(() => {
+    if (!enabled || campaignId === undefined) return;
+    if (transcript.entries.length > 0) {
+      if (!seededRef.current) seededRef.current = true;
+      return;
+    }
+    if (seededRef.current) return;
+    if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
+    if (session?.scene || session?.lastNarration) {
+      dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });
+    }
+    seededRef.current = true;
+  }, [
+    enabled,
+    campaignId,
+    transcript.entries.length,
+    seatQuery.isFetched,
+    sessionQuery.isFetched,
+    session,
+  ]);
+
+  const stableDispatch = useCallback((action: TranscriptAction) => {
+    dispatchTranscript(action);
+  }, []);
 
   useAiDmStream(
     campaignId,
     {
       onEvent: (event: AiDmStreamEvent) => {
         setState((prev) => reduce(prev, event));
-        if (event.type === 'tool' && campaignId !== undefined) {
-          // Pass the event's encounterId so invalidation targets the fight that changed (#825).
+        if (enabled) {
+          dispatchTranscript({ type: 'stream', event });
+        }
+        if (campaignId === undefined) return;
+        if (event.type === 'tool') {
           invalidateForToolEvent(queryClient, event, {
             campaignId,
             encounterId: event.encounterId,
           });
+        } else if (
+          event.type === 'state' ||
+          event.type === 'stuck' ||
+          event.type === 'recovered' ||
+          event.type === 'vote' ||
+          event.type === 'takeover'
+        ) {
+          invalidateAiDm(queryClient, campaignId);
         }
       },
       onReconnect: () => {
@@ -126,10 +199,15 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
     { enabled },
   );
 
-  return { ...state, live: enabled };
+  return {
+    ...state,
+    live: enabled,
+    transcript,
+    dispatchTranscript: stableDispatch,
+  };
 }
 
-function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveActivityState {
+function reduce(prev: typeof INITIAL_STATE, event: AiDmStreamEvent): typeof INITIAL_STATE {
   switch (event.type) {
     case 'turn.start':
       return { ...prev, turnActive: true };
@@ -140,7 +218,7 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
       return { ...prev, lastNarration: event.text };
     case 'tool': {
       const at = Date.now();
-      const next: AiDmLiveActivityState = { ...prev, lastToolEvent: event, lastToolAt: at };
+      const next = { ...prev, lastToolEvent: event, lastToolAt: at };
       if (event.proposed) next.proposalFiledCount = prev.proposalFiledCount + 1;
       const resource = toolResource(event.name);
       if (resource === 'encounter' || resource === 'party') {
@@ -165,6 +243,12 @@ function reduce(prev: AiDmLiveActivityState, event: AiDmStreamEvent): AiDmLiveAc
 
 const AiDmLiveActivityContext = createContext<AiDmLiveActivityState | null>(null);
 
+const INERT_CONTEXT: AiDmLiveActivityState = {
+  ...INITIAL_STATE,
+  transcript: emptyTranscript,
+  dispatchTranscript: NOOP_DISPATCH,
+};
+
 /** Provide a pre-computed snapshot (from one `useAiDmLiveActivityState` call) to descendants. */
 export function AiDmLiveActivityProvider({
   value,
@@ -183,5 +267,5 @@ export function AiDmLiveActivityProvider({
  * here treats "no signal yet" as "render nothing" anyway.
  */
 export function useAiDmLiveActivity(): AiDmLiveActivityState {
-  return useContext(AiDmLiveActivityContext) ?? INITIAL_STATE;
+  return useContext(AiDmLiveActivityContext) ?? INERT_CONTEXT;
 }
