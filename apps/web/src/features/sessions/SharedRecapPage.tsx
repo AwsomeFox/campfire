@@ -38,6 +38,7 @@ export default function SharedRecapPage() {
       setLoading(true);
       setError(null);
       setNotFound(false);
+      setRecap(null);
       try {
         const data = await api.get<SharedRecap>(`${API}/shared/recaps/${token}`);
         if (!cancelled) setRecap(data);
@@ -94,25 +95,29 @@ export default function SharedRecapPage() {
         <Card>
           <section
             className="text-center space-y-3"
-            role="alert"
-            aria-labelledby="shared-recap-unavailable-title"
-            aria-describedby="shared-recap-unavailable-hint"
             data-testid="shared-recap-unavailable"
           >
-            <p className="flex justify-center text-slate-400 m-0">
-              <GameIcon slug="candle-flame" size={32} reserveSpace />
-            </p>
-            <h1
-              id="shared-recap-unavailable-title"
-              ref={unavailableHeadingRef}
-              tabIndex={-1}
-              className="text-xl font-extrabold text-white m-0"
+            <div
+              role="alert"
+              aria-labelledby="shared-recap-unavailable-title"
+              aria-describedby="shared-recap-unavailable-hint"
+              className="space-y-3"
             >
-              {t('sessions.empty.shareInactiveTitle')}
-            </h1>
-            <p id="shared-recap-unavailable-hint" className="text-sm text-slate-400 m-0 max-w-md mx-auto">
-              {t('sessions.empty.shareInactiveHint')}
-            </p>
+              <p className="flex justify-center text-slate-400 m-0">
+                <GameIcon slug="candle-flame" size={32} reserveSpace />
+              </p>
+              <h1
+                id="shared-recap-unavailable-title"
+                ref={unavailableHeadingRef}
+                tabIndex={-1}
+                className="text-xl font-extrabold text-white m-0"
+              >
+                {t('sessions.empty.shareInactiveTitle')}
+              </h1>
+              <p id="shared-recap-unavailable-hint" className="text-sm text-slate-400 m-0 max-w-md mx-auto">
+                {t('sessions.empty.shareInactiveHint')}
+              </p>
+            </div>
             <div className="flex flex-col gap-2 pt-1 max-w-sm mx-auto">
               <Link
                 to="/"

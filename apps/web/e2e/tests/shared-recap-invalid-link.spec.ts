@@ -81,7 +81,7 @@ test.describe('shared recap invalid link (#482)', () => {
     const heading = page.getByRole('heading', { level: 1, name: "This recap link isn't available" });
     await expect(heading).toBeVisible();
     await expect(heading).toBeFocused();
-    await expect(page.getByTestId('shared-recap-unavailable')).toHaveAttribute('role', 'alert');
+    await expect(page.getByTestId('shared-recap-unavailable').getByRole('alert')).toBeVisible();
 
     await expect(page.getByText(INVALID_TOKEN)).toHaveCount(0);
     await expect(page.getByText(/revoked|Not found/i)).toHaveCount(0);
