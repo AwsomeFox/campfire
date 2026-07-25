@@ -52,7 +52,6 @@ import {
 import { endedSummaryTallies, isDown } from './encounterEndedSummary';
 import { TurnWorkspace } from './TurnWorkspace';
 import { initials as tokenInitials } from '../../lib/avatarText';
-import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import { useAuth } from '../../app/auth';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
