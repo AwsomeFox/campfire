@@ -79,6 +79,7 @@ function writeSpawnSnapshot(incoming: CoverageMapData): void {
     );
   }
   snapshot.merge(incoming);
+  fs.mkdirSync(path.dirname(SPAWN_COVERAGE_SNAPSHOT), { recursive: true });
   fs.writeFileSync(SPAWN_COVERAGE_SNAPSHOT, JSON.stringify(snapshot.toJSON()));
 }
 
