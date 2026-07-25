@@ -11,7 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { Notification, NotificationType } from '@campfire/schema';
+import type { Notification, NotificationType, TimeFormat } from '@campfire/schema';
 import { parseScheduleNotificationData } from '@campfire/schema';
 import { useCampaigns } from '../../app/CampaignContext';
 import { api, API } from '../../lib/api';
@@ -21,7 +21,7 @@ import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { notificationHref } from '../../lib/entityLinks';
-import { useFormattingLocale } from '../../lib/format';
+import { useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { parseCampaignIdParam } from '../../lib/parseCampaignIdParam';
 import {
   rememberCancelledScheduleDetail,
@@ -78,11 +78,15 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-function notificationCopy(notification: Notification, locale: string | undefined): { title: string; body: string } {
+function notificationCopy(
+  notification: Notification,
+  locale: string | undefined,
+  timeFormat: TimeFormat,
+): { title: string; body: string } {
   const scheduleData = parseScheduleNotificationData(notification.data);
   if (scheduleData) {
     return {
-      title: scheduleNotificationDisplayTitle(scheduleData, locale),
+      title: scheduleNotificationDisplayTitle(scheduleData, locale, undefined, timeFormat),
       body: scheduleNotificationDisplayBody(scheduleData, locale),
     };
   }
@@ -109,6 +113,7 @@ export default function NotificationsPage() {
   const navigate = useNavigate();
   const announce = useAnnounce();
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const { campaigns } = useCampaigns();
   const { count: globalUnreadCount, markReadBulk, markUnreadBulk } = useNotifications();
 
@@ -556,7 +561,7 @@ export default function NotificationsPage() {
         )}
 
         {items.map((notification) => {
-          const copy = notificationCopy(notification, formattingLocale);
+          const copy = notificationCopy(notification, formattingLocale, timeFormat);
           const campaignName = campaignMap.get(notification.campaignId);
           const isRead = Boolean(notification.readAt);
 

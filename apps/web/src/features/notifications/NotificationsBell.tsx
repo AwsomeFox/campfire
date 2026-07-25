@@ -17,7 +17,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import type { Notification } from '@campfire/schema';
+import type { Notification, TimeFormat } from '@campfire/schema';
 import { parseScheduleNotificationData } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { api, API } from '../../lib/api';
@@ -26,7 +26,7 @@ import { useAnnounce } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { useDialog } from '../../components/useDialog';
 import { notificationHref } from '../../lib/entityLinks';
-import { useFormattingLocale } from '../../lib/format';
+import { useFormattingLocale, useTimeFormat } from '../../lib/format';
 import {
   rememberCancelledScheduleDetail,
   scheduleNotificationDisplayBody,
@@ -271,7 +271,10 @@ export function NotificationsProvider({ children }: { children: ReactNode }) {
 
   const refreshCount = useCallback((force = false): Promise<void> => {
     if (userId === undefined || !storageKey || !lockName || !isDocumentActive()) return Promise.resolve();
-    if (countRequestRef.current) return countRequestRef.current.promise;
+    if (countRequestRef.current) {
+      if (!force) return countRequestRef.current.promise;
+      cancelCountRequest();
+    }
 
     const stored = readStoredSnapshot();
     if (!force && stored && Date.now() - stored.refreshedAt < POLL_MS) {
@@ -701,11 +704,15 @@ function CloseButton({ onClose, label }: { onClose: () => void; label: string })
   );
 }
 
-function notificationCopy(notification: Notification, locale: string | undefined): { title: string; body: string } {
+function notificationCopy(
+  notification: Notification,
+  locale: string | undefined,
+  timeFormat: TimeFormat,
+): { title: string; body: string } {
   const scheduleData = parseScheduleNotificationData(notification.data);
   if (scheduleData) {
     return {
-      title: scheduleNotificationDisplayTitle(scheduleData, locale),
+      title: scheduleNotificationDisplayTitle(scheduleData, locale, undefined, timeFormat),
       body: scheduleNotificationDisplayBody(scheduleData, locale),
     };
   }
@@ -715,6 +722,7 @@ function notificationCopy(notification: Notification, locale: string | undefined
 function OpenNotificationsPanel({ notifications }: { notifications: NotificationContextValue }) {
   const { count, items, loadError, closePanel, retryLoadItems, markRead, markAllRead } = notifications;
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const narrow = useIsNarrowViewport();
   const navigate = useNavigate();
   const [markAllAnnouncement, setMarkAllAnnouncement] = useState<string | null>(null);
@@ -845,7 +853,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
             </div>
           )}
           {items?.map((notification) => {
-            const copy = notificationCopy(notification, formattingLocale);
+            const copy = notificationCopy(notification, formattingLocale, timeFormat);
             return (
             <button
               key={notification.id}

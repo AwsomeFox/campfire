@@ -1364,6 +1364,20 @@ a:hover .cf-name-reveal {
   font-size: 18px;
   line-height: 1;
 }
+.cf-tabbar-live-indicator {
+  position: relative;
+}
+.cf-tabbar-live-indicator::after {
+  content: '';
+  position: absolute;
+  top: -1px;
+  right: -4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--color-accent) 60%, transparent);
+}
 @media (min-width: 768px) {
   .cf-tabbar {
     display: none;

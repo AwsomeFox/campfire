@@ -1,5 +1,9 @@
 /**
  * Authenticated app chrome — desktop sidebar + mobile topbar/tabbar/More sheet.
+ * Mobile tab bar contract (issue #637): five primary targets — Home, Quests, Party,
+ * Notes, and either More or a temporary Live shortcut to the running encounter.
+ * Overflow nav stays in the More sheet (reachable from the role chip in the top bar
+ * when Live replaces More in the tab bar).
  * Mirrors the Nocturne app shell in design/claude-design/Campfire.dc.html
  * (the block starting at the `inApp` sc-if, just above "Dashboard").
  * Campaign-scoped nav only renders inside /c/:campaignId routes.
@@ -17,7 +21,7 @@ import { parseCampaignIdParam } from '../lib/parseCampaignIdParam';
 import { rememberCampaignRoute } from '../lib/campaignSwitcherRoute';
 import { confirmDiscardUnsavedWork } from '../lib/unsavedWork';
 
-import { useFormattingLocale } from '../lib/format';
+import { useFormattingLocale, useTimeFormat, formatDateTime } from '../lib/format';
 import { initials } from '../lib/avatarText';
 import { useAiDmSeat } from '../lib/query';
 import { Btn, Card } from '../components/ui';
@@ -37,6 +41,8 @@ import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
 import { MAIN_CONTENT_ID } from './routeFocus';
 import { useMembershipLiveSync } from '../features/auth/useMembershipLiveSync';
+import { LiveEncounterProvider } from './LiveEncounterContext';
+import { useLiveEncounterState } from '../lib/useLiveEncounterState';
 
 function FlameMark({ size = 20 }: { size?: number }) {
   return (
@@ -222,6 +228,7 @@ function relativeAgo(at: number, now: number = Date.now()): string {
 function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   const { t } = useTranslation();
   const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   // Tick once a minute so the relative label stays current. `staleIdentity` only
   // flips on a real /me outcome, so this effect is mounted at most while offline.
   const [, tick] = useState(0);
@@ -232,9 +239,12 @@ function OfflineBanner({ lastSyncedAt }: { lastSyncedAt: number | null }) {
   const when = useMemo(() => {
     if (lastSyncedAt == null) return null;
     const ago = relativeAgo(lastSyncedAt);
-    const abs = new Date(lastSyncedAt).toLocaleString(formattingLocale);
+    const abs = formatDateTime(lastSyncedAt, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
     return { ago, abs };
-  }, [lastSyncedAt, formattingLocale]);
+  }, [lastSyncedAt, formattingLocale, timeFormat]);
 
   return (
     <div
@@ -379,9 +389,18 @@ function LayoutContent() {
   const role = campaignId !== undefined ? roleIn(campaignId) : null;
   const isDm = role === 'dm';
 
+  const { liveEncounter, refresh: refreshLiveEncounter } = useLiveEncounterState(
+    Number.isFinite(campaignId) ? campaignId : undefined,
+  );
+
   // Issue #437: live promote/demote — refresh /me when this user's campaign role
   // changes over SSE (and fan out to other tabs). Keeps the current route.
-  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined);
+  // Issue #637: reuse the same stream for live-encounter chrome refresh.
+  useMembershipLiveSync(Number.isFinite(campaignId) ? campaignId : undefined, {
+    onEncounterChange: () => void refreshLiveEncounter(),
+    onReconnect: () => void refreshLiveEncounter(),
+    onStreamRecovery: () => void refreshLiveEncounter(),
+  });
 
   // Issue #760: remember the last safe in-campaign route per user/campaign so
   // the chooser can restore task context after a switch (namespaced by userId
@@ -648,6 +667,7 @@ function LayoutContent() {
 
   return (
     <AiDmLiveActivityProvider value={liveActivity}>
+    <LiveEncounterProvider value={liveEncounter}>
     <div className="min-h-screen flex" style={{ background: 'var(--color-bg)' }}>
       <SkipToMainLink mainRef={mainRef} />
       {/* Desktop sidebar */}
@@ -918,11 +938,25 @@ function LayoutContent() {
             <span className="ico"><GameIcon slug="shield" size={20} /></span>Party
           </NavLink>
           <NavLink to={`/c/${campaignId}/notes`} className={({ isActive }) => (isActive ? 'active' : '')}>
-            <span className="ico"><GameIcon slug="quill-ink" size={20} /></span>Notes
+            <span className="ico"><GameIcon slug="quill-ink" size={20} /></span>{t('nav.notes')}
           </NavLink>
-          <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
-            <span className="ico">⋯</span>More
-          </button>
+          {liveEncounter ? (
+            <NavLink
+              to={`/c/${campaignId}/encounters/${liveEncounter.id}`}
+              className={({ isActive }) => (isActive ? 'active' : '')}
+              data-testid="tabbar-live"
+              aria-label={t('nav.liveEncounterTab', { round: liveEncounter.round })}
+            >
+              <span className="ico cf-tabbar-live-indicator">
+                <GameIcon slug="crossed-swords" size={20} />
+              </span>
+              {t('nav.live')}
+            </NavLink>
+          ) : (
+            <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
+              <span className="ico">⋯</span>{t('nav.more')}
+            </button>
+          )}
         </nav>
       )}
 
@@ -948,6 +982,7 @@ function LayoutContent() {
       {showPasswordModal && <ChangePasswordModal onClose={() => setShowPasswordModal(false)} />}
       <NotificationsPanel />
     </div>
+    </LiveEncounterProvider>
     </AiDmLiveActivityProvider>
   );
 }

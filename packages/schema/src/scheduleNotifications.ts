@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod';
+import { DEFAULT_TIME_FORMAT, type TimeFormat, withTimeFormat } from './timeFormat';
 
 export const ScheduleNotificationChangeType = z.enum([
   'created',
@@ -86,10 +87,11 @@ export function formatScheduleNotificationInstant(
   scheduledAt: string,
   locale?: string,
   timeZone?: string,
+  timeFormat: TimeFormat = DEFAULT_TIME_FORMAT,
 ): string {
   const d = new Date(scheduledAt);
   if (Number.isNaN(d.getTime())) return 'an unknown time';
-  const options: Intl.DateTimeFormatOptions = {
+  const base: Intl.DateTimeFormatOptions = {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -98,7 +100,7 @@ export function formatScheduleNotificationInstant(
     minute: '2-digit',
     timeZoneName: 'short',
   };
-  if (timeZone) options.timeZone = timeZone;
+  const options = withTimeFormat(timeZone ? { ...base, timeZone } : base, timeFormat);
   try {
     return d.toLocaleString(locale, options);
   } catch {
@@ -180,9 +182,10 @@ export function formatScheduleNotificationTitle(
   data: ScheduleNotificationData,
   locale?: string,
   timeZone?: string,
+  timeFormat: TimeFormat = DEFAULT_TIME_FORMAT,
 ): string {
   const label = scheduleNotificationLabel(data.label);
-  const when = formatScheduleNotificationInstant(data.scheduledAt, locale, timeZone);
+  const when = formatScheduleNotificationInstant(data.scheduledAt, locale, timeZone, timeFormat);
   switch (data.changeType) {
     case 'created':
       return `${label} scheduled for ${when}`;
