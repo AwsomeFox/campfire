@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ProcessCov } from '@bcoe/v8-coverage';
 import libCoverage from 'istanbul-lib-coverage';
 import v8toIstanbul from 'v8-to-istanbul';
@@ -47,7 +47,7 @@ function isOidcRelatedDistFile(scriptPath: string): boolean {
 
 function scriptPathFromUrl(url: string): string | undefined {
   if (url.startsWith('file://')) {
-    return path.normalize(new URL(url).pathname);
+    return path.normalize(fileURLToPath(url));
   }
   if (path.isAbsolute(url)) {
     return path.normalize(url);
@@ -102,7 +102,9 @@ export async function mergeLatestChildV8Coverage(): Promise<void> {
       await converter.load();
       converter.applyCoverage(script.functions);
       const incoming = converter.toIstanbul();
-      Object.assign(globalWithCoverage.__coverage__, incoming);
+      const coverageMap = libCoverage.createCoverageMap(globalWithCoverage.__coverage__);
+      coverageMap.merge(incoming);
+      globalWithCoverage.__coverage__ = coverageMap.data;
     } catch {
       // Skip dist files v8-to-istanbul cannot map (e.g. missing source maps).
     }

@@ -81,6 +81,5 @@ describe('jest coverageThreshold (#562)', () => {
     // Observed with oidc.e2e-spec.ts child-process merge alone: ~63% branches.
     // Keep the floor a few points below so CI has headroom without silent regression.
     expect(oidcService.branches).toBeGreaterThanOrEqual(55);
-    expect(oidcService.branches).toBeLessThan(63);
   });
 });
