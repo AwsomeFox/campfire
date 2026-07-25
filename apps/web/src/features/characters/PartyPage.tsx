@@ -303,7 +303,7 @@ function CharacterCard({
                 <p className="font-bold text-white text-[15px] truncate cf-name-reveal" title={character.name} aria-label={character.name}>{character.name}</p>
                 {!isActive && <StatusTag status={character.status} className="shrink-0" />}
               </div>
-              <p className="text-[11.5px] text-slate-500 truncate cf-name-reveal" title={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`} aria-label={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`}>
+              <p className="text-[11.5px] text-secondary truncate cf-name-reveal" title={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`} aria-label={`${character.className || 'Unknown class'} · Lv ${character.level}${ownerLabel ? ` · ${ownerLabel}` : ''}`}>
                 {character.className || 'Unknown class'} · Lv {character.level}
                 {ownerLabel && ` · ${ownerLabel}`}
               </p>
@@ -314,7 +314,7 @@ function CharacterCard({
               </span>
             )}
           </div>
-        <div className="flex justify-between text-[11.5px] text-slate-500">
+        <div className="flex justify-between text-[11.5px] text-secondary">
           <span>HP</span>
           <span>
             {character.hpMax > 0 ? `${character.hpCurrent} / ${character.hpMax}` : 'Not set'}
@@ -323,7 +323,7 @@ function CharacterCard({
         {character.hpMax > 0 ? (
           <HpBar current={character.hpCurrent} max={character.hpMax} />
         ) : (
-          <p className="text-[10px] text-slate-600">Complete HP on the sheet</p>
+          <p className="text-[10px] text-secondary">Complete HP on the sheet</p>
         )}
         {character.conditions.length > 0 && (
           <div className="flex gap-1.5 flex-wrap">

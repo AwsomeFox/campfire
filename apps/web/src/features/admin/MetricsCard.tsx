@@ -92,7 +92,7 @@ export function MetricsCard() {
     <Card className="space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap border-b border-slate-700 pb-2">
         <h2 className="font-bold text-white text-sm">Server overview</h2>
-        <div className="flex items-center gap-2 text-[11px] text-slate-500">
+        <div className="flex items-center gap-2 text-[11px] text-secondary">
           <span className="cf-chip cf-chip-private" data-testid="client-version" title="Running client version">
             Client: v{__APP_VERSION__}
           </span>
@@ -118,7 +118,7 @@ export function MetricsCard() {
 
       {/* Entity counts */}
       <div>
-        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Records</p>
+        <p className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-2">Records</p>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
           {COUNT_LABELS.map(({ key, label }) => (
             <Stat key={key} label={label} value={metrics.counts[key].toLocaleString()} />
@@ -128,19 +128,19 @@ export function MetricsCard() {
 
       {/* Recent activity */}
       <div>
-        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Recent activity</p>
+        <p className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-2">Recent activity</p>
         {metrics.recentActivity.length === 0 ? (
-          <p className="text-xs text-slate-500">No recorded activity yet.</p>
+          <p className="text-xs text-secondary">No recorded activity yet.</p>
         ) : (
           <ul className="divide-y divide-slate-800">
             {metrics.recentActivity.map((a) => (
               <li key={a.id} className="py-1.5 flex items-center justify-between gap-3 text-xs">
                 <span className="text-slate-300 truncate">
                   <span className="font-semibold text-white">{a.action}</span>
-                  <span className="text-slate-500"> · {a.actor}</span>
-                  {a.entityType && <span className="text-slate-600"> · {a.entityType}{a.entityId ? ` #${a.entityId}` : ''}</span>}
+                  <span className="text-secondary"> · {a.actor}</span>
+                  {a.entityType && <span className="text-secondary"> · {a.entityType}{a.entityId ? ` #${a.entityId}` : ''}</span>}
                 </span>
-                <span className="text-slate-600 whitespace-nowrap">{new Date(a.createdAt).toLocaleString()}</span>
+                <span className="text-secondary whitespace-nowrap">{new Date(a.createdAt).toLocaleString()}</span>
               </li>
             ))}
           </ul>
@@ -153,7 +153,7 @@ export function MetricsCard() {
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="cf-inset p-2.5">
-      <p className="text-[10px] uppercase tracking-widest text-slate-500">{label}</p>
+      <p className="text-[10px] uppercase tracking-widest text-secondary">{label}</p>
       <p className="text-sm font-bold text-white truncate" title={value}>
         {value}
       </p>

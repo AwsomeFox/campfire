@@ -54,7 +54,7 @@ export function EntityRevealDialog({
               >
                 {preview.map((item, index) => (
                   <li key={`${item.label}-${index}`}>
-                    <span className="text-slate-500">{item.label}: </span>
+                    <span className="text-secondary">{item.label}: </span>
                     <span className="text-slate-200 break-words">{item.value}</span>
                   </li>
                 ))}

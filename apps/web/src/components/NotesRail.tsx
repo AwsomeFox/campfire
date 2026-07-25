@@ -190,7 +190,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
                 <VisLabel visibility={n.visibility} />
               )}
             </Chip>
-            <span className="text-[10px]" style={{ color: 'var(--color-neutral-600)' }}>
+            <span className="text-[10px]" style={{ color: 'var(--color-text-secondary)' }}>
               {n.authorName || n.authorUserId}
             </span>
           </div>
@@ -262,7 +262,7 @@ export function NotesRail({ campaignId, entityType, entityId }: { campaignId: nu
             Save
           </Btn>
         </div>
-        <p id={visHelpId} className="text-[11px] text-slate-500 m-0">
+        <p id={visHelpId} className="text-[11px] text-secondary m-0">
           {NOTE_VISIBILITY_HELP[visibility]}
         </p>
         {visibility === 'whisper' && (

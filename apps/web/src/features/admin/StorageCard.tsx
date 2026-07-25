@@ -104,7 +104,7 @@ export function StorageCard() {
     <Card className="space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap border-b border-slate-700 pb-2">
         <h2 className="font-bold text-white text-sm">Storage</h2>
-        <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={() => void load()}>
+        <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={() => void load()}>
           refresh
         </button>
       </div>
@@ -122,14 +122,14 @@ export function StorageCard() {
 
       {/* Per-campaign usage + quotas */}
       <div>
-        <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Per-campaign usage</p>
+        <p className="text-[10px] font-bold text-secondary uppercase tracking-widest mb-2">Per-campaign usage</p>
         {stats.campaigns.length === 0 ? (
-          <p className="text-xs text-slate-500">No campaigns yet.</p>
+          <p className="text-xs text-secondary">No campaigns yet.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-[10px] uppercase text-slate-500 text-left">
+                <tr className="text-[10px] uppercase text-secondary text-left">
                   <th className="py-2 pr-4 font-bold">Campaign</th>
                   <th className="pr-4 font-bold">Files</th>
                   <th className="pr-4 font-bold">Committed</th>
@@ -151,7 +151,7 @@ export function StorageCard() {
       {/* Filesystem deletion queue (issue #727) */}
       <div id="fs-cleanup" className="cf-inset p-3.5 space-y-2">
         <p className="text-[10px] font-bold text-rose-400 uppercase tracking-widest">Pending file erasure</p>
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           Paths whose database metadata was removed but bytes could not be verified erased (
           {stats.fsCleanup.pendingCount} retrying, {stats.fsCleanup.failedCount} need attention).
         </p>
@@ -171,7 +171,7 @@ export function StorageCard() {
           </ul>
         )}
         {stats.fsCleanup.queueCount > stats.fsCleanup.items.length && (
-          <p className="text-[10px] text-slate-500 m-0">
+          <p className="text-[10px] text-secondary m-0">
             Showing {stats.fsCleanup.items.length} of {stats.fsCleanup.queueCount} queued paths (oldest first).
           </p>
         )}
@@ -185,7 +185,7 @@ export function StorageCard() {
       {/* Orphan cleanup */}
       <div className="cf-inset p-3.5 space-y-2">
         <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Orphan cleanup</p>
-        <p className="text-[11px] text-slate-500">
+        <p className="text-[11px] text-secondary">
           Removes attachment rows whose file is missing on disk ({stats.orphans.rowsWithoutFile}) and upload files with no
           backing row ({stats.orphans.filesWithoutRow}, {formatBytes(stats.orphans.orphanBytes)}). Preview first, then clean.
         </p>
@@ -277,7 +277,7 @@ function QuotaRow({
             />
           </div>
         ) : campaign.quotaBytes === null ? (
-          <span className="text-slate-600">none</span>
+          <span className="text-secondary">none</span>
         ) : (
           formatBytes(campaign.quotaBytes)
         )}
@@ -288,12 +288,12 @@ function QuotaRow({
             <button type="button" className="text-[11px] text-emerald-400 hover:text-emerald-300 mr-3" onClick={save} disabled={saving}>
               save
             </button>
-            <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={() => setEditing(false)}>
+            <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={() => setEditing(false)}>
               cancel
             </button>
           </>
         ) : (
-          <button type="button" className="text-[11px] text-slate-500 hover:text-white" onClick={startEdit}>
+          <button type="button" className="text-[11px] text-secondary hover:text-white" onClick={startEdit}>
             set quota
           </button>
         )}
@@ -305,7 +305,7 @@ function QuotaRow({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="cf-inset p-2.5">
-      <p className="text-[10px] uppercase tracking-widest text-slate-500">{label}</p>
+      <p className="text-[10px] uppercase tracking-widest text-secondary">{label}</p>
       <p className="text-sm font-bold text-white truncate" title={value}>
         {value}
       </p>

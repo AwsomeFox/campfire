@@ -21,7 +21,7 @@ export function RequireServerAdmin({ children }: { children: ReactNode }) {
         <Card className="text-center space-y-1">
           <p className="flex justify-center text-[var(--color-neutral-400)]"><GameIcon slug="padlock" size={28} reserveSpace /></p>
           <p className="text-sm text-slate-300 font-semibold">Server admins only</p>
-          <p className="text-xs text-slate-500">Ask a server admin if you need access to this console.</p>
+          <p className="text-xs text-secondary">Ask a server admin if you need access to this console.</p>
         </Card>
       </div>
     );

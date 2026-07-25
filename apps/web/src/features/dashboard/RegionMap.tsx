@@ -765,7 +765,7 @@ export function RegionMap({
           >
             {kbSaving ? 'Saving…' : 'Save'}
           </button>
-          <span id="kb-pin-help" className="text-[10px] text-slate-500 basis-full">
+          <span id="kb-pin-help" className="text-[10px] text-secondary basis-full">
             Arrow keys move 1%, Shift+arrow moves 5%. 0% = left/top edge, 100% = right/bottom edge.
           </span>
         </div>

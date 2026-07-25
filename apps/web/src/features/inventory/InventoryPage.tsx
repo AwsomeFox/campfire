@@ -543,7 +543,7 @@ function TreasuryCard({
                   const dmEdited = intent !== editBase[key];
                   return (
                     <div key={key} className="text-center">
-                      <p className="text-[10px] text-slate-500 uppercase">{label}</p>
+                      <p className="text-[10px] text-secondary uppercase">{label}</p>
                       <p className="text-white font-bold">{fresh}</p>
                       {dmEdited && intent !== fresh && <p className="text-[11px] text-amber-400">→ {intent}</p>}
                     </div>
@@ -558,7 +558,7 @@ function TreasuryCard({
               const label = t(labelKey);
               return (
               <label key={key} className="space-y-1">
-                <span className="block text-[11px] text-slate-500 uppercase tracking-wide">{label}</span>
+                <span className="block text-[11px] text-secondary uppercase tracking-wide">{label}</span>
                 <TextInput
                   type="text"
                   inputMode="numeric"
@@ -597,7 +597,7 @@ function TreasuryCard({
                 </span>
                 <p className="text-lg font-extrabold text-white leading-none">{treasury[key]}</p>
               </div>
-              <p className="text-[11px] text-slate-500 uppercase tracking-wide mt-1">
+              <p className="text-[11px] text-secondary uppercase tracking-wide mt-1">
                 {label} ({key})
               </p>
               {canEdit && (
@@ -657,7 +657,7 @@ function ItemSection({
         <GameIcon slug={icon} size={16} /> {title}
       </h2>
       {items.length === 0 ? (
-        <p className="text-sm text-slate-500">{t('inventory.empty')}</p>
+        <p className="text-sm text-secondary">{t('inventory.empty')}</p>
       ) : (
         <ul className="divide-y" style={{ borderColor: 'var(--color-neutral-800)' }}>
           {items.map((item) => (
@@ -783,9 +783,9 @@ function ItemRow({
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold text-white truncate">
           {committed.name}
-          {committed.qty !== 1 && <span className="text-slate-500 font-normal"> ×{committed.qty}</span>}
+          {committed.qty !== 1 && <span className="text-secondary font-normal"> ×{committed.qty}</span>}
         </p>
-        {committed.notes && <Markdown className="!text-[12px] !text-slate-500">{committed.notes}</Markdown>}
+        {committed.notes && <Markdown className="!text-[12px] !text-secondary">{committed.notes}</Markdown>}
         {error && <p className="text-[12px] text-rose-400">{error}</p>}
       </div>
       {editable && (
@@ -1037,7 +1037,7 @@ function AddItemForm({
               {t('inventory.autoIcon')}
             </Btn>
           )}
-          {!iconSlug && <span className="text-[11px] text-slate-500">{t('inventory.autoFromName')}</span>}
+          {!iconSlug && <span className="text-[11px] text-secondary">{t('inventory.autoFromName')}</span>}
         </div>
         <div className="flex gap-2 justify-end">
           <Btn ghost type="button" onClick={onCancel} disabled={saving}>

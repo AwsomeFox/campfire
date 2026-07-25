@@ -245,7 +245,7 @@ export function EmptyState({
         <GameIcon slug={icon} size={30} reserveSpace />
       </p>
       <p className="text-sm font-semibold text-[var(--color-neutral-300)]">{title}</p>
-      {hint && <p className="text-xs text-[var(--color-neutral-600)] max-w-md mx-auto">{hint}</p>}
+      {hint && <p className="text-xs text-secondary max-w-md mx-auto">{hint}</p>}
       {action && <div className="pt-1 flex justify-center flex-wrap gap-2">{action}</div>}
       {children}
     </div>

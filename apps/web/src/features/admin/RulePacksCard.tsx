@@ -136,7 +136,7 @@ export function RulePacksCard() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-[10px] uppercase text-slate-500 text-left">
+              <tr className="text-[10px] uppercase text-secondary text-left">
                 <th className="py-2 pr-4 font-bold">Name</th>
                 <th className="pr-4 font-bold">Version</th>
                 <th className="pr-4 font-bold">License</th>
@@ -171,7 +171,7 @@ export function RulePacksCard() {
         onError={setError}
       />
 
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         Rule packs are server-wide (not per-campaign) and readable by any signed-in user. Installing or removing a
         pack here affects every campaign that has it selected as its rule system. Usage counts are server-wide
         (every campaign using the pack, even ones you can't see).
@@ -228,7 +228,7 @@ function PackRow({
       <td className="pr-4 text-slate-400">{pack.entryCount}</td>
       <td className="pr-4 text-slate-400">
         {usageCount === 0 ? (
-          <span className="text-slate-600">—</span>
+          <span className="text-secondary">—</span>
         ) : (
           <span title={usedBy.map((c) => c.name).join(', ')}>
             {usageCount} {usageCount === 1 ? 'campaign' : 'campaigns'}
@@ -400,7 +400,7 @@ function InstallPanel({
 
       <div className="flex flex-wrap gap-3">
         <label className="flex flex-col gap-1 text-sm text-slate-300">
-          <span className="text-[10px] uppercase tracking-widest text-slate-500">Source</span>
+          <span className="text-[10px] uppercase tracking-widest text-secondary">Source</span>
           <select
             className="cf-input !min-h-0 !py-1.5 text-sm"
             value={source}
@@ -417,7 +417,7 @@ function InstallPanel({
 
         {source === 'osr' && (
           <label className="flex flex-col gap-1 text-sm text-slate-300">
-            <span className="text-[10px] uppercase tracking-widest text-slate-500">Variant</span>
+            <span className="text-[10px] uppercase tracking-widest text-secondary">Variant</span>
             <select
               className="cf-input !min-h-0 !py-1.5 text-sm"
               value={osrVariant}
@@ -435,7 +435,7 @@ function InstallPanel({
       </div>
 
       <p className="text-[11px] text-slate-400">{meta.blurb}</p>
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         <span className="text-slate-400 font-semibold">Rules:</span> {meta.mechanics}
       </p>
 
@@ -464,7 +464,7 @@ function InstallPanel({
 
       {requiresUrl && (
         <label className="flex flex-col gap-1 text-sm text-slate-300">
-          <span className="text-[10px] uppercase tracking-widest text-slate-500">Mirror URL (required)</span>
+          <span className="text-[10px] uppercase tracking-widest text-secondary">Mirror URL (required)</span>
           <input
             type="url"
             className="cf-input !min-h-0 !py-1.5 text-sm"
@@ -479,7 +479,7 @@ function InstallPanel({
         </label>
       )}
 
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         {hasExistingPack
           ? `Adds any selected sections not already in "${existingPack?.name ?? meta.label}" — sections you already have are left untouched.`
           : `Installs "${meta.label}" as a new server-wide pack.`}{' '}

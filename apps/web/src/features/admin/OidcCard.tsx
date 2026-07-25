@@ -53,7 +53,7 @@ function draftFingerprint(draft: OidcDraft, revision: number): string {
 function checkTone(status: OidcCheckResult['status']): string {
   if (status === 'pass') return 'text-emerald-300';
   if (status === 'fail') return 'text-rose-300';
-  return 'text-slate-500';
+  return 'text-secondary';
 }
 
 function checkLabel(status: OidcCheckResult['status']): string {
@@ -322,7 +322,7 @@ export function OidcCard() {
 
       {loadErr && <ErrorNote message={loadErr} onRetry={load} />}
 
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         Configure OIDC/SSO here, or via <code>OIDC_*</code> environment variables. When both are set, the environment
         variable wins for that field. Use <strong>Test discovery</strong> to confirm the issuer is reachable, then{' '}
         <strong>Test login (end-to-end)</strong> before relying on SSO as the only sign-in path.
@@ -435,7 +435,7 @@ export function OidcCard() {
                     : '✗ End-to-end test login failed'}
               </p>
               <p className="text-slate-400">{testResult.message}</p>
-              <p className="text-slate-500">
+              <p className="text-secondary">
                 Tested {new Date(testResult.testedAt).toLocaleString()} · fingerprint{' '}
                 <span className="font-mono">{testResult.fingerprint || '—'}</span> · values from{' '}
                 {sourceSummary(testResult)}
@@ -461,13 +461,13 @@ export function OidcCard() {
                 ))}
               </ul>
               {testResult.authorizationEndpoint && (
-                <p className="text-slate-500 font-mono break-all">authorize: {testResult.authorizationEndpoint}</p>
+                <p className="text-secondary font-mono break-all">authorize: {testResult.authorizationEndpoint}</p>
               )}
             </div>
           )}
 
           {cfg.lastE2eTest && (
-            <p className="text-[10px] text-slate-600">
+            <p className="text-[10px] text-secondary">
               Last end-to-end test: {cfg.lastE2eTest.ok ? 'OK' : 'failed'} at{' '}
               {new Date(cfg.lastE2eTest.testedAt).toLocaleString()} · fingerprint{' '}
               <span className="font-mono">{cfg.lastE2eTest.fingerprint || '—'}</span>
@@ -521,7 +521,7 @@ function OidcField({
 }) {
   return (
     <label className="block">
-      <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold flex items-center gap-1.5">
+      <span className="text-[10px] uppercase tracking-widest text-secondary font-bold flex items-center gap-1.5">
         {label}
         {envPinned && <span className="cf-chip cf-chip-private !py-0 !text-[9px]">env</span>}
       </span>
@@ -532,7 +532,7 @@ function OidcField({
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
       />
-      {hint && <span className="text-[10px] text-slate-600 mt-0.5 block">{hint}</span>}
+      {hint && <span className="text-[10px] text-secondary mt-0.5 block">{hint}</span>}
     </label>
   );
 }

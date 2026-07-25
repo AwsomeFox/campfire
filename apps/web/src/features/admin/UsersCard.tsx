@@ -97,7 +97,7 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
           </table>
         </div>
       )}
-      <p className="text-[11px] text-slate-500">
+      <p className="text-[11px] text-secondary">
         This is how players &amp; DMs get accounts — create a user here, then add them to a campaign from that
         campaign&apos;s Members page.
       </p>
@@ -425,7 +425,7 @@ function UserRow({
           {user.username}
         </td>
         <td className="pr-4 text-slate-400" style={{ overflowWrap: 'anywhere' }}>
-          {user.displayName || <span className="text-slate-600">—</span>}
+          {user.displayName || <span className="text-secondary">—</span>}
         </td>
         <td className="pr-4">
           <span className={`cf-chip ${user.serverRole === 'admin' ? 'cf-chip-dm' : 'cf-chip-private'}`}>

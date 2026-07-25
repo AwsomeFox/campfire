@@ -72,7 +72,7 @@ export function ResetRequestsCard() {
       <h2 className="font-bold text-white text-sm border-b border-slate-700 pb-2">Password reset requests</h2>
       {error && <p className="text-xs text-rose-400">{error}</p>}
       {!requests || requests.length === 0 ? (
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-secondary">
           None right now. When someone taps &ldquo;Forgot password?&rdquo; on the sign-in screen, their request shows up
           here — approve it to get a one-time reset code to hand to them.
         </p>
@@ -90,9 +90,9 @@ export function ResetRequestsCard() {
                 <div>
                   <p className="text-sm font-semibold text-white">
                     {r.username}
-                    {r.displayName && <span className="text-slate-500 font-normal"> · {r.displayName}</span>}
+                    {r.displayName && <span className="text-secondary font-normal"> · {r.displayName}</span>}
                   </p>
-                  <p className="text-[11px] text-slate-500">
+                  <p className="text-[11px] text-secondary">
                     Requested {new Date(r.requestedAt).toLocaleString()}
                     {r.status === 'approved' && r.expiresAt && (
                       <> · code expires {new Date(r.expiresAt).toLocaleTimeString()}</>
@@ -131,7 +131,7 @@ export function ResetRequestsCard() {
                       failureAnnouncement="Copy failed. Clipboard blocked — select the link and copy it manually."
                     />
                   </div>
-                  <p className="text-[11px] text-slate-500">
+                  <p className="text-[11px] text-secondary">
                     Expires {new Date(approval.expiresAt).toLocaleTimeString()} · single-use · they set their own
                     password at /reset-password.
                   </p>

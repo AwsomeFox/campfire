@@ -174,6 +174,17 @@ test.describe('CSS custom-property validation (issue #882)', () => {
     expect(DEFINED.has('--cf-border'), '--cf-border must be defined').toBe(true);
   });
 
+  test('semantic text tokens stay defined (issue #593)', () => {
+    for (const token of [
+      '--color-text-secondary',
+      '--color-text-timestamp',
+      '--color-text-disabled',
+      '--color-text-decorative',
+    ]) {
+      expect(DEFINED.has(token), `${token} must be defined`).toBe(true);
+    }
+  });
+
   test('CSS cascade files are discoverable (guards the fixture against relocation)', () => {
     // If index.css or nocturne.css moved, the DEFINED set would be empty and
     // the assertions above would vacuously pass. This guard fails loudly so a

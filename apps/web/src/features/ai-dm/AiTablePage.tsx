@@ -633,7 +633,7 @@ export default function AiTablePage() {
         <div className="flex items-start gap-3 flex-wrap">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)]">
+              <span className="text-[10px] font-bold uppercase tracking-widest text-secondary">
                 {t('table.scene')}
               </span>
               <Chip variant={STATUS_VARIANT[statusKey]}>{statusLabel}</Chip>
@@ -642,7 +642,7 @@ export default function AiTablePage() {
               {session?.scene || t('table.noScene')}
             </p>
             {session !== undefined && (
-              <p className="text-[11px] text-[var(--color-neutral-600)] mt-0.5">
+              <p className="text-[11px] text-secondary mt-0.5">
                 {t('table.turnCount', { count: session.turnCount })}
               </p>
             )}
@@ -669,7 +669,7 @@ export default function AiTablePage() {
           <span className="flex text-[var(--color-accent)]"><GameIcon slug="crossed-swords" size={16} /></span>
           <span className="font-semibold">{t('table.liveEncounterTitle')}</span>
           {currentCombatantName && (
-            <span className="text-[var(--color-neutral-600)]">· {t('table.liveEncounterTurn', { name: currentCombatantName })}</span>
+            <span className="text-secondary">· {t('table.liveEncounterTurn', { name: currentCombatantName })}</span>
           )}
           <span className="ml-auto text-[var(--color-accent)]">{t('table.openTracker')} →</span>
         </Link>
@@ -817,7 +817,7 @@ export default function AiTablePage() {
           </div>
         </form>
       ) : (
-        <p className="text-xs text-center text-[var(--color-neutral-600)] py-2">{t('table.viewerHint')}</p>
+        <p className="text-xs text-center text-secondary py-2">{t('table.viewerHint')}</p>
       )}
     </div>
   );
@@ -827,13 +827,13 @@ export default function AiTablePage() {
 function BudgetMeter({ used, budget }: { used: number; budget: number }) {
   const { t } = useTranslation();
   if (budget <= 0) {
-    return <span className="text-[11px] text-[var(--color-neutral-600)]">{t('table.noBudget')}</span>;
+    return <span className="text-[11px] text-secondary">{t('table.noBudget')}</span>;
   }
   const pct = Math.max(0, Math.min(100, (used / budget) * 100));
   const tone = pct > 90 ? '#f43f5e' : pct > 70 ? '#f59e0b' : 'var(--color-accent)';
   return (
     <div className="text-right">
-      <div className="text-[10px] uppercase tracking-widest text-[var(--color-neutral-600)]">{t('table.tokenBudget')}</div>
+      <div className="text-[10px] uppercase tracking-widest text-secondary">{t('table.tokenBudget')}</div>
       <div
         className="mt-1 rounded-full overflow-hidden"
         style={{ width: 120, height: 6, background: 'var(--color-neutral-800)' }}
@@ -844,7 +844,7 @@ function BudgetMeter({ used, budget }: { used: number; budget: number }) {
       >
         <div style={{ width: `${pct}%`, height: '100%', background: tone }} />
       </div>
-      <div className="text-[10px] text-[var(--color-neutral-600)] mt-0.5">
+      <div className="text-[10px] text-secondary mt-0.5">
         {t('table.tokensUsedOf', { used: used.toLocaleString(), budget: budget.toLocaleString() })}
       </div>
     </div>
@@ -866,7 +866,7 @@ function TranscriptRow({
   if (entry.kind === 'player') {
     return (
       <div className="flex flex-col items-end">
-        <div className="text-[11px] text-[var(--color-neutral-600)] mb-0.5">
+        <div className="text-[11px] text-secondary mb-0.5">
           {entry.characterName
             ? `${entry.characterName} · ${t('table.playedBy', { name: entry.memberName })}`
             : entry.memberName}
@@ -890,10 +890,10 @@ function TranscriptRow({
       <div className="flex flex-col items-start">
         <div className="text-[11px] font-semibold text-[var(--color-accent)] mb-0.5">DM</div>
         <div className="max-w-[92%] rounded-lg px-3 py-2 cf-inset">
-          {text ? <Markdown>{text}</Markdown> : <span className="cf-typing text-[var(--color-neutral-600)]">…</span>}
+          {text ? <Markdown>{text}</Markdown> : <span className="cf-typing text-secondary">…</span>}
           {entry.status === 'streaming' && text && <span className="cf-typing"> ▍</span>}
           {entry.meta && (
-            <div className="text-[10px] text-[var(--color-neutral-600)] mt-1.5 pt-1.5 border-t border-[var(--color-divider)]">
+            <div className="text-[10px] text-secondary mt-1.5 pt-1.5 border-t border-[var(--color-divider)]">
               {entry.meta.stopReason} · {entry.meta.steps} steps ·{' '}
               {entry.meta.tokensUsageUnknown
                 ? t('table.tokensUnknown')
@@ -928,7 +928,7 @@ function TranscriptRow({
     );
     const tone =
       chip.variant === 'error'
-        ? 'var(--color-neutral-600)'
+        ? 'var(--color-text-secondary)'
         : chip.variant === 'proposal'
           ? 'var(--color-accent)'
           : 'var(--color-neutral-400)';
@@ -958,7 +958,7 @@ function TranscriptRow({
     return (
       <div className="flex justify-center">
         <div className="cf-inset px-3 py-2 max-w-[92%] text-sm">
-          <div className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-neutral-600)]">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-secondary">
             {t('ladder.rulesAnswerLabel', { query: entry.data?.query ?? '' })}
           </div>
           <div className="mt-1">
@@ -970,7 +970,7 @@ function TranscriptRow({
   }
   return (
     <div className="flex justify-center">
-      <span className="text-[11px] text-[var(--color-neutral-600)] italic px-2">{systemText(entry, t)}</span>
+      <span className="text-[11px] text-secondary italic px-2">{systemText(entry, t)}</span>
     </div>
   );
 }

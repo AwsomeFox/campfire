@@ -103,7 +103,7 @@ export default function TrashPage() {
       <div className="flex items-center gap-2.5">
         <h1 className="text-2xl font-extrabold text-white">Trash</h1>
         <div className="flex-1" />
-        <Link to={`/c/${cid}`} className="text-xs text-slate-500 hover:text-slate-300">
+        <Link to={`/c/${cid}`} className="text-xs text-secondary hover:text-[var(--color-neutral-300)]">
           ← Dashboard
         </Link>
       </div>

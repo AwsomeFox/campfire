@@ -89,15 +89,15 @@ export default function CreditsPage() {
                   ) : (
                     artist.name
                   )}
-                  {artist.cc0 && <span className="text-[10px] text-[var(--color-neutral-600)] ml-1">(CC0)</span>}
+                  {artist.cc0 && <span className="text-[10px] text-secondary ml-1">(CC0)</span>}
                 </span>
-                <span className="text-[var(--color-neutral-600)] text-xs shrink-0">{count}</span>
+                <span className="text-secondary text-xs shrink-0">{count}</span>
               </li>
             );
           })}
         </ul>
 
-        <p className="text-[11px] text-[var(--color-neutral-600)] leading-snug">
+        <p className="text-[11px] text-secondary leading-snug">
           Campfire is self-hosted and works offline: every icon above ships with the app (no runtime requests to{' '}
           {ICON_SOURCE_NAME}). The {ICON_COUNT}-icon curated set is in the main app bundle; the rest load from a
           static, cached-once-viewed bundle the first time they're searched or used.

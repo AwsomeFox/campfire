@@ -398,7 +398,7 @@ export default function NpcPage() {
           <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-4 items-start">
             <div className="space-y-4 min-w-0">
               <Card>
-                {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-slate-500 italic">No description yet.</p>}
+                {npc.body ? <Markdown>{npc.body}</Markdown> : <p className="text-sm text-secondary italic">No description yet.</p>}
               </Card>
 
               {isDm && npc.dmSecret && <DmPanel>{npc.dmSecret}</DmPanel>}
