@@ -297,12 +297,16 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
  * is shared table knowledge and a player already sees their own character sheet.
  */
 function redactMonsterHp(c: Combatant): Combatant {
-  if ((c.kind !== 'monster' && c.kind !== 'npc') || c.hpCurrent === null || c.hpMax === null) return c;
+  if (c.kind !== 'monster' && c.kind !== 'npc') return c;
+  // Inline homebrew statblocks (issue #425) carry AC, abilities, attacks, and DM notes —
+  // withhold from non-DM encounter reads the same way exact HP is banded (issue #43).
+  const redacted = { ...c, statblock: null };
+  if (redacted.hpCurrent === null || redacted.hpMax === null) return redacted;
   // hpTemp is exact-HP information too — null it alongside hpCurrent/hpMax so a
   // temp-HP buffed monster doesn't leak numbers through the redaction.
   return {
-    ...c,
-    hpBand: hpBandFor(c.hpCurrent, c.hpMax),
+    ...redacted,
+    hpBand: hpBandFor(redacted.hpCurrent, redacted.hpMax),
     hpCurrent: null,
     hpMax: null,
     spCurrent: null,
