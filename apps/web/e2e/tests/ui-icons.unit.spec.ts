@@ -17,7 +17,15 @@ const CONTROL_SITES = [
   'app/Layout.tsx',
 ] as const;
 
-const PLATFORM_GLYPHS = /['"][+⬆✓⋯✕▾]['"]/;
+/** Glyphs replaced by UIIcon in issue #678 control surfaces (not role-label ▾). */
+const CONTROL_GLYPHS = '+⬆✓⋯✕';
+
+function containsControlGlyph(source: string): boolean {
+  const glyph = `[${CONTROL_GLYPHS}]`;
+  const quoted = new RegExp(`['"]${glyph}['"]`);
+  const directJsxText = new RegExp(`>\\s*${glyph}\\s*<`);
+  return quoted.test(source) || directJsxText.test(source);
+}
 
 test.describe('UI control icons (issue #678)', () => {
   test('snapshots the control icon vocabulary and size ramp', () => {
@@ -36,7 +44,7 @@ test.describe('UI control icons (issue #678)', () => {
     const offenders: string[] = [];
     for (const rel of CONTROL_SITES) {
       const text = readFileSync(resolve(ROOT, rel), 'utf8');
-      if (PLATFORM_GLYPHS.test(text)) offenders.push(rel);
+      if (containsControlGlyph(text)) offenders.push(rel);
       if (!text.includes('UIIcon') && !text.includes('BrandMark')) {
         offenders.push(`${rel}: missing UIIcon/BrandMark import`);
       }
