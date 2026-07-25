@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { TurnWorkspace as TurnWorkspaceData } from '@campfire/schema';
+import { hasDeathSavesForAdapter, ruleSystemAdapter } from '@campfire/schema';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, translateApiError } from '../../lib/api';
 import { queryKeys, invalidateEncounter } from '../../lib/query';
@@ -30,6 +31,9 @@ interface TurnWorkspaceProps {
   round: number;
   currentCombatantId: number | null;
   isDm: boolean;
+  ruleSystem?: string | null;
+  onRollDeathSave?: (combatant: { id: number; name: string }) => void;
+  onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
 }
 
 /** A single action-economy slot chip with usage + a use/release control for the owner/DM. */
@@ -73,12 +77,23 @@ function SlotChip({
   );
 }
 
-export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: TurnWorkspaceProps) {
+export function TurnWorkspace({
+  encounterId,
+  round,
+  currentCombatantId,
+  isDm,
+  ruleSystem,
+  onRollDeathSave,
+  onPatchCombatant,
+}: TurnWorkspaceProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const announce = useAnnounce();
   const [actionFilter, setActionFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const hasDeathSaves = hasDeathSavesForAdapter(adapter);
 
   const { data: turn } = useQuery({
     // Keying on round + current combatant makes the workspace refetch the instant the turn
@@ -144,6 +159,7 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurn.isPending || turnState.isPending;
+  const isDying = turn.current.deathState === 'dying';
 
   return (
     <Card className="space-y-3">
@@ -164,6 +180,45 @@ export function TurnWorkspace({ encounterId, round, currentCombatantId, isDm }: 
       )}
 
       {error && <p className="text-sm m-0" style={{ color: 'var(--color-danger, #f87171)' }}>{error}</p>}
+
+      {/* Prominent Death Save turn action card (issue #424). */}
+      {isDying && hasDeathSaves && (
+        <div className="rounded-lg border border-red-500/40 bg-red-950/30 p-3 space-y-2" data-testid="turn-death-save-card">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div>
+              <span className="tag tag-danger font-semibold">Unconscious & Dying (0 HP)</span>
+              <p className="text-xs text-muted m-0 mt-1">Roll a d20 death saving throw to stabilize or revive.</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary min-h-[44px] min-w-[44px] px-4 py-2 font-bold text-sm flex items-center gap-1.5"
+              data-testid="turn-roll-death-save"
+              aria-label={`Roll a death save for ${turn.current.name}`}
+              disabled={busy}
+              onClick={() => {
+                if (onRollDeathSave && turn.current) {
+                  onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
+                } else if (onPatchCombatant && turn.current) {
+                  const face = 1 + Math.floor(Math.random() * 20);
+                  onPatchCombatant(turn.current.combatantId, { deathSaveRoll: face });
+                }
+              }}
+            >
+              🎲 Roll Death Save
+            </button>
+          </div>
+          <div className="flex items-center gap-4 text-xs text-muted pt-1 flex-wrap">
+            <span>Successes: <strong className="text-white">{turn.current.deathSaveSuccesses ?? 0}/3</strong></span>
+            <span>Failures: <strong className="text-red-400">{turn.current.deathSaveFailures ?? 0}/3</strong></span>
+          </div>
+        </div>
+      )}
+
+      {isDying && (
+        <p className="text-xs text-amber-400 m-0 italic">
+          Character is unconscious — normal actions and movement are suppressed while dying.
+        </p>
+      )}
 
       {/* Action economy — adapter-defined slots with plain-language help + usage. */}
       {turn.actionEconomy.length > 0 && (

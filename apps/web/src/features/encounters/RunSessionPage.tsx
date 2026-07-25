@@ -42,7 +42,7 @@ import type {
   TokenSize,
 } from '@campfire/schema';
 import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
-import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, API, ApiError , translateApiError} from '../../lib/api';
@@ -1063,7 +1063,7 @@ export default function RunSessionPage() {
    * fails we still apply the roll outcome (the combat-log event records provenance too).
    */
   const rollDeathSave = useCallback(
-    (combatant: Combatant) => {
+    (combatant: Pick<Combatant, 'id' | 'name'>) => {
       const face = 1 + Math.floor(Math.random() * 20); // 1–20, uniform
       const label = `${combatant.name} · death save`;
       // Visible in the shared dice tray. A plain 1d20 expr so crit/fumble flavor lights up.
@@ -1663,6 +1663,9 @@ export default function RunSessionPage() {
           round={encounter.round}
           currentCombatantId={currentCombatantId ?? null}
           isDm={isDm}
+          ruleSystem={campaign?.ruleSystem}
+          onRollDeathSave={rollDeathSave}
+          onPatchCombatant={patchCombatant}
         />
       )}
 
@@ -4249,7 +4252,8 @@ function CombatantRow({
     setHpMaxDraft(combatant.hpMax?.toString() ?? '');
   }, [combatant.name, combatant.hpMax]);
 
-  const isStarfinder = ruleSystemAdapter(ruleSystem).id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
+  const adapter = useMemo(() => ruleSystemAdapter(ruleSystem), [ruleSystem]);
+  const isStarfinder = adapter.id === STARFINDER_ADAPTER_ID || ruleSystem?.startsWith('starfinder');
   const hasSfPools = isStarfinder || (combatant.spMax != null && combatant.spMax > 0) || (combatant.rpMax != null && combatant.rpMax > 0);
 
   function commitIdentity() {
@@ -4532,6 +4536,7 @@ function CombatantRow({
         {/* Death-save tracker (issue #57): shown for a character that is dying/stable/dead,
             or any character sitting at 0 HP. Monsters never roll death saves. */}
         {combatant.kind === 'character' &&
+          hasDeathSavesForAdapter(adapter) &&
           (combatant.deathState === 'dying' ||
             combatant.deathState === 'stable' ||
             combatant.deathState === 'dead' ||

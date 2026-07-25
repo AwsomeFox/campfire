@@ -187,9 +187,13 @@ function parseConditionInstances(text: string | null, stringConditions: string[]
     for (const rawName of stringConditions) {
       const name = rawName.trim();
       if (!name) continue;
-      if (!existingNames.has(name.toLowerCase())) {
+      const key = name.toLowerCase();
+      if (!existingNames.has(key)) {
+        existingNames.add(key);
+        // Bound the generated id to the schema max(40) and keep it stable.
+        const slug = key.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 33);
         instances.push({
-          id: `legacy_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`,
+          id: `legacy_${slug}`.slice(0, 40),
           name,
           ruleEntryId: null,
           source: null,
@@ -2625,7 +2629,7 @@ export class EncountersService {
     // fresh row, so two concurrent condition changes (one adds while another
     // removes a different condition) compose instead of the loser's whole-array
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
-    let conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
     const conditionInstancesTouched =
       patch.addConditionInstance !== undefined ||
       patch.removeConditionInstanceId !== undefined ||
@@ -2684,9 +2688,13 @@ export class EncountersService {
     let beforeHp = 0;
     let beforeTemp = 0;
     let beforeDeath = 'none';
+    let _beforeSucc = 0;
+    let _beforeFail = 0;
     let afterHp = 0;
     let afterTemp = 0;
     let afterDeath = 'none';
+    let afterSucc = 0;
+    let afterFail = 0;
     // Condition snapshots captured inside the tx (off the fresh row + the write
     // result) so combat-log events derive from the actual committed before/after
     // state, not a stale pre-await read (issue #747, mirroring the HP snapshots).
@@ -2697,9 +2705,47 @@ export class EncountersService {
       beforeHp = fresh.hpCurrent;
       beforeTemp = fresh.hpTemp;
       beforeDeath = fresh.deathState;
+      _beforeSucc = fresh.deathSaveSuccesses;
+      _beforeFail = fresh.deathSaveFailures;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (conditionsTouched) {
-        // Rebase the add/remove deltas against the FRESH row's conditions (issue
+        if (
+          patch.removeConditionInstanceId !== undefined ||
+          patch.conditionInstances !== undefined ||
+          patch.addConditionInstance !== undefined ||
+          patch.updateConditionInstance !== undefined
+        ) {
+          // Instance-level condition writes (issue #423): apply a single
+          // add/update/remove delta against the fresh instances, or replace the
+          // whole array, then derive the legacy string[] conditions array.
+          let instances = parseConditionInstances(fresh.conditionInstances, []);
+          beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
+          if (patch.conditionInstances !== undefined) {
+            instances = [...patch.conditionInstances];
+          } else {
+            if (patch.addConditionInstance !== undefined) {
+              // Add a single instance (idempotent: replace if id already present).
+              const addIdx = instances.findIndex((i) => i.id === patch.addConditionInstance!.id);
+              if (addIdx >= 0) instances[addIdx] = patch.addConditionInstance;
+              else instances.push(patch.addConditionInstance);
+            }
+            if (patch.updateConditionInstance !== undefined) {
+              // Update a single instance by id; ignore if not present (no-op).
+              const upd = patch.updateConditionInstance;
+              const updIdx = instances.findIndex((i) => i.id === upd.id);
+              if (updIdx >= 0) instances[updIdx] = upd;
+            }
+            if (patch.removeConditionInstanceId !== undefined) {
+              // Remove only the targeted instance — not all instances.
+              instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
+            }
+          }
+          const derived = deriveConditionNames(instances);
+          afterConditions = new Set(derived);
+          writeSet.conditionInstances = toJsonText(instances);
+          writeSet.conditions = toJsonText(derived);
+        } else {
+          // Rebase the add/remove deltas against the FRESH row's conditions (issue
           // #747). A stale whole-array write — derived outside the tx from the
           // pre-await read — let two concurrent callers clobber each other: caller A
           // adds 'poisoned' while caller B removes 'prone', and whichever wrote
@@ -2715,25 +2761,7 @@ export class EncountersService {
           for (const c of patch.addConditions ?? []) current.add(c);
           afterConditions = new Set(current);
           writeSet.conditions = toJsonText([...current]);
-      }
-      if (conditionInstancesTouched) {
-        let instances = parseConditionInstances(fresh.conditionInstances, fromJsonText<string[]>(fresh.conditions, []));
-        if (patch.conditionInstances !== undefined) {
-          instances = patch.conditionInstances;
-        } else {
-          if (patch.addConditionInstance) instances = [...instances, patch.addConditionInstance];
-          if (patch.removeConditionInstanceId) {
-            instances = instances.filter((i) => i.id !== patch.removeConditionInstanceId);
-          }
-          if (patch.updateConditionInstance) {
-            instances = instances.map((i) => (i.id === patch.updateConditionInstance!.id ? patch.updateConditionInstance! : i));
-          }
         }
-        writeSet.conditionInstances = toJsonText(instances);
-        writeSet.conditions = toJsonText(deriveConditionNames(instances));
-        conditionsTouched = true;
-        beforeConditions = new Set(fromJsonText<string[]>(fresh.conditions, []));
-        afterConditions = new Set(deriveConditionNames(instances));
       }
       if (patch.eac !== undefined && isDm) writeSet.eac = patch.eac;
       if (patch.kac !== undefined && isDm) writeSet.kac = patch.kac;
@@ -2797,6 +2825,8 @@ export class EncountersService {
       afterHp = updated.hpCurrent;
       afterTemp = updated.hpTemp;
       afterDeath = updated.deathState;
+      afterSucc = updated.deathSaveSuccesses;
+      afterFail = updated.deathSaveFailures;
       if (conditionsTouched) {
         afterConditions = new Set(fromJsonText<string[]>(updated.conditions, []));
       }
@@ -2928,21 +2958,46 @@ export class EncountersService {
     // log shows the provenance of a sudden two-failure nat 1 or a nat-20 revival. The
     // death event above already fires if the roll killed or the revival shows as HP gain;
     // this line adds the roll itself.
+    // death save event logging (issue #424).
     if (patch.deathSaveRoll !== undefined) {
-      const outcome =
-        afterDeath === 'dead'
-          ? 'failed their last death save'
-          : afterDeath === 'stable'
-            ? 'stabilized'
-            : afterHp > 0
-              ? 'revived at 1 HP'
-              : patch.deathSaveRoll === 20
-                ? 'revived at 1 HP'
-                : 'marked a death save';
+      const die = patch.deathSaveRoll;
+      let rollResult = '';
+      if (die === 20) {
+        rollResult = 'Natural 20! Revived with 1 HP!';
+      } else if (die === 1) {
+        rollResult = `Natural 1! (2 failures) — totals: ${afterSucc} succ / ${afterFail} fail`;
+      } else if (die >= 10) {
+        rollResult = `Success (rolled ${die}) — totals: ${afterSucc} succ / ${afterFail} fail`;
+      } else {
+        rollResult = `Failure (rolled ${die}) — totals: ${afterSucc} succ / ${afterFail} fail`;
+      }
+      if (afterDeath === 'dead' && beforeDeath !== 'dead') {
+        rollResult += ' (Dead)';
+      } else if (afterDeath === 'stable' && beforeDeath !== 'stable') {
+        rollResult += ' (Stabilized)';
+      }
       await this.appendEvent(encounterId, round, 'roll', {
         target: targetName,
         targetId: targetCombatantId,
-        detail: `death save d20 ${patch.deathSaveRoll} — ${outcome}`,
+        detail: `death save d20 roll ${die}: ${rollResult}`,
+      });
+    } else if (patch.deathSaveSuccesses !== undefined || patch.deathSaveFailures !== undefined) {
+      await this.appendEvent(encounterId, round, 'override', {
+        target: targetName,
+        targetId: targetCombatantId,
+        detail: `death save counters edited: ${afterSucc} succ / ${afterFail} fail`,
+      });
+    }
+
+    if (patch.deathState !== undefined && beforeDeath !== afterDeath) {
+      let stateMsg = `death state changed to ${afterDeath}`;
+      if (afterDeath === 'stable') stateMsg = 'marked stable at 0 HP';
+      if (afterDeath === 'dying') stateMsg = 'became dying (un-stabilized)';
+      if (afterDeath === 'dead') stateMsg = 'marked dead';
+      await this.appendEvent(encounterId, round, 'condition', {
+        target: targetName,
+        targetId: targetCombatantId,
+        detail: stateMsg,
       });
     }
 
