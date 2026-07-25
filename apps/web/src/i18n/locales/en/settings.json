@@ -1,0 +1,30 @@
+{
+  "settings": {
+    "title": "Campaign settings",
+    "navigationLabel": "Campaign settings sections",
+    "navigationHeading": "Settings sections",
+    "jumpTo": "Jump to section",
+    "categories": {
+      "campaign": {
+        "label": "Campaign",
+        "description": "Identity and table-wide defaults."
+      },
+      "gameplayRules": {
+        "label": "Gameplay / Rules",
+        "description": "Rules and mechanics used at the table."
+      },
+      "ai": {
+        "label": "AI",
+        "description": "AI Dungeon Master mode, provider, budget, and steering."
+      },
+      "data": {
+        "label": "Data",
+        "description": "Portable exports and reusable campaign copies."
+      },
+      "lifecycle": {
+        "label": "Lifecycle",
+        "description": "Archive, resume, or move this campaign to the Trash."
+      }
+    }
+  }
+}

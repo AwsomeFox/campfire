@@ -1,12 +1,14 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Res } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiParam, ApiResponse } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiParam, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
-import type { CalendarFeed, ScheduledSessionWithRsvps } from '@campfire/schema';
+import type { CalendarFeed, ScheduledSessionListPage, ScheduledSessionWithRsvps } from '@campfire/schema';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { THROTTLE_AUTH, ICS_THROTTLE_LIMIT, ICS_THROTTLE_TTL_MS } from '../../common/throttle.constants';
+import { parsePageParams } from '../../common/pagination';
+import { SCHEDULE_PAST_MAX_LIMIT } from '@campfire/schema';
 import { CampaignAccessService } from '../membership/campaign-access.service';
 import { SchedulingService } from './scheduling.service';
 import { ScheduledSessionCreateDto, ScheduledSessionUpdateDto, RsvpSetDto } from './sessions.dto';
@@ -31,6 +33,43 @@ export class CampaignScheduleController {
   async list(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser): Promise<ScheduledSessionWithRsvps[]> {
     await this.access.requireMember(user, campaignId);
     return this.scheduling.listForCampaign(campaignId);
+  }
+
+  @Get('upcoming')
+  @ApiOperation({
+    summary: 'Upcoming and in-progress scheduled sessions',
+    description:
+      'Requires campaign membership. Returns not-yet-ended game nights (in progress + upcoming), soonest-first, with RSVPs. Issue #612: queried directly instead of loading full history.',
+  })
+  @ApiResponse({ status: 200, description: 'Live scheduled sessions with RSVPs.' })
+  async upcoming(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+  ): Promise<ScheduledSessionWithRsvps[]> {
+    await this.access.requireMember(user, campaignId);
+    return this.scheduling.listUpcomingForCampaign(campaignId);
+  }
+
+  @Get('past')
+  @ApiOperation({
+    summary: 'Past scheduled sessions (paginated)',
+    description:
+      'Requires campaign membership. Ended game nights, most-recent first. Supports `?limit`/`?offset` paging (default limit 20, max 100). Issue #612.',
+  })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'offset', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Paginated past scheduled sessions.' })
+  async past(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @CurrentUser() user: RequestUser,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ): Promise<ScheduledSessionListPage> {
+    await this.access.requireMember(user, campaignId);
+    return this.scheduling.listPastForCampaign(
+      campaignId,
+      parsePageParams({ limit, offset }, SCHEDULE_PAST_MAX_LIMIT),
+    );
   }
 
   @Get('next')

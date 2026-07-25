@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation, Trans } from 'react-i18next';
-import type { TextSize, User } from '@campfire/schema';
+import type { TextSize, TimeFormat, User } from '@campfire/schema';
 import { api, ApiError, API } from '../../lib/api';
 import { joinPublicBase } from '../../lib/public-base';
 import {
@@ -56,6 +56,7 @@ const ACCENT_SWATCHES: Array<{ name: string; hex: string }> = [
 ];
 
 const READING_MODES = ['default', 'comfortable', 'large'] as const satisfies readonly TextSize[];
+const TIME_FORMATS = ['system', '12h', '24h'] as const satisfies readonly TimeFormat[];
 
 export default function PreferencesPage() {
   const { t } = useTranslation();
@@ -77,6 +78,7 @@ export default function PreferencesPage() {
   const [accentColor, setAccentColor] = useState<string | null>(user?.accentColor ?? null);
   const [appliedAccent, setAppliedAccent] = useState<string | null>(user?.accentColor ?? null);
   const [textSize, setTextSize] = useState<TextSize>(user?.textSize ?? 'default');
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>(user?.timeFormat ?? 'system');
   const [hexInput, setHexInput] = useState(user?.accentColor ?? '');
   const [hexError, setHexError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -93,6 +95,7 @@ export default function PreferencesPage() {
     setAccentColor(user.accentColor ?? null);
     setAppliedAccent(user.accentColor ?? null);
     setTextSize(user.textSize ?? 'default');
+    setTimeFormat(user.timeFormat ?? 'system');
     setHexInput(user.accentColor ?? '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -127,7 +130,13 @@ export default function PreferencesPage() {
 
   const profileDirty =
     displayName !== (user.displayName ?? '') ||
+<<<<<<< HEAD
     textSize !== (user.textSize ?? 'default');
+=======
+    textSize !== (user.textSize ?? 'default') ||
+    timeFormat !== (user.timeFormat ?? 'system');
+  const accentDirty = accentColor !== appliedAccent;
+>>>>>>> origin/main
   const previewSeed = accentColor ?? DEFAULT_ACCENT;
 
   const { beginRollAnimation, showRoll } = useRollResultToast();
@@ -236,9 +245,11 @@ export default function PreferencesPage() {
       const updated = await api.patch<User>(`${API}/me/preferences`, {
         displayName: displayName.trim(),
         textSize,
+        timeFormat,
       });
       setDisplayName(updated.displayName ?? '');
       setTextSize(updated.textSize ?? 'default');
+      setTimeFormat(updated.timeFormat ?? 'system');
       await refresh();
       setSaved(true);
       if (savedFlashTimerRef.current) clearTimeout(savedFlashTimerRef.current);
@@ -544,6 +555,28 @@ export default function PreferencesPage() {
         </div>
         <p className="text-muted reading-supporting" style={{ margin: 0 }}>
           {t('preferences.languageNote')}
+        </p>
+      </div>
+
+      <div className="card elev-sm">
+        <span className="card-kicker">{t('preferences.timeFormat')}</span>
+        <div className="field" style={{ maxWidth: 260 }}>
+          <label htmlFor="prefs-time-format">{t('preferences.timeFormatLabel')}</label>
+          <select
+            id="prefs-time-format"
+            className="input"
+            value={timeFormat}
+            onChange={(e) => setTimeFormat(e.target.value as TimeFormat)}
+          >
+            {TIME_FORMATS.map((mode) => (
+              <option key={mode} value={mode}>
+                {t(`preferences.timeFormat${mode === 'system' ? 'System' : mode === '12h' ? '12h' : '24h'}`)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="text-muted reading-supporting" style={{ margin: 0 }}>
+          {t('preferences.timeFormatNote')}
         </p>
       </div>
 

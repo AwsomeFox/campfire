@@ -4,7 +4,7 @@ import type { Role, ScheduledSessionWithRsvps, SessionListItem } from '@campfire
 import { isScheduleInProgress, scheduleEndsAtMs } from '@campfire/schema';
 import { useAuth } from '../../app/auth';
 import { dashboardRsvpCue, findViewerRsvp, viewerRsvpIds } from '../../lib/dashboardRsvp';
-import { formatDate, formatDateTime, useFormattingLocale } from '../../lib/format';
+import { formatDate, formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { EmptyState } from '../../components/ui';
 import { GameIcon } from '../../components/GameIcon';
@@ -204,6 +204,7 @@ export function SessionLog({
   role: Role | null;
 }) {
   useFormattingLocale();
+  useTimeFormat();
   const { me } = useAuth();
   const myIds = useMemo(() => viewerRsvpIds(me?.user ?? null), [me]);
   const mine = nextSession ? findViewerRsvp(nextSession.rsvps, myIds) : undefined;

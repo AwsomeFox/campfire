@@ -21,8 +21,9 @@
  * show "Imported from D&D Beyond" + a copyable source id (no "sync" overclaim),
  * while manually-created sheets get honest guidance instead of "soon".
  */
-import { useCallback, useEffect, useId, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type { Attachment, Character, CharacterAction, CampaignMember, CharacterStatus, SkillRank } from '@campfire/schema';
 import { xpProgressForCharacter, ruleSystemAdapter, type RuleSystemAdapter } from '@campfire/schema';
 import { CHARACTER_STATUSES, STATUS_LABEL, StatusTag } from './status';
@@ -33,6 +34,13 @@ import {
   createCompositionSubmitGate,
 } from '../../lib/compositionSafeSubmit';
 import { useAuth } from '../../app/auth';
+import { useProtectedForm } from '../../lib/useProtectedForm';
+import {
+  characterSheetDraftFrom,
+  characterSheetDraftsEqual,
+  isCharacterSheetDirty,
+  snapshotCharacterSheetDraft,
+} from './characterSheetFormState';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { useCampaign } from '../../app/CampaignContext';
 import { Card, Chip, Btn, TextInput, TextArea, Skeleton, ErrorNote, HpBar } from '../../components/ui';
@@ -253,11 +261,11 @@ export default function CharacterPage() {
 
   return (
     <div className="reading-surface max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('character', character.id)}>
-      <div>
-        <Btn ghost className="!min-h-0 !py-1.5 text-xs" onClick={() => navigate(`/c/${cid}/party`)}>
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/party`}
+        defaultLabel="← Back to party"
+      />
 
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
 
@@ -474,35 +482,43 @@ function SheetEditForm({
   onSaved: () => void;
   onError: (msg: string | null) => void;
 }) {
-  const [name, setName] = useState(character.name);
-  const [species, setSpecies] = useState(character.species);
-  const [className, setClassName] = useState(character.className);
-  const [background, setBackground] = useState(character.background);
-  const [level, setLevel] = useState(String(character.level));
-  const [ac, setAc] = useState(character.ac != null ? String(character.ac) : '');
-  const [hpMax, setHpMax] = useState(String(character.hpMax));
-  const [status, setStatus] = useState<CharacterStatus>(character.status);
-  const [stats, setStats] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const k of ABILITY_KEYS) init[k] = String(abilityScore(character, k));
-    return init;
-  });
+  const { me } = useAuth();
+  const baseline = useMemo(() => characterSheetDraftFrom(character), [character.id, character.updatedAt]);
+  const [name, setName] = useState(baseline.name);
+  const [species, setSpecies] = useState(baseline.species);
+  const [className, setClassName] = useState(baseline.className);
+  const [background, setBackground] = useState(baseline.background);
+  const [level, setLevel] = useState(baseline.level);
+  const [ac, setAc] = useState(baseline.ac);
+  const [hpMax, setHpMax] = useState(baseline.hpMax);
+  const [status, setStatus] = useState<CharacterStatus>(baseline.status);
+  const [stats, setStats] = useState<Record<string, string>>(baseline.stats);
   const [saving, setSaving] = useState(false);
   // Per-field parse errors (issue #633): level/AC/HP/stats are parsed in the
   // viewer's locale; an unparseable value keeps the field's current text and
   // surfaces a message here rather than silently coercing to 0/1.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const formatLocale = useFormattingLocale();
+  const clearPersistedDraftRef = useRef<() => void>(() => {});
 
-  async function save() {
-    if (!name.trim()) return;
-    // Issue #633: parse each numeric field in the viewer's locale. On any
-    // failure, surface the per-field errors, keep the current field values,
-    // and abort — do NOT fall back to 0/1 and silently corrupt the sheet.
+  const draft = snapshotCharacterSheetDraft({
+    name,
+    species,
+    className,
+    background,
+    level,
+    ac,
+    hpMax,
+    status,
+    stats,
+  });
+  const dirty = isCharacterSheetDirty(draft, baseline);
+
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!name.trim()) return false;
     const errs: Record<string, string> = {};
     const levelParsed = parseLocalizedInteger(level, formatLocale, { min: 1, max: 20 });
     if (!levelParsed.ok) errs.level = levelParsed.error;
-    // AC may be blank (cleared to null on the server); only validate when present.
     let acValue: number | null = null;
     if (ac.trim() !== '') {
       const acParsed = parseLocalizedInteger(ac, formatLocale);
@@ -519,11 +535,9 @@ function SheetEditForm({
     }
     if (Object.keys(errs).length > 0) {
       setFieldErrors(errs);
-      return;
+      return false;
     }
     setFieldErrors({});
-    // Every field parsed cleanly above (we returned otherwise), so the ok
-    // branches are guaranteed here. Re-bind to plain numbers for the payload.
     const levelNum = (levelParsed as { ok: true; value: number }).value;
     const hpMaxNum = (hpMaxParsed as { ok: true; value: number }).value;
     setSaving(true);
@@ -540,18 +554,63 @@ function SheetEditForm({
         status,
         stats: statNums,
       });
+      clearPersistedDraftRef.current();
       onSaved();
+      return true;
     } catch (err) {
       onError(err instanceof ApiError ? err.message : "Couldn't save the sheet.");
+      return false;
     } finally {
       setSaving(false);
     }
-  }
+  }, [
+    ac,
+    background,
+    character.id,
+    className,
+    formatLocale,
+    hpMax,
+    level,
+    name,
+    onError,
+    onSaved,
+    species,
+    stats,
+    status,
+  ]);
+
+  const protectedSheet = useProtectedForm({
+    formId: `character-sheet:${character.id}`,
+    userId: me?.user.id,
+    campaignId: character.campaignId,
+    active: true,
+    dirty,
+    draft,
+    baseline,
+    serverUpdatedAt: character.updatedAt,
+    isDraftEqual: characterSheetDraftsEqual,
+    onRestoreDraft: (restored) => {
+      setName(restored.name);
+      setSpecies(restored.species);
+      setClassName(restored.className);
+      setBackground(restored.background);
+      setLevel(restored.level);
+      setAc(restored.ac);
+      setHpMax(restored.hpMax);
+      setStatus(restored.status);
+      setStats({ ...restored.stats });
+    },
+    onDiscard: onCancel,
+    onSave: save,
+  });
+  clearPersistedDraftRef.current = protectedSheet.clearPersistedDraft;
 
   const cardLabel = 'text-[10px] text-slate-300 font-bold uppercase tracking-wide';
 
   return (
     <div className="space-y-3" data-testid="character-sheet-edit">
+      {protectedSheet.restorePrompt}
+      {protectedSheet.leavePrompt}
       <Field
         idPrefix={CHARACTER_EDIT_PREFIX}
         name={CHARACTER_FIELD.name}
@@ -687,11 +746,24 @@ function SheetEditForm({
           />
         ))}
       </div>
-      <div className="flex gap-2 justify-end">
-        <Btn ghost type="button" onClick={onCancel} disabled={saving}>
+      <div className="flex gap-2 justify-end items-center">
+        {protectedSheet.saveStatusLabel ? (
+          <span className="text-xs text-slate-400 mr-auto" role="status" aria-live="polite">
+            {protectedSheet.saveStatusLabel}
+          </span>
+        ) : null}
+        <Btn
+          ghost
+          type="button"
+          onClick={() => {
+            protectedSheet.clearPersistedDraft();
+            onCancel();
+          }}
+          disabled={saving}
+        >
           Cancel
         </Btn>
-        <Btn type="button" onClick={save} disabled={saving || !name.trim()}>
+        <Btn type="button" onClick={() => void save()} disabled={saving || !name.trim()}>
           {saving ? 'Saving…' : 'Save'}
         </Btn>
       </div>

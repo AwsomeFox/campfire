@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DetailPageWayfinding } from '../../components/DetailPageWayfinding';
 import type {
   ActionSpec,
   ActionUndoToken,
@@ -82,6 +83,7 @@ import {
 } from './combatLogAccessibility';
 import { makeActionError, type ActionErrorState } from './encounterActionError';
 import { FOG_HIDDEN_TOKEN_LABEL, partitionMapTokens } from './mapTokenPlacement';
+import { combatantsInAoe, type AoeHitLayout, type AoeHitTestContext } from './aoeHitTest';
 import {
   calibrationToPx,
   computeContainedRect,
@@ -622,6 +624,8 @@ export default function RunSessionPage() {
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
   const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
+  const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
   const [pendingActionUse, setPendingActionUse] = useState<{
     combatantId: number;
@@ -876,6 +880,10 @@ export default function RunSessionPage() {
     [],
   );
 
+  const onAoeHitLayoutChange = useCallback((layout: AoeHitLayout | null) => {
+    setAoeHitLayout(layout);
+  }, []);
+
   const reportError = useCallback((err: unknown) => {
     setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
   }, []);
@@ -969,6 +977,35 @@ export default function RunSessionPage() {
       }
     },
   });
+
+  const applyHpDeltaBulk = useCallback(
+    async (combatantIds: readonly number[], delta: number) => {
+      if (combatantIds.length === 0) return;
+      setActionError(null);
+      await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
+      const previous = queryClient.getQueryData<EncounterWithCombatants>(queryKeys.encounter(eid));
+      const targets = new Set(combatantIds);
+      if (previous) {
+        queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), {
+          ...previous,
+          combatants: previous.combatants.map((c) =>
+            targets.has(c.id) ? applyHpDelta(c, delta, ruleSystem) : c,
+          ),
+        });
+      }
+      try {
+        for (const combatantId of combatantIds) {
+          await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta });
+        }
+        await invalidateEncounter(queryClient, eid);
+      } catch (err) {
+        if (previous) queryClient.setQueryData(queryKeys.encounter(eid), previous);
+        reportError(err);
+        throw err;
+      }
+    },
+    [eid, queryClient, reportError, ruleSystem],
+  );
 
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
@@ -1196,6 +1233,36 @@ export default function RunSessionPage() {
   // Header run-control group shares one pending flag (see runControl above).
   const headerBusy = runControl.isPending || deleteEncounterMut.isPending;
 
+  // Issue #636: scroll the active combatant row into view when the turn advances.
+  const currentCombatantId = useMemo(
+    () => (encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined),
+    [encounter],
+  );
+  const combatantRowRefs = useRef(new Map<number, HTMLElement>());
+  const setCombatantRowRef = useCallback((combatantId: number, el: HTMLElement | null) => {
+    if (el) combatantRowRefs.current.set(combatantId, el);
+    else combatantRowRefs.current.delete(combatantId);
+  }, []);
+  useLayoutEffect(() => {
+    if (encounter?.status !== 'running' || currentCombatantId == null) return;
+    const frame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el =
+          combatantRowRefs.current.get(currentCombatantId) ??
+          document.querySelector<HTMLElement>(
+            `[data-testid="combatant-row-${currentCombatantId}"][data-current-turn="true"]`,
+          );
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const inView = rect.bottom > 0 && rect.top < window.innerHeight;
+        if (inView) return;
+        const targetTop = window.scrollY + rect.top - (window.innerHeight - rect.height) / 2;
+        window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [encounter?.status, currentCombatantId]);
+
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
@@ -1237,7 +1304,6 @@ export default function RunSessionPage() {
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
   // removed mid-fight.
   const orderedCombatants = encounter.combatants;
-  const currentCombatantId = encounter.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
   // Issue #420: DM header actions come from an explicit lifecycle matrix (not
   // ad-hoc status !== 'ended' checks) so Preparing never offers the invalid End.
   const lifecycle = dmLifecycleActions(encounter.status);
@@ -1245,18 +1311,11 @@ export default function RunSessionPage() {
 
   return (
     <div className="reading-surface max-w-4xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10" {...entityTargetProps('encounter', encounter.id)}>
-      <div>
-        <Btn
-          ghost
-          className="!min-h-0 !py-1.5 text-xs"
-          onClick={() => {
-            setActionError(null);
-            navigate(`/c/${cid}/encounters`);
-          }}
-        >
-          ← Back
-        </Btn>
-      </div>
+      <DetailPageWayfinding
+        campaignId={cid}
+        defaultPath={`/c/${cid}/encounters`}
+        defaultLabel="← Back to encounters"
+      />
 
       {(loadError || actionError) && (
         <ErrorNote
@@ -1501,6 +1560,7 @@ export default function RunSessionPage() {
           onPing={sendPing}
           pings={pings}
           onError={surfaceActionError}
+          onAoeHitLayoutChange={onAoeHitLayoutChange}
         />
       )}
 
@@ -1520,10 +1580,30 @@ export default function RunSessionPage() {
           amount={pendingApply.amount}
           label={pendingApply.label}
           targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          aoeTemplates={encounter.aoe ?? []}
+          aoeHitContext={
+            encounter.gridSize != null &&
+            encounter.gridSize > 0 &&
+            encounter.gridScale != null &&
+            encounter.gridScale > 0 &&
+            aoeHitLayout
+              ? {
+                  gridSize: encounter.gridSize,
+                  gridScale: encounter.gridScale,
+                  mapRect: aoeHitLayout.mapRect,
+                  cellPx: aoeHitLayout.cellPx,
+                }
+              : null
+          }
           isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
             hpDelta.mutate({ combatantId, delta });
             setPendingApply(null);
+          }}
+          onApplyToAll={(combatantIds, delta) => {
+            void applyHpDeltaBulk(combatantIds, delta)
+              .then(() => setPendingApply(null))
+              .catch(() => undefined);
           }}
           onDismiss={() => setPendingApply(null)}
         />
@@ -1590,6 +1670,7 @@ export default function RunSessionPage() {
           orderedCombatants.map((c) => (
             <CombatantRow
               key={c.id}
+              rowRef={(el) => setCombatantRowRef(c.id, el)}
               combatant={c}
               isCurrentTurn={c.id === currentCombatantId}
               canEdit={canEditCombatant(c)}
@@ -1947,6 +2028,7 @@ function BattleMap({
   onPing,
   pings,
   onError,
+  onAoeHitLayoutChange,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -1970,6 +2052,8 @@ function BattleMap({
   onPing: (x: number, y: number) => void;
   pings: ReadonlyArray<{ key: number; x: number; y: number }>;
   onError: (message: string) => void;
+  /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
+  onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
@@ -2137,6 +2221,15 @@ function BattleMap({
   const canMeasure = gridOn && gridScale != null && gridScale > 0 && cellPx > 0;
   const canAoe = canMeasure; // AoE sizes are expressed in feet, so they need the scale too.
   const canCalibrate = gridOn && !!mapRect; // calibration acts on an enabled grid + loaded map
+
+  const aoeHitLayout = useMemo(
+    () => (mapRect && cellPx > 0 ? { mapRect, cellPx } : null),
+    [mapRect, cellPx],
+  );
+  useEffect(() => {
+    onAoeHitLayoutChange?.(aoeHitLayout);
+    return () => onAoeHitLayoutChange?.(null);
+  }, [aoeHitLayout, onAoeHitLayoutChange]);
 
   const aoeTemplates = encounter.aoe ?? [];
   const fog = encounter.fog;
@@ -3269,15 +3362,21 @@ function ApplyDamageBar({
   amount,
   label,
   targets,
+  aoeTemplates = [],
+  aoeHitContext,
   isStarfinder = false,
   onApply,
+  onApplyToAll,
   onDismiss,
 }: {
   amount: number;
   label: string;
   targets: Combatant[];
+  aoeTemplates?: AoeTemplate[];
+  aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
   onApply: (combatantId: number, delta: number) => void;
+  onApplyToAll: (combatantIds: number[], delta: number) => void;
   onDismiss: () => void;
 }) {
   const [mode, setMode] = useState<'damage' | 'heal'>('damage');
@@ -3366,6 +3465,38 @@ function ApplyDamageBar({
           })}
         </div>
       )}
+      {aoeHitContext && aoeTemplates.length > 0 && (
+        <>
+          <span className="text-muted" style={{ fontSize: 11.5, width: '100%' }}>
+            AoE templates:
+          </span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', width: '100%' }}>
+            {aoeTemplates.map((t) => {
+              const affectedCombatants = combatantsInAoe(targets, t, aoeHitContext);
+              const buttonLabel = `Apply to all in ${t.shape} (${t.sizeFt} ft)`;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  className="btn btn-secondary cf-target-44"
+                  style={{ fontSize: 12, padding: '0 12px' }}
+                  disabled={affectedCombatants.length === 0}
+                  title={
+                    affectedCombatants.length === 0
+                      ? `No editable targets inside this ${t.shape} template`
+                      : `${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${affectedCombatants.map((c) => c.name).join(', ')}`
+                  }
+                  data-testid={`apply-damage-aoe-${t.id}`}
+                  onClick={() => onApplyToAll(affectedCombatants.map((c) => c.id), delta)}
+                >
+                  {buttonLabel}
+                  {affectedCombatants.length > 0 ? ` (${affectedCombatants.length})` : ''}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
       <button
         type="button"
         aria-label="Dismiss"
@@ -3381,6 +3512,7 @@ function ApplyDamageBar({
 }
 
 function CombatantRow({
+  rowRef,
   combatant,
   isCurrentTurn,
   canEdit,
@@ -3412,6 +3544,7 @@ function CombatantRow({
   onPatchCombatant,
   onRemove,
 }: {
+  rowRef?: (el: HTMLDivElement | null) => void;
   combatant: Combatant;
   isCurrentTurn: boolean;
   canEdit: boolean;
@@ -3526,6 +3659,9 @@ function CombatantRow({
 
   return (
     <div
+      ref={rowRef}
+      data-testid={`combatant-row-${combatant.id}`}
+      data-current-turn={isCurrentTurn ? 'true' : undefined}
       style={{
         display: 'flex',
         flexWrap: 'wrap',

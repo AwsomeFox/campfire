@@ -4,7 +4,9 @@
  * DM can inline-create (name + kind); everyone can browse & open a detail page.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { ListDetailLink } from '../../components/ListDetailLink';
+import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Location } from '@campfire/schema';
 import { api, API, ApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
@@ -56,6 +58,7 @@ export default function LocationListPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
+  useRestoreListOriginScroll();
 
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
@@ -230,7 +233,7 @@ export default function LocationListPage() {
         ) : (
           <div className="flex flex-col gap-2.5" style={{ maxWidth: 720 }}>
             {toTree(locations).map(({ loc, depth }) => (
-              <Link
+              <ListDetailLink
                 key={loc.id}
                 to={`/c/${id}/locations/${loc.id}`}
                 className="cf-card cf-card-hover flex items-center gap-3 p-3.5"
@@ -253,7 +256,7 @@ export default function LocationListPage() {
                     <GameIcon slug="position-marker" size={11} className="inline align-text-bottom mr-1" />{Math.round(loc.mapX)},{Math.round(loc.mapY)}
                   </span>
                 )}
-              </Link>
+              </ListDetailLink>
             ))}
           </div>
         )}

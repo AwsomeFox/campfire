@@ -36,6 +36,7 @@ function toDomain(row: typeof users.$inferSelect): User {
     accentColor: row.accentColor,
     textSize: row.textSize as User['textSize'],
     diceTheme: (row.diceTheme ?? 'nocturne') as User['diceTheme'],
+    timeFormat: (row.timeFormat ?? 'system') as User['timeFormat'],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -249,6 +250,7 @@ export class UsersService {
     if (input.accentColor !== undefined) update.accentColor = input.accentColor;
     if (input.textSize !== undefined) update.textSize = input.textSize;
     if (input.diceTheme !== undefined) update.diceTheme = input.diceTheme;
+    if (input.timeFormat !== undefined) update.timeFormat = input.timeFormat;
 
     const [row] = await this.db.update(users).set(update).where(eq(users.id, id)).returning();
     return toDomain(row);
