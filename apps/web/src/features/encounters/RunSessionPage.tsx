@@ -46,6 +46,7 @@ import {
   FogUndoStack,
   appendFogReveal,
   deleteFogRegion,
+  ensureFogRectIds,
   eraseFogRegion,
   fogRectFromCorners,
   fogStatesEqual,
@@ -2444,8 +2445,8 @@ function BattleMap({
   }, [encounter.fog, syncFogUndoUi]);
 
   const undoFogEdit = useCallback(() => {
+    if (!fogUndoStackRef.current.canUndo()) return;
     const prev = fogUndoStackRef.current.undo(lastLocalFogRef.current);
-    if (!prev) return;
     lastLocalFogRef.current = prev;
     onSetFog(prev);
     syncFogUndoUi();
@@ -2453,8 +2454,8 @@ function BattleMap({
   }, [announce, onSetFog, syncFogUndoUi]);
 
   const redoFogEdit = useCallback(() => {
+    if (!fogUndoStackRef.current.canRedo()) return;
     const next = fogUndoStackRef.current.redo(lastLocalFogRef.current);
-    if (!next) return;
     lastLocalFogRef.current = next;
     onSetFog(next);
     syncFogUndoUi();
@@ -3087,7 +3088,7 @@ function BattleMap({
   const revealPreview = revealCorners ? fogRectFromCorners(revealCorners.start, revealCorners.end) : null;
   const fogBrushMode = tool === 'erase' ? 'erase' : 'reveal';
   const displayedFogRects = useMemo(() => {
-    const revealed = fog?.revealed ?? [];
+    const revealed = ensureFogRectIds(fog?.revealed ?? []);
     if (!fogRegionDrag) return revealed;
     return revealed.map((r) =>
       r.id === fogRegionDrag.id ? { ...r, x: r.x + fogRegionDrag.dx, y: r.y + fogRegionDrag.dy } : r,
