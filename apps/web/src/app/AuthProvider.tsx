@@ -44,6 +44,7 @@ import {
   subscribeSessionExpired,
 } from '../lib/sessionExpiry';
 import { applyAccentColor } from './accentPalette';
+import { setTimeFormatPreference } from '../lib/format';
 // Re-exported here so feature code that imports from './AuthProvider' (and the
 // e2e specs) can keep doing so; the logic itself lives in authDecision.ts so it
 // can be unit-tested without JSX and without React.
@@ -217,6 +218,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (decision.me) {
       applyAccentColor(decision.me.user.accentColor);
       applyReadingPreference(document.documentElement, decision.me.user.textSize);
+      setTimeFormatPreference(decision.me.user.timeFormat ?? 'system');
       if (outcome.kind === 'live') {
         setAuthStorage(decision.me.user);
         // Successful reauth after a mid-session 401: clear the login banner and
@@ -227,6 +229,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } else {
       applyAccentColor(null);
       applyReadingPreference(document.documentElement, 'default');
+      setTimeFormatPreference('system');
       if (outcome.kind === 'loggedOut') clearAuthStorage();
     }
 

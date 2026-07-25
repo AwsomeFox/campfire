@@ -424,6 +424,7 @@ CREATE TABLE IF NOT EXISTS users (
   oidc_sub TEXT,
   accent_color TEXT,
   text_size TEXT NOT NULL DEFAULT 'default',
+  time_format TEXT NOT NULL DEFAULT 'system',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

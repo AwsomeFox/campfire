@@ -533,6 +533,7 @@ describe('me/preferences (e2e)', () => {
     const meRes = await agent.get('/api/v1/me');
     expect(meRes.status).toBe(200);
     expect(meRes.body.user.textSize).toBe('default');
+    expect(meRes.body.user.timeFormat).toBe('system');
   });
 
   it('setting textSize large -> /me reflects it', async () => {
@@ -584,6 +585,27 @@ describe('me/preferences (e2e)', () => {
   it('invalid textSize -> 400', async () => {
     const res = await agent.patch('/api/v1/me/preferences').send({ textSize: 'enormous' });
     expect(res.status).toBe(400);
+  });
+
+  it('setting timeFormat 24h -> /me reflects it', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ timeFormat: '24h' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.timeFormat).toBe('24h');
+
+    const meRes = await agent.get('/api/v1/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.user.timeFormat).toBe('24h');
+  });
+
+  it('invalid timeFormat -> 400', async () => {
+    const res = await agent.patch('/api/v1/me/preferences').send({ timeFormat: 'military' });
+    expect(res.status).toBe(400);
+  });
+
+  it('setting timeFormat back to system clears the override', async () => {
+    const patchRes = await agent.patch('/api/v1/me/preferences').send({ timeFormat: 'system' });
+    expect(patchRes.status).toBe(200);
+    expect(patchRes.body.timeFormat).toBe('system');
   });
 
   it('setting textSize back to default clears the override', async () => {

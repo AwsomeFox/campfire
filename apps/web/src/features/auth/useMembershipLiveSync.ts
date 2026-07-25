@@ -4,6 +4,9 @@
  * `membership.updated` for the signed-in user, refreshes /me and fans the signal
  * out to other tabs via BroadcastChannel. Does not navigate — the current route
  * stays put while role-gated chrome re-renders from the new memberships.
+ *
+ * Optional encounter hooks let Layout reuse this single stream for live-encounter
+ * chrome (issue #637) instead of opening a second /campaigns/:id/events socket.
  */
 import { useCallback, useEffect, useRef } from 'react';
 import type { CampaignEvent } from '@campfire/schema';
@@ -14,12 +17,23 @@ import {
   type MembershipSyncMessage,
 } from '../../lib/membershipLiveSync';
 
-export function useMembershipLiveSync(campaignId: number | undefined): void {
+export type MembershipLiveSyncOptions = {
+  onEncounterChange?: () => void;
+  onReconnect?: () => void;
+  onStreamRecovery?: () => void;
+};
+
+export function useMembershipLiveSync(
+  campaignId: number | undefined,
+  options?: MembershipLiveSyncOptions,
+): void {
   const { me, refresh } = useAuth();
   const userId = me?.user.id;
   const channelRef = useRef<BroadcastChannel | null>(null);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
 
   // Publish-only channel — AuthProvider owns the cross-tab listener so every
   // authenticated surface (including /screen outside Layout) refreshes /me.
@@ -35,6 +49,9 @@ export function useMembershipLiveSync(campaignId: number | undefined): void {
 
   const onEvent = useCallback(
     (event: CampaignEvent) => {
+      if (event.type === 'encounter.updated' || event.type === 'encounter.deleted') {
+        optionsRef.current?.onEncounterChange?.();
+      }
       if (event.type !== 'membership.updated') return;
       if (userId === undefined || event.userId !== String(userId)) return;
 
@@ -54,5 +71,13 @@ export function useMembershipLiveSync(campaignId: number | undefined): void {
     [userId],
   );
 
-  useCampaignEvents(campaignId, { onEvent });
+  const onReconnect = useCallback(() => {
+    optionsRef.current?.onReconnect?.();
+  }, []);
+
+  const onStreamRecovery = useCallback(() => {
+    optionsRef.current?.onStreamRecovery?.();
+  }, []);
+
+  useCampaignEvents(campaignId, { onEvent, onReconnect, onStreamRecovery });
 }

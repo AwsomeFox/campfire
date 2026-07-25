@@ -201,6 +201,23 @@ function migrateUsersTableForTextSize(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before per-user time format (issue #634):
+ * `users.time_format` didn't exist. Plain NOT NULL DEFAULT 'system' ADD COLUMN.
+ */
+function migrateUsersTableForTimeFormat(sqlite: Database.Database): void {
+  const hasUsersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!hasUsersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(users)').all() as Array<{ name: string }>;
+  const hasTimeFormat = columns.some((c) => c.name === 'time_format');
+  if (hasTimeFormat) return;
+
+  sqlite.exec("ALTER TABLE users ADD COLUMN time_format TEXT NOT NULL DEFAULT 'system'");
+}
+
+/**
  * Migration for DBs created before attachments (media uploads):
  * `campaigns.map_attachment_id` didn't exist. Plain nullable ADD COLUMN — no
  * table rebuild needed, same as migrateCampaignsTableForRuleSystem above.
@@ -2344,6 +2361,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0080_starfinder_combat_state', run: migrateStarfinderCombatState },
   { name: '0081_ai_dm_seats_action_queue_depth', run: migrateAiDmSeatsTableForActionQueueDepth },
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
+  { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
 ];
 
 /**
