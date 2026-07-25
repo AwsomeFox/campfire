@@ -240,6 +240,17 @@ export default function LocationListPage() {
                 style={depth > 0 ? { marginLeft: depth * 20 } : undefined}
               >
                 {depth > 0 && <span className="text-secondary shrink-0" aria-hidden>↳</span>}
+                {loc.portraitUrl ? (
+                  <img
+                    src={loc.portraitUrl}
+                    alt=""
+                    className="h-9 w-9 shrink-0 rounded-md object-cover border border-[var(--color-divider)]"
+                  />
+                ) : (
+                  <div className="h-9 w-9 shrink-0 rounded-md bg-[var(--color-neutral-900)] border border-[var(--color-divider)] flex items-center justify-center" aria-hidden>
+                    <GameIcon slug="position-marker" size={16} className="text-[var(--color-accent)]" />
+                  </div>
+                )}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-slate-200 text-sm truncate cf-name-reveal" title={loc.name} aria-label={`Location: ${loc.name}`}>{loc.name}</p>

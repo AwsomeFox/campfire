@@ -688,7 +688,7 @@ describe('encounters (e2e)', () => {
     });
   });
 
-  describe('ended encounter is immutable (issue #163)', () => {
+  describe('ended encounter is immutable (issues #163, #470)', () => {
     // An ended encounter's combatant rows are a frozen historical snapshot. Patching a
     // combatant on it must be rejected AND must not rewrite the linked character's live
     // sheet HP (the pre-fix bug: a post-combat combatant patch leaked back onto current HP).
@@ -771,6 +771,78 @@ describe('encounters (e2e)', () => {
 
       const del = await request(server).delete(`/api/v1/encounters/${endedEncounterId}/combatants/${heroCombatantId}`).set(dm);
       expect(del.status).toBe(409);
+    });
+
+    it('encounter-level PATCHes (name, map, grid, fog, AoE, links, hidden) are rejected (409) on an ended encounter', async () => {
+      const server = ctx.app.getHttpServer();
+
+      const before = await request(server).get(`/api/v1/encounters/${endedEncounterId}`).set(dm);
+      expect(before.status).toBe(200);
+      const snapshot = before.body;
+
+      const upload = await request(server)
+        .post(`/api/v1/campaigns/${endedCampaignId}/attachments`)
+        .set(dm)
+        .field('kind', 'map')
+        .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), {
+          filename: 'battle.png',
+          contentType: 'image/png',
+        });
+      expect(upload.status).toBe(201);
+
+      const loc = await request(server)
+        .post(`/api/v1/campaigns/${endedCampaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Frozen Hall' });
+      expect(loc.status).toBe(201);
+
+      const cases = [
+        ['name', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ name: 'Rewritten Title' })],
+        [
+          'mapAttachmentId',
+          () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ mapAttachmentId: upload.body.id }),
+        ],
+        ['gridSize', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ gridSize: 10 })],
+        [
+          'fog',
+          () =>
+            request(server)
+              .patch(`/api/v1/encounters/${endedEncounterId}`)
+              .set(dm)
+              .send({ fog: { enabled: true, revealed: [{ x: 0, y: 0, w: 50, h: 50 }] } }),
+        ],
+        [
+          'aoe',
+          () =>
+            request(server)
+              .patch(`/api/v1/encounters/${endedEncounterId}`)
+              .set(dm)
+              .send({ aoe: [{ id: 'aoe-1', shape: 'circle', x: 50, y: 50, sizeFt: 20, angleDeg: 0, color: null }] }),
+        ],
+        ['hidden', () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ hidden: true })],
+        [
+          'locationId',
+          () => request(server).patch(`/api/v1/encounters/${endedEncounterId}`).set(dm).send({ locationId: loc.body.id }),
+        ],
+        [
+          'generate-map',
+          () => request(server).post(`/api/v1/encounters/${endedEncounterId}/generate-map`).set(dm).send({ kind: 'dungeon', size: 'large' }),
+        ],
+      ] as const;
+
+      for (const [, req] of cases) {
+        const res = await req();
+        expect(res.status).toBe(409);
+        const after = await request(server).get(`/api/v1/encounters/${endedEncounterId}`).set(dm);
+        expect(after.body.name).toBe(snapshot.name);
+        expect(after.body.mapAttachmentId).toBe(snapshot.mapAttachmentId);
+        expect(after.body.gridSize).toBe(snapshot.gridSize);
+        expect(after.body.fog).toEqual(snapshot.fog);
+        expect(after.body.aoe).toEqual(snapshot.aoe);
+        expect(after.body.hidden).toBe(snapshot.hidden);
+        expect(after.body.locationId).toBe(snapshot.locationId);
+        expect(after.body.status).toBe('ended');
+      }
     });
 
     it('after /reopen the same combatant patch succeeds and mirrors to the character sheet again', async () => {
@@ -3280,6 +3352,20 @@ describe('encounters — issue #238: hex grid, shared AoE templates & pings (e2e
     expect(getRes.body.gridType).toBe('hex');
   });
 
+  it('DM sets hex orientation; it round-trips with default pointy for legacy encounters', async () => {
+    const server = ctx.app.getHttpServer();
+    const fresh = (
+      await request(server).post(`/api/v1/campaigns/${campaignId}/encounters`).set(dm).send({ name: 'Hex orient', hidden: false })
+    ).body.id;
+    expect((await request(server).get(`/api/v1/encounters/${fresh}`).set(dm)).body.hexOrientation).toBe('pointy');
+    const res = await request(server).patch(`/api/v1/encounters/${fresh}`).set(dm).send({ gridType: 'hex', hexOrientation: 'flat' });
+    expect(res.status).toBe(200);
+    expect(res.body.hexOrientation).toBe('flat');
+    expect((await request(server).get(`/api/v1/encounters/${fresh}`).set(player)).body.hexOrientation).toBe('flat');
+    const bad = await request(server).patch(`/api/v1/encounters/${fresh}`).set(dm).send({ hexOrientation: 'diamond' });
+    expect(bad.status).toBe(400);
+  });
+
   it('an invalid gridType is rejected (400)', async () => {
     const server = ctx.app.getHttpServer();
     const res = await request(server).patch(`/api/v1/encounters/${encounterId}`).set(dm).send({ gridType: 'octagon' });
@@ -3360,9 +3446,9 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(res.status).toBe(201);
     }
 
-    const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Thornbridge' });
+    const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Thornbridge', status: 'explored' });
     locationId = loc.body.id;
-    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'The Everflame' });
+    const quest = await request(server).post(`/api/v1/campaigns/${campaignId}/quests`).set(dm).send({ title: 'The Everflame', hidden: false });
     questId = quest.body.id;
     const session = await request(server).post(`/api/v1/campaigns/${campaignId}/sessions`).set(dm).send({ title: 'Session One' });
     sessionId = session.body.id;
@@ -3544,6 +3630,110 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
     expect(note.body.entityType).toBe('encounter');
     expect(note.body.entityId).toBe(enc.body.id);
     expect(note.body.entityName).toBe('Noted fight');
+  });
+
+  // Issue #480: encounter links resolve role-safe display metadata; related records
+  // surface backlinks; hidden/deleted targets are handled safely.
+  describe('encounter link metadata & backlinks (issue #480)', () => {
+    it('GET encounter returns resolved link labels for every role', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Bridge fight', locationId, questId, sessionId, hidden: false });
+
+      for (const headers of [dm, player, viewer]) {
+        const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(headers);
+        expect(got.status).toBe(200);
+        expect(got.body.locationLink).toEqual({ id: locationId, label: 'Thornbridge' });
+        expect(got.body.questLink).toEqual({ id: questId, label: 'The Everflame' });
+        expect(got.body.sessionLink).toEqual({ id: sessionId, label: 'Session One' });
+      }
+    });
+
+    it('redacts hidden linked entities for non-DM and omits their labels', async () => {
+      const server = ctx.app.getHttpServer();
+      const secretQuest = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/quests`)
+        .set(dm)
+        .send({ title: 'Hidden Plot', hidden: true });
+      const secretLoc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/locations`)
+        .set(dm)
+        .send({ name: 'Secret Cave', status: 'unexplored' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Secret ambush', questId: secretQuest.body.id, locationId: secretLoc.body.id, hidden: false });
+
+      const dmGot = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+      expect(dmGot.body.questLink).toEqual({ id: secretQuest.body.id, label: 'Hidden Plot' });
+      expect(dmGot.body.locationLink).toEqual({ id: secretLoc.body.id, label: 'Secret Cave' });
+
+      for (const headers of [player, viewer]) {
+        const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(headers);
+        expect(got.body.questId).toBeNull();
+        expect(got.body.locationId).toBeNull();
+        expect(got.body.questLink).toBeUndefined();
+        expect(got.body.locationLink).toBeUndefined();
+      }
+    });
+
+    it('broken links stay unavailable for the DM without leaking a label', async () => {
+      const server = ctx.app.getHttpServer();
+      const loc = await request(server).post(`/api/v1/campaigns/${campaignId}/locations`).set(dm).send({ name: 'Gone Place', status: 'explored' });
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Orphan link', locationId: loc.body.id, hidden: false });
+      const removed = await request(server).delete(`/api/v1/locations/${loc.body.id}`).set(dm);
+      expect(removed.status).toBe(200);
+
+      const got = await request(server).get(`/api/v1/encounters/${enc.body.id}`).set(dm);
+      expect(got.body.locationId).toBe(loc.body.id);
+      expect(got.body.locationLink).toBeNull();
+    });
+
+    it('location/quest/session GET surfaces linked encounter backlinks', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Backlink fight', locationId, questId, sessionId, hidden: false });
+      const hiddenEnc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Prep ambush', locationId, hidden: true });
+
+      const loc = await request(server).get(`/api/v1/locations/${locationId}`).set(player);
+      expect(loc.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+      expect(loc.body.linkedEncounters.some((e: { id: number }) => e.id === hiddenEnc.body.id)).toBe(false);
+
+      const quest = await request(server).get(`/api/v1/quests/${questId}`).set(player);
+      expect(quest.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+
+      const session = await request(server).get(`/api/v1/sessions/${sessionId}`).set(player);
+      expect(session.body.linkedEncounters).toEqual(
+        expect.arrayContaining([{ id: enc.body.id, name: 'Backlink fight', status: 'preparing' }]),
+      );
+    });
+
+    it('campaign summary digests include resolved link metadata', async () => {
+      const server = ctx.app.getHttpServer();
+      const enc = await request(server)
+        .post(`/api/v1/campaigns/${campaignId}/encounters`)
+        .set(dm)
+        .send({ name: 'Summary links', locationId, questId, hidden: false });
+      const summary = await request(server).get(`/api/v1/campaigns/${campaignId}/summary`).set(player);
+      const digest = summary.body.encounters.find((e: { id: number }) => e.id === enc.body.id);
+      expect(digest).toBeDefined();
+      expect(digest.locationLink).toEqual({ id: locationId, label: 'Thornbridge' });
+      expect(digest.questLink).toEqual({ id: questId, label: 'The Everflame' });
+    });
   });
 
   it('difficulty band computes correctly for a known party + monster set', async () => {
@@ -4393,6 +4583,113 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       expect(ok.status).toBe(201);
 
       await request(server()).post(`/api/v1/encounters/${next}/end`).set(dm);
+    });
+  });
+
+  describe('encounter list filter/sort/search (issue #490)', () => {
+    let listCampId: number;
+    let runningId: number;
+    let preparingId: number;
+    let endedGoblinId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'List Filter Campaign' });
+      expect(campRes.status).toBe(201);
+      listCampId = campRes.body.id;
+
+      const ts = new Date().toISOString();
+      const endedRows = Array.from({ length: 50 }, (_, i) => ({
+        campaignId: listCampId,
+        name: `Ended fight ${i + 1}`,
+        status: 'ended' as const,
+        round: 1,
+        turnIndex: 0,
+        createdAt: ts,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      }));
+      await db.insert(encountersTable).values(endedRows);
+
+      const preparing = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Prep Ambush', hidden: false });
+      expect(preparing.status).toBe(201);
+      preparingId = preparing.body.id;
+
+      const running = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Live Boss Fight', hidden: false });
+      expect(running.status).toBe(201);
+      runningId = running.body.id;
+      const runningMonster = await request(server)
+        .post(`/api/v1/encounters/${runningId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Boss', hpMax: 100 });
+      expect(runningMonster.status).toBe(201);
+      const roll = await request(server).post(`/api/v1/encounters/${runningId}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+      const start = await request(server).post(`/api/v1/encounters/${runningId}/start`).set(dm);
+      expect(start.status).toBe(201);
+
+      const endedNamed = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Goblin Skirmish', hidden: false });
+      expect(endedNamed.status).toBe(201);
+      endedGoblinId = endedNamed.body.id;
+      const goblin = await request(server)
+        .post(`/api/v1/encounters/${endedGoblinId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin', hpMax: 7 });
+      expect(goblin.status).toBe(201);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/start`).set(dm);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/end`).set(dm);
+    });
+
+    it('surfaces the running encounter ahead of dozens of ended fights', async () => {
+      const server = ctx.app.getHttpServer();
+      const list = await request(server).get(`/api/v1/campaigns/${listCampId}/encounters`).set(dm);
+      expect(list.status).toBe(200);
+      expect(list.body.length).toBeGreaterThanOrEqual(52);
+      expect(list.body[0].id).toBe(runningId);
+      expect(list.body[0].status).toBe('running');
+    });
+
+    it('filters by status', async () => {
+      const server = ctx.app.getHttpServer();
+      const preparing = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ status: 'preparing' })
+        .set(dm);
+      expect(preparing.status).toBe(200);
+      expect(preparing.body.every((e: { status: string }) => e.status === 'preparing')).toBe(true);
+      expect(preparing.body.some((e: { id: number }) => e.id === preparingId)).toBe(true);
+      expect(preparing.body.some((e: { id: number }) => e.id === runningId)).toBe(false);
+    });
+
+    it('searches by name substring', async () => {
+      const server = ctx.app.getHttpServer();
+      const search = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ q: 'goblin' })
+        .set(dm);
+      expect(search.status).toBe(200);
+      expect(search.body).toHaveLength(1);
+      expect(search.body[0].id).toBe(endedGoblinId);
+      expect(search.body[0].name).toBe('Goblin Skirmish');
+    });
+
+    it('rejects an invalid status filter', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ status: 'bogus' })
+        .set(dm);
+      expect(res.status).toBe(400);
     });
   });
 });

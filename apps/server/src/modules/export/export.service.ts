@@ -322,12 +322,12 @@ export class ExportService {
         : null,
       attachments,
       attachmentsNote:
-        'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl and ' +
-        'npc.portraitUrl ends in attachments[].fileRoute. This JSON document carries attachment ' +
-        'METADATA only — the raw image bytes are NOT embedded here. Export with format=mdzip to ' +
-        'obtain a zip whose uploads/ folder holds the actual files at attachments[].file. Entries ' +
-        'with present=false have no file on disk (dangling reference); their bytes are omitted ' +
-        'from every export format.',
+        'campaign.mapAttachmentId references attachments[].id; each character.portraitUrl, ' +
+        'npc.portraitUrl, faction.portraitUrl, and location.portraitUrl ends in attachments[].fileRoute. ' +
+        'This JSON document carries attachment METADATA only — the raw image bytes are NOT embedded here. ' +
+        'Export with format=mdzip to obtain a zip whose uploads/ folder holds the actual files at ' +
+        'attachments[].file. Entries with present=false have no file on disk (dangling reference); ' +
+        'their bytes are omitted from every export format.',
       participantSupportNote:
         'Participant-owned access-support preferences are intentionally excluded from campaign exports, imports, ' +
         'and clones. Each participant can export their own submission with GET /campaigns/:id/export/me; full-server ' +

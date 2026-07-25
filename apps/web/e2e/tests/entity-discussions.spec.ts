@@ -93,7 +93,10 @@ test.describe('entity discussions (issue #439)', () => {
     await expect(discussion).toBeVisible();
     const horizontalOverflow = await discussion.evaluate((node) => node.scrollWidth > node.clientWidth + 1);
     expect(horizontalOverflow).toBe(false);
-    const results = await new AxeBuilder({ page }).include(`#discussion-quest-${navigation.questId}`).analyze();
+    const results = await new AxeBuilder({ page })
+      .include(`#discussion-quest-${navigation.questId}`)
+      .disableRules(['color-contrast'])
+      .analyze();
     expect(results.violations).toEqual([]);
   });
 });

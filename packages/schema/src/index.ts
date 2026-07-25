@@ -683,6 +683,16 @@ export const Quest = z.object({
   // `hidden` to DM-only (issue #754) — pass false only for an intentional public create.
   hidden: z.boolean().default(false),
   sortOrder: z.number().int().default(0),
+  // Encounters linked to this quest (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
   ...timestamps,
 });
 export type Quest = z.infer<typeof Quest>;
@@ -893,6 +903,9 @@ export const Faction = z.object({
   // +100 allied, 0 neutral) the DM/scribe bumps; `standing` is the coarse label.
   reputation: z.number().int().min(-100).max(100).default(0),
   standing: FactionStanding.default('neutral'),
+  // Emblem/banner portrait image (issue #1324). Nullable URL to an attachment
+  // `/api/v1/attachments/:id/file`; absent/empty falls back to faction initials.
+  portraitUrl: z.string().max(500).nullable().default(null),
   ...timestamps,
 });
 export type Faction = z.infer<typeof Faction>;
@@ -928,6 +941,19 @@ export const Location = z.object({
   mapY: z.number().nullable().default(null),
   body: z.string().max(50_000).default(''),
   dmSecret: z.string().max(20_000).default(''),
+  // Encounters linked to this location (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
+  // Landmark/portrait image (issue #1324). Nullable URL to an attachment; absent
+  // falls back to the status-colored map pin placeholder.
+  portraitUrl: z.string().max(500).nullable().default(null),
   ...timestamps,
 });
 export type Location = z.infer<typeof Location>;
@@ -943,6 +969,16 @@ export const Session = z.object({
   playedAt: IsoDate.nullable().default(null),
   recap: z.string().max(100_000).default(''), // markdown
   dmSecret: z.string().max(20_000).default(''), // DM only — stripped for non-DM (session prep notes)
+  // Encounters linked to this session (issue #480) — present on GET reads only.
+  linkedEncounters: z
+    .array(
+      z.object({
+        id: Id,
+        name: z.string().min(1).max(120),
+        status: z.enum(['preparing', 'running', 'ended']),
+      }),
+    )
+    .optional(),
   ...timestamps,
 });
 export type Session = z.infer<typeof Session>;
@@ -2518,6 +2554,30 @@ export function initiativeModelForAdapter(adapter: Pick<RuleSystemAdapter, 'init
   return adapter.initiativeModel ?? DEFAULT_INITIATIVE_MODEL;
 }
 
+// ---------- adapter-defined grid distance rules (issue #467) ----------
+// Square grids default to Euclidean straight-line ruler distance; hex grids use
+// cube/axial hex steps. 5e optionally counts every other diagonal as 2 squares.
+
+/** Square-grid distance mode for the measurement ruler. */
+export type SquareDistanceMode = 'euclidean' | 'alternating-diagonal';
+
+/** Hex-grid distance mode — cube/axial steps between hex centres. */
+export type HexDistanceMode = 'hex';
+
+/** Per-system ruler distance configuration (issue #467). */
+export interface GridDistanceRule {
+  readonly square: SquareDistanceMode;
+  readonly hex: HexDistanceMode;
+}
+
+/** Default ruler distance: Euclidean squares, hex steps on hex grids. */
+export const DEFAULT_GRID_DISTANCE_RULE: GridDistanceRule = { square: 'euclidean', hex: 'hex' };
+
+/** Resolve the grid distance rule for an adapter (issue #467). */
+export function gridDistanceForAdapter(adapter: Pick<RuleSystemAdapter, 'gridDistanceRule'>): GridDistanceRule {
+  return adapter.gridDistanceRule ?? DEFAULT_GRID_DISTANCE_RULE;
+}
+
 export interface RuleSystemAdapter {
   /** Stable adapter id — typically a family id (e.g. 'dnd5e'); OSR variants use their pack slug. */
   readonly id: string;
@@ -2540,6 +2600,12 @@ export interface RuleSystemAdapter {
    * Encounter rollers and the UI read this via {@link initiativeModelForAdapter}.
    */
   readonly initiativeModel?: InitiativeModel;
+  /**
+   * OPTIONAL — how the VTT measurement ruler counts grid cells (issue #467). Square grids
+   * default to Euclidean straight-line distance; hex grids use cube/axial hex steps. 5e may
+   * opt into alternating-diagonal counting on square grids. Read via {@link gridDistanceForAdapter}.
+   */
+  readonly gridDistanceRule?: GridDistanceRule;
   /**
    * Hard level cap for this system, sourced from the adapter so `levelUp` doesn't bake in 5e's
    * 20 (issue #535). 5e/PF1e/PF2e/Starfinder are 20; 13th Age is 10. A system with no hard cap
@@ -2792,6 +2858,8 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
   conditions: CONDITIONS,
   // 5e turn workspace (issue #413): action / bonus action / reaction / movement.
   actionEconomy: DND5E_ACTION_ECONOMY,
+  // 5e square-grid ruler: Euclidean by default; DMs may prefer alternating-diagonal counting.
+  gridDistanceRule: { square: 'euclidean', hex: 'hex' },
   mapStatblock(d: Record<string, unknown>): MonsterStatblockData {
     const abilityScores = (d.abilityScores ?? d.ability_scores) as Record<string, unknown> | undefined;
     return {
@@ -4206,6 +4274,22 @@ export const RuleSearchPage = z.object({
 });
 export type RuleSearchPage = z.infer<typeof RuleSearchPage>;
 
+// ---------- encounter link metadata (issue #480) ----------
+/** Role-safe resolved label for an encounter's location/quest/session link. */
+export const EncounterLinkMeta = z.object({
+  id: Id,
+  label: z.string(),
+});
+export type EncounterLinkMeta = z.infer<typeof EncounterLinkMeta>;
+
+/** Compact backlink from a location/quest/session to a linked encounter. */
+export const EncounterBacklink = z.object({
+  id: Id,
+  name: z.string().min(1).max(120),
+  status: z.enum(['preparing', 'running', 'ended']),
+});
+export type EncounterBacklink = z.infer<typeof EncounterBacklink>;
+
 // ---------- campaign summary (dashboard aggregate / AI primer) ----------
 // Compact per-encounter digest for the campaign summary (issue #126) — enough for an
 // AI drafting a recap or "the story so far" to SEE that combat happened, where/why/
@@ -4221,6 +4305,10 @@ export const EncounterDigest = z.object({
   locationId: Id.nullable(),
   questId: Id.nullable(),
   sessionId: Id.nullable(),
+  // Role-safe resolved link labels (issue #480).
+  locationLink: EncounterLinkMeta.nullable().optional(),
+  questLink: EncounterLinkMeta.nullable().optional(),
+  sessionLink: EncounterLinkMeta.nullable().optional(),
   combatantCount: z.number().int().nonnegative(),
   // Issue #625: the "down" tally used to sum EVERY combatant at 0 HP / dead — including
   // every dead monster — which inflated a glance at the summary. It now counts only
@@ -5662,12 +5750,15 @@ export const FogState = z.object({
 export type FogState = z.infer<typeof FogState>;
 
 /**
- * Battle-map grid geometry (issue #40 / #238). 'square' is the classic Battlemat grid; 'hex'
- * renders a pointy-top hexagonal overlay for hex-crawl / wilderness maps. Purely a display
- * choice for the overlay — the measurement ruler still reads cell size off gridSize/gridScale.
+ * Battle-map grid geometry (issue #40 / #238 / #467). 'square' is the classic Battlemat grid;
+ * 'hex' uses hex-center snapping, hex-aware distance, footprints, and AoE geometry.
  */
 export const GridType = z.enum(['square', 'hex']);
 export type GridType = z.infer<typeof GridType>;
+
+/** Pointy-top vs flat-top hex orientation (issue #467). Default pointy matches legacy overlay. */
+export const HexOrientation = z.enum(['pointy', 'flat']);
+export type HexOrientation = z.infer<typeof HexOrientation>;
 
 /**
  * Area-of-effect template shape (issue #238). 'circle' is a radius burst; 'cone' is a 5e
@@ -5758,9 +5849,11 @@ export const Encounter = z.object({
   gridScale: z.number().positive().nullable().default(null),
   gridUnit: z.string().max(12).nullable().default(null),
   gridSnap: z.boolean().default(false),
-  // Grid geometry (issue #238). 'square' (default) or 'hex' — a pointy-top hex overlay. Older
-  // DBs backfill to 'square' via migration, preserving the original square-only behaviour.
+  // Grid geometry (issue #238 / #467). 'square' (default) or 'hex' with hex-center snapping.
+  // Older DBs backfill to 'square' via migration, preserving the original square-only behaviour.
   gridType: GridType.default('square'),
+  // Hex orientation (issue #467): pointy-top (default, matches legacy overlay) or flat-top.
+  hexOrientation: HexOrientation.default('pointy'),
   // Grid CALIBRATION for aligning the overlay to a map's own printed grid (issue #417).
   // Every field is expressed in the same isotropic unit — percent of the rendered map's
   // WIDTH — so the overlay, snapping, and the ruler share ONE transform (see the web
@@ -5792,6 +5885,10 @@ export const Encounter = z.object({
   // from every non-DM read (list/get/difficulty) until the DM reveals it (hidden=false).
   hidden: z.boolean().default(false),
   endedAt: IsoDate.nullable().default(null),
+  // Role-safe resolved link labels (issue #480) — present on list/get/summary reads.
+  locationLink: EncounterLinkMeta.nullable().optional(),
+  questLink: EncounterLinkMeta.nullable().optional(),
+  sessionLink: EncounterLinkMeta.nullable().optional(),
   ...timestamps,
 });
 export type Encounter = z.infer<typeof Encounter>;
@@ -5819,8 +5916,10 @@ export const EncounterUpdate = z.object({
   gridScale: z.number().positive().nullable().optional(),
   gridUnit: z.string().max(12).nullable().optional(),
   gridSnap: z.boolean().optional(),
-  // Grid geometry (issue #238) — dm only. 'square' | 'hex'.
+  // Grid geometry (issue #238 / #467) — dm only. 'square' | 'hex'.
   gridType: GridType.optional(),
+  // Hex orientation (issue #467) — dm only. 'pointy' | 'flat'.
+  hexOrientation: HexOrientation.optional(),
   // Grid calibration (issue #417) — dm only. Align the overlay to a map's printed grid:
   // origin offset, independent cell height, rotation, and overlay opacity. Each field is
   // independently settable; gridCellHeight: null restores square cells. Omitting a field

@@ -32,6 +32,7 @@ import { CopyControl } from '../../components/CopyControl';
 import { SchedulePanel } from './SchedulePanel';
 import { ScribePanel } from './ScribePanel';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
+import { EncounterBacklinksCard } from '../../components/EncounterBacklinksCard';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
 import { VirtualList } from '../../components/VirtualList';
@@ -677,6 +678,7 @@ function SessionDetail({
   const [recapDraft, setRecapDraft] = useState('');
   const [recapBaseline, setRecapBaseline] = useState<RecapEditorDraft | null>(null);
   const [loadedSessionId, setLoadedSessionId] = useState<number | null>(null);
+  const [linkedEncounters, setLinkedEncounters] = useState<Session['linkedEncounters']>([]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -702,6 +704,7 @@ function SessionDetail({
     setRecapDraft('');
     setRecapBaseline(null);
     setLoadedSessionId(null);
+    setLinkedEncounters([]);
     setLoadedUpdatedAt(null);
     setConflict(false);
     setConfirmingDelete(false);
@@ -727,6 +730,7 @@ function SessionDetail({
         );
         setLoadedUpdatedAt(decision.record.updatedAt);
         setLoadedSessionId(decision.record.id);
+        setLinkedEncounters(decision.record.linkedEncounters ?? []);
         setConflict(false);
       })
       .catch((err) => {
@@ -735,6 +739,7 @@ function SessionDetail({
         setRecapDraft('');
         setLoadedUpdatedAt(null);
         setLoadedSessionId(null);
+        setLinkedEncounters([]);
         if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
         setError(translateApiError(err, t, { fallbackKey: 'sessions.errors.loadRecap' }));
       })
@@ -1137,6 +1142,7 @@ function SessionDetail({
 
       {/* Discussion thread on the recap (issue #123) — the shared, between-sessions
           surface: react to the recap, ask the DM, or post an in-character scene. */}
+      <EncounterBacklinksCard campaignId={campaignId} encounters={linkedEncounters ?? []} />
       <EntityDiscussion campaignId={campaignId} entityType="session" entityId={session.id} />
     </div>
   );

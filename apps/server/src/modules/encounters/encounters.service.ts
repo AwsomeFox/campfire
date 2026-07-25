@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterBacklink, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterLinkMeta, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HexOrientation, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -37,6 +37,7 @@ import {
   resetTurnStateForStart,
   retreatEncounterTurn,
   sortCombatants,
+  sortEncountersForList,
   tickConditionInstancesAtTurnEnd,
   tickConditionInstancesAtTurnStart,
   tickEffectsAtTurnEnd,
@@ -120,6 +121,7 @@ function encounterToDomain(row: typeof encounters.$inferSelect): Encounter {
     gridUnit: row.gridUnit,
     gridSnap: row.gridSnap,
     gridType: (row.gridType as GridType) ?? 'square',
+    hexOrientation: (row.hexOrientation as HexOrientation) ?? 'pointy',
     // Grid calibration (issue #417). Null-coalesce so rows written before the columns
     // existed (or a legacy NULL) read as the pre-#417 defaults — top-left square grid.
     gridOffsetX: row.gridOffsetX ?? 0,
@@ -387,20 +389,25 @@ export class EncountersService {
   }
 
   /**
-   * Reject a combat write against an 'ended' encounter (issue #163). `end()` was
-   * carefully guarded against double-firing, but per-combatant writes (add / update /
-   * remove / roll-initiative) never checked status — so after a fight was over any
-   * owning player or DM could keep editing the historical record, and every combatant
-   * HP patch ALSO rewrote the linked character's live sheet HP through the write-through
-   * in updateCombatant, corrupting current HP outside any session context. An ended
-   * encounter's combatant rows are a frozen historical snapshot; mutating them is a
-   * state conflict (409). Viewing stays allowed (getWithCombatantsOrThrow is untouched),
-   * and /reopen is the supported path back to a mutable 'running' encounter.
+   * Reject a write against an 'ended' encounter (issues #163, #470). Combatant mutations
+   * were the first gap: per-combatant writes never checked status, so after a fight any
+   * owning player or DM could keep editing the historical record and every combatant HP
+   * patch rewrote the linked character's live sheet HP through write-through in
+   * updateCombatant. Encounter-level fields (map/grid/fog/AoE/links/name/hidden) were
+   * still mutable via updateEncounter, so the board could drift after the session. An
+   * ended encounter is a frozen historical snapshot; mutating it is a state conflict
+   * (409). Viewing stays allowed (getWithCombatantsOrThrow is untouched), and /reopen is
+   * the supported path back to a mutable 'running' encounter.
    */
   private assertMutable(encounterRow: typeof encounters.$inferSelect): void {
     if (encounterRow.status === 'ended') {
-      throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before modifying combatants`);
+      throw new ConflictException(`Encounter ${encounterRow.id} has ended — reopen it before making changes`);
     }
+  }
+
+  /** Public seam for sibling modules (e.g. map attach) to reject ended-encounter writes (#470). */
+  async ensureMutable(encounterId: number): Promise<void> {
+    this.assertMutable(await this.getRowOrThrow(encounterId));
   }
 
   /**
@@ -856,13 +863,107 @@ export class EncountersService {
     });
   }
 
+  private sessionDisplayLabel(row: { title: string | null; number: number; id: number }): string {
+    const title = row.title?.trim();
+    return title && title.length > 0 ? title : `Session ${row.number}`;
+  }
+
+  /**
+   * Attach role-safe display metadata for location/quest/session links (issue #480).
+   * Call after {@link redactHiddenLinkedEntities} so hidden targets are already nulled
+   * for non-DM viewers.
+   */
+  private async attachEncounterLinkMeta<T extends { locationId: number | null; questId: number | null; sessionId: number | null }>(
+    items: T[],
+    campaignId: number,
+  ): Promise<Array<T & { locationLink?: EncounterLinkMeta | null; questLink?: EncounterLinkMeta | null; sessionLink?: EncounterLinkMeta | null }>> {
+    if (items.length === 0) return items;
+
+    const locationIds = Array.from(new Set(items.map((i) => i.locationId).filter((id): id is number => id !== null)));
+    const questIds = Array.from(new Set(items.map((i) => i.questId).filter((id): id is number => id !== null)));
+    const sessionIds = Array.from(new Set(items.map((i) => i.sessionId).filter((id): id is number => id !== null)));
+
+    const locationById = new Map<number, EncounterLinkMeta>();
+    if (locationIds.length > 0) {
+      const rows = await this.db
+        .select({ id: locations.id, name: locations.name })
+        .from(locations)
+        .where(and(inArray(locations.id, locationIds), eq(locations.campaignId, campaignId), notDeleted(locations.deletedAt)));
+      for (const row of rows) {
+        locationById.set(row.id, { id: row.id, label: row.name });
+      }
+    }
+
+    const questById = new Map<number, EncounterLinkMeta>();
+    if (questIds.length > 0) {
+      const rows = await this.db
+        .select({ id: quests.id, title: quests.title })
+        .from(quests)
+        .where(and(inArray(quests.id, questIds), eq(quests.campaignId, campaignId), notDeleted(quests.deletedAt)));
+      for (const row of rows) {
+        questById.set(row.id, { id: row.id, label: row.title });
+      }
+    }
+
+    const sessionById = new Map<number, EncounterLinkMeta>();
+    if (sessionIds.length > 0) {
+      const rows = await this.db
+        .select({ id: sessions.id, title: sessions.title, number: sessions.number })
+        .from(sessions)
+        .where(and(inArray(sessions.id, sessionIds), eq(sessions.campaignId, campaignId), notDeleted(sessions.deletedAt)));
+      for (const row of rows) {
+        sessionById.set(row.id, { id: row.id, label: this.sessionDisplayLabel(row) });
+      }
+    }
+
+    return items.map((item) => ({
+      ...item,
+      ...(item.locationId !== null ? { locationLink: locationById.get(item.locationId) ?? null } : {}),
+      ...(item.questId !== null ? { questLink: questById.get(item.questId) ?? null } : {}),
+      ...(item.sessionId !== null ? { sessionLink: sessionById.get(item.sessionId) ?? null } : {}),
+    }));
+  }
+
+  /**
+   * Encounters linked to a location, quest, or session (issue #480 backlinks).
+   * Hidden encounters are dropped for non-DM callers, mirroring listForCampaign.
+   */
+  async listBacklinks(
+    campaignId: number,
+    filter: { locationId?: number; questId?: number; sessionId?: number },
+    viewerRole?: Role,
+  ): Promise<EncounterBacklink[]> {
+    const conditions = [eq(encounters.campaignId, campaignId), notDeleted(encounters.deletedAt)];
+    if (filter.locationId !== undefined) conditions.push(eq(encounters.locationId, filter.locationId));
+    if (filter.questId !== undefined) conditions.push(eq(encounters.questId, filter.questId));
+    if (filter.sessionId !== undefined) conditions.push(eq(encounters.sessionId, filter.sessionId));
+
+    const rows = await this.db
+      .select({ id: encounters.id, name: encounters.name, status: encounters.status, hidden: encounters.hidden })
+      .from(encounters)
+      .where(and(...conditions))
+      .orderBy(encounters.id);
+
+    const visible = viewerRole === undefined || viewerRole === 'dm' ? rows : rows.filter((r) => !r.hidden);
+    return visible.map((r) => ({
+      id: r.id,
+      name: r.name,
+      status: r.status as EncounterStatus,
+    }));
+  }
+
   /**
    * `viewerRole` drives entity-level secrecy (issue #262): a hidden encounter is a DM's
    * prepared, not-yet-sprung fight and is dropped WHOLESALE for a non-DM viewer — mirroring
    * how QuestsService/NpcsService filter hidden rows. Omit `viewerRole` (or pass `dm`) only
    * for DM-facing callers (e.g. the full-backup export), which must see hidden encounters.
    */
-  async listForCampaign(campaignId: number, status?: EncounterStatus, viewerRole?: Role): Promise<Encounter[]> {
+  async listForCampaign(
+    campaignId: number,
+    status?: EncounterStatus,
+    viewerRole?: Role,
+    q?: string,
+  ): Promise<Encounter[]> {
     const conditions = [
       eq(encounters.campaignId, campaignId),
       notDeleted(encounters.deletedAt),
@@ -877,28 +978,20 @@ export class EncountersService {
     let list = rows.map(encounterToDomain);
     // Drop hidden encounters wholesale for a non-DM viewer (issue #262). undefined role
     // (DM-facing callers) is never filtered.
-    const visible = viewerRole === undefined ? list : filterHidden(list, viewerRole);
-    // One authoritative live fight (issue #744): when listing 'running' encounters, pin
-    // the campaign's activeEncounterId to the front so consumers (Dashboard / Player
-    // Display / AI Table) that take the first result follow the authoritative fight rather
-    // than an arbitrary DB ordering. With the Start/Reopen transactional guard there is at
-    // most one running encounter anyway; this is the deterministic tiebreaker for any
-    // legacy drift and a no-op otherwise.
-    if (status === 'running' && visible.length > 1) {
-      const activeId = await this.findLiveEncounter(campaignId);
-      if (activeId) {
-        list = visible.sort((a, b) => {
-          if (a.id === activeId.id) return -1;
-          if (b.id === activeId.id) return 1;
-          return 0;
-        });
-      } else {
-        list = visible;
-      }
-    } else {
-      list = visible;
+    list = viewerRole === undefined ? list : filterHidden(list, viewerRole);
+    const folded = q !== undefined ? foldForSearch(q.trim()) : '';
+    if (folded) {
+      list = list.filter((enc) => foldedIncludes(enc.name, folded));
     }
-    return this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
+    const runningCount = list.filter((enc) => enc.status === 'running').length;
+    let pinActiveId: number | null = null;
+    if (runningCount > 1) {
+      const active = await this.findLiveEncounter(campaignId);
+      pinActiveId = active?.id ?? null;
+    }
+    list = sortEncountersForList(list, { pinActiveId });
+    const redacted = await this.redactHiddenLinkedEntities(list, campaignId, viewerRole);
+    return this.attachEncounterLinkMeta(redacted, campaignId);
   }
 
   async searchForCampaign(campaignId: number, role: Role, needle: string, limit: number): Promise<EncounterSearchEntry[]> {
@@ -1045,11 +1138,12 @@ export class EncountersService {
     list = enrichCombatantsWithLegendaryPools(list, statblocks);
     const domain = encounterToDomain(row);
     const [redactedDomain] = await this.redactHiddenLinkedEntities([domain], row.campaignId, viewerRole);
+    const [withLinks] = await this.attachEncounterLinkMeta([redactedDomain], row.campaignId);
     // Issue #465: AoE templates in unrevealed fog leak origin/shape/dimensions to players
     // (and render above the fog overlay client-side). Filter server-side for non-DMs using
     // the same concealment rules as token redaction; player-declared templates stay visible
     // to their owner via declaredByUserId.
-    let aoe = redactedDomain.aoe ?? [];
+    let aoe = withLinks.aoe ?? [];
     if (viewerRole !== undefined && viewerRole !== 'dm') {
       const fog = parseFog(row.fog);
       const invalidFog = row.fog !== null && fog === null;
@@ -1067,7 +1161,7 @@ export class EncountersService {
       }
     }
     return {
-      ...redactedDomain,
+      ...withLinks,
       aoe,
       combatants: list,
       ...(hpSyncConflicts && hpSyncConflicts.length > 0 ? { hpSyncConflicts } : {}),
@@ -1163,6 +1257,7 @@ export class EncountersService {
     opts?: { expectedUpdatedAt?: string },
   ): Promise<EncounterWithCombatants> {
     const encounterRow = await this.getRowOrThrow(encounterId);
+    this.assertMutable(encounterRow);
     // Optimistic concurrency (#532): 409 on a stale expectedUpdatedAt before any write.
     this.revisions.assertNotStale(encounterRow, opts?.expectedUpdatedAt);
 
@@ -1223,6 +1318,10 @@ export class EncountersService {
     if (input.gridType !== undefined && input.gridType !== (encounterRow.gridType ?? 'square')) {
       set.gridType = input.gridType;
       changedPredicates.push(sql`${encounters.gridType} IS NOT ${input.gridType}`);
+    }
+    if (input.hexOrientation !== undefined && input.hexOrientation !== (encounterRow.hexOrientation ?? 'pointy')) {
+      set.hexOrientation = input.hexOrientation;
+      changedPredicates.push(sql`${encounters.hexOrientation} IS NOT ${input.hexOrientation}`);
     }
     // Grid calibration (issue #417) — each field independently settable. gridCellHeight is
     // nullable (null restores square cells); the others carry non-null defaults. Same
@@ -2248,7 +2347,8 @@ export class EncountersService {
         monstersDefeated: t.monstersDefeated,
       };
     });
-    return this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
+    const redacted = await this.redactHiddenLinkedEntities(digests, campaignId, viewerRole);
+    return this.attachEncounterLinkMeta(redacted, campaignId);
   }
 
   /**

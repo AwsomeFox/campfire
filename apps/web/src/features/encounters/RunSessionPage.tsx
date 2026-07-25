@@ -42,11 +42,12 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
-import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
-import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer } from '@campfire/schema';
+import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT, buildDifficultyExplanation } from '@campfire/schema';
+import { ruleSystemAdapter, hasDeathSavesForAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage, filterAoeTemplatesForViewer, gridDistanceForAdapter } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError , translateApiError} from '../../lib/api';
+import { api, API, ApiError, isReadTimeout, isTransientError, translateApiError } from '../../lib/api';
+import { formatDateTime, useFormattingLocale, useTimeFormat } from '../../lib/format';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
@@ -76,6 +77,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
+import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
@@ -98,19 +100,38 @@ import {
   computeContainedRect,
   DEFAULT_GRID_OPACITY,
   layerPxToMapPercent,
-  mapPercentDistanceCells,
   mapPercentToLayerPx,
   pointerToMapPercent,
   resolveGridCalibration,
   snapMapPercentCalibrated,
   type GridCalibration,
 } from './mapRenderedBounds';
+import {
+  gridCellLabel,
+  gridCellLabelPlural,
+  hexAoeCirclePolygons,
+  hexPolygons,
+  hexKeyboardStepPx,
+  mapPercentGridDistance,
+  snapFogRectToHexGrid,
+  snapMapPercentToHex,
+  tokenFootprintDiameterPx,
+} from './hexGeometry';
 import { scrollBehavior } from '../../lib/prefersReducedMotion';
 import {
   deleteConfirmCopy,
   dmLifecycleActions,
   isLifecycleConfirmValid,
 } from './encounterLifecycleActions';
+import {
+  deriveEncounterSyncState,
+  encounterRiskyActionsBlocked,
+  encounterSyncBannerMessage,
+  encounterSyncChipClass,
+  encounterSyncChipLabel,
+  encounterSyncRevisionFromUpdatedAt,
+  type EncounterSyncRevision,
+} from './encounterSyncState';
 import { ENCOUNTER_LIFECYCLE_STEPS, preparingGuidance } from './postCreateGuidance';
 import {
   armMapPingTap,
@@ -137,6 +158,7 @@ import {
   type MapViewportState,
   type PinchGesture,
 } from './mapViewport';
+import { tokenDiameterPx } from './tokenFootprint';
 
 const STATUS_LABEL: Record<string, string> = {
   preparing: 'Preparing',
@@ -158,6 +180,7 @@ type EncounterGridPatch = Partial<
     | 'gridUnit'
     | 'gridSnap'
     | 'gridType'
+    | 'hexOrientation'
     // Grid calibration (issue #417) — origin offset, independent cell height, rotation, opacity.
     | 'gridOffsetX'
     | 'gridOffsetY'
@@ -208,46 +231,71 @@ const DIFFICULTY_NEUTRAL_STYLE = {
 };
 
 /**
- * Difficulty badge shown in the encounter header (issues #58 + #429). Reads
+ * Difficulty badge shown in the encounter header (issues #58 + #429, #476). Reads
  * GET /encounters/:id/difficulty. Hidden when there are no monsters. Zero-data
  * fights show the adapter's "Unknown—add XP/CR" label (never a fake Trivial);
- * unsupported rulesets explain the limitation. `title` surfaces XP math + warnings.
+ * unsupported rulesets explain the limitation. A focusable details control exposes
+ * the XP math and warnings visibly (not hover-title-only).
  */
 function DifficultyBadge({ difficulty }: { difficulty: EncounterDifficulty | null }) {
+  const { open, buttonProps, regionProps } = useDisclosure({
+    focusManagement: true,
+    regionLabel: 'Encounter difficulty details',
+  });
+
   if (!difficulty) return null;
   if (difficulty.monsterCount === 0) return null;
 
-  if (difficulty.status === 'unsupported') {
-    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
-    return (
-      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
-        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-        {difficulty.label}
-      </span>
-    );
-  }
+  const explanation = buildDifficultyExplanation(difficulty);
+  const style =
+    difficulty.status === 'unsupported' || difficulty.status === 'unknown' || difficulty.band === null
+      ? DIFFICULTY_NEUTRAL_STYLE
+      : DIFFICULTY_STYLE[difficulty.band];
+  const { onClick: toggleDetails, ...detailsButtonProps } = buttonProps;
 
-  if (difficulty.status === 'unknown' || difficulty.band === null) {
-    const title = [...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' ') || difficulty.label;
-    return (
-      <span className="tag" style={DIFFICULTY_NEUTRAL_STYLE} title={title}>
-        <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-        {difficulty.label}
-      </span>
-    );
-  }
-
-  const breakdown =
-    `Adjusted monster XP ${difficulty.adjustedXp.toLocaleString()} ` +
-    `(${difficulty.totalMonsterXp.toLocaleString()} × ${difficulty.multiplier}) vs party thresholds — ` +
-    `easy ${difficulty.thresholds.easy.toLocaleString()}, medium ${difficulty.thresholds.medium.toLocaleString()}, ` +
-    `hard ${difficulty.thresholds.hard.toLocaleString()}, deadly ${difficulty.thresholds.deadly.toLocaleString()}`;
-  const title = [breakdown, ...difficulty.warnings, ...difficulty.assumptions].filter(Boolean).join(' · ');
   return (
-    <span className="tag" style={DIFFICULTY_STYLE[difficulty.band]} title={title}>
-      <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
-      {difficulty.label}
-    </span>
+    <div
+      className="inline-flex flex-col items-start gap-1"
+      data-testid="difficulty-badge"
+      style={{ maxWidth: 'min(100%, 24rem)' }}
+    >
+      <div className="inline-flex items-center gap-1">
+        <span className="tag" style={style}>
+          <GameIcon slug="crossed-swords" size={12} className="inline align-text-bottom mr-1" />
+          {difficulty.label}
+        </span>
+        <button
+          type="button"
+          className="btn btn-ghost cf-target-24"
+          style={{ fontSize: 11, padding: '0 4px', lineHeight: 1 }}
+          data-testid="difficulty-help-toggle"
+          aria-label="Show encounter difficulty details"
+          {...detailsButtonProps}
+          onClick={(e) => toggleDetails?.(e)}
+        >
+          <GameIcon slug="info" size={12} aria-hidden="true" />
+        </button>
+      </div>
+      {open && (
+        <div
+          {...regionProps}
+          className="cf-inset"
+          data-testid="difficulty-help-panel"
+          style={{ padding: '8px 12px', fontSize: 12, width: '100%' }}
+        >
+          <p style={{ margin: 0, fontWeight: 600 }}>{explanation.headline}</p>
+          {explanation.detail.length > 0 && (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {explanation.detail.map((line, i) => (
+                <li key={i} className="text-muted" style={{ fontSize: 11 }}>
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -258,10 +306,9 @@ function linkLabel(kind: 'location' | 'quest' | 'session', row: LinkRow): string
 }
 
 /**
- * Encounter location/quest/session links (issue #126). Shows the current attachments as
- * chips; the DM can expand an inline editor to (re)attach or clear each link, persisted
- * via PATCH /encounters/:id. Non-DM members see the chips read-only (nothing at all when
- * an encounter is unlinked, so the header stays clean).
+ * Encounter location/quest/session links (issue #126, #480). Shows the current attachments as
+ * chips with server-resolved labels so every role sees navigable names in read mode; the DM can
+ * expand an inline editor to (re)attach or clear each link, persisted via PATCH /encounters/:id.
  */
 function EncounterLinks({
   campaignId,
@@ -289,7 +336,7 @@ function EncounterLinks({
   const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
 
   useEffect(() => {
-    if ((!editing && !hasLink) || linkListsLoaded) return;
+    if (!editing || linkListsLoaded) return;
     let cancelled = false;
     void Promise.all([
       api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
@@ -305,11 +352,36 @@ function EncounterLinks({
     return () => {
       cancelled = true;
     };
-  }, [editing, hasLink, campaignId, linkListsLoaded]);
+  }, [editing, campaignId, linkListsLoaded]);
 
-  const locName = locations.find((l) => l.id === encounter.locationId);
-  const questName = quests.find((q) => q.id === encounter.questId);
-  const sessName = sessions.find((s) => s.id === encounter.sessionId);
+  const locLabel =
+    encounter.locationLink?.label ??
+    (editing ? locations.find((l) => l.id === encounter.locationId) : undefined);
+  const questLabelResolved =
+    encounter.questLink?.label ??
+    (editing ? quests.find((q) => q.id === encounter.questId) : undefined);
+  const sessLabelResolved =
+    encounter.sessionLink?.label ??
+    (editing ? sessions.find((s) => s.id === encounter.sessionId) : undefined);
+
+  const locDisplay =
+    typeof locLabel === 'string'
+      ? locLabel
+      : locLabel
+        ? linkLabel('location', locLabel)
+        : null;
+  const questDisplay =
+    typeof questLabelResolved === 'string'
+      ? questLabelResolved
+      : questLabelResolved
+        ? linkLabel('quest', questLabelResolved)
+        : null;
+  const sessDisplay =
+    typeof sessLabelResolved === 'string'
+      ? sessLabelResolved
+      : sessLabelResolved
+        ? linkLabel('session', sessLabelResolved)
+        : null;
 
   async function save(patch: Record<string, number | null>) {
     setSaving(true);
@@ -324,9 +396,9 @@ function EncounterLinks({
     }
   }
 
-  const showLoc = encounter.locationId != null && (canEdit || locName != null);
-  const showQuest = encounter.questId != null && (canEdit || questName != null);
-  const showSess = encounter.sessionId != null && (canEdit || sessName != null);
+  const showLoc = encounter.locationId != null && (canEdit || locDisplay != null);
+  const showQuest = encounter.questId != null && (canEdit || questDisplay != null);
+  const showSess = encounter.sessionId != null && (canEdit || sessDisplay != null);
   const hasVisibleLink = showLoc || showQuest || showSess;
 
   if (!canEdit && !hasVisibleLink) return null;
@@ -334,36 +406,36 @@ function EncounterLinks({
   return (
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 'var(--type-meta)' }}>
       {showLoc && (
-        locName ? <Link
+        locDisplay ? <Link
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('location', locName)}
+          {locDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
           Location #{encounter.locationId} (unavailable)
         </span>
       )}
       {showQuest && (
-        questName ? <Link
+        questDisplay ? <Link
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('quest', questName)}
+          {questDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
           Quest #{encounter.questId} (unavailable)
         </span>
       )}
       {showSess && (
-        sessName ? <Link
+        sessDisplay ? <Link
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('session', sessName)}
+          {sessDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
           Session #{encounter.sessionId} (unavailable)
@@ -584,6 +656,23 @@ function applyHpDelta(c: Combatant, delta: number, ruleSystem?: string | null): 
   return { ...c, hpTemp: temp - fromTemp, hpCurrent: Math.max(0, c.hpCurrent - overflow) };
 }
 
+/** Combat-log actor for HP/death patches (issues #620, #494). Omit self-attribution. */
+function hpLogActorId(actorCombatantId: number | undefined | null, targetCombatantId: number): number | undefined {
+  if (actorCombatantId == null || actorCombatantId === targetCombatantId) return undefined;
+  return actorCombatantId;
+}
+
+function hpPatchWithActor(
+  patch: Record<string, unknown>,
+  actorCombatantId: number | undefined | null,
+  targetCombatantId: number,
+): Record<string, unknown> {
+  const actorId = hpLogActorId(actorCombatantId, targetCombatantId);
+  return actorId != null ? { ...patch, actorId } : patch;
+}
+
+const HP_LOG_PATCH_KEYS = new Set(['hpDelta', 'hpSet', 'hpTemp', 'deathSaveRoll']);
+
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -599,7 +688,9 @@ export default function RunSessionPage() {
   const cid = Number(campaignId);
   const eid = Number(encounterId);
   const navigate = useNavigate();
-  const { me } = useAuth();
+  const { me, staleIdentity } = useAuth();
+  const formattingLocale = useFormattingLocale();
+  const timeFormat = useTimeFormat();
   const { isDm, canDmWrite, canPlayerWrite } = useCampaignAccess();
   const campaign = useCampaign(Number.isFinite(cid) ? cid : undefined);
   const announce = useAnnounce();
@@ -653,7 +744,12 @@ export default function RunSessionPage() {
   const [actionError, setActionError] = useState<ActionErrorState>(null);
   // A damage/heal amount just rolled from a character card, awaiting a one-tap target
   // pick (issue: wire actions → dice → damage). Cleared on apply or dismiss.
-  const [pendingApply, setPendingApply] = useState<{ amount: number; label: string } | null>(null);
+  const [pendingApply, setPendingApply] = useState<{
+    amount: number;
+    label: string;
+    /** Combatant whose card rolled the damage — attributed as the combat-log actor when set. */
+    actorCombatantId?: number;
+  } | null>(null);
   /** Live map layout from BattleMap for AoE hit-testing (issue #626). */
   const [aoeHitLayout, setAoeHitLayout] = useState<AoeHitLayout | null>(null);
   // Issue #414: structured action Use flow — pick targets, preview, apply, undo.
@@ -696,6 +792,9 @@ export default function RunSessionPage() {
   const [pendingTrashUndo, setPendingTrashUndo] = useState(false);
   const [confirmRemoveCombatantId, setConfirmRemoveCombatantId] = useState<number | null>(null);
   const [eventStatus, setEventStatus] = useState<CampaignEventsStatus | null>(null);
+  const [encounterReadStale, setEncounterReadStale] = useState(false);
+  const [resyncPending, setResyncPending] = useState(false);
+  const [syncRevision, setSyncRevision] = useState<EncounterSyncRevision | null>(null);
 
   // Reads via TanStack Query (issue #73). Each is polled while the tab is visible
   // (refetchInterval pauses in the background by default) as a backstop to the SSE
@@ -708,6 +807,25 @@ export default function RunSessionPage() {
     refetchInterval: 5_000,
   });
   const encounter = encounterQuery.data ?? null;
+
+  useEffect(() => {
+    if (!encounterQuery.isSuccess || encounterQuery.isFetching || encounterQuery.dataUpdatedAt === 0) return;
+    setEncounterReadStale(false);
+    setResyncPending(false);
+    if (encounter?.updatedAt) {
+      setSyncRevision(encounterSyncRevisionFromUpdatedAt(encounter.updatedAt, encounterQuery.dataUpdatedAt));
+    }
+  }, [encounter?.updatedAt, encounterQuery.dataUpdatedAt, encounterQuery.isFetching, encounterQuery.isSuccess]);
+
+  useEffect(() => {
+    if (!encounterQuery.error || encounter == null) return;
+    if (encounterQuery.error instanceof ApiError && encounterQuery.error.status >= 400 && encounterQuery.error.status < 500) {
+      return;
+    }
+    if (isTransientError(encounterQuery.error) || isReadTimeout(encounterQuery.error)) {
+      setEncounterReadStale(true);
+    }
+  }, [encounterQuery.error, encounter]);
 
   // Difficulty is a separate read-only derivation (issue #58) — never let its failure
   // block the encounter view; the badge just stays hidden (retry off, error ignored).
@@ -746,6 +864,22 @@ export default function RunSessionPage() {
     eventStatus,
     charactersQuery.isFetching && !charactersQuery.isLoading,
   );
+  const encounterSync = deriveEncounterSyncState({
+    eventStatus,
+    readStale: encounterReadStale,
+    resyncPending,
+    staleIdentity,
+  });
+  const riskyBlocked = encounterRiskyActionsBlocked(encounterSync);
+  const encounterSyncBanner = encounterSyncBannerMessage(encounterSync);
+  const encounterSyncChip = encounterSyncChipLabel(encounterSync);
+  const encounterSyncLastSyncTitle = useMemo(() => {
+    if (syncRevision?.lastSyncAt == null) return undefined;
+    return `Last synced ${formatDateTime(syncRevision.lastSyncAt, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    })}`;
+  }, [syncRevision?.lastSyncAt, formattingLocale, timeFormat]);
 
   // Issue #431: tailor preparing next-steps to whether a monster pack is installed.
   const packsQuery = useQuery({
@@ -776,6 +910,10 @@ export default function RunSessionPage() {
   useEffect(() => {
     setActionError(null);
     setShowMapGuidance(false);
+    setEncounterReadStale(false);
+    setResyncPending(false);
+    setSyncRevision(null);
+    setEventStatus(null);
   }, [eid]);
 
   // Live updates over SSE (issue #4) — players waiting for the DM to hit "Start" (or
@@ -816,12 +954,14 @@ export default function RunSessionPage() {
     ),
     // The stream was down for a while — refetch encounter + character sheets.
     onReconnect: useCallback(() => {
+      setResyncPending(true);
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
     }, [queryClient, eid, cid]),
     // Parser recovery (connection stayed up) — same catch-up refetch.
     onStreamRecovery: useCallback(() => {
+      setResyncPending(true);
       invalidateEncounter(queryClient, eid);
       invalidateCampaignCharacters(queryClient, cid);
       invalidateCampaignCheckRequests(queryClient, cid);
@@ -884,8 +1024,8 @@ export default function RunSessionPage() {
   // rather than a `.find` over all characters on every render (issue: large encounters).
   const charactersById = useMemo(() => new Map(characters.map((c) => [c.id, c])), [characters]);
 
-  function canEditCombatant(c: Combatant): boolean {
-    // An ended encounter is immutable server-side (assertMutable, #163): the interactive
+  function canEditCombatantPermission(c: Combatant): boolean {
+    // An ended encounter is immutable server-side (assertMutable, #163/#470): the interactive
     // card + ApplyDamageBar would only fire a PATCH the server always rejects. Gate on
     // status like canSetInitiative so an ended encounter renders read-only (#368).
     if (encounter?.status === 'ended') return false;
@@ -894,11 +1034,16 @@ export default function RunSessionPage() {
     return c.characterId != null && ownedCharacterIds.has(c.characterId);
   }
 
+  function canEditCombatant(c: Combatant): boolean {
+    if (riskyBlocked) return false;
+    return canEditCombatantPermission(c);
+  }
+
   // A character card rolled damage — surface the one-tap "apply to target" bar. A
   // non-positive total (a 0/negative damage expr) has nothing to apply, so clear any
   // prior pending amount rather than leaving a stale bar from an earlier roll.
-  const onApplyDamageRolled = useCallback((amount: number, label: string) => {
-    setPendingApply(amount > 0 ? { amount, label } : null);
+  const onApplyDamageRolled = useCallback((amount: number, label: string, actorCombatantId?: number) => {
+    setPendingApply(amount > 0 ? { amount, label, actorCombatantId } : null);
   }, []);
 
   useRollApplyDamageBridge(encounter?.status === 'running' ? onApplyDamageRolled : undefined);
@@ -1007,8 +1152,11 @@ export default function RunSessionPage() {
   const HP_MUTATION_KEY = useMemo(() => ['encounter', eid, 'hpDelta'] as const, [eid]);
   const hpDelta = useMutation({
     mutationKey: HP_MUTATION_KEY,
-    mutationFn: ({ combatantId, delta }: { combatantId: number; delta: number }) =>
-      api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta }),
+    mutationFn: ({ combatantId, delta, actorId }: { combatantId: number; delta: number; actorId?: number }) =>
+      api.patch(
+        `${API}/encounters/${eid}/combatants/${combatantId}`,
+        hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+      ),
     onMutate: async ({ combatantId, delta }) => {
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1034,7 +1182,7 @@ export default function RunSessionPage() {
   });
 
   const applyHpDeltaBulk = useCallback(
-    async (combatantIds: readonly number[], delta: number) => {
+    async (combatantIds: readonly number[], delta: number, actorId?: number) => {
       if (combatantIds.length === 0) return;
       setActionError(null);
       await queryClient.cancelQueries({ queryKey: queryKeys.encounter(eid) });
@@ -1050,7 +1198,10 @@ export default function RunSessionPage() {
       }
       try {
         for (const combatantId of combatantIds) {
-          await api.patch(`${API}/encounters/${eid}/combatants/${combatantId}`, { hpDelta: delta });
+          await api.patch(
+            `${API}/encounters/${eid}/combatants/${combatantId}`,
+            hpPatchWithActor({ hpDelta: delta }, actorId, combatantId),
+          );
         }
         await invalidateEncounter(queryClient, eid);
       } catch (err) {
@@ -1063,8 +1214,14 @@ export default function RunSessionPage() {
   );
 
   const patchCombatant = useCallback(
-    (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
-    [combatantPatch],
+    (combatantId: number, patch: Record<string, unknown>) => {
+      const needsActor = Object.keys(patch).some((key) => HP_LOG_PATCH_KEYS.has(key));
+      const actorCombatantId =
+        needsActor && encounter?.status === 'running' ? (encounter.currentCombatantId ?? undefined) : undefined;
+      const enriched = needsActor ? hpPatchWithActor(patch, actorCombatantId, combatantId) : patch;
+      combatantPatch.mutate({ combatantId, patch: enriched });
+    },
+    [combatantPatch, encounter?.status, encounter?.currentCombatantId],
   );
 
   const patchCombatantTurnState = useCallback(
@@ -1261,7 +1418,7 @@ export default function RunSessionPage() {
   // Issue #865: normalize placeholder grid defaults once per encounter + missing-field set.
   // This lives beside the mutation/cache boundary instead of inside BattleMap's render tree.
   useEffect(() => {
-    if (!canDmWrite || !encounter) return;
+    if (!canDmWrite || !encounter || encounter.status === 'ended') return;
     const patch = missingGridDefaults(encounter);
     const encounterPrefix = `${encounter.id}:`;
     if (!patch) {
@@ -1304,7 +1461,7 @@ export default function RunSessionPage() {
     canDmWrite && encounter
       ? {
           canExecute: () => {
-            if (!encounter || headerBusy) return false;
+            if (!encounter || headerBusy || riskyBlocked) return false;
             if (confirmEnd || confirmReopen || confirmDelete) return false;
             return dmLifecycleActions(encounter.status).nextTurn;
           },
@@ -1392,6 +1549,8 @@ export default function RunSessionPage() {
 
   if (!encounter) return null;
 
+  const canEditEncounter = canDmWrite && encounter.status !== 'ended';
+
   // The server returns combatants already in initiative order and names the current
   // actor by id (issue #49) — no client-side re-sort, and no positional
   // `turnIndex % length` guesswork that desyncs the moment a combatant is added or
@@ -1431,7 +1590,7 @@ export default function RunSessionPage() {
           the party sees the same one-tap prompt for their own character. */}
       <CheckRequestPrompts campaignId={cid} ownedCharacterIds={ownedCharacterIds} onError={surfaceActionError} />
 
-      {canDmWrite && (
+      {canEditEncounter && (
         <VisibleToPlayersBar
           visible={!encounter.hidden}
           onHide={async () => {
@@ -1457,6 +1616,13 @@ export default function RunSessionPage() {
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
+        <span
+          className={`cf-chip ${encounterSyncChipClass(encounterSync)}`}
+          data-testid="encounter-sync-chip"
+          title={encounterSyncLastSyncTitle}
+        >
+          {encounterSyncChip}
+        </span>
         {/* AI-DM presence chip (#344) — the seat is in Driver mode, so it may act on
             this encounter from the Table page without anyone here having it open. */}
         {liveActivity.mode === 'driver' && <AiDmPresenceTag turnActive={liveActivity.turnActive} />}
@@ -1491,7 +1657,7 @@ export default function RunSessionPage() {
                     ones). Hidden entirely rather than dead weight once Start is live. */}
                 <Btn
                   ghost
-                  disabled={headerBusy || needsInitiativeCount === 0}
+                  disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
@@ -1499,7 +1665,7 @@ export default function RunSessionPage() {
                 </Btn>
                 <div className="flex flex-col gap-0.5 items-stretch">
                   <Btn
-                    disabled={headerBusy || hasNoCombatants}
+                    disabled={headerBusy || riskyBlocked || hasNoCombatants}
                     onClick={startEncounter}
                     aria-describedby={hasNoCombatants ? 'start-empty-roster-hint' : undefined}
                   >
@@ -1522,14 +1688,14 @@ export default function RunSessionPage() {
                     roll (issue #702), and surface how many still need rolling. */}
                 <Btn
                   ghost
-                  disabled={headerBusy || needsInitiativeCount === 0}
+                  disabled={headerBusy || riskyBlocked || needsInitiativeCount === 0}
                   onClick={rollInitiative}
                   title={needsInitiativeCount === 0 ? 'All combatants already have initiative' : undefined}
                 >
                   {needsInitiativeCount > 0 ? `Roll remaining (${needsInitiativeCount})` : 'Roll initiative'}
                 </Btn>
                 <Btn
-                  disabled={headerBusy}
+                  disabled={headerBusy || riskyBlocked}
                   onClick={nextTurn}
                   aria-keyshortcuts={nextTurnShortcut.ariaKeyshortcuts}
                   title={`Next turn${nextTurnShortcut.titleSuffix}`}
@@ -1539,14 +1705,14 @@ export default function RunSessionPage() {
               </>
             )}
             {lifecycle.end && (
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmEnd(true)}>
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmEnd(true)}>
                 End
               </Btn>
             )}
             {lifecycle.reopen && (
               <Btn
                 ghost
-                disabled={headerBusy}
+                disabled={headerBusy || riskyBlocked}
                 onClick={() => {
                   // Default each conflict to pull_sheet (preserve intervening healing/rest).
                   const initial: Record<number, HpResyncDirection> = {};
@@ -1559,13 +1725,26 @@ export default function RunSessionPage() {
               </Btn>
             )}
             {lifecycle.delete && (
-              <Btn ghost danger disabled={headerBusy} onClick={() => setConfirmDelete(true)}>
+              <Btn ghost danger disabled={headerBusy || riskyBlocked} onClick={() => setConfirmDelete(true)}>
                 {encounter.status === 'preparing' ? 'Cancel' : 'Delete'}
               </Btn>
             )}
           </div>
         )}
       </div>
+
+      {encounterSyncBanner && (
+        <p
+          className="text-muted"
+          data-testid="encounter-sync-banner"
+          style={{ fontSize: 12, margin: 0 }}
+          role="status"
+          aria-live="polite"
+          title={encounterSyncLastSyncTitle}
+        >
+          {encounterSyncBanner}
+        </p>
+      )}
 
       {/* Transient "the AI just acted" row(s) (#344 point 2) — sourced from live tool
           events touching encounter or party state (including loot/treasury grants). */}
@@ -1577,6 +1756,17 @@ export default function RunSessionPage() {
         </div>
       )}
 
+      {/* AI-DM driver dock (#427): transcript + composer + recovery without leaving tracker. */}
+      {liveActivity.mode === 'driver' && encounter && (
+        <EncounterAiDriverPanel
+          campaignId={cid}
+          encounterId={eid}
+          encounter={encounter}
+          isDm={isDm}
+          canCompose={canPlayerWrite}
+        />
+      )}
+
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}
       {canDmWrite && encounter.status === 'ended' && (
         <EncounterNextSteps campaignId={cid} sessionId={encounter.sessionId} />
@@ -1585,7 +1775,7 @@ export default function RunSessionPage() {
       <EncounterLinks
         campaignId={cid}
         encounter={encounter}
-        canEdit={canDmWrite}
+        canEdit={canEditEncounter}
         onSaved={(updated) =>
           queryClient.setQueryData<EncounterWithCombatants>(queryKeys.encounter(eid), (prev) =>
             prev ? { ...prev, ...updated } : prev,
@@ -1636,7 +1826,7 @@ export default function RunSessionPage() {
           campaignId={cid}
           isDm={isDm}
           viewerUserId={myUserId != null ? String(myUserId) : null}
-          canDmWrite={canDmWrite}
+          canDmWrite={canEditEncounter}
           busy={setMap.isPending}
           canMoveToken={canEditCombatant}
           onSetMap={setEncounterMap}
@@ -1646,9 +1836,9 @@ export default function RunSessionPage() {
           onSetGrid={setEncounterGrid}
           onSetFog={setEncounterFog}
           onSetAoe={setEncounterAoe}
-          onGenerateMap={canDmWrite ? generateAndAttachMap : undefined}
+          onGenerateMap={canEditEncounter ? generateAndAttachMap : undefined}
           onImportMap={
-            canDmWrite
+            canEditEncounter
               ? (id) => {
                   setEncounterMap(id);
                   setShowMapGuidance(true);
@@ -1662,6 +1852,7 @@ export default function RunSessionPage() {
           pings={pings}
           onError={surfaceActionError}
           onAoeHitLayoutChange={onAoeHitLayoutChange}
+          ruleSystem={ruleSystem}
         />
       )}
 
@@ -1682,7 +1873,7 @@ export default function RunSessionPage() {
             <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
             <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
             {canDmWrite && (
-              <Btn className="ml-auto" disabled={headerBusy} onClick={nextTurn}>
+              <Btn className="ml-auto" disabled={headerBusy || riskyBlocked} onClick={nextTurn}>
                 Done →
               </Btn>
             )}
@@ -1698,6 +1889,7 @@ export default function RunSessionPage() {
           isDm={isDm}
           ruleSystem={campaign?.ruleSystem}
           currentTurnState={currentCombatant?.turnState}
+          actionsDisabled={riskyBlocked}
           onRollDeathSave={rollDeathSave}
           onPatchCombatant={patchCombatant}
         />
@@ -1707,7 +1899,8 @@ export default function RunSessionPage() {
         <ApplyDamageBar
           amount={pendingApply.amount}
           label={pendingApply.label}
-          targets={orderedCombatants.filter((c) => canEditCombatant(c) && c.hpCurrent != null)}
+          targets={orderedCombatants.filter((c) => canEditCombatantPermission(c) && c.hpCurrent != null)}
+          applyDisabled={riskyBlocked}
           aoeTemplates={encounter.aoe ?? []}
           aoeHitContext={
             encounter.gridSize != null &&
@@ -1720,16 +1913,21 @@ export default function RunSessionPage() {
                   gridScale: encounter.gridScale,
                   mapRect: aoeHitLayout.mapRect,
                   cellPx: aoeHitLayout.cellPx,
+                  gridType: encounter.gridType ?? 'square',
+                  hexOrientation: encounter.hexOrientation ?? 'pointy',
+                  calibration: resolveGridCalibration(encounter),
                 }
               : null
           }
           isStarfinder={isStarfinder}
           onApply={(combatantId, delta) => {
-            hpDelta.mutate({ combatantId, delta });
+            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantId);
+            hpDelta.mutate({ combatantId, delta, actorId });
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            void applyHpDeltaBulk(combatantIds, delta)
+            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
+            void applyHpDeltaBulk(combatantIds, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);
           }}
@@ -1747,6 +1945,7 @@ export default function RunSessionPage() {
           spec={pendingActionUse.spec}
           combatants={orderedCombatants}
           isDm={isDm}
+          applyDisabled={riskyBlocked}
           onDismiss={() => setPendingActionUse(null)}
           onError={surfaceActionError}
           onApplied={(token, _policy) => {
@@ -1812,7 +2011,7 @@ export default function RunSessionPage() {
               // Omit campaignId while sheets are stale so click-to-roll cannot use obsolete mods (#421).
               campaignId={sheetsInteractive ? cid : undefined}
               onRollError={surfaceActionError}
-              onApplyDamage={onApplyDamageRolled}
+              onApplyDamage={(amount, label) => onApplyDamageRolled(amount, label, c.id)}
               onUseAction={
                 canEditCombatant(c) && c.characterId != null
                   ? (actionIndex) => {
@@ -1826,7 +2025,10 @@ export default function RunSessionPage() {
               busy={pendingCombatantIds.has(c.id)}
               conditionSuggestions={conditionSuggestions}
               ruleSystem={ruleSystem}
-              onHpDelta={(delta) => hpDelta.mutate({ combatantId: c.id, delta })}
+              onHpDelta={(delta) => {
+                const actorId = hpLogActorId(currentCombatantId, c.id);
+                hpDelta.mutate({ combatantId: c.id, delta, actorId });
+              }}
               onSetTempHp={(value) => patchCombatant(c.id, { hpTemp: value })}
               onSetDeathSaves={(patch) => patchCombatant(c.id, patch)}
               onRollDeathSave={() => rollDeathSave(c)}
@@ -2018,18 +2220,8 @@ export default function RunSessionPage() {
 // `tokenInitials` is the shared grapheme-aware helper (issue #631): two-letter
 // token labels from a combatant name ("Ashen cultist" -> "AC", "Goblin 1" -> "G1").
 
-// Token footprint multipliers (issue #40, phase 2) — a Medium creature is 1×1; a token's
-// rendered diameter scales by these against a 32px base (min ~18px so tiny stays tappable).
-const TOKEN_SIZE_SCALE: Record<TokenSize, number> = {
-  tiny: 0.6,
-  small: 0.8,
-  medium: 1,
-  large: 1.6,
-  huge: 2.2,
-  gargantuan: 3,
-};
+// Token footprint categories (issue #40 / #468) — diameters derive from calibrated grid cells.
 const TOKEN_SIZE_OPTIONS: TokenSize[] = ['tiny', 'small', 'medium', 'large', 'huge', 'gargantuan'];
-const BASE_TOKEN_PX = 32;
 
 /** Measure an element's rendered pixel box, tracking resizes — used for square grid cells + the ruler. */
 function useElementSize<T extends HTMLElement>(ref: RefObject<T | null>): { w: number; h: number } {
@@ -2070,49 +2262,13 @@ type MapTool = 'move' | 'measure' | 'reveal' | 'ping' | 'calibrate';
 /** One draggable calibration anchor (issue #417). Origin sets the grid offset; cell sets cell w/h. */
 type CalibrateAnchor = 'origin' | 'cell';
 
-// AoE token-footprint scale is defined near the tokens; AoE template geometry lives here.
+// Creature token footprints live in ./tokenFootprint; AoE template geometry lives here.
 const BASE_AOE_LENGTH_MULT = 3; // default cone/line length = 3 cells; circle radius = 2 cells.
 
 /** Stable-ish short id for a new AoE template (crypto.randomUUID when available). */
 function newAoeId(): string {
   const uuid = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
   return uuid.slice(0, 40);
-}
-
-/**
- * Pointy-top hexagon centres + vertices tiling the surface (issue #238). Returned as SVG
- * `points` strings in pixel space so the overlay can draw them directly. `cellPx` is treated as
- * the hex width; a cap keeps a pathologically fine grid from emitting tens of thousands of nodes.
- */
-function hexPolygons(surfaceW: number, surfaceH: number, cellPx: number): string[] {
-  if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
-  const w = cellPx;
-  const s = w / Math.sqrt(3); // hex side / circumradius for a pointy-top hex of width w
-  const rowH = 1.5 * s;
-  const cols = Math.ceil(surfaceW / w) + 1;
-  const rows = Math.ceil(surfaceH / rowH) + 1;
-  if (cols * rows > 3000) return []; // too fine to draw as discrete polygons — skip the overlay
-  const out: string[] = [];
-  for (let r = 0; r <= rows; r++) {
-    const offset = r % 2 ? w / 2 : 0;
-    for (let c = 0; c <= cols; c++) {
-      const cx = c * w + offset;
-      const cy = r * rowH;
-      out.push(
-        [
-          [cx, cy - s],
-          [cx + w / 2, cy - s / 2],
-          [cx + w / 2, cy + s / 2],
-          [cx, cy + s],
-          [cx - w / 2, cy + s / 2],
-          [cx - w / 2, cy - s / 2],
-        ]
-          .map(([px, py]) => `${px.toFixed(1)},${py.toFixed(1)}`)
-          .join(' '),
-      );
-    }
-  }
-  return out;
 }
 
 /**
@@ -2171,7 +2327,7 @@ function aoePolygonPoints(
  * (matching pointer-up inside slop + time), never on touch-down. DM may move any token; a player
  * only their own character's (canMoveToken), but any member may ping.
  */
-function BattleMap({
+export function BattleMap({
   encounter,
   campaignId,
   isDm,
@@ -2194,6 +2350,8 @@ function BattleMap({
   pings,
   onError,
   onAoeHitLayoutChange,
+  projection = 'session',
+  ruleSystem,
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -2221,7 +2379,15 @@ function BattleMap({
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
+  /** `cast` = read-only table projection on Player Display (issue #484). */
+  projection?: 'session' | 'cast';
+  /** Active campaign rule system — selects grid distance rules (issue #467). */
+  ruleSystem: string | null;
 }) {
+  const isCast = projection === 'cast';
+  const effectiveIsDm = isCast ? false : isDm;
+  const effectiveCanDmWrite = isCast ? false : canDmWrite;
+  const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
   type MapPoint = { x: number; y: number };
@@ -2351,6 +2517,8 @@ function BattleMap({
   const gridScale = encounter.gridScale;
   const gridUnit = encounter.gridUnit || 'ft';
   const gridType: GridType = encounter.gridType ?? 'square';
+  const hexOrientation = encounter.hexOrientation ?? 'pointy';
+  const gridDistanceRule = useMemo(() => gridDistanceForAdapter(ruleSystemAdapter(ruleSystem)), [ruleSystem]);
   const gridOn = gridSize != null && gridSize > 0;
 
   // A new map starts with unknown natural size until its <img> fires onLoad.
@@ -2445,9 +2613,9 @@ function BattleMap({
 
   const aoeTemplates = useMemo(() => {
     const all = encounter.aoe ?? [];
-    if (isDm) return all;
+    if (effectiveIsDm) return all;
     return filterAoeTemplatesForViewer(all, encounter.fog, { viewerUserId });
-  }, [encounter.aoe, encounter.fog, isDm, viewerUserId]);
+  }, [encounter.aoe, encounter.fog, effectiveIsDm, viewerUserId]);
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
@@ -2567,9 +2735,18 @@ function BattleMap({
           setRuler({ start: { x: 50, y: 50 }, end: { x: 50, y: 50 } });
           announce('Measurement started at map center. Arrow keys adjust the endpoint. Enter to finish, Escape to cancel.');
         } else if (ruler && canMeasure && mapRect) {
-          const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+          const cells = mapPercentGridDistance(
+            ruler.start,
+            ruler.end,
+            mapRect,
+            cellPx,
+            gridType,
+            calibration,
+            hexOrientation,
+            gridDistanceRule,
+          );
           const feet = Math.round(cells) * (gridScale ?? 0);
-          announce(`${cells.toFixed(1)} squares · ${feet} ${gridUnit}`);
+          announce(`${cells.toFixed(1)} ${gridCellLabelPlural(gridType)} · ${feet} ${gridUnit}`);
         }
         return;
       }
@@ -2595,8 +2772,7 @@ function BattleMap({
         } else {
           const rect = rectFromCorners(revealCorners.start, revealCorners.end);
           if (rect.w >= 1 && rect.h >= 1) {
-            const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-            onSetFog(next);
+            commitFogReveal(revealCorners.start, revealCorners.end);
             announce(`Revealed ${Math.round(rect.w)} by ${Math.round(rect.h)} percent`);
           }
           setRevealCorners(null);
@@ -2624,10 +2800,25 @@ function BattleMap({
     }
   }
 
-  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417). */
+  /** Snap a drop point to the nearest calibrated cell centre when the grid + snap are on (issue #40/#417/#467). */
   function snapPoint(pt: MapPoint): MapPoint {
     if (!mapRect) return pt;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(pt, calibration, mapRect, hexOrientation, encounter.gridSnap);
+    }
     return snapMapPercentCalibrated(pt, calibration, mapRect, gridOn && encounter.gridSnap);
+  }
+
+  /** Commit a fog reveal rectangle, snapping corners to hex centres in hex grid mode (issue #467). */
+  function commitFogReveal(start: MapPoint, end: MapPoint): void {
+    let rect = rectFromCorners(start, end);
+    if (rect.w >= 1 && rect.h >= 1) {
+      if (gridOn && gridType === 'hex' && calibration && mapRect) {
+        rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
+      }
+      const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
+      onSetFog(next);
+    }
   }
 
   /** Keyboard nudge step in layer pixels: one calibrated cell, or 1% of map width if the grid is off. */
@@ -2639,15 +2830,30 @@ function BattleMap({
 
   /** Nudge a map-percent point by one grid cell (Shift = five) and snap to the nearest cell centre. */
   function nudgeMapPoint(pt: MapPoint, e: ReactKeyboardEvent): MapPoint {
-    const step = keyboardStepPx();
     const mult = e.shiftKey ? 5 : 1;
-    const px = mapPercentToLayerPx(pt, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const baseRect = mapRect ?? { left: 0, top: 0, width: 1, height: 1 };
+    const px = mapPercentToLayerPx(pt, baseRect);
+
+    if (gridOn && gridType === 'hex' && calibrationPx && cellPx > 0) {
+      const hexStep = hexKeyboardStepPx(e.key, cellPx, hexOrientation);
+      if (hexStep) {
+        const nextPx = { x: px.x + hexStep.x * mult, y: px.y + hexStep.y * mult };
+        const raw = layerPxToMapPercent(nextPx, baseRect);
+        if (!mapRect) return raw;
+        return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+      }
+    }
+
+    const step = keyboardStepPx();
     const nextPx = {
       x: px.x + (e.key === 'ArrowRight' ? step.x * mult : e.key === 'ArrowLeft' ? -step.x * mult : 0),
       y: px.y + (e.key === 'ArrowDown' ? step.y * mult : e.key === 'ArrowUp' ? -step.y * mult : 0),
     };
-    const raw = layerPxToMapPercent(nextPx, mapRect ?? { left: 0, top: 0, width: 1, height: 1 });
+    const raw = layerPxToMapPercent(nextPx, baseRect);
     if (!mapRect) return raw;
+    if (gridOn && gridType === 'hex') {
+      return snapMapPercentToHex(raw, calibration, mapRect, hexOrientation, true);
+    }
     return snapMapPercentCalibrated(raw, calibration, mapRect, gridOn);
   }
 
@@ -2863,12 +3069,7 @@ function BattleMap({
       return;
     }
     if (gesture.kind === 'fog') {
-      const rect = rectFromCorners(gesture.start, finalPoint ?? gesture.end);
-      // Ignore an accidental micro-drag (a click) — a real reveal has some area.
-      if (rect.w >= 1 && rect.h >= 1) {
-        const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
-        onSetFog(next);
-      }
+      commitFogReveal(gesture.start, finalPoint ?? gesture.end);
       return;
     }
     // A ruler stays on screen after release so the readout can be read; it clears when the
@@ -2989,7 +3190,16 @@ function BattleMap({
   // but a straight-line ruler is more intuitive — show fractional squares + rounded feet).
   const rulerReadout = (() => {
     if (!ruler || !canMeasure || !mapRect) return null;
-    const cells = mapPercentDistanceCells(ruler.start, ruler.end, mapRect, cellPx);
+    const cells = mapPercentGridDistance(
+      ruler.start,
+      ruler.end,
+      mapRect,
+      cellPx,
+      gridType,
+      calibration,
+      hexOrientation,
+      gridDistanceRule,
+    );
     const feet = Math.round(cells) * (gridScale ?? 0);
     return { cells, feet };
   })();
@@ -3010,10 +3220,10 @@ function BattleMap({
   // stretches cells (#464). Memoized on geometry inputs so a token/AoE drag never recomputes.
   const hexCells = useMemo(
     () =>
-      gridOn && gridType === 'hex' && mapRect
-        ? hexPolygons(mapRect.width, mapRect.height, cellPx)
+      gridOn && gridType === 'hex' && mapRect && calibrationPx
+        ? hexPolygons(mapRect.width, mapRect.height, calibrationPx, hexOrientation)
         : [],
-    [gridOn, gridType, mapRect, cellPx],
+    [gridOn, gridType, mapRect, calibrationPx, hexOrientation],
   );
 
   function changeTool(next: MapTool) {
@@ -3030,7 +3240,7 @@ function BattleMap({
   const modeBtn = (value: MapTool, label: string, disabled = false, hint?: string) => (
     <button
       type="button"
-      className="cf-map-tool"
+      className="cf-map-tool cf-map-focusable"
       data-testid={`map-tool-${value}`}
       disabled={disabled}
       title={hint}
@@ -3046,11 +3256,20 @@ function BattleMap({
   );
 
   return (
-    <div className="card elev-sm reading-exempt" data-testid="battle-map" style={{ padding: 0, overflow: 'hidden' }}>
+    <div
+      className={isCast ? 'cf-cast-battle-map' : 'card elev-sm reading-exempt'}
+      data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}
+      style={{
+        padding: 0,
+        overflow: 'hidden',
+        ...(isCast ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' } : {}),
+      }}
+    >
+      {!isCast && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">Battle map</span>
         <div style={{ flex: 1 }} />
-        {canDmWrite && mapImageUrl && (
+        {effectiveCanDmWrite && mapImageUrl && (
           <MapUploadButton
             campaignId={campaignId}
             hasMap
@@ -3060,8 +3279,9 @@ function BattleMap({
           />
         )}
       </div>
+      )}
 
-      {canDmWrite && !mapImageUrl && (
+      {!isCast && effectiveCanDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px' }}>
           <ImageUpload
             campaignId={campaignId}
@@ -3088,7 +3308,7 @@ function BattleMap({
           {/* Post-attach guidance (issue #409): after a generated map is attached it stays
               hidden (DM-only) with an aligned grid — walk the DM through the next steps so
               the map is table-ready. Dismissible; only shown right after an attach. */}
-          {canDmWrite && showGuidance && (
+          {effectiveCanDmWrite && showGuidance && (
             <div
               data-testid="map-attach-guidance"
               className="cf-inset"
@@ -3104,7 +3324,7 @@ function BattleMap({
                   className="btn btn-ghost"
                   style={{ fontSize: 12, minHeight: 20, padding: '0 6px' }}
                 >
-                  ✕
+                  <span aria-hidden="true">✕</span>
                 </button>
               </div>
               <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
@@ -3120,25 +3340,32 @@ function BattleMap({
           )}
 
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
-          <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
+          {!isCast && (
+          <div
+            className="flex flex-wrap gap-2 items-center"
+            style={{ padding: '8px 14px 0' }}
+            data-testid="map-toolbar"
+            role="toolbar"
+            aria-label="Map tools"
+          >
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
-            {canDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
-            {canDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {canDmWrite && canAoe && (
+            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
+            {effectiveCanDmWrite && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
-                <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
-                <button type="button" className="cf-map-tool" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
-                <button type="button" className="cf-map-tool" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a cone" onClick={() => addAoe('cone')}>+ Cone</button>
+                <button type="button" className="cf-map-tool cf-map-focusable" title="Add a line" onClick={() => addAoe('line')}>+ Line</button>
               </>
             )}
             <div style={{ flex: 1 }} />
-            {canDmWrite && (
+            {effectiveCanDmWrite && (
               <button
                 type="button"
-                className="cf-map-tool"
+                className="cf-map-tool cf-map-focusable"
                 {...gridDisclosure.buttonProps}
                 title="Grid & fog settings"
                 style={{ borderColor: gridPanelOpen ? 'var(--color-accent)' : 'var(--color-divider)' }}
@@ -3147,9 +3374,10 @@ function BattleMap({
               </button>
             )}
           </div>
+          )}
 
           {/* Selected token editor — numeric position/size controls for switch and voice users (issue #419). */}
-          {selectedToken && tool === 'move' && (
+          {!isCast && selectedToken && tool === 'move' && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }} data-testid="selected-token-panel">
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedToken.name}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -3225,7 +3453,7 @@ function BattleMap({
           )}
 
           {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {canDmWrite && selectedAoe && canAoe && (
+          {!isCast && effectiveCanDmWrite && selectedAoe && canAoe && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -3280,7 +3508,7 @@ function BattleMap({
             </div>
           )}
 
-          {canDmWrite && gridPanelOpen && (
+          {!isCast && effectiveCanDmWrite && gridPanelOpen && (
             <div
               {...gridDisclosure.regionProps}
               className="flex flex-wrap gap-3 items-center"
@@ -3353,6 +3581,19 @@ function BattleMap({
                   <option value="hex">hex</option>
                 </select>
               </label>
+              {gridOn && gridType === 'hex' && (
+                <label className="flex items-center gap-1 text-muted" title="Pointy-top or flat-top hex orientation">
+                  orientation
+                  <select
+                    value={hexOrientation}
+                    onChange={(e) => onSetGrid({ hexOrientation: e.target.value as typeof hexOrientation })}
+                    style={{ fontSize: 12 }}
+                  >
+                    <option value="pointy">pointy-top</option>
+                    <option value="flat">flat-top</option>
+                  </select>
+                </label>
+              )}
 
               {/* Grid calibration (issue #417) — human-readable alignment controls with a
                   keyboard/numeric alternative to the draggable anchors, plus help + reset. */}
@@ -3490,14 +3731,14 @@ function BattleMap({
           {/* Viewport navigation (issue #712) — separate from token/map play tools. */}
           <div
             className="flex flex-wrap gap-2 items-center"
-            style={{ padding: '8px 14px 0' }}
+            style={{ padding: isCast ? '0 0 8px' : '8px 14px 0' }}
             data-testid="map-viewport-toolbar"
             role="toolbar"
             aria-label="Map viewport navigation"
           >
             <button
               type="button"
-              className="cf-map-tool"
+              className="cf-map-tool cf-map-focusable"
               data-testid="map-viewport-pan"
               aria-pressed={viewportPan}
               title="Drag to pan the map (touch: one finger when Pan is on; two fingers to pinch-zoom)"
@@ -3572,8 +3813,10 @@ function BattleMap({
             }
             aria-describedby="map-keyboard-help"
             style={{
-              margin: '8px 14px',
+              margin: isCast ? 0 : '8px 14px',
               aspectRatio: '16 / 9',
+              flex: isCast ? '1 1 auto' : undefined,
+              minHeight: isCast ? 0 : undefined,
               touchAction:
                 viewportPan || viewport.scale > 1
                   ? 'none'
@@ -3677,7 +3920,7 @@ function BattleMap({
                     Drag the origin anchor to a corner of the map's printed grid, then drag the
                     cell anchor to the opposite corner of ONE printed cell. The overlay previews
                     live off `calibration` (which already folds in the active drag). */}
-                {canDmWrite && tool === 'calibrate' && calibrationPx && (() => {
+                {effectiveCanDmWrite && tool === 'calibrate' && calibrationPx && (() => {
                   const rad = calibrationPx.rotationRad;
                   const cos = Math.cos(rad);
                   const sin = Math.sin(rad);
@@ -3728,9 +3971,16 @@ function BattleMap({
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-                  const movable = tool === 'move' && canMoveToken(c);
+                  const movable = tool === 'move' && effectiveCanMoveToken(c);
                   const isCharacter = c.kind === 'character';
-                  const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
+                  const sizePx =
+                    gridOn && gridType === 'hex' && cellPx > 0
+                      ? Math.round(tokenFootprintDiameterPx(c.tokenSize, cellPx, hexOrientation))
+                      : tokenDiameterPx({
+                          tokenSize: c.tokenSize,
+                          cellPx,
+                          gridType,
+                        });
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
                   return (
                     <div
@@ -3814,7 +4064,7 @@ function BattleMap({
                             zIndex: 3,
                           }}
                         >
-                          ×
+                          <span aria-hidden="true">×</span>
                         </button>
                       )}
                     </div>
@@ -3841,6 +4091,17 @@ function BattleMap({
                       const stroke = selected ? 'rgba(56,189,248,.95)' : 'rgba(239,68,68,.8)';
                       const fill = selected ? 'rgba(56,189,248,.18)' : 'rgba(239,68,68,.20)';
                       if (t.shape === 'circle') {
+                        if (gridType === 'hex' && calibrationPx) {
+                          const radiusCells = t.sizeFt / gridScale!;
+                          const hexPolys = hexAoeCirclePolygons({ x: ox, y: oy }, radiusCells, calibrationPx, hexOrientation);
+                          return (
+                            <g key={t.id}>
+                              {hexPolys.map((pts, i) => (
+                                <polygon key={i} points={pts} fill={fill} stroke={stroke} strokeWidth={2} />
+                              ))}
+                            </g>
+                          );
+                        }
                         return <circle key={t.id} cx={ox} cy={oy} r={lengthPx} fill={fill} stroke={stroke} strokeWidth={2} />;
                       }
                       const pts = aoePolygonPoints(t.shape, ox, oy, lengthPx, (t.angleDeg * Math.PI) / 180, cellPx);
@@ -3848,7 +4109,7 @@ function BattleMap({
                     })}
                   </svg>
                 )}
-                {canDmWrite && canAoe &&
+                {effectiveCanDmWrite && canAoe &&
                   aoeTemplates.map((t) => {
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;
@@ -3902,7 +4163,7 @@ function BattleMap({
                         ))}
                       </mask>
                     </defs>
-                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
+                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={effectiveIsDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
                   </svg>
                 )}
 
@@ -3955,7 +4216,7 @@ function BattleMap({
                           zIndex: 9,
                         }}
                       >
-                        {rulerReadout.cells.toFixed(1)} sq · {rulerReadout.feet} {gridUnit}
+                        {rulerReadout.cells.toFixed(1)} {gridCellLabel(gridType)} · {rulerReadout.feet} {gridUnit}
                       </div>
                     )}
                   </>
@@ -3984,13 +4245,13 @@ function BattleMap({
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
-          {(unplaced.length > 0 || hiddenByFog.length > 0) && (
+          {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
               {unplaced.length > 0 && (
                 <div className="flex flex-wrap gap-2 items-center">
                   <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
                   {unplaced.map((c) => {
-                    const movable = canMoveToken(c);
+                    const movable = effectiveCanMoveToken(c);
                     return (
                       <button
                         key={c.id}
@@ -4027,6 +4288,8 @@ function BattleMap({
             </div>
           )}
 
+          {!isCast && (
+          <>
           <div id="map-keyboard-help" className="sr-only">
             Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete or Backspace removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
           </div>
@@ -4043,10 +4306,12 @@ function BattleMap({
                   ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
-                    : isDm
+                    : effectiveIsDm
                       ? 'Drag a token to move it, or Tab to focus it and use arrow keys. Drag an AoE handle to move a template, or Tab to focus it. Use the viewport toolbar to zoom and pan.'
                       : 'Drag your own token to move it, or Tab to focus it and use arrow keys. Use the viewport toolbar to zoom and pan.'}
           </div>
+          </>
+          )}
         </>
       )}
     </div>
@@ -4069,6 +4334,7 @@ function ApplyDamageBar({
   aoeTemplates = [],
   aoeHitContext,
   isStarfinder = false,
+  applyDisabled = false,
   onApply,
   onApplyToAll,
   onDismiss,
@@ -4079,6 +4345,7 @@ function ApplyDamageBar({
   aoeTemplates?: AoeTemplate[];
   aoeHitContext?: AoeHitTestContext | null;
   isStarfinder?: boolean;
+  applyDisabled?: boolean;
   onApply: (combatantId: number, delta: number) => void;
   onApplyToAll: (combatantIds: number[], delta: number) => void;
   onDismiss: () => void;
@@ -4161,6 +4428,7 @@ function ApplyDamageBar({
                 className="btn btn-secondary cf-target-44"
                 style={{ fontSize: 12, padding: '0 12px' }}
                 title={`${mode === 'heal' ? 'Heal' : 'Deal'} ${amount} to ${c.name}${acLabel}`}
+                disabled={applyDisabled}
                 onClick={() => onApply(c.id, delta)}
               >
                 {c.name}{acLabel}
@@ -4184,7 +4452,7 @@ function ApplyDamageBar({
                   type="button"
                   className="btn btn-secondary cf-target-44"
                   style={{ fontSize: 12, padding: '0 12px' }}
-                  disabled={affectedCombatants.length === 0}
+                  disabled={applyDisabled || affectedCombatants.length === 0}
                   title={
                     affectedCombatants.length === 0
                       ? `No editable targets inside this ${t.shape} template`
@@ -4203,13 +4471,13 @@ function ApplyDamageBar({
       )}
       <button
         type="button"
-        aria-label="Dismiss"
+        aria-label={`Dismiss apply ${amount} ${label} bar`}
         onClick={onDismiss}
         className="cf-dismiss-target"
         style={{ marginLeft: 'auto' }}
         data-testid="apply-damage-dismiss"
       >
-        ✕
+        <span aria-hidden="true">✕</span>
       </button>
     </div>
   );
@@ -4683,7 +4951,7 @@ function CombatantRow({
                         color: 'inherit',
                       }}
                     >
-                      ✕
+                      <span aria-hidden="true">✕</span>
                     </button>
                   )}
                 </span>
@@ -4711,8 +4979,8 @@ function CombatantRow({
                       color: 'inherit',
                     }}
                   >
-                    ✕
-                  </button>
+                    <span aria-hidden="true">✕</span>
+                    </button>
                 )}
               </span>
             ))}
@@ -5051,10 +5319,9 @@ function CombatantRow({
           style={{ width: 44, height: 44, fontSize: 14, flex: 'none' }}
           disabled={busy}
           onClick={onRemove}
-          title="Remove combatant"
           aria-label={`Remove ${combatant.name}`}
         >
-          ✕
+          <span aria-hidden="true">✕</span>
         </button>
       )}
     </div>
@@ -5333,6 +5600,13 @@ function EncounterNextSteps({ campaignId, sessionId }: { campaignId: number; ses
 // ---------------------------------------------------------------------------
 
 type AddTab = 'manual' | 'compendium' | 'party' | 'npc';
+const ADD_TAB_ORDER: ReadonlyArray<AddTab> = ['manual', 'compendium', 'party', 'npc'];
+const ADD_TAB_LABELS: Record<AddTab, string> = {
+  manual: 'Manual',
+  compendium: 'Compendium',
+  party: 'Party',
+  npc: 'NPC',
+};
 
 function AddCombatantPanel({
   encounterId,
@@ -5350,7 +5624,14 @@ function AddCombatantPanel({
   onAdded: () => Promise<void> | void;
 }) {
   const { t } = useTranslation();
+  const announce = useAnnounce();
   const [tab, setTab] = useState<AddTab>('manual');
+  const tabRefs = useRef<Record<AddTab, HTMLButtonElement | null>>({
+    manual: null,
+    compendium: null,
+    party: null,
+    npc: null,
+  });
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -5381,6 +5662,47 @@ function AddCombatantPanel({
     const n = Math.floor(Number(raw));
     if (!Number.isFinite(n) || n < 1) return 1;
     return Math.min(50, n);
+  }
+
+  function selectAddTab(next: AddTab) {
+    setTab(next);
+    announce(`${ADD_TAB_LABELS[next]} tab selected.`);
+  }
+
+  function focusAddTab(which: AddTab) {
+    tabRefs.current[which]?.focus();
+  }
+
+  function onAddTabKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    const idx = ADD_TAB_ORDER.indexOf(tab);
+    if (idx < 0) return;
+    let next: AddTab | null = null;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = ADD_TAB_ORDER[(idx + 1) % ADD_TAB_ORDER.length];
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = ADD_TAB_ORDER[(idx - 1 + ADD_TAB_ORDER.length) % ADD_TAB_ORDER.length];
+        break;
+      case 'Home':
+        next = ADD_TAB_ORDER[0];
+        break;
+      case 'End':
+        next = ADD_TAB_ORDER[ADD_TAB_ORDER.length - 1];
+        break;
+      default:
+        return;
+    }
+    if (next && next !== tab) {
+      event.preventDefault();
+      selectAddTab(next);
+      requestAnimationFrame(() => focusAddTab(next));
+    } else if (next) {
+      event.preventDefault();
+      focusAddTab(next);
+    }
   }
 
   // Campaign NPCs for the NPC tab's picker. Low-churn, fetched once.
@@ -5596,31 +5918,56 @@ function AddCombatantPanel({
       <p className="text-muted" style={{ fontSize: 11, margin: 0 }}>
         Add manually, search monsters and hazards, or drop a compendium monster/hazard here.
       </p>
-      <div className="seg self-start inline-flex">
-        {(['manual', 'compendium', 'party', 'npc'] as AddTab[]).map((t) => (
-          <button
-            key={t}
-            style={{
-              padding: '7px 13px',
-              font: 'inherit',
-              fontSize: 12,
-              border: 0,
-              background: 'transparent',
-              cursor: 'pointer',
-              color: tab === t ? 'var(--color-accent)' : 'var(--color-text)',
-              boxShadow: tab === t ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
-              minHeight: 32,
-            }}
-            onClick={() => setTab(t)}
-          >
-            {t === 'manual' ? 'Manual' : t === 'compendium' ? 'Compendium' : t === 'party' ? 'Party' : 'NPC'}
-          </button>
-        ))}
+      <div
+        className="seg self-start inline-flex"
+        role="tablist"
+        aria-label="Add combatant"
+        data-testid="add-combatant-tabs"
+      >
+        {ADD_TAB_ORDER.map((t) => {
+          const selectedTab = tab === t;
+          return (
+            <button
+              key={t}
+              ref={(el) => {
+                tabRefs.current[t] = el;
+              }}
+              type="button"
+              role="tab"
+              id={`add-combatant-tab-${t}`}
+              aria-selected={selectedTab}
+              aria-controls={`add-combatant-panel-${t}`}
+              tabIndex={selectedTab ? 0 : -1}
+              onClick={() => selectAddTab(t)}
+              onKeyDown={onAddTabKeyDown}
+              style={{
+                padding: '7px 13px',
+                font: 'inherit',
+                fontSize: 12,
+                border: 0,
+                background: 'transparent',
+                cursor: 'pointer',
+                color: selectedTab ? 'var(--color-accent)' : 'var(--color-text)',
+                boxShadow: selectedTab ? 'inset 0 0 0 1px var(--color-accent)' : 'none',
+                minHeight: 32,
+              }}
+            >
+              {ADD_TAB_LABELS[t]}
+            </button>
+          );
+        })}
       </div>
 
       {error && <p role="alert" className="text-sm text-rose-400">{error}</p>}
 
-      {tab === 'manual' && (
+      <div
+        id="add-combatant-panel-manual"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-manual"
+        tabIndex={0}
+        hidden={tab !== 'manual'}
+        className={tab === 'manual' ? '' : 'hidden'}
+      >
         <form onSubmit={addManual} className="flex gap-2 flex-wrap items-end">
           <div className="field" style={{ flex: 1, minWidth: 140 }}>
             <label htmlFor="add-combatant-name">Name</label>
@@ -5642,16 +5989,21 @@ function AddCombatantPanel({
             {saving ? 'Adding…' : 'Add'}
           </Btn>
         </form>
-      )}
+      </div>
 
-      {tab === 'compendium' && (
-        <div className="space-y-2">
-          <TextInput
+      <div
+        id="add-combatant-panel-compendium"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-compendium"
+        tabIndex={0}
+        hidden={tab !== 'compendium'}
+        className={tab === 'compendium' ? 'space-y-2' : 'hidden'}
+      >
+        <TextInput
             aria-label="Search monsters and hazards in the compendium"
             placeholder="Search monsters and hazards…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            autoFocus
           />
           {/* Quantity + optional name override for the next pick (issue #114): adding
               N monsters auto-numbers them "Goblin 1".."Goblin N" so they're distinguishable. */}
@@ -5699,12 +6051,17 @@ function AddCombatantPanel({
               ))}
             </div>
           )}
-        </div>
-      )}
+      </div>
 
-      {tab === 'party' && (
-        <div className="space-y-1.5">
-          {(() => {
+      <div
+        id="add-combatant-panel-party"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-party"
+        tabIndex={0}
+        hidden={tab !== 'party'}
+        className={tab === 'party' ? 'space-y-1.5' : 'hidden'}
+      >
+        {(() => {
             const available = characters.filter((c) => !existingCombatantCharacterIds.has(c.id));
             if (characters.length === 0) {
               return (
@@ -5745,13 +6102,18 @@ function AddCombatantPanel({
                 </span>
               </button>
             ));
-          })()}
-        </div>
-      )}
+        })()}
+      </div>
 
-      {tab === 'npc' && (
-        <div className="space-y-2">
-          {npcs.length === 0 ? (
+      <div
+        id="add-combatant-panel-npc"
+        role="tabpanel"
+        aria-labelledby="add-combatant-tab-npc"
+        tabIndex={0}
+        hidden={tab !== 'npc'}
+        className={tab === 'npc' ? 'space-y-2' : 'hidden'}
+      >
+        {npcs.length === 0 ? (
             <p className="text-muted" style={{ fontSize: 12 }}>
               No NPCs in this campaign yet — create one on the NPCs page.
             </p>
@@ -5834,8 +6196,7 @@ function AddCombatantPanel({
               )}
             </>
           )}
-        </div>
-      )}
+      </div>
     </Card>
   );
 }
