@@ -7660,6 +7660,105 @@ export const StorageCleanupResult = z.object({
 });
 export type StorageCleanupResult = z.infer<typeof StorageCleanupResult>;
 
+// ---------- admin bulk roster import (issue #589) ----------
+// Server-admin dry-run + commit for seasonal roster setup. CSV/JSON rows map to
+// local usernames and/or OIDC subjects, optionally seat users in campaigns.
+// New accounts are created passwordless; commit returns expiring activation codes
+// ONCE (never logged or exported in audit detail).
+export const RosterImportFormat = z.enum(['csv', 'json']);
+export type RosterImportFormat = z.infer<typeof RosterImportFormat>;
+
+export const RosterImportField = z.enum([
+  'username',
+  'displayName',
+  'oidcSub',
+  'campaignId',
+  'campaignRole',
+  'characterId',
+]);
+export type RosterImportField = z.infer<typeof RosterImportField>;
+
+/** Canonical row after parsing + mapping (commit payload). */
+export const RosterImportRow = z
+  .object({
+    rowIndex: z.number().int().nonnegative(),
+    username: User.shape.username.optional(),
+    displayName: z.string().max(120).optional(),
+    oidcSub: z.string().max(200).optional(),
+    campaignId: Id.optional(),
+    campaignRole: Role.optional(),
+    characterId: Id.nullable().optional(),
+  })
+  .refine((row) => row.username != null || row.oidcSub != null, {
+    message: 'Row needs at least one of username or oidcSub',
+  });
+export type RosterImportRow = z.infer<typeof RosterImportRow>;
+
+export const RosterImportRowAction = z.enum(['create', 'update', 'skip', 'error']);
+export type RosterImportRowAction = z.infer<typeof RosterImportRowAction>;
+
+export const RosterImportRowDiagnostic = z.object({
+  rowIndex: z.number().int().nonnegative(),
+  action: RosterImportRowAction,
+  matchedUserId: Id.nullable().optional(),
+  matchBy: z.enum(['username', 'oidcSub']).nullable().optional(),
+  username: z.string().optional(),
+  displayName: z.string().optional(),
+  oidcSub: z.string().optional(),
+  campaignId: Id.optional(),
+  campaignRole: Role.optional(),
+  characterId: Id.nullable().optional(),
+  errors: z.array(z.string()),
+  warnings: z.array(z.string()),
+});
+export type RosterImportRowDiagnostic = z.infer<typeof RosterImportRowDiagnostic>;
+
+export const RosterImportRequest = z.object({
+  dryRun: z.boolean().default(true),
+  format: RosterImportFormat,
+  content: z.string().max(1_000_000),
+  /** CSV only: header name -> canonical field. Unmapped headers are ignored. */
+  columnMap: z.record(z.string(), RosterImportField).optional(),
+  activationExpiresInDays: z.number().int().min(1).max(30).default(7),
+  /** Required on commit — the reviewed normalized rows from the dry-run preview. */
+  rows: z.array(RosterImportRow).max(500).optional(),
+  /** Fingerprint from dry-run; must match on commit. */
+  batchId: z.string().max(128).optional(),
+});
+export type RosterImportRequest = z.infer<typeof RosterImportRequest>;
+
+export const RosterImportPreview = z.object({
+  dryRun: z.literal(true),
+  batchId: z.string(),
+  totalRows: z.number().int().nonnegative(),
+  validRows: z.number().int().nonnegative(),
+  errorRows: z.number().int().nonnegative(),
+  rows: z.array(RosterImportRowDiagnostic),
+  /** Normalized rows eligible for commit (action create|update|skip, no errors). */
+  commitRows: z.array(RosterImportRow),
+});
+export type RosterImportPreview = z.infer<typeof RosterImportPreview>;
+
+export const RosterImportActivation = z.object({
+  userId: Id,
+  username: z.string(),
+  activationCode: z.string(),
+  expiresAt: IsoDate,
+});
+export type RosterImportActivation = z.infer<typeof RosterImportActivation>;
+
+export const RosterImportCommitResult = z.object({
+  dryRun: z.literal(false),
+  batchId: z.string(),
+  created: z.number().int().nonnegative(),
+  updated: z.number().int().nonnegative(),
+  membershipsAdded: z.number().int().nonnegative(),
+  membershipsUpdated: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  activations: z.array(RosterImportActivation),
+});
+export type RosterImportCommitResult = z.infer<typeof RosterImportCommitResult>;
+
 // ---------- campaign-wide search + @-mention cross-linking (issue #64) ----------
 // The kinds of things a campaign-wide search can turn up. `campaign` from
 // EntityType is deliberately excluded — a campaign never searches its own row,
