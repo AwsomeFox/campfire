@@ -77,8 +77,8 @@ test.describe('keyboard command registry (issue #672)', () => {
   test('formats aria-keyshortcuts and display labels', () => {
     const chord = { key: 'k', mod: true };
     expect(formatChordLabel(chord)).toMatch(/K/i);
-    expect(formatAriaKeyshortcuts([chord])).toContain('Control');
-    expect(formatAriaKeyshortcuts([chord])).toContain('Meta');
+    expect(formatAriaKeyshortcuts([chord])).toBe('Control+K Meta+K');
+    expect(formatAriaKeyshortcuts([{ key: '?', shift: true }])).toBe('Shift+?');
   });
 
   test('parses stored chord strings', () => {

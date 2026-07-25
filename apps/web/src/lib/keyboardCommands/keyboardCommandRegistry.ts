@@ -245,16 +245,26 @@ function formatKeyToken(key: string): string {
   }
 }
 
+function formatAriaChord(chord: KeyChord, modKey: 'Control' | 'Meta' | null): string {
+  const parts: string[] = [];
+  if (modKey) parts.push(modKey);
+  if (chord.alt) parts.push('Alt');
+  if (chord.shift) parts.push('Shift');
+  parts.push(formatAriaKeyToken(chord.key));
+  return parts.join('+');
+}
+
 /** WAI-ARIA aria-keyshortcuts value (Control/Meta variants for cross-platform). */
 export function formatAriaKeyshortcuts(chords: readonly KeyChord[]): string {
   return chords
-    .map((chord) => {
-      const parts: string[] = [];
-      if (chord.mod) parts.push('Control', 'Meta');
-      if (chord.alt) parts.push('Alt');
-      if (chord.shift) parts.push('Shift');
-      parts.push(formatAriaKeyToken(chord.key));
-      return parts.join('+');
+    .flatMap((chord) => {
+      if (chord.mod) {
+        return [
+          formatAriaChord(chord, 'Control'),
+          formatAriaChord(chord, 'Meta'),
+        ];
+      }
+      return [formatAriaChord(chord, null)];
     })
     .join(' ');
 }

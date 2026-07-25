@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
+  DEFAULT_KEYBOARD_BINDINGS,
   KEYBOARD_COMMANDS,
   chordFromKeyboardEvent,
   chordsEqual,
@@ -44,7 +45,7 @@ export function ShortcutHelpDialog({
         return;
       }
       if (event.key === 'Backspace' || event.key === 'Delete') {
-        onSetBinding(activeId, bindings[activeId]);
+        onSetBinding(activeId, DEFAULT_KEYBOARD_BINDINGS[activeId]);
         setRebindingId(null);
         setRebindError(null);
         return;

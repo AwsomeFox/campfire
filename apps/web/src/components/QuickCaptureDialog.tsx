@@ -19,7 +19,6 @@ export function QuickCaptureDialog({
   const [body, setBody] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
   const [dest, setDest] = useState<'private' | 'inbox'>('private');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const titleId = useRef(`quick-capture-title-${Math.random().toString(36).slice(2)}`).current;
@@ -36,7 +35,6 @@ export function QuickCaptureDialog({
     if (!body.trim() || !canMemberWrite) return;
     setSaving(true);
     setError(null);
-    setSaved(false);
     try {
       if (dest === 'inbox') {
         await api.post(`${API}/campaigns/${campaignId}/inbox`, { body: body.trim() });
@@ -47,7 +45,6 @@ export function QuickCaptureDialog({
         });
       }
       setBody('');
-      setSaved(true);
       onClose();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : t('keyboard.quickCaptureFailed'));
@@ -74,11 +71,6 @@ export function QuickCaptureDialog({
         </h2>
         <p className="text-sm text-muted mb-3">{t('keyboard.quickCaptureHint')}</p>
         {error && <ErrorNote message={error} />}
-        {saved && (
-          <p className="text-sm text-emerald-400 mb-2" role="status">
-            {dest === 'inbox' ? t('keyboard.quickCaptureSavedInbox') : t('keyboard.quickCaptureSavedPrivate')}
-          </p>
-        )}
         {!isDm && (
           <div className="flex gap-2 mb-2 text-xs">
             <button
