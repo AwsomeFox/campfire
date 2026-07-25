@@ -43,5 +43,6 @@ test.describe('RTL document direction and bidi isolation (#628)', () => {
     expect(css).toMatch(/\.cf-timeline\s*\{[^}]*border-inline-start/);
     expect(css).toMatch(/\.cf-prose ul,\s*\n\.cf-prose ol\s*\{[^}]*padding-inline-start/);
     expect(css).toMatch(/\.cf-prose blockquote\s*\{[^}]*border-inline-start/);
+    expect(css).toMatch(/\.cf-prose blockquote\s*\{[^}]*padding-inline-start/);
   });
 });

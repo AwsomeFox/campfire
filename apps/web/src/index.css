@@ -1061,7 +1061,8 @@ h1, h2, h3, h4, h5, h6 {
 
 .cf-prose blockquote {
   margin: 0.75em 0;
-  padding: 0.25em 0 0.25em 1em;
+  padding-block: 0.25em;
+  padding-inline-start: 1em;
   border-inline-start: 3px solid var(--color-accent);
   color: var(--cf-dim);
 }
