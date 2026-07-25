@@ -252,33 +252,33 @@ export default function InventoryPage() {
                   partyStashTitle={t('inventory.partyStash')}
                 />
               ))}
-
-              {canEdit && (
-                <div className="pt-2">
-                  <Btn
-                    ghost
-                    className="text-xs"
-                    onClick={() => {
-                      if (!showTrash) void loadTrash();
-                      setShowTrash((s) => !s);
-                    }}
-                  >
-                    {showTrash ? t('inventory.hideTrash') : t('inventory.showTrash')}
-                  </Btn>
-                </div>
-              )}
-
-              {showTrash && (
-                <TrashSection
-                  items={trashItems}
-                  characters={characters}
-                  onChanged={() => {
-                    void load();
-                    void loadTrash();
-                  }}
-                />
-              )}
             </>
+          )}
+
+          {canEdit && (
+            <div className="pt-2">
+              <Btn
+                ghost
+                className="text-xs"
+                onClick={() => {
+                  if (!showTrash) void loadTrash();
+                  setShowTrash((s) => !s);
+                }}
+              >
+                {showTrash ? t('inventory.hideTrash') : t('inventory.showTrash')}
+              </Btn>
+            </div>
+          )}
+
+          {showTrash && (
+            <TrashSection
+              items={trashItems}
+              characters={characters}
+              onChanged={() => {
+                void load();
+                void loadTrash();
+              }}
+            />
           )}
         </>
       )}

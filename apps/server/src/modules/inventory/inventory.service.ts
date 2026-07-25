@@ -452,16 +452,18 @@ export class InventoryService {
   /**
    * Restore a soft-deleted inventory item to its original owner. If the original
    * character no longer exists in the campaign, the item falls back to the party
-   * stash so restoration always succeeds.
+   * stash so restoration always succeeds. Already-restored items are returned
+   * as-is without re-auditing, making the operation idempotent.
    */
   async restore(id: number, user: RequestUser, role: Role): Promise<InventoryItem> {
     const existing = await this.getRowOrThrow(id, { includeDeleted: true });
-    if (!existing.deletedAt) {
-      throw new BadRequestException(`Item ${id} is not in the trash`);
-    }
 
     const actor = auditActor(user);
     await this.assertCanRestore(existing, user, role, actor);
+
+    if (!existing.deletedAt) {
+      return toDomain(existing);
+    }
 
     // Verify the original owner still exists; otherwise restore to the party stash.
     let ownerType = existing.ownerType as 'party' | 'character';

@@ -615,7 +615,10 @@ describe('inventory & treasury (e2e)', () => {
       expect(first.status).toBe(200);
 
       const second = await request(server).post(`/api/v1/inventory/${itemId}/restore`).set(dm);
-      expect(second.status).toBe(400);
+      expect(second.status).toBe(200);
+      expect(second.body.id).toBe(itemId);
+      expect(second.body.deletedAt).toBeNull();
+      expect(second.body.deletedBy).toBeNull();
     });
   });
 
