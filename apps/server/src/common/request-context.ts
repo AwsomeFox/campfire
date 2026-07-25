@@ -43,7 +43,7 @@ export function runWithRequestContext<T>(store: RequestContextStore, fn: () => T
  * Re-bind the current context for an explicit async handoff (timers, detached
  * promises) so background work started during a request keeps the correlation id.
  */
-export function bindRequestContext<T extends (...args: unknown[]) => unknown>(fn: T): T {
+export function bindRequestContext<T extends (...args: any[]) => unknown>(fn: T): T {
   const store = storage.getStore();
   if (!store) return fn;
   return ((...args: Parameters<T>) => storage.run({ ...store }, () => fn(...args))) as T;
