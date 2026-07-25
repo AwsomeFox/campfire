@@ -30,6 +30,7 @@ import type {
   Encounter,
   EncounterWithCombatants,
   HpBand,
+  MapPing,
 } from '@campfire/schema';
 import { api, API } from '../../lib/api';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
@@ -42,7 +43,7 @@ import {
 } from '../../components/Announcer';
 import { GameIcon } from '../../components/GameIcon';
 import { NpcDispositionBadge, QuestStatusBadge } from '../../components/EntitySemanticBadges';
-import { encounterMapUrl } from '../../components/ImageUpload';
+import { BattleMap } from '../encounters/RunSessionPage';
 import { useAuth } from '../../app/auth';
 import { prefersReducedMotion } from '../../lib/prefersReducedMotion';
 import { useAiDmLiveActivityState } from '../ai-dm/useAiDmLiveActivity';
@@ -50,6 +51,7 @@ import { STATUS_LABEL } from '../characters/status';
 import { initials } from '../../lib/avatarText';
 import {
   safeCombatants,
+  safeEncounterForCast,
   safeLocation,
   safeNpcs,
   safeParty,
@@ -220,6 +222,9 @@ export default function PlayerDisplayPage() {
    * cockpit's page buttons step it by hand. Kept as plain state so tests can drive
    * paging deterministically. */
   const [sceneTick, setSceneTick] = useState(0);
+  /** Transient battle-map pings mirrored from the live encounter (issue #484). */
+  const [mapPings, setMapPings] = useState<Array<{ key: number; x: number; y: number }>>([]);
+  const mapPingSeq = useRef(0);
   const fullscreenActiveRef = useRef(isFullscreen);
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const loadSequencerRef = useRef(new PlayerDisplayLoadSequencer());
@@ -292,10 +297,32 @@ export default function PlayerDisplayPage() {
   // so a status change made in another tab lands promptly when Cast is watched again.
   usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(cid));
 
+  const addMapPing = useCallback((ping: MapPing) => {
+    const key = ++mapPingSeq.current;
+    setMapPings((prev) => [...prev, { key, x: ping.x, y: ping.y }]);
+    window.setTimeout(() => {
+      setMapPings((prev) => prev.filter((p) => p.key !== key));
+    }, 2_400);
+  }, []);
+
   // Snappy combat updates: refetch the moment the DM starts/advances/ends an encounter.
   // Poll + SSE share the same sequencer, so overlapping bursts cannot reorder commits.
+  // Ping events render locally without a full refetch (issue #484).
   useCampaignEvents(Number.isFinite(cid) ? cid : undefined, {
-    onEvent: useCallback(() => void load(), [load]),
+    onEvent: useCallback(
+      (event) => {
+        if (
+          event.type === 'encounter.ping' &&
+          event.ping &&
+          projectionRef.current?.encounter?.id === event.encounterId
+        ) {
+          addMapPing(event.ping);
+          return;
+        }
+        void load();
+      },
+      [load, addMapPing],
+    ),
     onReconnect: useCallback(() => void load(), [load]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
     onStreamRecovery: useCallback(() => void load(), [load]),
@@ -446,6 +473,48 @@ export default function PlayerDisplayPage() {
     }
     prevAnnounceRef.current = { hp, turnKey };
   }, [cid, encounter, announce]);
+
+  // Map-scene a11y: announce token moves and AoE changes from the player-safe projection.
+  const prevMapAnnounceRef = useRef<{ tokens: Map<number, string>; aoe: string } | null>(null);
+  useEffect(() => {
+    if (!encounter || scene !== 'map') {
+      prevMapAnnounceRef.current = null;
+      return;
+    }
+    const safe = safeEncounterForCast(encounter);
+    const tokenSig = new Map(
+      safe.combatants
+        .filter((c) => c.tokenX != null && c.tokenY != null)
+        .map((c) => [c.id, `${c.tokenX},${c.tokenY}`] as const),
+    );
+    const aoeSig = (safe.aoe ?? []).map((t) => `${t.id}:${t.x},${t.y},${t.sizeFt}`).join('|');
+    const prev = prevMapAnnounceRef.current;
+    if (prev) {
+      const parts: string[] = [];
+      for (const c of safe.combatants) {
+        const before = prev.tokens.get(c.id);
+        const now = tokenSig.get(c.id);
+        if (before != null && now != null && before !== now) {
+          parts.push(`${c.name} moved on the map`);
+        } else if (before == null && now != null) {
+          parts.push(`${c.name} placed on the map`);
+        }
+      }
+      if (aoeSig !== prev.aoe) {
+        const count = safe.aoe?.length ?? 0;
+        if (count > 0) {
+          parts.push(count === 1 ? 'Area effect updated on the map' : `${count} area effects on the map`);
+        }
+      }
+      const message = formatGroupedAnnouncement(parts);
+      if (message) {
+        announce(message, {
+          dedupeKey: `screen-map:${cid}:${encounter.id}:${aoeSig}:${[...tokenSig.values()].join('|')}`,
+        });
+      }
+    }
+    prevMapAnnounceRef.current = { tokens: tokenSig, aoe: aoeSig };
+  }, [cid, encounter, scene, announce]);
 
   // Fullscreen can end without this control being used (Escape, browser chrome,
   // or another caller), so the browser events — not the request promise — own
@@ -778,8 +847,6 @@ export default function PlayerDisplayPage() {
   const isRunning = encounter?.status === 'running';
   const currentActor = currentIndex >= 0 ? combatants[currentIndex] ?? null : null;
   const nextActor = nextIndex >= 0 ? combatants[nextIndex] ?? null : null;
-  const mapUrl =
-    encounter?.mapAttachmentId != null ? encounterMapUrl(encounter.id, encounter.updatedAt) : null;
   const ratio = ASPECT_RATIO[aspect];
   const stageStyle = {
     '--cf-ar-w': String(ratio.w),
@@ -850,7 +917,32 @@ export default function PlayerDisplayPage() {
   let sceneContent: ReactNode;
   switch (scene) {
     case 'map':
-      sceneContent = <MapScene mapUrl={mapUrl} locationName={location?.name ?? null} />;
+      sceneContent =
+        encounter?.mapAttachmentId != null ? (
+          <section className="cf-scene cf-scene-map" data-testid="cf-scene-map-body" aria-label="Map">
+            <BattleMap
+              projection="cast"
+              encounter={safeEncounterForCast(encounter)}
+              campaignId={cid}
+              isDm={false}
+              viewerUserId={null}
+              canDmWrite={false}
+              busy={false}
+              canMoveToken={() => false}
+              onSetMap={() => {}}
+              onMoveToken={() => {}}
+              onUnplaceToken={() => {}}
+              onSetGrid={() => {}}
+              onSetFog={() => {}}
+              onSetAoe={() => {}}
+              onPing={() => {}}
+              pings={mapPings}
+              onError={() => {}}
+            />
+          </section>
+        ) : (
+          <MapScene locationName={location?.name ?? null} />
+        );
       break;
     case 'party':
       sceneContent = <PartyScene party={party} includeAlumni={includeAlumni} tick={sceneTick} />;
@@ -913,18 +1005,14 @@ function SceneEmpty({ icon, title, subtitle }: { icon: string; title: string; su
   );
 }
 
-function MapScene({ mapUrl, locationName }: { mapUrl: string | null; locationName: string | null }) {
+function MapScene({ locationName }: { locationName: string | null }) {
   return (
     <section className="cf-scene cf-scene-map" data-testid="cf-scene-map-body" aria-label="Map">
-      {mapUrl ? (
-        <img className="cf-map-img" src={mapUrl} alt={locationName ? `Map of ${locationName}` : 'Battle map'} />
-      ) : (
-        <SceneEmpty
-          icon="treasure-map"
-          title={locationName ?? 'No map to display'}
-          subtitle="Upload a battle map to the live encounter to project it here."
-        />
-      )}
+      <SceneEmpty
+        icon="treasure-map"
+        title={locationName ?? 'No map to display'}
+        subtitle="Upload a battle map to the live encounter to project it here."
+      />
     </section>
   );
 }
@@ -1721,7 +1809,8 @@ const SCREEN_CSS = `
 .cf-npc-disposition { margin-top: 0.8cqh; }
 
 /* Map */
-.cf-scene-map { align-items: center; justify-content: center; }
+.cf-scene-map { align-items: stretch; justify-content: stretch; }
+.cf-cast-battle-map { width: 100%; height: 100%; min-height: 0; }
 .cf-map-img { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; border-radius: var(--radius-md); }
 
 /* Intermission */

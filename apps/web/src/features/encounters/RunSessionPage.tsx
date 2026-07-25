@@ -2127,7 +2127,7 @@ function aoePolygonPoints(
  * (matching pointer-up inside slop + time), never on touch-down. DM may move any token; a player
  * only their own character's (canMoveToken), but any member may ping.
  */
-function BattleMap({
+export function BattleMap({
   encounter,
   campaignId,
   isDm,
@@ -2150,6 +2150,7 @@ function BattleMap({
   pings,
   onError,
   onAoeHitLayoutChange,
+  projection = 'session',
 }: {
   encounter: EncounterWithCombatants;
   campaignId: number;
@@ -2177,7 +2178,13 @@ function BattleMap({
   onError: (message: string) => void;
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
+  /** `cast` = read-only table projection on Player Display (issue #484). */
+  projection?: 'session' | 'cast';
 }) {
+  const isCast = projection === 'cast';
+  const effectiveIsDm = isCast ? false : isDm;
+  const effectiveCanDmWrite = isCast ? false : canDmWrite;
+  const effectiveCanMoveToken = isCast ? () => false : canMoveToken;
   const { t } = useTranslation();
   const announce = useAnnounce();
   type MapPoint = { x: number; y: number };
@@ -2401,9 +2408,9 @@ function BattleMap({
 
   const aoeTemplates = useMemo(() => {
     const all = encounter.aoe ?? [];
-    if (isDm) return all;
+    if (effectiveIsDm) return all;
     return filterAoeTemplatesForViewer(all, encounter.fog, { viewerUserId });
-  }, [encounter.aoe, encounter.fog, isDm, viewerUserId]);
+  }, [encounter.aoe, encounter.fog, effectiveIsDm, viewerUserId]);
   const fog = encounter.fog;
   const fogOn = !!fog?.enabled;
   // A non-DM whose token sits outside revealed fog never receives its coordinates (issue #40).
@@ -3002,11 +3009,20 @@ function BattleMap({
   );
 
   return (
-    <div className="card elev-sm reading-exempt" data-testid="battle-map" style={{ padding: 0, overflow: 'hidden' }}>
+    <div
+      className={isCast ? 'cf-cast-battle-map' : 'card elev-sm reading-exempt'}
+      data-testid={isCast ? 'cf-cast-battle-map' : 'battle-map'}
+      style={{
+        padding: 0,
+        overflow: 'hidden',
+        ...(isCast ? { flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column' } : {}),
+      }}
+    >
+      {!isCast && (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 14px 0', flexWrap: 'wrap' }}>
         <span className="card-kicker">Battle map</span>
         <div style={{ flex: 1 }} />
-        {canDmWrite && mapImageUrl && (
+        {effectiveCanDmWrite && mapImageUrl && (
           <MapUploadButton
             campaignId={campaignId}
             hasMap
@@ -3016,8 +3032,9 @@ function BattleMap({
           />
         )}
       </div>
+      )}
 
-      {canDmWrite && !mapImageUrl && (
+      {!isCast && effectiveCanDmWrite && !mapImageUrl && (
         <div style={{ padding: '8px 14px' }}>
           <ImageUpload
             campaignId={campaignId}
@@ -3044,7 +3061,7 @@ function BattleMap({
           {/* Post-attach guidance (issue #409): after a generated map is attached it stays
               hidden (DM-only) with an aligned grid — walk the DM through the next steps so
               the map is table-ready. Dismissible; only shown right after an attach. */}
-          {canDmWrite && showGuidance && (
+          {effectiveCanDmWrite && showGuidance && (
             <div
               data-testid="map-attach-guidance"
               className="cf-inset"
@@ -3076,13 +3093,14 @@ function BattleMap({
           )}
 
           {/* Toolbar: interaction mode + ping + (DM) AoE templates + grid & fog controls. */}
+          {!isCast && (
           <div className="flex flex-wrap gap-2 items-center" style={{ padding: '8px 14px 0' }} data-testid="map-toolbar">
             {modeBtn('move', 'Move')}
             {modeBtn('measure', 'Measure', !canMeasure, canMeasure ? 'Click-drag to measure' : 'Set a grid scale first')}
             {modeBtn('ping', 'Ping', false, 'Tap or activate the map to ping a spot for everyone')}
-            {canDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
-            {canDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
-            {canDmWrite && canAoe && (
+            {effectiveCanDmWrite && modeBtn('reveal', 'Reveal', undefined, 'Click-drag to reveal a fog region')}
+            {effectiveCanDmWrite && modeBtn('calibrate', 'Calibrate', !canCalibrate, canCalibrate ? 'Drag the anchors to align the grid to the map' : 'Enable the grid first')}
+            {effectiveCanDmWrite && canAoe && (
               <>
                 <span className="text-muted" style={{ fontSize: 11, marginLeft: 4 }}>AoE:</span>
                 <button type="button" className="cf-map-tool" title="Add a circular burst" onClick={() => addAoe('circle')}>+ Circle</button>
@@ -3091,7 +3109,7 @@ function BattleMap({
               </>
             )}
             <div style={{ flex: 1 }} />
-            {canDmWrite && (
+            {effectiveCanDmWrite && (
               <button
                 type="button"
                 className="cf-map-tool"
@@ -3103,9 +3121,10 @@ function BattleMap({
               </button>
             )}
           </div>
+          )}
 
           {/* Selected token editor — numeric position/size controls for switch and voice users (issue #419). */}
-          {selectedToken && tool === 'move' && (
+          {!isCast && selectedToken && tool === 'move' && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }} data-testid="selected-token-panel">
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedToken.name}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -3181,7 +3200,7 @@ function BattleMap({
           )}
 
           {/* Selected AoE template editor (DM) — size / rotation / remove for the picked shape. */}
-          {canDmWrite && selectedAoe && canAoe && (
+          {!isCast && effectiveCanDmWrite && selectedAoe && canAoe && (
             <div className="flex flex-wrap gap-3 items-center" style={{ padding: '8px 14px 0', fontSize: 11 }}>
               <span className="text-muted" style={{ textTransform: 'capitalize' }}>{selectedAoe.shape}</span>
               <label className="flex items-center gap-1 text-muted">
@@ -3236,7 +3255,7 @@ function BattleMap({
             </div>
           )}
 
-          {canDmWrite && gridPanelOpen && (
+          {!isCast && effectiveCanDmWrite && gridPanelOpen && (
             <div
               {...gridDisclosure.regionProps}
               className="flex flex-wrap gap-3 items-center"
@@ -3446,7 +3465,7 @@ function BattleMap({
           {/* Viewport navigation (issue #712) — separate from token/map play tools. */}
           <div
             className="flex flex-wrap gap-2 items-center"
-            style={{ padding: '8px 14px 0' }}
+            style={{ padding: isCast ? '0 0 8px' : '8px 14px 0' }}
             data-testid="map-viewport-toolbar"
             role="toolbar"
             aria-label="Map viewport navigation"
@@ -3528,8 +3547,10 @@ function BattleMap({
             }
             aria-describedby="map-keyboard-help"
             style={{
-              margin: '8px 14px',
+              margin: isCast ? 0 : '8px 14px',
               aspectRatio: '16 / 9',
+              flex: isCast ? '1 1 auto' : undefined,
+              minHeight: isCast ? 0 : undefined,
               touchAction:
                 viewportPan || viewport.scale > 1
                   ? 'none'
@@ -3633,7 +3654,7 @@ function BattleMap({
                     Drag the origin anchor to a corner of the map's printed grid, then drag the
                     cell anchor to the opposite corner of ONE printed cell. The overlay previews
                     live off `calibration` (which already folds in the active drag). */}
-                {canDmWrite && tool === 'calibrate' && calibrationPx && (() => {
+                {effectiveCanDmWrite && tool === 'calibrate' && calibrationPx && (() => {
                   const rad = calibrationPx.rotationRad;
                   const cos = Math.cos(rad);
                   const sin = Math.sin(rad);
@@ -3684,7 +3705,7 @@ function BattleMap({
                   const isDragging = draggingId === c.id && dragPos != null;
                   const left = isDragging ? dragPos!.x : (c.tokenX ?? 0);
                   const top = isDragging ? dragPos!.y : (c.tokenY ?? 0);
-                  const movable = tool === 'move' && canMoveToken(c);
+                  const movable = tool === 'move' && effectiveCanMoveToken(c);
                   const isCharacter = c.kind === 'character';
                   const sizePx = Math.max(18, Math.round(BASE_TOKEN_PX * (TOKEN_SIZE_SCALE[c.tokenSize] ?? 1)));
                   const tokenLabel = `${c.name}${c.tokenSize !== 'medium' ? ` (${c.tokenSize})` : ''}${isCharacter ? ', player character' : ''} token`;
@@ -3804,7 +3825,7 @@ function BattleMap({
                     })}
                   </svg>
                 )}
-                {canDmWrite && canAoe &&
+                {effectiveCanDmWrite && canAoe &&
                   aoeTemplates.map((t) => {
                     const drag = aoeDrag && aoeDrag.id === t.id ? aoeDrag : null;
                     const x = drag ? drag.x : t.x;
@@ -3858,7 +3879,7 @@ function BattleMap({
                         ))}
                       </mask>
                     </defs>
-                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={isDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
+                    <rect x={0} y={0} width={100} height={100} fill="#0b1120" opacity={effectiveIsDm ? 0.45 : 0.97} mask={`url(#fogmask-${encounter.id})`} />
                   </svg>
                 )}
 
@@ -3940,13 +3961,13 @@ function BattleMap({
             <style>{'@keyframes cfPing{0%{transform:translate(-50%,-50%) scale(.4);opacity:.9}70%{opacity:.55}100%{transform:translate(-50%,-50%) scale(3);opacity:0}}'}</style>
           </div>
 
-          {(unplaced.length > 0 || hiddenByFog.length > 0) && (
+          {!isCast && (unplaced.length > 0 || hiddenByFog.length > 0) && (
             <div className="flex flex-col gap-2" style={{ padding: '0 14px 10px' }} data-testid="map-token-trays">
               {unplaced.length > 0 && (
                 <div className="flex flex-wrap gap-2 items-center">
                   <span className="text-muted" style={{ fontSize: 11 }}>Unplaced:</span>
                   {unplaced.map((c) => {
-                    const movable = canMoveToken(c);
+                    const movable = effectiveCanMoveToken(c);
                     return (
                       <button
                         key={c.id}
@@ -3983,6 +4004,8 @@ function BattleMap({
             </div>
           )}
 
+          {!isCast && (
+          <>
           <div id="map-keyboard-help" className="sr-only">
             Use Tab to focus a token or area-of-effect handle. Arrow keys nudge one grid cell, Shift plus Arrow moves five. Delete or Backspace removes. Number keys 1 to 5 switch tools. In measure or reveal mode, press Enter to start at the map center, arrows to adjust, Enter to finish, Escape to cancel. Press plus, minus, or zero to zoom, and arrow keys to pan when zoomed.
           </div>
@@ -3999,10 +4022,12 @@ function BattleMap({
                   ? 'Tap a spot on the map or press Enter/Space when the map is focused to ping it for everyone.'
                   : viewportPan
                     ? 'Drag to pan the map. Pinch with two fingers to zoom on touch devices.'
-                    : isDm
+                    : effectiveIsDm
                       ? 'Drag a token to move it, or Tab to focus it and use arrow keys. Drag an AoE handle to move a template, or Tab to focus it. Use the viewport toolbar to zoom and pan.'
                       : 'Drag your own token to move it, or Tab to focus it and use arrow keys. Use the viewport toolbar to zoom and pan.'}
           </div>
+          </>
+          )}
         </>
       )}
     </div>
