@@ -26,7 +26,9 @@ import {
 } from '../../components/formFieldLabels';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
 import { PageHeader, type PageHeaderSecondaryAction } from '../../components/PageHeader';
+import { CampaignCover } from '../../components/CampaignCover';
 import { usePageHeaderDraftWithAi } from '../ai-dm/usePageHeaderDraftWithAi';
+import { useCampaign } from '../../app/CampaignContext';
 import { GameIcon } from '../../components/GameIcon';
 import {
   ENCOUNTER_NAME_HELP,
@@ -52,6 +54,7 @@ export default function EncounterListPage() {
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
   const { isDm, canDmWrite } = useCampaignAccess();
+  const campaign = useCampaign(id);
   useRestoreListOriginScroll();
 
   const [encounters, setEncounters] = useState<Encounter[]>([]);
@@ -112,6 +115,7 @@ export default function EncounterListPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
+      <CampaignCover campaignId={id} name={campaign?.name ?? 'Campaign'} variant="strip" showMonogram={false} />
       <PageHeader
         title="Encounters"
         secondaryActions={secondaryActions}

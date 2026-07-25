@@ -74,7 +74,22 @@
 
   --font-heading: "Inter", system-ui, sans-serif;
   --font-heading-weight: 500;
+  /* Restrained fantasy display voice for page titles + cover monograms (#676). */
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-display-weight: 700;
   --font-body: "Inter", system-ui, sans-serif;
+
+  /* Ember brand layer — warm ambient glow carried from login into signed-in chrome. */
+  --cf-ember-glow: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  --cf-ember-ambient: radial-gradient(
+    90% 55% at 12% 0%,
+    color-mix(in srgb, var(--color-accent) 10%, transparent) 0%,
+    transparent 62%
+  );
+  --cf-ember-grid: radial-gradient(
+    color-mix(in srgb, var(--color-neutral-700) 55%, transparent) 1px,
+    transparent 1px
+  );
 
   /* Semantic type roles. Spatial/control type remains fixed while the three
      reading roles are overridden by an account's reading-mode attribute. */
@@ -602,10 +617,84 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Issue #649 — route-level page title. Matches nocturne h3 size so screens that
-   previously used a bare <h3> keep their visual weight when promoted to <h1>. */
+   previously used a bare <h3> keep their visual weight when promoted to <h1>.
+   Issue #676 — display serif for brand moments; body/control type stays Inter. */
 .cf-page-title {
   margin: 4px 0 0;
+  font-family: var(--font-display);
+  font-weight: var(--font-display-weight);
   font-size: 1.5625rem;
+  letter-spacing: -0.02em;
+}
+
+/* Signed-in ambient layer — fixed behind scrollable content, never traps focus. */
+.cf-ember-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: var(--cf-ember-ambient);
+}
+.cf-ember-layer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.22;
+  background-image: var(--cf-ember-grid);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(180deg, black 0%, transparent 72%);
+}
+.cf-authed-shell {
+  position: relative;
+  z-index: 1;
+}
+
+/* Campaign cover — gradient + motif texture + legibility overlay (#676). */
+.cf-campaign-cover {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.cf-campaign-cover__texture,
+.cf-campaign-cover__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.cf-campaign-cover__texture {
+  opacity: 0.35;
+  mix-blend-mode: soft-light;
+}
+.cf-campaign-cover__overlay {
+  opacity: 1;
+}
+.cf-campaign-cover__content {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+}
+.cf-cover-monogram {
+  font-family: var(--font-display);
+  font-weight: var(--font-display-weight);
+  font-size: 30px;
+  line-height: 1;
+  text-shadow: 0 1px 18px color-mix(in srgb, var(--color-bg) 55%, transparent);
+}
+.cf-campaign-cover[data-variant='strip'] .cf-cover-monogram {
+  font-size: 22px;
+}
+.cf-campaign-cover[data-variant='hero'] .cf-cover-monogram {
+  font-size: 42px;
+}
+.cf-brand-scene {
+  position: relative;
+  margin-bottom: 0.75rem;
+}
+.cf-brand-scene__cover {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-divider);
 }
 
 ::-webkit-scrollbar {
