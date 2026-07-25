@@ -102,7 +102,6 @@ import {
 import { RollModeChooser } from './RollModeChooser';
 import { resolveRollMode, rollModeSummary, type RollMode } from './rollMode';
 import { useRoller, type Roller } from '../../lib/useRoller';
-import { RollResultBanner } from '../../components/RollResultBanner';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { CopyControl } from '../../components/CopyControl';
 import { CharacterTrashMenu } from './CharacterTrashMenu';
@@ -279,8 +278,6 @@ export default function CharacterPage() {
       />
 
       {(error || actionError) && <ErrorNote message={actionError ?? error ?? ''} onRetry={() => { setActionError(null); void load(); }} />}
-
-      {roller.last && <RollResultBanner roll={roller.last} onDismiss={roller.dismiss} />}
 
       <div className="flex items-center gap-3 flex-wrap">
         <div className="h-14 w-14 shrink-0 rounded-full bg-[var(--color-accent-900)] text-[var(--color-accent-200)] flex items-center justify-center text-[17px] font-semibold">
