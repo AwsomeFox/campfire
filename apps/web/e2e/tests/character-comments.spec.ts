@@ -73,7 +73,8 @@ test('posts as an owned character from the keyboard and renders mobile-safe acce
     `/api/v1/campaigns/${campaignId}/comments?entityType=session&entityId=${navigation.sessionId}`,
   );
   if (thread.ok()) {
-    const comments = (await thread.json()) as Array<{ id: number; body: string }>;
+    const page = (await thread.json()) as { items: Array<{ root: { id: number; body: string }; replies: Array<{ id: number; body: string }> }> };
+    const comments = page.items.flatMap((item) => [item.root, ...item.replies]);
     const posted = comments.find((comment) => comment.body === 'A song for everyone at the table.');
     if (posted) await page.request.delete(`/api/v1/comments/${posted.id}`);
   }

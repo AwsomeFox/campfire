@@ -1449,6 +1449,55 @@ export const CommentUpdate = z.object({
   inCharacter: z.boolean().optional(),
 });
 
+/** Default page size for discussion root-thread lists (issue #609). */
+export const COMMENTS_THREAD_DEFAULT_LIMIT = 20;
+/** Hard cap for `?limit=` on root-thread pages. */
+export const COMMENTS_THREAD_MAX_LIMIT = 100;
+/** How many replies to inline-preview per root on the first page (issue #609). */
+export const COMMENTS_REPLY_PREVIEW_LIMIT = 3;
+/** Hard cap for `?limit=` when loading additional replies for one root. */
+export const COMMENTS_REPLY_MAX_LIMIT = 50;
+
+/**
+ * One discussion root with a bounded reply preview (issue #609). Pagination is by
+ * root thread — flat row paging cannot split a root from its replies. When
+ * `replyHasMore` is true, continue with `replyNextCursor` on the replies endpoint.
+ */
+export const CommentThread = z.object({
+  root: Comment,
+  replies: z.array(Comment),
+  replyCount: z.number().int().nonnegative(),
+  replyHasMore: z.boolean(),
+  replyNextCursor: z.string().max(512).nullable(),
+});
+export type CommentThread = z.infer<typeof CommentThread>;
+
+/**
+ * Paginated discussion list for one anchored entity (issue #609). `total` is the
+ * root-thread count; `totalComments` includes every reply. Order is oldest-first
+ * (root id asc) so the thread reads naturally top-to-bottom.
+ */
+export const CommentThreadPage = z.object({
+  items: z.array(CommentThread),
+  total: z.number().int().nonnegative(),
+  totalComments: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type CommentThreadPage = z.infer<typeof CommentThreadPage>;
+
+/** Additional replies for one root thread (issue #609). */
+export const CommentReplyPage = z.object({
+  rootId: Id,
+  items: z.array(Comment),
+  replyCount: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type CommentReplyPage = z.infer<typeof CommentReplyPage>;
+
 // ---------- notifications (in-app) ----------
 // Per-user notification rows written by the server when something a member cares
 // about happens while they're not looking: a session recap is posted, someone

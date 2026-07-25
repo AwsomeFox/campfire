@@ -1,8 +1,8 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, isNull, ne } from 'drizzle-orm';
+import { and, asc, count, eq, gt, isNull, ne } from 'drizzle-orm';
 import type { z } from 'zod';
 import { CommentCreate, CommentUpdate, EntityType } from '@campfire/schema';
-import type { Comment, Role, PageParams } from '@campfire/schema';
+import type { Comment, CommentReplyPage, CommentThread, CommentThreadPage, Role, PageParams } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, comments, encounters, factions, locations, npcs, quests, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -10,6 +10,13 @@ import { historicalAvatarAttachmentId, safeHistoricalAvatarUrl } from '../../com
 import { notDeleted } from '../../common/soft-delete';
 import { isVisibleTo } from '../../common/redact';
 import { applyPage } from '../../common/pagination';
+import {
+  clampCommentsReplyLimit,
+  clampCommentsThreadLimit,
+  decodeCommentsReplyCursor,
+  decodeCommentsRootCursor,
+  encodeCommentsCursor,
+} from './comments-pagination';
 import { AuditService } from '../audit/audit.service';
 import { NotificationsService, excerpt } from '../notifications/notifications.service';
 import { auditActor } from '../../common/user.types';
@@ -245,6 +252,8 @@ export class CommentsService {
    * campaign, oldest-first (id asc) so replies read naturally under their
    * parent. Threading is reconstructed on the client from parentId; the server
    * returns the flat, chronologically-ordered set.
+   *
+   * Retained for MCP / legacy offset paging — REST uses {@link listThreadsForEntity}.
    */
   async listForEntity(
     campaignId: number,
@@ -270,6 +279,152 @@ export class CommentsService {
     query = applyPage(query, page);
     const rows = await query;
     return rows.map(toDomain);
+  }
+
+  private entityAnchorWhere(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+  ) {
+    return and(
+      eq(comments.campaignId, campaignId),
+      eq(comments.entityType, entityType),
+      eq(comments.entityId, entityId),
+    )!;
+  }
+
+  /**
+   * Paginated discussion for one entity by root thread (issue #609). Each item
+   * is a root comment plus a bounded oldest-first reply preview so flat row paging
+   * can never orphan replies from their parent. Continue root pages with `cursor`;
+   * load additional replies per root via {@link listRepliesForRoot}.
+   */
+  async listThreadsForEntity(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    role: Role,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<CommentThreadPage> {
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+    const limit = clampCommentsThreadLimit(opts.limit);
+    const previewLimit = clampCommentsReplyLimit(undefined, true);
+    const cursor = decodeCommentsRootCursor(opts.cursor);
+    const anchor = this.entityAnchorWhere(campaignId, entityType, entityId);
+
+    const [rootCountRow, commentCountRow] = await Promise.all([
+      this.db.select({ value: count() }).from(comments).where(and(anchor, isNull(comments.parentId))),
+      this.db.select({ value: count() }).from(comments).where(anchor),
+    ]);
+    const total = rootCountRow[0]?.value ?? 0;
+    const totalComments = commentCountRow[0]?.value ?? 0;
+
+    const rootConds = cursor ? and(anchor, isNull(comments.parentId), gt(comments.id, cursor.i)) : and(anchor, isNull(comments.parentId));
+    const rootRows = await this.db
+      .select()
+      .from(comments)
+      .where(rootConds)
+      .orderBy(asc(comments.id))
+      .limit(limit + 1);
+
+    const hasMore = rootRows.length > limit;
+    const pageRoots = hasMore ? rootRows.slice(0, limit) : rootRows;
+    const items: CommentThread[] = [];
+    for (const rootRow of pageRoots) {
+      items.push(await this.buildThreadPreview(rootRow, anchor, previewLimit));
+    }
+
+    const lastRoot = pageRoots[pageRoots.length - 1];
+    const nextCursor =
+      hasMore && lastRoot ? encodeCommentsCursor({ v: 1, m: 'root', i: lastRoot.id }) : null;
+    return { items, total, totalComments, hasMore, nextCursor, limit };
+  }
+
+  private async buildThreadPreview(
+    rootRow: typeof comments.$inferSelect,
+    anchor: ReturnType<CommentsService['entityAnchorWhere']>,
+    previewLimit: number,
+  ): Promise<CommentThread> {
+    const [replyCountRow, replyRows] = await Promise.all([
+      this.db
+        .select({ value: count() })
+        .from(comments)
+        .where(and(anchor, eq(comments.parentId, rootRow.id))),
+      this.db
+        .select()
+        .from(comments)
+        .where(and(anchor, eq(comments.parentId, rootRow.id)))
+        .orderBy(asc(comments.id))
+        .limit(previewLimit + 1),
+    ]);
+    const replyCount = replyCountRow[0]?.value ?? 0;
+    const replyHasMore = replyRows.length > previewLimit;
+    const previewReplies = replyHasMore ? replyRows.slice(0, previewLimit) : replyRows;
+    const lastPreview = previewReplies[previewReplies.length - 1];
+    return {
+      root: toDomain(rootRow),
+      replies: previewReplies.map(toDomain),
+      replyCount,
+      replyHasMore,
+      replyNextCursor:
+        replyHasMore && lastPreview
+          ? encodeCommentsCursor({ v: 1, m: 'reply', r: rootRow.id, i: lastPreview.id })
+          : null,
+    };
+  }
+
+  /**
+   * Additional replies for one root thread (issue #609). Oldest-first; continue
+   * with `cursor` from a previous `nextCursor` / inline `replyNextCursor`.
+   */
+  async listRepliesForRoot(
+    campaignId: number,
+    entityType: EntityTypeValue,
+    entityId: number,
+    rootId: number,
+    role: Role,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<CommentReplyPage> {
+    await this.assertAnchorVisible(campaignId, entityType, entityId, role);
+    const root = await this.getRowOrThrow(rootId, true);
+    if (
+      root.parentId !== null ||
+      root.campaignId !== campaignId ||
+      root.entityType !== entityType ||
+      root.entityId !== entityId
+    ) {
+      throw new NotFoundException(`Comment ${rootId} not found`);
+    }
+
+    const limit = clampCommentsReplyLimit(opts.limit);
+    const cursor = decodeCommentsReplyCursor(opts.cursor, rootId);
+    const anchor = this.entityAnchorWhere(campaignId, entityType, entityId);
+    const replyWhere = and(anchor, eq(comments.parentId, rootId));
+    const pageWhere = cursor ? and(replyWhere, gt(comments.id, cursor.i)) : replyWhere;
+
+    const [replyCountRow, fetched] = await Promise.all([
+      this.db.select({ value: count() }).from(comments).where(replyWhere),
+      this.db
+        .select()
+        .from(comments)
+        .where(pageWhere)
+        .orderBy(asc(comments.id))
+        .limit(limit + 1),
+    ]);
+    const replyCount = replyCountRow[0]?.value ?? 0;
+    const hasMore = fetched.length > limit;
+    const pageRows = hasMore ? fetched.slice(0, limit) : fetched;
+    const last = pageRows[pageRows.length - 1];
+    const nextCursor =
+      hasMore && last ? encodeCommentsCursor({ v: 1, m: 'reply', r: rootId, i: last.id }) : null;
+    return {
+      rootId,
+      items: pageRows.map(toDomain),
+      replyCount,
+      hasMore,
+      nextCursor,
+      limit,
+    };
   }
 
   async getRowOrThrow(id: number, includeDeleted = false) {
