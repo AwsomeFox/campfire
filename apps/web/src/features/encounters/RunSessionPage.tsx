@@ -74,6 +74,7 @@ import { VisibleToPlayersBar } from '../../components/VisibleToPlayersBar';
 import { useAnnounce } from '../../components/Announcer';
 import { useRollApplyDamageBridge } from '../../components/RollResultToastContext';
 import { useAiDmLiveActivity } from '../ai-dm/useAiDmLiveActivity';
+import { EncounterAiDriverPanel } from '../ai-dm/EncounterAiDriverPanel';
 import { AiDmPresenceTag, AiDmToolActivityRow } from '../ai-dm/AiDmActivityChip';
 import { resolveToolActivity, toolResource } from '../ai-dm/toolActivity';
 import { GameIcon } from '../../components/GameIcon';
@@ -1546,6 +1547,17 @@ export default function RunSessionPage() {
             <AiDmToolActivityRow key={toast.key} chip={toast.chip} at={toast.at} />
           ))}
         </div>
+      )}
+
+      {/* AI-DM driver dock (#427): transcript + composer + recovery without leaving tracker. */}
+      {liveActivity.mode === 'driver' && encounter && (
+        <EncounterAiDriverPanel
+          campaignId={cid}
+          encounterId={eid}
+          encounter={encounter}
+          isDm={isDm}
+          canCompose={canPlayerWrite}
+        />
       )}
 
       {encounter.status === 'ended' && <EndedSummary encounter={encounter} />}

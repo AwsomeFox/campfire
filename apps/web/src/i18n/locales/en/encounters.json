@@ -34,6 +34,12 @@
       "rollCheck": "Couldn't roll the check.",
       "resolveAction": "Couldn't resolve that action.",
       "applyAction": "Couldn't apply that action."
+    },
+    "driver": {
+      "toggle": "AI Driver",
+      "panelLabel": "AI Driver controls",
+      "transcriptLabel": "Driver transcript",
+      "openTable": "Open full table"
     }
   }
 }
