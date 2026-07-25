@@ -972,6 +972,10 @@ function BeatRow({
   const [branchLabel, setBranchLabel] = useState('');
   const [branchTarget, setBranchTarget] = useState<string>('');
   const [branchCreateError, setBranchCreateError] = useState<string | null>(null);
+  const [editingBranch, setEditingBranch] = useState<StoryBranch | null>(null);
+  const [editBranchLabel, setEditBranchLabel] = useState('');
+  const [editBranchTarget, setEditBranchTarget] = useState<string>('');
+  const [editBranchError, setEditBranchError] = useState<string | null>(null);
   const [editingLinks, setEditingLinks] = useState(false);
   const [editingContent, setEditingContent] = useState(false);
   const [contentDraft, setContentDraft] = useState<StorylineContentDraft>({ title: beat.title, prose: beat.body ?? '' });
@@ -998,6 +1002,7 @@ function BeatRow({
   const [branchDeleteError, setBranchDeleteError] = useState<{ id: number; message: string } | null>(null);
   const branchLabelRef = useRef<HTMLInputElement>(null);
   const branchTriggerRef = useRef<HTMLButtonElement>(null);
+  const editBranchLabelRef = useRef<HTMLInputElement>(null);
   const editTriggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
   // Issue #854: Enter confirming IME composition must not create a branch.
@@ -1195,6 +1200,55 @@ function BeatRow({
       // Issue #688: keep the branch on the page with a targeted retry so the author
       // isn't left wondering if the click registered.
       setBranchDeleteError({ id: branch.id, message: "Couldn't delete that branch. It's still here — try again." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startBranchEdit = (branch: StoryBranch) => {
+    setEditingBranch(branch);
+    setEditBranchLabel(branch.label);
+    setEditBranchTarget(branch.toBeatId != null ? String(branch.toBeatId) : '');
+    setEditBranchError(null);
+    requestAnimationFrame(() => editBranchLabelRef.current?.focus());
+  };
+
+  const cancelBranchEdit = () => {
+    const branch = editingBranch;
+    setEditingBranch(null);
+    setEditBranchError(null);
+    // Restore focus to the branch row container (stable id + tabIndex={-1}),
+    // not the edit button — the button is unmounted while the edit form is shown.
+    if (branch) {
+      requestAnimationFrame(() => {
+        document.getElementById(branchDomId(branch.id))?.focus();
+      });
+    }
+  };
+
+  const saveBranch = async () => {
+    const branch = editingBranch;
+    if (!branch || busy) return;
+    const label = editBranchLabel.trim();
+    if (!label) return;
+    setEditBranchError(null);
+    setBusy(true);
+    try {
+      await api.patch<StoryBranch>(`${API}/beats/${beat.id}/branches/${branch.id}`, {
+        label,
+        toBeatId: editBranchTarget ? Number(editBranchTarget) : null,
+      });
+      setEditingBranch(null);
+      await onChange(branchDomId(branch.id));
+      // The edit form unmounts on save; move focus to the updated branch row
+      // container so keyboard users keep their place.
+      requestAnimationFrame(() => {
+        document.getElementById(branchDomId(branch.id))?.focus();
+      });
+      announce(`Updated branch ${label} from ${beat.title}.`);
+    } catch {
+      setEditBranchError("Couldn't save the branch. Your edits have been kept — try again.");
+      requestAnimationFrame(() => editBranchLabelRef.current?.focus());
     } finally {
       setBusy(false);
     }
@@ -1428,6 +1482,97 @@ function BeatRow({
       {beat.branches.map((branch) => {
         const target = branch.toBeatId != null ? allBeats.get(branch.toBeatId) : undefined;
         const branchErr = branchDeleteError && branchDeleteError.id === branch.id ? branchDeleteError : null;
+        const isEditing = editingBranch?.id === branch.id;
+        if (isEditing) {
+          return (
+            <form
+              key={branch.id}
+              id={branchDomId(branch.id)}
+              role="group"
+              aria-label={`Edit branch ${branch.label} from ${beat.title}`}
+              style={{ marginLeft: 22, minWidth: 0 }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveBranch();
+              }}
+            >
+              <fieldset style={{ minWidth: 0 }}>
+                <legend style={{ marginBottom: 5, fontSize: 12, fontWeight: 600, overflowWrap: 'anywhere' }}>
+                  Edit branch from {beat.title}
+                </legend>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))',
+                    gap: 6,
+                    alignItems: 'end',
+                    minWidth: 0,
+                  }}
+                >
+                  <div className="field" style={{ minWidth: 0 }}>
+                    <label htmlFor={`edit-branch-label-${branch.id}`}>Trigger</label>
+                    <input
+                      ref={editBranchLabelRef}
+                      id={`edit-branch-label-${branch.id}`}
+                      className="input"
+                      value={editBranchLabel}
+                      maxLength={200}
+                      required
+                      aria-invalid={editBranchError ? true : undefined}
+                      aria-describedby={editBranchError ? `edit-branch-err-${branch.id}` : undefined}
+                      onChange={(event) => {
+                        setEditBranchLabel(event.target.value);
+                        setEditBranchError(null);
+                      }}
+                      style={{ fontSize: 12, minWidth: 0 }}
+                    />
+                  </div>
+                  <div className="field" style={{ minWidth: 0 }}>
+                    <label htmlFor={`edit-branch-target-${branch.id}`}>Target beat</label>
+                    <select
+                      id={`edit-branch-target-${branch.id}`}
+                      className="input"
+                      value={editBranchTarget}
+                      onChange={(e) => {
+                        setEditBranchTarget(e.target.value);
+                        setEditBranchError(null);
+                      }}
+                      style={{ fontSize: 12, width: '100%', minWidth: 0, maxWidth: '100%' }}
+                    >
+                      <option value="">No target (open branch)</option>
+                      {[...allBeats.entries()]
+                        .filter(([id]) => id !== beat.id)
+                        .map(([id, info]) => (
+                          <option key={id} value={id}>
+                            {info.arcTitle} · {info.title}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  <button type="submit" className="btn btn-ghost" style={{ fontSize: 11 }} disabled={busy || !editBranchLabel.trim()}>
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ fontSize: 11 }}
+                    disabled={busy}
+                    onClick={() => cancelBranchEdit()}
+                  >
+                    Cancel
+                  </button>
+                </div>
+                {editBranchError && (
+                  <div id={`edit-branch-err-${branch.id}`} style={{ marginTop: 6 }}>
+                    <ErrorNote message={editBranchError} />
+                  </div>
+                )}
+              </fieldset>
+            </form>
+          );
+        }
         return (
           <div
             key={branch.id}
@@ -1442,6 +1587,18 @@ function BeatRow({
             <span className="text-muted" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
               {target ? `→ ${target.title}` : branch.toBeatId != null ? '→ (unknown beat)' : '→ (open)'}
             </span>
+            {canDmWrite && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ fontSize: 10, padding: '0 4px' }}
+                disabled={busy}
+                aria-label={`Edit branch ${branch.label} from ${beat.title}`}
+                onClick={() => startBranchEdit(branch)}
+              >
+                ✎
+              </button>
+            )}
             {canDmWrite && (
               <button
                 type="button"
