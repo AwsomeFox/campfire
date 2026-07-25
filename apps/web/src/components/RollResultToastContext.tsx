@@ -86,7 +86,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
 
   const applyToast = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
     setRoll(r);
-    setRollApplyHandler((prev) => options?.onApply ?? applyHandlerRef.current ?? prev);
+    setRollApplyHandler((prev: ApplyDamageHandler | null) => options?.onApply ?? applyHandlerRef.current ?? prev);
   }, []);
 
   const showRoll = useCallback((r: DiceRoll, options?: ShowRollOptions) => {
