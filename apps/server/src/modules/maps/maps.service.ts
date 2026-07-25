@@ -133,6 +133,7 @@ export class MapsService {
     user: RequestUser,
     role: Role,
   ): Promise<GeneratedMapResult> {
+    await this.encounters.ensureMutable(encounterId);
     const result = await this.generateForCampaign(campaignId, params, user, role);
     await this.encounters.updateEncounter(
       encounterId,
