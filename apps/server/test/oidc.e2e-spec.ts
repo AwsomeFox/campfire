@@ -1,5 +1,4 @@
-import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import type { Readable } from 'node:stream';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -164,7 +163,7 @@ async function spawnAppOnce(
       })()
     : ['ignore', 'pipe', 'pipe'];
 
-  const child: ChildProcessByStdio<null, Readable, Readable> = spawn('node', [SERVER_DIST_ENTRY], {
+  const child: ChildProcess = spawn('node', [SERVER_DIST_ENTRY], {
     cwd: path.resolve(__dirname, '..'),
     env,
     stdio,
