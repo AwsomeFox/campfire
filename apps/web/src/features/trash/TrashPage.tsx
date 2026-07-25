@@ -3,7 +3,8 @@
  * (#116) promised but never built. Deleting an entity shows an Undo toast that says
  * "restore it from the campaign Trash"; this is that Trash. It lists the campaign's
  * soft-deleted child entities (GET /campaigns/:id/trash — DM-only) and offers a
- * one-click Restore (POST /<type>/:id/restore) so a mis-click is recoverable long
+ * one-click Restore (POST /<route>/:id/restore via TYPE_META — e.g. /sessions/:id/restore,
+ * /timeline/:id/restore for timeline events) so a mis-click is recoverable long
  * after the toast has expired.
  *
  * Route: /c/:campaignId/trash. Covers the entity types with a DM-gated restore route

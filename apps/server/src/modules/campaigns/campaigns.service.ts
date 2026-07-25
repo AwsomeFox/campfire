@@ -319,7 +319,8 @@ export class CampaignsService {
   /**
    * The per-campaign Trash (issue #269): every soft-deleted (issue #116) child entity
    * of this campaign, newest-trashed first, as lightweight {type,id,name,deletedAt} rows
-   * the Trash page renders and restores (POST /<type>/:id/restore). DM-only — gated in
+   * the Trash page renders and restores (POST /<route>/:id/restore — usually the plural
+   * resource name, with timeline_event -> /timeline/:id/restore). DM-only — gated in
    * the controller. Covers the entity types that both carry a `deleted_at` column AND
    * expose a DM-gated restore endpoint today: sessions, characters, quests, npcs,
    * locations, timeline events. Notes are deliberately excluded — their per-author/whisper visibility

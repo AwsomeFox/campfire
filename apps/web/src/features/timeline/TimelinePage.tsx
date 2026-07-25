@@ -651,6 +651,7 @@ export default function TimelinePage() {
                       ghost
                       onClick={() => setConfirmingDelete({ id: e.id, title: e.title })}
                       busy={deleting}
+                      disabled={busy || deleting}
                     >
                       Delete
                     </Btn>

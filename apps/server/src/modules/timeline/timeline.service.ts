@@ -206,9 +206,10 @@ export class TimelineService {
    */
   async removeEvent(id: number, user: RequestUser, role: Role): Promise<void> {
     const existing = await this.getEventRowOrThrow(id);
+    const ts = nowIso();
     await this.db
       .update(timelineEvents)
-      .set({ deletedAt: nowIso(), updatedAt: nowIso() })
+      .set({ deletedAt: ts, updatedAt: ts })
       .where(eq(timelineEvents.id, id));
     await this.audit.log({
       actor: auditActor(user),
