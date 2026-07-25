@@ -137,7 +137,6 @@ describe('co-DM authoring — draft → proposal → approve (e2e)', () => {
       .send({ title: 'Foreign arc' });
     expect(otherArc.status).toBe(201);
 
-    h.script({ text: JSON.stringify({ title: 'Sneaky beat', body: 'Should not land.' }) });
     const res = await draft({ target: 'beat', prompt: 'the next beat', arcId: otherArc.body.id });
     expect(res.status).toBe(400);
     expect(res.body.message).toContain('does not belong to this campaign');
