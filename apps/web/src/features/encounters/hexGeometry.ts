@@ -294,15 +294,24 @@ export function hexPolygons(
   const cellPx = cal.cellWpx;
   if (cellPx <= 2 || surfaceW <= 0 || surfaceH <= 0) return [];
 
-  const size = hexSizeFromCellPx(cellPx, orientation);
-  const rowH = orientation === 'pointy' ? 1.5 * size : SQRT3 * size;
-  const cols = Math.ceil(surfaceW / cellPx) + 2;
-  const rows = Math.ceil(surfaceH / rowH) + 2;
-  if (cols * rows > 3000) return [];
+  const corners = [
+    { x: 0, y: 0 },
+    { x: surfaceW, y: 0 },
+    { x: 0, y: surfaceH },
+    { x: surfaceW, y: surfaceH },
+  ].map((p) => {
+    const grid = toGridFrame(p, cal);
+    return axialRound(layerPxToAxialFrac(grid, cellPx, orientation));
+  });
+  const minQ = Math.min(...corners.map((c) => c.q)) - 1;
+  const maxQ = Math.max(...corners.map((c) => c.q)) + 1;
+  const minR = Math.min(...corners.map((c) => c.r)) - 1;
+  const maxR = Math.max(...corners.map((c) => c.r)) + 1;
+  if ((maxQ - minQ + 1) * (maxR - minR + 1) > 3000) return [];
 
   const out: string[] = [];
-  for (let r = -1; r <= rows; r++) {
-    for (let q = -1; q <= cols; q++) {
+  for (let r = minR; r <= maxR; r++) {
+    for (let q = minQ; q <= maxQ; q++) {
       const verts = hexVerticesGridFrac({ q, r }, cellPx, orientation);
       const layerVerts = verts.map(([gx, gy]) => fromGridFrame({ x: gx, y: gy }, cal));
       out.push(layerVerts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
@@ -352,9 +361,10 @@ export function pointInHexCircleAoe(
   mapRect: Rect,
   orientation: HexOrientation,
 ): boolean {
+  const radius = Math.ceil(radiusCells);
   const a = mapPercentToAxial(pt, cal, mapRect, orientation);
   const b = mapPercentToAxial(origin, cal, mapRect, orientation);
-  return hexDistance(a, b) <= radiusCells;
+  return hexDistance(a, b) <= radius;
 }
 
 /** Keyboard nudge: one hex step in the arrow direction (layer pixels). */
@@ -366,12 +376,20 @@ export function hexKeyboardStepPx(
   const size = hexSizeFromCellPx(cellPx, orientation);
   if (!(size > 0)) return null;
   // Axial neighbour directions (pointy-top); flat-top uses the same axial deltas.
-  const dirs: Record<string, AxialCoord> = {
-    ArrowRight: { q: 1, r: 0 },
-    ArrowLeft: { q: -1, r: 0 },
-    ArrowUp: orientation === 'pointy' ? { q: 0, r: -1 } : { q: 1, r: -1 },
-    ArrowDown: orientation === 'pointy' ? { q: 0, r: 1 } : { q: -1, r: 1 },
-  };
+  const dirs: Record<string, AxialCoord> =
+    orientation === 'pointy'
+      ? {
+          ArrowRight: { q: 1, r: 0 },
+          ArrowLeft: { q: -1, r: 0 },
+          ArrowUp: { q: 0, r: -1 },
+          ArrowDown: { q: 0, r: 1 },
+        }
+      : {
+          ArrowRight: { q: 1, r: 0 },
+          ArrowLeft: { q: -1, r: 0 },
+          ArrowUp: { q: 0, r: -1 },
+          ArrowDown: { q: 0, r: 1 },
+        };
   const dir = dirs[key];
   if (!dir) return null;
   const origin = axialToLayerPxFrac({ q: 0, r: 0 }, cellPx, orientation);

@@ -2585,8 +2585,8 @@ function BattleMap({
   function commitFogReveal(start: MapPoint, end: MapPoint): void {
     let rect = rectFromCorners(start, end);
     if (rect.w >= 1 && rect.h >= 1) {
-      if (gridOn && gridType === 'hex' && calibration) {
-        rect = snapFogRectToHexGrid(rect, calibration, mapRect!, hexOrientation);
+      if (gridOn && gridType === 'hex' && calibration && mapRect) {
+        rect = snapFogRectToHexGrid(rect, calibration, mapRect, hexOrientation);
       }
       const next: FogState = { enabled: true, revealed: [...(fog?.revealed ?? []), rect].slice(-500) };
       onSetFog(next);
