@@ -57,9 +57,11 @@ describe('ProposalsService.approve (issue #681)', () => {
       remove: jest.fn(),
     };
 
+    const audit = { log: jest.fn() };
+
     const service = new ProposalsService(
       records as unknown as ProposalRecordsService,
-      { log: jest.fn() } as never,
+      audit as never,
       { notifyUser: jest.fn() } as never,
       quests as never,
       {} as never,
@@ -72,7 +74,7 @@ describe('ProposalsService.approve (issue #681)', () => {
       {} as never,
     );
 
-    return { service, records, quests, existing };
+    return { service, records, quests, audit, existing };
   }
 
   it('rejects stale update targets with STALE_PROPOSAL_TARGET before claiming', async () => {
@@ -115,10 +117,14 @@ describe('ProposalsService.approve (issue #681)', () => {
   });
 
   it('does not revert to pending when finalize fails after a successful entity write', async () => {
-    const { service, records } = makeService({ finalizeThrows: true });
+    const { service, records, audit } = makeService({ finalizeThrows: true });
 
-    await expect(service.approve(9, {}, user, role)).rejects.toThrow('simulated finalize failure');
+    const result = await service.approve(9, {}, user, role);
+    expect(result.entityId).toBe(100);
     expect(records.revertToPending).not.toHaveBeenCalled();
     expect(records.finalizeApproved).toHaveBeenCalled();
+    expect(audit.log).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'proposal.approve.finalize_failed', entityId: 9 }),
+    );
   });
 });

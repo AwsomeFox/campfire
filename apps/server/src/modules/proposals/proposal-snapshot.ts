@@ -1,13 +1,17 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 
-/** Stable JSON for hashing — sorted object keys, deterministic arrays. */
+/** Stable JSON for hashing — sorted object keys, deterministic arrays. Omits undefined values. */
 export function stableStringify(value: unknown): string {
+  if (value === undefined) return 'null';
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+  return `{${keys
+    .filter((k) => obj[k] !== undefined)
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(',')}}`;
 }
 
 /** sha256 hex digest of a proposal base snapshot (issue #681). */
@@ -69,6 +73,8 @@ export function assertProposalTargetFresh(input: {
   const expectedHash =
     input.baseSnapshotHash ??
     (input.baseSnapshot !== null ? hashProposalSnapshot(input.baseSnapshot) : null);
+  // Legacy rows (pre-#681) lack baseSnapshotHash; fall back to hashing the stored
+  // baseSnapshot if present. Creates without a snapshot return null here and skip the check.
   if (expectedHash === null) return;
 
   const currentHash = hashProposalSnapshot(input.currentSnapshot);

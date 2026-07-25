@@ -315,8 +315,12 @@ export class ProposalsService {
       } else if (action === 'create') {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const created = await (service as any).create(existing.campaignId, validated, user, role);
-        if (created && typeof created.id === 'number') {
-          createdEntityId = created.id;
+        const createdId = created?.id;
+        if (typeof createdId === 'number') {
+          createdEntityId = createdId;
+        } else if (typeof createdId === 'string' && createdId !== '') {
+          const parsed = Number(createdId);
+          if (Number.isFinite(parsed)) createdEntityId = parsed;
         }
       } else {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -325,16 +329,32 @@ export class ProposalsService {
     } catch (err) {
       // The entity write failed — undo the claim so the proposal returns to pending
       // rather than being stranded as approved with no write applied.
-      await this.records.revertToPending(id);
+      try {
+        await this.records.revertToPending(id);
+      } catch {
+        // Revert failed; preserve and surface the original entity-write error.
+      }
       throw err;
     }
 
     // Finalize bookkeeping only after a successful entity write. Failures here must
     // not revert the claim — the mutation already landed (issue #85 / #681).
-    this.records.finalizeApproved(id, user, role, {
-      ...(amended ? { payload: validated! } : {}),
-      ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
-    });
+    try {
+      this.records.finalizeApproved(id, user, role, {
+        ...(amended ? { payload: validated! } : {}),
+        ...(createdEntityId !== null ? { entityId: createdEntityId } : {}),
+      });
+    } catch (finalizeErr) {
+      await this.audit.log({
+        actor: auditActor(user),
+        actorRole: role,
+        action: 'proposal.approve.finalize_failed',
+        entityType: existing.entityType,
+        entityId: id,
+        campaignId: existing.campaignId,
+        detail: String(finalizeErr),
+      });
+    }
 
     await this.notifyProposerOfResolution(resolved, 'approved', user);
 

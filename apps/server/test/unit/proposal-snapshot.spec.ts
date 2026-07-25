@@ -13,6 +13,10 @@ describe('proposal-snapshot (issue #681)', () => {
     expect(stableStringify({ b: 1, a: 2 })).toBe('{"a":2,"b":1}');
   });
 
+  it('stableStringify omits undefined object values', () => {
+    expect(stableStringify({ a: 1, b: undefined, c: 2 })).toBe('{"a":1,"c":2}');
+  });
+
   it('hashProposalSnapshot is stable for equivalent objects', () => {
     const a = hashProposalSnapshot({ title: 'A', id: 1, updatedAt: 't' });
     const b = hashProposalSnapshot({ id: 1, updatedAt: 't', title: 'A' });
