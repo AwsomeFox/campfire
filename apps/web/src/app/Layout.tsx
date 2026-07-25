@@ -432,7 +432,9 @@ function LayoutContent() {
   const { t } = useTranslation();
   const { me, isAdmin, roleIn, staleIdentity, lastSyncedAt, refresh: refreshAuth, logout } = useAuth();
   const [connectionSync, setConnectionSync] = useState(getConnectionSyncSnapshot);
-  useEffect(() => subscribeConnectionSync(() => setConnectionSync(getConnectionSyncSnapshot())), []);
+  useEffect(() => {
+    return subscribeConnectionSync(() => setConnectionSync(getConnectionSyncSnapshot()));
+  }, []);
   const formattingLocale = useFormattingLocale();
   const clearAnnouncements = useClearAnnouncements();
   const params = useParams<{ campaignId: string }>();

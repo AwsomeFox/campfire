@@ -18,6 +18,19 @@ import {
   isReadTimeout,
 } from './apiTimeouts';
 import { noteReadConnecting, noteReadOffline, noteReadStale, noteReadSuccess } from './connectionSync';
+
+function isBrowserOffline(): boolean {
+  return typeof navigator !== 'undefined' && !navigator.onLine;
+}
+
+/** Map a failed read to the global connection-sync banner state (#581). */
+function noteReadFailure(error: unknown): void {
+  if (isReadTimeout(error) || (isTransientError(error) && !isBrowserOffline())) {
+    noteReadStale();
+  } else if (!(error instanceof ApiError)) {
+    noteReadOffline();
+  }
+}
 import { noteUnauthorizedResponse } from './sessionExpiry';
 import { registerInFlightAction } from './reloadGuard';
 
@@ -192,10 +205,7 @@ async function request<T>(path: string, init?: RequestInit & { json?: unknown })
     if (isRead) noteReadSuccess();
     return parsed;
   } catch (error) {
-    if (isRead && !init?.signal?.aborted) {
-      if (isReadTimeout(error) || isTransientError(error)) noteReadStale();
-      else if (!(error instanceof ApiError)) noteReadOffline();
-    }
+    if (isRead && !init?.signal?.aborted) noteReadFailure(error);
     throw error;
   } finally {
     clearInFlight?.();
@@ -244,10 +254,7 @@ export async function getWithHeaders<T>(path: string, init?: RequestInit): Promi
     noteReadSuccess();
     return { data, headers: res.headers };
   } catch (error) {
-    if (!init?.signal?.aborted) {
-      if (isReadTimeout(error) || isTransientError(error)) noteReadStale();
-      else if (!(error instanceof ApiError)) noteReadOffline();
-    }
+    if (!init?.signal?.aborted) noteReadFailure(error);
     throw error;
   }
 }

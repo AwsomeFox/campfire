@@ -123,11 +123,10 @@ export async function fetchWithBudget(
     clearTimers.push(armTimer(readBudget.overallMs, 'overall', budgetController, onFire));
   } else if (kind === 'write') {
     const writeBudget = budget as typeof API_WRITE_BUDGET;
-    clearTimers.push(armTimer(writeBudget.connectMs, 'connect', budgetController, onFire));
+    // fetch exposes no connect/first-byte hook — overallMs bounds the full mutation.
     clearTimers.push(armTimer(writeBudget.overallMs, 'write-overall', budgetController, onFire));
   } else if (kind === 'upload') {
     const uploadBudget = budget as typeof API_UPLOAD_BUDGET;
-    clearTimers.push(armTimer(uploadBudget.connectMs, 'connect', budgetController, onFire));
     clearTimers.push(armTimer(uploadBudget.overallMs, 'upload-overall', budgetController, onFire));
   } else if (kind === 'stream') {
     const streamBudget = budget as typeof API_STREAM_BUDGET;

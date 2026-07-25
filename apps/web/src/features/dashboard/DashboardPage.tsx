@@ -63,6 +63,8 @@ export default function DashboardPage() {
   const liveEncounter = useLiveEncounter();
 
   const load = useCallback(async (opts?: { background?: boolean }) => {
+    if (opts?.background && loadAbortRef.current) return;
+
     const requestId = ++requestSequence.current;
     loadAbortRef.current?.abort();
     const controller = new AbortController();
@@ -98,8 +100,10 @@ export default function DashboardPage() {
         if (hasProjection && (timedOut || transient)) {
           setSummaryStale(true);
           setFailure(null);
-          // Background revalidation after surfacing last-known data (#581).
-          void load({ background: true });
+          // One background revalidation after surfacing last-known data (#581).
+          if (!opts?.background) {
+            setTimeout(() => void load({ background: true }), 0);
+          }
           return;
         }
         setFailure({
@@ -138,7 +142,7 @@ export default function DashboardPage() {
 
   // Keep the summary live while the tab is open (issue #113): the quest/party/notes
   // cards have no SSE event, so poll them ~5s and pause when the tab is hidden.
-  usePollWhileVisible(() => void load(), POLL_MS, Number.isFinite(id));
+  usePollWhileVisible(() => void load({ background: true }), POLL_MS, Number.isFinite(id));
 
   // One campaign stream invalidates each affected authoritative read. Scheduling
   // events refetch the whole dashboard projection; this is also the reconnect
