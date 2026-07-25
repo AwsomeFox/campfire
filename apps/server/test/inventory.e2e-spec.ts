@@ -580,7 +580,7 @@ describe('inventory & treasury (e2e)', () => {
       expect(detail.snapshot).toMatchObject({ name: 'Signed contract', qty: 3, notes: 'Do not lose' });
     });
 
-    it('only dm, the deleting player, or the owning player may restore an item (#551)', async () => {
+    it('only dm, the deleting player, or the owning player may restore a character-owned item (#551)', async () => {
       const server = ctx.app.getHttpServer();
 
       const created = await request(server)

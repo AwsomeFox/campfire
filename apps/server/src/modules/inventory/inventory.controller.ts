@@ -120,7 +120,7 @@ export class InventoryController {
 
   @Post(':id/restore')
   @HttpCode(200)
-  @ApiOperation({ summary: 'Restore a soft-deleted inventory item', description: 'Restores the item from trash to its original owner (party stash if the character is gone). player role required; restricted to dm, the deleting player, or the owning player.' })
+  @ApiOperation({ summary: 'Restore a soft-deleted inventory item', description: 'Restores the item from trash to its original owner (party stash if the character is gone). player role required; restricted to dm, the deleting player, or the owning player. Any player may restore party-stash items.' })
   @ApiResponse({ status: 200, description: 'Restored item.' })
   async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.inventory.getRowOrThrow(id, { includeDeleted: true });

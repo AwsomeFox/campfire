@@ -92,6 +92,10 @@ export default function InventoryPage() {
       const trashed = await api.get<InventoryItem[]>(`${API}/campaigns/${id}/inventory/trash`);
       setTrashItems(trashed);
     } catch (err) {
+      // Reset to an empty list and close the trash section so the user isn't
+      // left staring at a perpetual loading skeleton with no retry path.
+      setTrashItems([]);
+      setShowTrash(false);
       setError(translateApiError(err, t, { fallbackKey: 'inventory.errors.load' }));
     }
   }, [id]);

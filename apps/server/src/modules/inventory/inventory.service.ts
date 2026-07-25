@@ -432,8 +432,13 @@ export class InventoryService {
     const [row] = await this.db
       .update(inventoryItems)
       .set({ deletedAt: ts, deletedBy: actor, updatedAt: ts })
-      .where(eq(inventoryItems.id, id))
+      .where(and(eq(inventoryItems.id, id), isNull(inventoryItems.deletedAt)))
       .returning();
+    if (!row) {
+      // Another request already tombstoned this item — treat as already deleted
+      // rather than overwriting the existing tombstone or logging a duplicate.
+      throw new ConflictException('Item is already deleted');
+    }
 
     const domain = toDomain(row);
     await this.audit.log({
