@@ -693,20 +693,18 @@ describe('mcp endpoint (e2e, real sessions + PATs)', () => {
     const hidden = parseResult(hiddenRes) as { id: number };
 
     // dm sees both, with the secret.
-    const dmList = parseResult(await dmClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as Array<{
-      id: number;
-      dmSecret: string;
-    }>;
-    expect(dmList.some((e) => e.id === hidden.id)).toBe(true);
-    expect(dmList.find((e) => e.id === visible.id)?.dmSecret).toBe('it is an omen');
+    const dmPage = parseResult(await dmClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as {
+      items: Array<{ id: number; dmSecret: string }>;
+    };
+    expect(dmPage.items.some((e) => e.id === hidden.id)).toBe(true);
+    expect(dmPage.items.find((e) => e.id === visible.id)?.dmSecret).toBe('it is an omen');
 
     // viewer: hidden event dropped wholesale, dmSecret stripped on the visible one.
-    const viewerList = parseResult(await viewerClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as Array<{
-      id: number;
-      dmSecret: string;
-    }>;
-    expect(viewerList.some((e) => e.id === hidden.id)).toBe(false);
-    expect(viewerList.find((e) => e.id === visible.id)?.dmSecret).toBe('');
+    const viewerPage = parseResult(await viewerClient.callTool({ name: 'list_timeline', arguments: { campaignId } })) as {
+      items: Array<{ id: number; dmSecret: string }>;
+    };
+    expect(viewerPage.items.some((e) => e.id === hidden.id)).toBe(false);
+    expect(viewerPage.items.find((e) => e.id === visible.id)?.dmSecret).toBe('');
 
     // a viewer fetching the hidden event by id 404s (indistinguishable from nonexistent).
     const denied = await viewerClient.callTool({ name: 'get_timeline_event', arguments: { eventId: hidden.id } });

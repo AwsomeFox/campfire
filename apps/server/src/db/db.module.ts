@@ -1033,6 +1033,19 @@ function migrateEncountersTableForHidden(sqlite: Database.Database): void {
   sqlite.exec('ALTER TABLE encounters ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0');
 }
 
+/** Boss-fight turn scheduling — lair slot at initiative 20 (issue #618). */
+function migrateEncountersTableForBossTurnPhase(sqlite: Database.Database): void {
+  const hasEncountersTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='encounters'")
+    .get();
+  if (!hasEncountersTable) return;
+
+  const columns = sqlite.prepare('PRAGMA table_info(encounters)').all() as Array<{ name: string }>;
+  const has = (name: string) => columns.some((c) => c.name === name);
+  if (!has('turn_phase')) sqlite.exec("ALTER TABLE encounters ADD COLUMN turn_phase TEXT NOT NULL DEFAULT 'combatant'");
+  if (!has('lair_resume_combatant_id')) sqlite.exec('ALTER TABLE encounters ADD COLUMN lair_resume_combatant_id INTEGER');
+}
+
 /**
  * Migration for DBs created before first-class factions (issue #221): `npcs.faction_id`
  * didn't exist. Plain nullable ADD COLUMN — no table rebuild needed, same shape as
@@ -2423,6 +2436,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0082_ai_dm_seats_proactive_settings', run: migrateAiDmSeatsTableForProactiveSettings },
   { name: '0083_users_time_format', run: migrateUsersTableForTimeFormat },
   { name: '0084_hot_history_composite_indexes', run: migrateHotHistoryCompositeIndexes },
+  { name: '0085_encounters_boss_turn_phase', run: migrateEncountersTableForBossTurnPhase },
 ];
 
 /**
