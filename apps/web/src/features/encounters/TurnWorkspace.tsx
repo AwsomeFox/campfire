@@ -32,6 +32,8 @@ interface TurnWorkspaceProps {
   currentCombatantId: number | null;
   isDm: boolean;
   ruleSystem?: string | null;
+  /** When true, conflict-prone turn controls stay disabled (issue #471). */
+  actionsDisabled?: boolean;
   onRollDeathSave?: (combatant: { id: number; name: string }) => void;
   onPatchCombatant?: (combatantId: number, patch: Record<string, unknown>) => void;
 }
@@ -83,6 +85,7 @@ export function TurnWorkspace({
   currentCombatantId,
   isDm,
   ruleSystem,
+  actionsDisabled = false,
   onRollDeathSave,
   onPatchCombatant,
 }: TurnWorkspaceProps) {
@@ -159,6 +162,7 @@ export function TurnWorkspace({
 
   if (!turn || turn.status !== 'running' || !turn.current) return null;
   const busy = endTurn.isPending || turnState.isPending;
+  const controlsDisabled = busy || actionsDisabled;
   const isDying = turn.current.deathState === 'dying';
 
   return (
@@ -194,7 +198,7 @@ export function TurnWorkspace({
               className="btn btn-primary min-h-[44px] min-w-[44px] px-4 py-2 font-bold text-sm flex items-center gap-1.5"
               data-testid="turn-roll-death-save"
               aria-label={`Roll a death save for ${turn.current.name}`}
-              disabled={busy}
+              disabled={controlsDisabled}
               onClick={() => {
                 if (onRollDeathSave && turn.current) {
                   onRollDeathSave({ id: turn.current.combatantId, name: turn.current.name });
@@ -229,7 +233,7 @@ export function TurnWorkspace({
               <SlotChip
                 key={slot.key}
                 slot={slot}
-                disabled={busy}
+                disabled={controlsDisabled}
                 onUse={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: 5 } : { useSlot: slot.key })}
                 onRelease={() => turnState.mutate(slot.kind === 'movement' ? { moveFt: -5 } : { releaseSlot: slot.key })}
               />
@@ -252,7 +256,7 @@ export function TurnWorkspace({
           Concentration:{' '}
           <span className="text-white">{turn.concentration ?? 'none'}</span>
           {turn.concentration && (
-            <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px] ml-1" disabled={busy} onClick={() => turnState.mutate({ concentration: null })}>
+            <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px] ml-1" disabled={controlsDisabled} onClick={() => turnState.mutate({ concentration: null })}>
               clear
             </button>
           )}
@@ -269,7 +273,7 @@ export function TurnWorkspace({
                 <span className="text-white">{e.name}</span>
                 {e.roundsRemaining != null && <span className="tag tag-neutral text-[11px]">{e.roundsRemaining} rd</span>}
                 {e.saveAbility && <span className="text-[11px]">save: {e.saveAbility}{e.saveDc != null ? ` DC ${e.saveDc}` : ''}</span>}
-                <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]" disabled={busy} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
+                <button type="button" className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]" disabled={controlsDisabled} onClick={() => turnState.mutate({ removeEffectId: e.id })}>
                   remove
                 </button>
               </li>
@@ -332,7 +336,7 @@ export function TurnWorkspace({
       {/* End turn — a player may end their own turn when allowed; the DM always may. */}
       <div className="flex items-center gap-2 flex-wrap">
         {turn.canEndTurn ? (
-          <Btn disabled={busy} onClick={() => endTurn.mutate()}>
+          <Btn disabled={controlsDisabled} onClick={() => endTurn.mutate()}>
             End turn →
           </Btn>
         ) : turn.isYourTurn && turn.dmControlsTurns ? (

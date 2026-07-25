@@ -53,8 +53,11 @@
       "noCalendar": "No session on the calendar",
       "noCalendarHintDm": "Use \"+ Schedule session\" to pick the next game night.",
       "noCalendarHintPlayer": "Your DM hasn't scheduled the next session yet.",
-      "shareInactiveTitle": "This share link is no longer active",
-      "shareInactiveHint": "It may have been revoked, or the recap was removed. Ask your DM for a fresh link."
+      "shareLoading": "Loading recap…",
+      "shareInactiveTitle": "This recap link isn't available",
+      "shareInactiveHint": "Check the link for typos, or ask your game master for a new one.",
+      "shareInactiveHome": "Go to Campfire",
+      "shareInactiveSignIn": "Sign in"
     }
   }
 }

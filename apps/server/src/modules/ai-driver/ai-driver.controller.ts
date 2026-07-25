@@ -108,6 +108,15 @@ const AiDmSecretApprovalRequest = z
   .strict();
 class AiDmSecretApprovalDto extends createZodDto(AiDmSecretApprovalRequest) {}
 
+/** Approve or reject a queued confirm-policy tool call (POST /ai-dm/tool-confirmation, #474). */
+const AiDmToolConfirmationRequest = z
+  .object({
+    action: z.enum(['approve', 'reject']).describe('Execute the queued tool, or discard it.'),
+    confirmationId: z.string().min(1).max(120).describe('The pending confirmation id returned to the model.'),
+  })
+  .strict();
+class AiDmToolConfirmationDto extends createZodDto(AiDmToolConfirmationRequest) {}
+
 const HEARTBEAT_MS = 25_000;
 
 /**
@@ -356,6 +365,36 @@ export class AiDriverController {
       return this.driver.grantSecretReadApproval(id, user, body.tool, body.entityId, body.note, role);
     }
     return toPublicAiDmSessionState(await this.driver.revokeSecretReadApproval(id, user, body.tool, body.entityId, role));
+  }
+
+  @Get('tool-confirmations')
+  @ApiOperation({
+    summary: 'List pending confirm-policy tool calls',
+    description:
+      'DM only. Returns queued live-play tool calls awaiting DM approval before execution (#474). ' +
+      'Each entry includes durable actor/provenance (seat actor + triggering player).',
+  })
+  @ApiResponse({ status: 200, description: 'Pending tool confirmations.' })
+  async listToolConfirmations(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return this.driver.listPendingToolConfirmations(id);
+  }
+
+  @Post('tool-confirmation')
+  @ApiOperation({
+    summary: 'Approve or reject a queued confirm-policy tool call',
+    description:
+      'DM only. `action:approve` executes the stored tool args under the seat principal; `action:reject` discards it. ' +
+      'Irreversible live-play tools (end_encounter, remove_combatant, award_xp, level_up_character, …) are queued during live play.',
+  })
+  @ApiResponse({ status: 201, description: 'The resolved confirmation (and tool result when approved).' })
+  async toolConfirmation(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: AiDmToolConfirmationDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireRole(user, id, 'dm');
+    return this.driver.resolveToolConfirmation(id, user, body.confirmationId, body.action, role);
   }
 
   @Sse('stream')
