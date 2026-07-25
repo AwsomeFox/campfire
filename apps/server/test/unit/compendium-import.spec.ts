@@ -70,7 +70,7 @@ describe('compendium-import (unit)', () => {
     expect(resolved.ruleEntryId).toBeNull();
     expect(resolved.ignoredLegacyId).toBe(true);
 
-    resolution.set(`${ref.packSlug}/${ref.entrySlug}`, 99);
+    resolution.set(`${ref.packSlug}/${ref.entryType}/${ref.entrySlug}`, 99);
     const fromRef = resolveImportedCombatantRuleEntryId(
       { compendiumRef: ref, ruleEntryId: 5, name: 'Goblin' },
       resolution,
@@ -82,7 +82,7 @@ describe('compendium-import (unit)', () => {
 
   it('detach mode maps unresolved refs to null without using numeric ids', () => {
     const ref = buildCompendiumRef(goblin, pack);
-    const resolution = new Map<string, number | null>([[`${ref.packSlug}/${ref.entrySlug}`, null]]);
+    const resolution = new Map<string, number | null>([[`${ref.packSlug}/${ref.entryType}/${ref.entrySlug}`, null]]);
     const detached = resolveImportedCombatantRuleEntryId({ compendiumRef: ref, name: 'Goblin' }, resolution);
     expect(detached.ruleEntryId).toBeNull();
     expect(detached.detached).toBe(true);

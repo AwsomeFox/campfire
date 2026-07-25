@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import type {
   CampaignImportPreflight,
   CompendiumDependency,
@@ -91,8 +91,8 @@ const PACK_INSTALL_SOURCE_HINTS: Record<string, string> = {
   'ironsworn-starforged': 'datasworn',
 };
 
-export function compendiumRefKey(ref: Pick<CompendiumRef, 'packSlug' | 'entrySlug'>): string {
-  return `${ref.packSlug}/${ref.entrySlug}`;
+export function compendiumRefKey(ref: Pick<CompendiumRef, 'packSlug' | 'entryType' | 'entrySlug'>): string {
+  return `${ref.packSlug}/${ref.entryType}/${ref.entrySlug}`;
 }
 
 export function parseCompendiumRef(raw: unknown): CompendiumRef | null {
@@ -219,9 +219,24 @@ export async function preflightCompendiumImport(
   const packBySlug = new Map(packRows.map((p) => [p.slug, p]));
   const depBySlug = new Map(exportDependencies.map((d) => [d.packSlug, d]));
 
+  const entrySlugsByPack = new Map<string, Set<string>>();
+  for (const ref of refs) {
+    let slugs = entrySlugsByPack.get(ref.packSlug);
+    if (!slugs) {
+      slugs = new Set();
+      entrySlugsByPack.set(ref.packSlug, slugs);
+    }
+    slugs.add(ref.entrySlug);
+  }
+
   const entryRowsByPack = new Map<number, RuleEntryRow[]>();
   for (const pack of packRows) {
-    const rows = await db.select().from(ruleEntries).where(eq(ruleEntries.packId, pack.id));
+    const neededSlugs = entrySlugsByPack.get(pack.slug);
+    if (!neededSlugs || neededSlugs.size === 0) continue;
+    const rows = await db
+      .select()
+      .from(ruleEntries)
+      .where(and(eq(ruleEntries.packId, pack.id), inArray(ruleEntries.slug, [...neededSlugs])));
     entryRowsByPack.set(pack.id, rows);
   }
 
@@ -261,29 +276,29 @@ export async function preflightCompendiumImport(
     }
 
     const entries = entryRowsByPack.get(pack.id) ?? [];
-    const entry = entries.find((e) => e.slug === ref.entrySlug);
+    const entry = entries.find((e) => e.slug === ref.entrySlug && e.type === ref.entryType);
     if (!entry) {
-      references.push({
-        compendiumRef: ref,
-        combatantName: item.combatantName,
-        status: 'missing_entry',
-        resolvedEntryId: null,
-        expectedContentHash: ref.contentHash,
-        installHint: installHintFromPack(pack),
-      });
-      continue;
-    }
-
-    if (entry.type !== ref.entryType) {
-      references.push({
-        compendiumRef: ref,
-        combatantName: item.combatantName,
-        status: 'type_mismatch',
-        resolvedEntryId: null,
-        expectedContentHash: ref.contentHash,
-        actualContentHash: computeRuleEntryContentHash(entry),
-        installHint: installHintFromPack(pack),
-      });
+      const wrongTypeEntry = entries.find((e) => e.slug === ref.entrySlug);
+      if (wrongTypeEntry) {
+        references.push({
+          compendiumRef: ref,
+          combatantName: item.combatantName,
+          status: 'type_mismatch',
+          resolvedEntryId: null,
+          expectedContentHash: ref.contentHash,
+          actualContentHash: computeRuleEntryContentHash(wrongTypeEntry),
+          installHint: installHintFromPack(pack),
+        });
+      } else {
+        references.push({
+          compendiumRef: ref,
+          combatantName: item.combatantName,
+          status: 'missing_entry',
+          resolvedEntryId: null,
+          expectedContentHash: ref.contentHash,
+          installHint: installHintFromPack(pack),
+        });
+      }
       continue;
     }
 
@@ -316,7 +331,6 @@ export async function preflightCompendiumImport(
   );
   const canImportDetached = references.every((r) => {
     if (r.status === 'resolved') return true;
-    if (r.status === 'legacy_numeric_id') return true;
     if (!r.compendiumRef) return false;
     return snapshotKeys.has(compendiumRefKey(r.compendiumRef));
   });
