@@ -29,6 +29,9 @@ export const campaigns = sqliteTable('campaigns', {
   // does NOT flip it back — deliberate reactivation via the invites policy
   // endpoint is required. Nullable in older DBs pre-migration; see db.module.ts.
   publicInvitesEnabled: integer('public_invites_enabled', { mode: 'boolean' }).notNull().default(true),
+  // Issue #635: AI narration output language (Driver / co-DM / Scribe). Distinct from
+  // the client UI locale. Nullable in older DBs pre-migration; see db.module.ts.
+  narrationLanguage: text('narration_language').notNull().default('en'),
   sessionCount: integer('session_count').notNull().default(0),
   // Slug of the installed rule pack (see rulePacks.slug) powering this campaign, or '' if unset.
   // Nullable in older DBs pre-migration; see db/db.module.ts ALTER TABLE note.
@@ -872,6 +875,9 @@ export const encounters = sqliteTable('encounters', {
   // Identity-based turn pointer (issue #49) — the combatant whose turn it is,
   // independent of positional shuffling on add/remove. null when not running/empty.
   currentCombatantId: integer('current_combatant_id'),
+  // Boss-fight scheduling (issue #618): 'combatant' | 'lair' (initiative count 20 slot).
+  turnPhase: text('turn_phase').notNull().default('combatant'),
+  lairResumeCombatantId: integer('lair_resume_combatant_id'),
   // Optional where/why/when links (issue #126) + battle map (issue #39). Nullable;
   // added by migration on older DBs (see db/db.module.ts).
   locationId: integer('location_id'),

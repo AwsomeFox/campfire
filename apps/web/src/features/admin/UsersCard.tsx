@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Users management card — extracted from AdminPage.tsx to its own file as part
  * of the /admin/* page split (issue #350). Lives on /admin/users. Supports an
@@ -10,13 +11,14 @@
  */
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import type { ServerRole, User } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { Card, Btn, TextInput, EmptyState } from '../../components/ui';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { useDialog } from '../../components/useDialog';
 import { useAnnounce } from '../../components/Announcer';
 
 export function UsersCard({ users, onChange }: { users: User[]; onChange: () => void }) {
+  const { t } = useTranslation();
   const [showNew, setShowNew] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [resetId, setResetId] = useState<number | null>(null);
@@ -53,7 +55,7 @@ export function UsersCard({ users, onChange }: { users: User[]; onChange: () => 
       )}
 
       {users.length === 0 ? (
-        <EmptyState icon="person" title="No users yet" hint="Create the first account above." />
+        <EmptyState icon="person" title={t('admin.empty.noUsers')} hint={t('admin.empty.noUsersHint')} />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -110,6 +112,7 @@ function NewUserForm({
   onCancel: () => void;
   onCreated: () => void;
 }) {
+  const { t } = useTranslation();
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
@@ -176,7 +179,7 @@ function NewUserForm({
         setFieldErrors({ username: 'That username is already in use.' });
         document.getElementById(usernameId)?.focus();
       } else {
-        setSubmitError(err instanceof ApiError ? err.message : "Couldn't create user.");
+        setSubmitError(translateApiError(err, t, { fallbackKey: 'admin.errors.createUser' }));
       }
       savingRef.current = false;
       setSaving(false);
@@ -340,6 +343,7 @@ function UserRow({
   onChange: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [displayName, setDisplayName] = useState(user.displayName);
   const [serverRole, setServerRole] = useState<ServerRole>(user.serverRole);
   const [disabled, setDisabled] = useState(user.disabled);
@@ -389,7 +393,7 @@ function UserRow({
       onClose();
       onChange();
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : "Couldn't update user.";
+      const message = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       setFormError(`${message} Your changes have been kept.`);
       onError(message);
       requestAnimationFrame(() => displayNameRef.current?.focus());
@@ -408,7 +412,7 @@ function UserRow({
       announce(`Deleted user ${user.username}.`);
       onChange();
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't delete user.");
+      onError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     } finally {
       setRemoving(false);
     }
@@ -589,6 +593,7 @@ function ResetPasswordRow({
   onClose: () => void;
   onError: (msg: string | null) => void;
 }) {
+  const { t } = useTranslation();
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
@@ -631,7 +636,7 @@ function ResetPasswordRow({
       setDone(true);
       announce(`Password reset for ${user.username}.`);
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : "Couldn't reset password.";
+      const message = translateApiError(err, t, { fallbackKey: 'errors.loadFailed' });
       setFieldError(`${message} Your password entry has been kept.`);
       onError(message);
       requestAnimationFrame(() => passwordRef.current?.focus());

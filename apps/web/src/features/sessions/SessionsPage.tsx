@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Session log — mirrors design/claude-design/Campfire.dc.html "Session log" (~867-942) and
  * "Session detail" (~1059-1073).
@@ -16,7 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Session, SessionListItem, SessionListPage, SessionShare, SessionShareCreated, SessionAttendee, Character } from '@campfire/schema';
 import { RECAP_TEMPLATE, SESSIONS_LIST_DEFAULT_LIMIT } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError, translateApiError } from '../../lib/api';
 import { useAuth } from '../../app/auth';
 import { useProtectedForm } from '../../lib/useProtectedForm';
 import { joinPublicBase } from '../../lib/public-base';
@@ -73,6 +74,7 @@ function OptionalFieldLabel({ children }: { children: string }) {
 }
 
 export default function SessionsPage() {
+  const { t } = useTranslation();
   useFormattingLocale();
   const { campaignId } = useParams<{ campaignId: string }>();
   const cid = Number(campaignId);
@@ -221,7 +223,7 @@ export default function SessionsPage() {
       if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
         setForbidden(true);
       } else {
-        setError("Couldn't load sessions.");
+        setError(t('sessions.errors.loadSessions'));
       }
     } finally {
       setLoading(false);
@@ -244,11 +246,11 @@ export default function SessionsPage() {
       setHasMoreSessions(page.hasMore);
       setSessionOffset((prev) => prev + page.items.length);
     } catch {
-      setError("Couldn't load more sessions.");
+      setError(t('sessions.errors.loadMoreSessions'));
     } finally {
       setLoadingMoreSessions(false);
     }
-  }, [cid, hasMoreSessions, loadingMoreSessions, loading, sessionOffset]);
+  }, [cid, hasMoreSessions, loadingMoreSessions, loading, sessionOffset, t]);
 
   useEffect(() => {
     if (Number.isFinite(cid)) void load();
@@ -342,7 +344,7 @@ export default function SessionsPage() {
   if (!Number.isFinite(cid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -351,7 +353,7 @@ export default function SessionsPage() {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
         <Card>
-          <EmptyState icon="padlock" title="You don't have access to this campaign" />
+          <EmptyState icon="padlock" title={t('sessions.accessDenied')} />
         </Card>
       </div>
     );
@@ -488,7 +490,7 @@ export default function SessionsPage() {
 
           {sessions.length === 0 && !showAddForm ? (
             <Card>
-              <EmptyState title="No sessions yet — add your first recap" />
+              <EmptyState title={t('sessions.empty.noSessions')} />
             </Card>
           ) : (
             <div className="space-y-2">
@@ -588,9 +590,9 @@ export default function SessionsPage() {
           ) : (
             <Card>
               {sessions.length > 0 ? (
-                <EmptyState icon="open-book" title="Select a session" hint="Pick a recap from the timeline on the left." />
+                <EmptyState icon="open-book" title={t('sessions.empty.selectSession')} hint={t('sessions.empty.selectSessionHint')} />
               ) : (
-                <EmptyState title="No sessions yet — add your first recap" hint="Use “+ Add recap” to log your first session." />
+                <EmptyState title={t('sessions.empty.noSessions')} hint={t('sessions.empty.noSessionsHint')} />
               )}
             </Card>
           )}
@@ -663,6 +665,7 @@ function SessionDetail({
    *  recap is opened from the list so SR users land on the new content. */
   detailHeadingRef: RefObject<HTMLHeadingElement>;
 }) {
+  const { t } = useTranslation();
   const { me } = useAuth();
   const { canDmWrite } = useCampaignAccess();
   const [editing, setEditing] = useState(canDmWrite && startEditing);
@@ -733,7 +736,7 @@ function SessionDetail({
         setLoadedUpdatedAt(null);
         setLoadedSessionId(null);
         if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
-        setError(err instanceof ApiError ? err.message : "Couldn't load this recap.");
+        setError(translateApiError(err, t, { fallbackKey: 'sessions.errors.loadRecap' }));
       })
       .finally(() => {
         if (loadSequencerRef.current.isCurrent(generation, session.id)) setRecapLoading(false);
@@ -803,7 +806,7 @@ function SessionDetail({
             'This recap changed since you opened it — reload to see the latest version before saving, so you don\'t erase the other edit.',
         );
       } else {
-        setError("Couldn't save the recap.");
+        setError(t('sessions.errors.saveRecap'));
       }
       document.getElementById(fieldIds.title.controlId)?.focus();
       return false;
@@ -872,7 +875,7 @@ function SessionDetail({
       setLoadedUpdatedAt(full.updatedAt);
       setLoadedSessionId(full.id);
     } catch {
-      setError("Couldn't reload the latest recap.");
+      setError(t('sessions.errors.reloadRecap'));
     } finally {
       setRecapLoading(false);
     }
@@ -890,7 +893,7 @@ function SessionDetail({
       setConfirmingDelete(false);
       await onDeleted(session.id, session.number);
     } catch {
-      setError("Couldn't delete the session.");
+      setError(t('sessions.errors.deleteSession'));
       setDeleting(false);
     }
   }
@@ -1148,6 +1151,7 @@ function SessionDetail({
  * this because the party is otherwise all-or-nothing.
  */
 function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const [attendees, setAttendees] = useState<SessionAttendee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1181,7 +1185,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
       setLoadedForSessionId(null);
       if ((err as { name?: string } | undefined)?.name === 'AbortError') return;
       // Attendance is a non-critical embellishment — surface retry via the empty state.
-      setError("Couldn't load attendance.");
+      setError(t('sessions.errors.loadAttendance'));
     } finally {
       if (loadSequencerRef.current.isCurrent(generation, sessionId)) setLoading(false);
     }
@@ -1207,7 +1211,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
         setRoster(await api.get<Character[]>(`${API}/campaigns/${campaignId}/characters`));
         setRosterLoaded(true);
       } catch {
-        setError("Couldn't load the character roster.");
+        setError(t('sessions.errors.loadRoster'));
         return;
       }
     }
@@ -1235,7 +1239,7 @@ function AttendancePanel({ sessionId, campaignId }: { sessionId: number; campaig
       setAttendees(updated);
       setEditing(false);
     } catch {
-      setError("Couldn't save attendance.");
+      setError(t('sessions.errors.saveAttendance'));
     } finally {
       setSaving(false);
     }
@@ -1311,6 +1315,7 @@ type ShareLifetime = '1' | '7' | '30' | 'never';
 
 /** Member-visible status plus DM-only capability controls for one recap. */
 function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: number }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const campaign = useCampaign(campaignId);
   const [shares, setShares] = useState<SessionShare[]>([]);
@@ -1330,7 +1335,7 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
     try {
       setShares(await api.get<SessionShare[]>(`${API}/sessions/${sessionId}/shares`));
     } catch {
-      setError("Couldn't load share links.");
+      setError(t('sessions.errors.loadShareLinks'));
     } finally {
       setLoading(false);
     }
@@ -1356,7 +1361,7 @@ function SharePanel({ sessionId, campaignId }: { sessionId: number; campaignId: 
       setAcknowledgedNever(false);
       await load();
     } catch {
-      setError("Couldn't create a share link.");
+      setError(t('sessions.errors.createShareLink'));
     } finally {
       setCreating(false);
     }
@@ -1483,6 +1488,7 @@ function ShareRow({
   onChanged: () => Promise<void>;
   onRevoked: (shareId: number) => void;
 }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const [draftLabel, setDraftLabel] = useState(share.label);
   const [busy, setBusy] = useState<'label' | 'extend' | 'revoke' | null>(null);
@@ -1504,7 +1510,9 @@ function ShareRow({
       }
       await onChanged();
     } catch {
-      setError(`Couldn't ${kind === 'revoke' ? 'revoke' : kind === 'extend' ? 'extend' : 'rename'} this link.`);
+      const action =
+        kind === 'revoke' ? t('sessions.shareActions.revoke') : kind === 'extend' ? t('sessions.shareActions.extend') : t('sessions.shareActions.rename');
+      setError(t('sessions.errors.shareLinkAction', { action }));
     } finally {
       setBusy(null);
     }
@@ -1564,6 +1572,7 @@ function AddRecapForm({
   onCreated: (session: Session) => void;
   onCancel?: () => void;
 }) {
+  const { t } = useTranslation();
   const { me } = useAuth();
   const [title, setTitle] = useState('');
   const [playedAt, setPlayedAt] = useState(() => localDateInputValue());
@@ -1601,13 +1610,13 @@ function AddRecapForm({
       onCreated(created);
       return true;
     } catch {
-      setError("Couldn't publish the recap.");
+      setError(t('sessions.errors.publishRecap'));
       document.getElementById(fieldIds.title.controlId)?.focus();
       return false;
     } finally {
       setSaving(false);
     }
-  }, [campaignId, fieldIds, nextNumber, onCreated, playedAt, recap, title]);
+  }, [campaignId, fieldIds, nextNumber, onCreated, playedAt, recap, t, title]);
 
   const protectedNewRecap = useProtectedForm({
     formId: 'session-recap-new',

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * AI Scribe panel — issue #342, mounted on SessionsPage.tsx as a collapsible card in
  * the timeline column, near "+ Add recap".
@@ -16,7 +17,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { ScribeConfig, ScribeJob, ScribeJobStatus, ScribeRunResult, ScribeTrigger } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { useAiDmSeat } from '../../lib/query';
 import { Card, Btn, EmptyState, Skeleton, SkeletonConditionalRegion, ErrorNote } from '../../components/ui';
 import { conditionalRegionPhase } from '../../components/loadingSkeletonState';
@@ -80,6 +81,7 @@ type Outcome = { kind: 'info' | 'error' | 'success'; text: string; href?: string
 const GATE_FAILURE_STATUSES: ScribeJobStatus[] = ['disabled', 'over_budget', 'no_provider'];
 
 export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: boolean }) {
+  const { t } = useTranslation();
   const { canDmWrite } = useCampaignAccess();
   const seatQuery = useAiDmSeat(campaignId);
 
@@ -106,7 +108,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       setConfig(c);
       setJobs(j);
     } catch (err) {
-      setLoadError(err instanceof ApiError ? err.message : "Couldn't load the AI scribe.");
+      setLoadError(translateApiError(err, t, { fallbackKey: 'sessions.errors.loadScribe' }));
     }
   }, [campaignId]);
 
@@ -173,7 +175,7 @@ export function ScribePanel({ campaignId, isDm }: { campaignId: number; isDm: bo
       // failed
       setOutcome({ kind: 'error', text: job.detail || "The scribe run failed." });
     } catch (err) {
-      setOutcome({ kind: 'error', text: err instanceof ApiError ? err.message : "Couldn't run the scribe." });
+      setOutcome({ kind: 'error', text: translateApiError(err, t, { fallbackKey: 'sessions.errors.runScribe' }) });
     } finally {
       setBusy(null);
     }
@@ -295,6 +297,7 @@ function ConfigForm({
   onSaved: (c: ScribeConfig) => void;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation();
   const [postSession, setPostSession] = useState(config.postSession);
   const [cron, setCron] = useState(config.cron);
   const [budgetPerRun, setBudgetPerRun] = useState(String(config.budgetPerRun));
@@ -317,7 +320,7 @@ function ConfigForm({
       });
       onSaved(updated);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't save the scribe config.");
+      setError(translateApiError(err, t, { fallbackKey: 'sessions.errors.saveScribe' }));
     } finally {
       setSaving(false);
     }
@@ -375,9 +378,10 @@ function ConfigForm({
 }
 
 function JobHistory({ campaignId, jobs }: { campaignId: number; jobs: ScribeJob[] | null }) {
+  const { t } = useTranslation();
   if (jobs === null) return <Skeleton lines={2} />;
   if (jobs.length === 0) {
-    return <EmptyState icon="feather" title="No scribe runs yet" hint="Run it on demand, or turn on a sweep in Configure." />;
+    return <EmptyState icon="feather" title={t('sessions.empty.noScribeRuns')} hint={t('sessions.empty.noScribeRunsHint')} />;
   }
   return (
     <ul className="m-0 p-0 space-y-1.5" style={{ listStyle: 'none' }}>

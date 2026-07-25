@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * /admin/audit — full server admin audit log. Part of the /admin/* page split
  * (issue #350); see AdminPage.tsx for the full route map (the overview page
@@ -8,6 +9,7 @@ import { AuditLogCard } from './AuditLogCard';
 import { GameIcon } from '../../components/GameIcon';
 
 export default function AdminAuditPage() {
+  useTranslation();
   return (
     <RequireServerAdmin>
       <div className="max-w-4xl mx-auto px-4 mt-5 space-y-5 pb-20 md:pb-10">

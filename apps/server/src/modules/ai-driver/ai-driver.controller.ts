@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger
 import { Throttle } from '@nestjs/throttler';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
+import { NarrationLanguage } from '@campfire/schema';
 import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -23,6 +24,7 @@ const AiDmMessageRequest = z
     scene: z.string().max(500).optional().describe('Optional scene/encounter label to set on the session.'),
     maxSteps: z.number().int().min(1).max(12).optional().describe('Cap on tool-loop iterations this turn.'),
     maxTokens: z.number().int().min(1).max(4096).optional().describe('Cap on each provider call’s output tokens (clamped to remaining budget).'),
+    narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635).'),
   })
   .strict();
 class AiDmMessageDto extends createZodDto(AiDmMessageRequest) {}
@@ -159,6 +161,7 @@ export class AiDriverController {
       maxSteps: body.maxSteps,
       maxTokens: body.maxTokens,
       characterId: body.characterId,
+      narrationLanguage: body.narrationLanguage,
     });
   }
 

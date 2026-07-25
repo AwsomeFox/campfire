@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Run session — live combat tracker. /c/:campaignId/encounters/:encounterId.
  * Mirrors design/claude-design/Campfire.dc.html "Run session" live state
@@ -39,10 +40,11 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
+import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, ApiError , translateApiError} from '../../lib/api';
 import { queryKeys, invalidateCampaignCharacters, invalidateCampaignCheckRequests, invalidateEncounter } from '../../lib/query';
 import { useCampaignEvents, type CampaignEventsStatus } from '../../lib/useCampaignEvents';
 import {
@@ -245,6 +247,7 @@ function EncounterLinks({
   canEdit: boolean;
   onSaved: (updated: Partial<EncounterWithCombatants>) => void;
 }) {
+  const { t } = useTranslation();
   const { open: editing, buttonProps, regionProps } = useDisclosure({
     focusManagement: false,
     regionLabel: 'Encounter links',
@@ -288,7 +291,7 @@ function EncounterLinks({
       const updated = await api.patch<EncounterWithCombatants>(`${API}/encounters/${encounter.id}`, patch);
       onSaved(updated);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't update links.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.updateLinks' }));
     } finally {
       setSaving(false);
     }
@@ -564,6 +567,7 @@ function useDebounced<T>(value: T, delayMs: number): T {
 }
 
 export default function RunSessionPage() {
+  const { t } = useTranslation();
   const { campaignId, encounterId } = useParams<{ campaignId: string; encounterId: string }>();
   const cid = Number(campaignId);
   const eid = Number(encounterId);
@@ -725,9 +729,7 @@ export default function RunSessionPage() {
   const notFound = encounterQuery.error instanceof ApiError && encounterQuery.error.status === 404;
   const loadError =
     encounterQuery.error && !notFound
-      ? encounterQuery.error instanceof ApiError
-        ? encounterQuery.error.message
-        : "Couldn't load this encounter."
+      ? translateApiError(encounterQuery.error, t, { fallbackKey: 'encounters.errors.loadEncounter' })
       : null;
   const refetchEncounter = useCallback(() => invalidateEncounter(queryClient, eid), [queryClient, eid]);
   // Ordinary Refresh clears a stale action banner (#430) — distinct from passive
@@ -882,9 +884,8 @@ export default function RunSessionPage() {
   }, []);
 
   const reportError = useCallback((err: unknown) => {
-    setActionError(makeActionError(err instanceof ApiError ? err.message : 'That action failed.'));
-  }, []);
-  /** BattleMap / card rollers pass a plain string (or null to clear). */
+    setActionError(makeActionError(translateApiError(err, t, { fallbackKey: 'encounters.errors.actionFailed' })));
+  }, [t]);
   const surfaceActionError = useCallback((message: string | null) => {
     setActionError(message ? makeActionError(message) : null);
   }, []);
@@ -939,6 +940,14 @@ export default function RunSessionPage() {
       markCombatantPending(combatantId, false);
       invalidateEncounter(queryClient, eid);
     },
+  });
+
+  const combatantTurnState = useMutation({
+    mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
+      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => invalidateEncounter(queryClient, eid),
   });
 
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
@@ -1007,6 +1016,11 @@ export default function RunSessionPage() {
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
     [combatantPatch],
+  );
+
+  const patchCombatantTurnState = useCallback(
+    (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
+    [combatantTurnState],
   );
 
   /**
@@ -1263,7 +1277,7 @@ export default function RunSessionPage() {
   if (!Number.isFinite(cid) || !Number.isFinite(eid)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="Encounter not found." />
+        <ErrorNote message={t('encounters.notFoundDetail')} />
       </div>
     );
   }
@@ -1281,7 +1295,7 @@ export default function RunSessionPage() {
   if (notFound && !encounter) {
     return (
       <div className="max-w-4xl mx-auto px-4 mt-5">
-        <NotFoundState title="Encounter not found" backTo={`/c/${cid}/encounters`} backLabel="← Back to encounters" />
+        <NotFoundState title={t('encounters.notFound')} backTo={`/c/${cid}/encounters`} backLabel={t('encounters.backToList')} />
       </div>
     );
   }
@@ -1357,6 +1371,7 @@ export default function RunSessionPage() {
         {encounter.status === 'running' && (
           <span className="tag tag-neutral">
             Round {encounter.round}
+            {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
@@ -1563,6 +1578,29 @@ export default function RunSessionPage() {
 
       {/* Current-turn workspace (issue #413): "what can I do now?" + player End-turn. Only
           while running; the component self-hides when there's no current combatant. */}
+      {encounter.status === 'running' && encounter.turnPhase === 'lair' && (
+        <div
+          className="card elev-sm"
+          data-testid="lair-action-slot"
+          style={{
+            padding: '12px 14px',
+            borderLeft: '2px solid var(--color-accent)',
+            background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
+          }}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-white">Lair action</span>
+            <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
+            <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
+            {canDmWrite && (
+              <Btn className="ml-auto" disabled={headerBusy} onClick={nextTurn}>
+                Done →
+              </Btn>
+            )}
+          </div>
+        </div>
+      )}
+
       {encounter.status === 'running' && (
         <TurnWorkspace
           encounterId={eid}
@@ -1653,13 +1691,13 @@ export default function RunSessionPage() {
           <div style={{ padding: 16 }}>
             <EmptyState
               icon="crossed-swords"
-              title="No combatants yet"
+              title={t('encounters.empty.noCombatants')}
               hint={
                 isDm
                   ? characters.some((c) => c.status === 'active')
-                    ? 'Add the party from the Party tab, then enemies.'
-                    : 'Add combatants below — this campaign has no active party to auto-add.'
-                  : 'Waiting on the DM.'
+                    ? t('encounters.empty.noCombatantsHintDmActive')
+                    : t('encounters.empty.noCombatantsHintDmNoParty')
+                  : t('encounters.empty.noCombatantsHintPlayer')
               }
             />
           </div>
@@ -1707,6 +1745,17 @@ export default function RunSessionPage() {
               onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
               onSetTokenSize={(size) => setTokenSize(c.id, size)}
               onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+              legendaryActions={c.legendaryActions}
+              onUseLegendary={
+                canDmWrite && c.legendaryActions
+                  ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
+              onReleaseLegendary={
+                canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
+                  ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
@@ -2052,6 +2101,7 @@ function BattleMap({
   /** Propagate rendered map rect + calibrated cell size for AoE hit-testing (#626). */
   onAoeHitLayoutChange?: (layout: AoeHitLayout | null) => void;
 }) {
+  const { t } = useTranslation();
   type MapPoint = { x: number; y: number };
   type ActiveMapGesture =
     | { kind: 'token'; pointerId: number; captureTarget: Element; tokenId: number; point: MapPoint | null }
@@ -2240,7 +2290,7 @@ function BattleMap({
       const attachment: Attachment = await uploadAttachment(campaignId, 'map', file);
       onSetMap(attachment.id);
     } catch (err) {
-      onError(err instanceof ApiError ? err.message : "Couldn't upload the map.");
+      onError(translateApiError(err, t, { fallbackKey: 'encounters.errors.uploadMap' }));
     } finally {
       setUploading(false);
     }
@@ -3539,6 +3589,9 @@ function CombatantRow({
   onSetHpMax,
   onSetTokenSize,
   onPatchCombatant,
+  legendaryActions,
+  onUseLegendary,
+  onReleaseLegendary,
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
@@ -3584,6 +3637,9 @@ function CombatantRow({
   onSetHpMax: (value: number) => void;
   onSetTokenSize: (size: TokenSize) => void;
   onPatchCombatant?: (patch: Record<string, unknown>) => void;
+  legendaryActions?: Combatant['legendaryActions'];
+  onUseLegendary?: () => void;
+  onReleaseLegendary?: () => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -3812,6 +3868,39 @@ function CombatantRow({
             <span className={kindTagClass}>
               {kindLabel}
             </span>
+            {legendaryActions && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`legendary-actions-${combatant.id}`}
+                title="Legendary actions used this round"
+              >
+                Legendary {legendaryActions.max - legendaryActions.used}/{legendaryActions.max}
+              </span>
+            )}
+            {legendaryActions && (onUseLegendary || onReleaseLegendary) && (
+              <span className="flex gap-1 items-center">
+                {onUseLegendary && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    disabled={busy || legendaryActions.used >= legendaryActions.max}
+                    onClick={onUseLegendary}
+                  >
+                    −1 leg
+                  </button>
+                )}
+                {onReleaseLegendary && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    disabled={busy}
+                    onClick={onReleaseLegendary}
+                  >
+                    +1 leg
+                  </button>
+                )}
+              </span>
+            )}
             {(isStarfinder || combatant.eac != null || combatant.kac != null) && (
               <span className="tag tag-neutral" style={{ fontSize: 10 }} title="Energy AC (EAC) / Kinetic AC (KAC)" data-testid="starfinder-ac-tag">
                 EAC {combatant.eac ?? '—'} · KAC {combatant.kac ?? '—'}
@@ -4396,6 +4485,7 @@ function AddCombatantPanel({
   rulePack: string;
   onAdded: () => Promise<void> | void;
 }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<AddTab>('manual');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -4511,7 +4601,7 @@ function AddCombatantPanel({
       setManualCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4533,7 +4623,7 @@ function AddCombatantPanel({
       setCompCount('1');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4569,7 +4659,7 @@ function AddCombatantPanel({
       }
       await addFromCompendium(entry);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4587,7 +4677,7 @@ function AddCombatantPanel({
       });
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }
@@ -4621,7 +4711,7 @@ function AddCombatantPanel({
       setNpcInit('');
       await onAdded();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't add combatant.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.addCombatant' }));
     } finally {
       setSaving(false);
     }

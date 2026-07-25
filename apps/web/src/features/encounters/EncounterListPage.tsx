@@ -1,16 +1,13 @@
 /**
  * Encounter list — /c/:campaignId/encounters.
- * Mirrors design/claude-design/Campfire.dc.html "Encounter" header conventions
- * (status chip + round tag, ~L949-951) applied to a card grid, same shape as
- * other list pages (PartyPage/SessionsPage): a "+ New encounter" inline form
- * for the DM, cards linking to the live tracker.
  */
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ListDetailLink } from '../../components/ListDetailLink';
 import { useRestoreListOriginScroll } from '../../hooks/useRestoreListOriginScroll';
 import type { Encounter, EncounterStatus } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { useCampaignAccess } from '../../app/CampaignAccessContext';
 import { Card, Btn, Skeleton, ErrorNote, EmptyState, Chip } from '../../components/ui';
 import { Field } from '../../components/Field';
@@ -35,11 +32,9 @@ import {
 } from './postCreateGuidance';
 import { GenerateEncounterWizard } from './GenerateEncounterWizard';
 
-const STATUS_LABEL: Record<EncounterStatus, string> = {
-  preparing: 'Preparing',
-  running: 'Running',
-  ended: 'Ended',
-};
+function encounterStatusLabel(status: EncounterStatus, t: ReturnType<typeof useTranslation>['t']): string {
+  return t(`encounters.status.${status}`);
+}
 
 const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
   preparing: 'tag tag-neutral',
@@ -48,6 +43,7 @@ const STATUS_TAG_CLASS: Record<EncounterStatus, string> = {
 };
 
 export default function EncounterListPage() {
+  const { t } = useTranslation();
   const { campaignId } = useParams<{ campaignId: string }>();
   const id = Number(campaignId);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -90,11 +86,11 @@ export default function EncounterListPage() {
       const data = await api.get<Encounter[]>(`${API}/campaigns/${id}/encounters`);
       setEncounters(data);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load encounters.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.load' }));
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, t]);
 
   useEffect(() => {
     if (Number.isFinite(id)) void load();
@@ -103,7 +99,7 @@ export default function EncounterListPage() {
   if (!Number.isFinite(id)) {
     return (
       <div className="max-w-5xl mx-auto px-4 mt-5">
-        <ErrorNote message="No campaign selected." />
+        <ErrorNote message={t('common.noCampaign')} />
       </div>
     );
   }
@@ -113,16 +109,16 @@ export default function EncounterListPage() {
   return (
     <div className="max-w-5xl mx-auto px-4 mt-5 space-y-4 pb-20 md:pb-10">
       <PageHeader
-        title="Encounters"
+        title={t('encounters.title')}
         secondaryActions={secondaryActions}
         primaryAction={
           canDmWrite && !creating && !generating ? (
             <div className="flex gap-2 flex-wrap">
               <Btn type="button" className="cf-page-header__action" ghost onClick={() => setGenerating(true)}>
-                Generate encounter
+                {t('encounters.generate')}
               </Btn>
               <Btn type="button" className="cf-page-header__action" onClick={() => setCreating(true)}>
-                + New encounter
+                {t('encounters.newEncounter')}
               </Btn>
             </div>
           ) : undefined
@@ -147,8 +143,8 @@ export default function EncounterListPage() {
       ) : encounters.length === 0 ? (
         <EmptyState
           icon="crossed-swords"
-          title="No encounters yet"
-          hint={isDm ? 'Start one when combat kicks off.' : 'The DM hasn’t started one yet.'}
+          title={t('encounters.empty.title')}
+          hint={isDm ? t('encounters.empty.hintDm') : t('encounters.empty.hintPlayer')}
         />
       ) : (
         <div className="grid gap-3.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
@@ -170,6 +166,7 @@ function EncounterCard({
   encounter: Encounter;
   showHidden?: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <ListDetailLink
       to={`/c/${campaignId}/encounters/${encounter.id}`}
@@ -183,7 +180,7 @@ function EncounterCard({
       </div>
       <div className="flex items-center gap-2 flex-wrap">
         <span className={STATUS_TAG_CLASS[encounter.status]} style={{ fontSize: 10 }}>
-          {STATUS_LABEL[encounter.status]}
+          {encounterStatusLabel(encounter.status, t)}
         </span>
         {encounter.status === 'running' && (
           <span className="tag tag-neutral" style={{ fontSize: 10 }}>
@@ -206,6 +203,7 @@ function EncounterCard({
 type NamedRow = { id: number; name?: string; title?: string; number?: number };
 
 function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCancel: () => void }) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [saving, setSaving] = useState(false);
@@ -259,7 +257,7 @@ function NewEncounterForm({ campaignId, onCancel }: { campaignId: number; onCanc
       });
       navigate(`/c/${campaignId}/encounters/${created.id}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't create the encounter.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.create' }));
       setSaving(false);
     }
   }

@@ -33,9 +33,11 @@ import {
   type InitiativeTiebreakCombatant,
 } from './initiative-tiebreak';
 import { ActionSpec } from './action-resolver';
+import { NarrationLanguage } from './narration-language';
 // Structured action resolver (issue #414): data model + pure, system-aware resolution math.
 // Re-exported so server / MCP / web import it from '@campfire/schema' alongside everything else.
 export * from './action-resolver';
+export * from './narration-language';
 
 export {
   DifficultyBand,
@@ -80,6 +82,23 @@ export const PageParams = z.object({
   offset: z.number().int().nonnegative().optional(),
 });
 export type PageParams = z.infer<typeof PageParams>;
+
+/**
+ * Shared cursor-paginated list envelope (issue #615).
+ *
+ * High-traffic lists return `{ items, total, hasMore, nextCursor, limit }` instead
+ * of unbounded arrays. `nextCursor` is always present and is `null` on the terminal
+ * page so REST/MCP consumers see a stable shape.
+ */
+export function CursorListPage<T extends z.ZodTypeAny>(itemSchema: T) {
+  return z.object({
+    items: z.array(itemSchema),
+    total: z.number().int().nonnegative(),
+    hasMore: z.boolean(),
+    nextCursor: z.string().max(512).nullable(),
+    limit: z.number().int().positive(),
+  });
+}
 
 /** Default page size for session log lists (issue #612). */
 export const SESSIONS_LIST_DEFAULT_LIMIT = 50;
@@ -143,6 +162,9 @@ export const Campaign = z.object({
   // (row delete): suspension keeps invite rows so a deliberate reactivation can
   // restore the same codes.
   publicInvitesEnabled: z.boolean().default(true),
+  // Issue #635: language contract for AI-generated campaign content (Driver, co-DM,
+  // Scribe). Distinct from the client UI locale — only governs model narration output.
+  narrationLanguage: NarrationLanguage.default('en'),
   sessionCount: z.number().int().nonnegative().default(0),
   ruleSystem: z.string().max(80).default(''), // slug of the installed rule pack (see RulePack), or '' if none picked
   mapAttachmentId: Id.nullable().default(null), // Attachment (kind='map') rendered as the campaign map background
@@ -160,7 +182,7 @@ export const Campaign = z.object({
   ...timestamps,
 });
 export type Campaign = z.infer<typeof Campaign>;
-export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, ruleSystem: true, mapAttachmentId: true });
+export const CampaignCreate = Campaign.omit({ id: true, createdAt: true, updatedAt: true, sessionCount: true, storageQuotaBytes: true, deletedAt: true, publicRecapSharingEnabled: true, publicInvitesEnabled: true }).partial({ description: true, status: true, currentLocationId: true, dangerLevel: true, dmControlsProgression: true, dmControlsTurns: true, requireDmTurnConfirmation: true, narrationLanguage: true, ruleSystem: true, mapAttachmentId: true });
 export const CampaignUpdate = CampaignCreate.partial();
 
 /**
@@ -1149,6 +1171,20 @@ export type TimelineEventCreate = z.infer<typeof TimelineEventCreate>;
 export const TimelineEventUpdate = TimelineEventCreate.partial();
 export type TimelineEventUpdate = z.infer<typeof TimelineEventUpdate>;
 
+/** Default page size for timeline list endpoints (issue #615). */
+export const TIMELINE_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on timeline lists — clients page with `cursor`, not a huge page. */
+export const TIMELINE_LIST_MAX_LIMIT = 200;
+
+/**
+ * Paginated timeline list response (issue #615).
+ *
+ * Replaces the historical bare `TimelineEvent[]`. Ordered by DM-controlled
+ * `sortIndex` (ascending), then `id`. Continue with `nextCursor` when `hasMore`.
+ */
+export const TimelineListPage = CursorListPage(TimelineEvent);
+export type TimelineListPage = z.infer<typeof TimelineListPage>;
+
 // The "honest v0" from the issue: one free-text "current in-world date" per campaign
 // ("It is presently the 3rd of Flamerule, 1492 DR"), plus an optional calendar note
 // (month names, moon phases, whatever the DM wants to remember). Stored in the
@@ -2105,7 +2141,31 @@ export interface MonsterStatblockData {
   actions: unknown;
   /** Optional action categories used by systems that distinguish them in a statblock. */
   legendaryActions?: unknown;
+  /** Lair actions the creature takes on initiative count 20 (issue #618). */
+  lairActions?: unknown;
   reactions?: unknown;
+}
+
+/** 5e lair actions fire on initiative count 20 (issue #618). */
+export const LAIR_INITIATIVE_COUNT = 20;
+
+/** Default legendary-action pool per round for boss creatures (issue #618). */
+export const LEGENDARY_ACTIONS_PER_ROUND = 3;
+
+/** Action-economy slot key for legendary-action usage on a combatant (issue #618). */
+export const LEGENDARY_ACTION_SLOT = 'legendary';
+
+/** Whether a mapped statblock section has at least one named entry (issue #618). */
+export function statblockSectionHasEntries(raw: unknown): boolean {
+  if (!Array.isArray(raw)) return false;
+  return raw.some((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const o = item as Record<string, unknown>;
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    if (name.length > 0) return true;
+    const desc = typeof o.desc === 'string' ? o.desc : typeof o.description === 'string' ? o.description : '';
+    return desc.trim().length > 0;
+  });
 }
 
 /**
@@ -2491,6 +2551,7 @@ export const Dnd5eAdapter: RuleSystemAdapter = {
       specialAbilities: d.specialAbilities ?? d.special_abilities,
       actions: d.actions,
       legendaryActions: d.legendaryActions ?? d.legendary_actions,
+      lairActions: d.lairActions ?? d.lair_actions,
       reactions: d.reactions,
     };
   },
@@ -4800,6 +4861,7 @@ export const AiDmTurnRequest = z.object({
   prompt: z.string().min(1).max(20_000),
   kind: AiDmTurnKind.default('narrate'),
   maxTokens: z.number().int().min(1).max(4096).optional(), // cap on this turn's output; provider clamps to the remaining budget
+  narrationLanguage: NarrationLanguage.optional(), // per-run override of the campaign narration language (#635)
 });
 export type AiDmTurnRequest = z.infer<typeof AiDmTurnRequest>;
 
@@ -4853,6 +4915,7 @@ export const CoDmDraftRequest = z.object({
   prompt: z.string().min(1).max(20_000),
   // How many drafts to produce (npc/location/beat/quest/faction; ignored for recap/encounter/map).
   count: z.number().int().min(1).max(10).optional(),
+  narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
   // When target is `beat`, pin the drafted beat(s) to this arc (#1307).
   arcId: Id.optional(),
 });
@@ -5229,6 +5292,7 @@ export type ScribeJob = z.infer<typeof ScribeJob>;
 // generates but files no proposal — a preview the DM can inspect before committing.
 export const ScribeRunRequest = z.object({
   dryRun: z.boolean().default(false),
+  narrationLanguage: NarrationLanguage.optional(), // per-run override (#635)
 });
 export type ScribeRunRequest = z.infer<typeof ScribeRunRequest>;
 
@@ -5346,6 +5410,17 @@ export type AoeTemplate = z.infer<typeof AoeTemplate>;
  * then lets fade. Coordinates are 0–100 percent of the map surface; any writing member may
  * drop one (a live table gesture, not DM-gated like fog).
  */
+/** Encounter turn pointer phase — combatant turn vs lair action at init 20 (issue #618). */
+export const EncounterTurnPhase = z.enum(['combatant', 'lair']);
+export type EncounterTurnPhase = z.infer<typeof EncounterTurnPhase>;
+
+/** Per-combatant legendary-action pool surfaced on encounter reads (issue #618). */
+export const LegendaryActionPool = z.object({
+  max: z.number().int().positive(),
+  used: z.number().int().nonnegative(),
+});
+export type LegendaryActionPool = z.infer<typeof LegendaryActionPool>;
+
 export const MapPing = z.object({
   x: z.number().min(0).max(100),
   y: z.number().min(0).max(100),
@@ -5369,6 +5444,10 @@ export const Encounter = z.object({
   // combatant (not running, or the encounter is empty).
   turnIndex: z.number().int().nonnegative().default(0),
   currentCombatantId: Id.nullable().default(null),
+  // Boss-fight scheduling (issue #618): when `turnPhase` is `lair`, `currentCombatantId`
+  // is null and `lairResumeCombatantId` is the next combatant after the lair slot resolves.
+  turnPhase: EncounterTurnPhase.default('combatant'),
+  lairResumeCombatantId: Id.nullable().default(null),
   // Optional links to WHERE / WHY / WHEN the encounter happened (issue #126) and an
   // optional battle map (issue #39). All nullable; absent in older DBs pre-migration.
   locationId: Id.nullable().default(null),
@@ -6308,6 +6387,8 @@ export const Combatant = z.object({
   // Structured active effects with duration + save timing (issue #413), alongside the
   // free-text `conditions`. Empty by default; capped so the JSON blob stays bounded.
   activeEffects: z.array(ActiveEffect).max(50).default([]),
+  // Populated server-side when the linked statblock has legendary actions (issue #618).
+  legendaryActions: LegendaryActionPool.nullable().default(null),
 });
 export type Combatant = z.infer<typeof Combatant>;
 

@@ -377,6 +377,7 @@ function mapCreature(row: Record<string, unknown>): ImportedEntry {
     ...combinedActions.filter((action) => asString(action.actionType).toUpperCase() === 'LEGENDARY_ACTION'),
     ...normalizedCreatureActions(row.legendary_actions),
   ];
+  const lairActions = normalizedCreatureActions(row.lair_actions);
   const reactions = [
     ...combinedActions.filter((action) => asString(action.actionType).toUpperCase() === 'REACTION'),
     ...normalizedCreatureActions(row.reactions),
@@ -402,6 +403,7 @@ function mapCreature(row: Record<string, unknown>): ImportedEntry {
       specialAbilities,
       actions: regularActions,
       legendaryActions,
+      lairActions,
       reactions,
     }),
     license: licenseOf(row),

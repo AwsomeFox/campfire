@@ -1,5 +1,8 @@
 import request from 'supertest';
 import { createTestApp, createTestAppNoDevAuth, closeTestApp, type TestAppContext } from './test-app';
+import { DB, type DrizzleDb } from '../src/db/db.module';
+import { notes } from '../src/db/schema';
+import { nowIso } from '../src/common/time';
 
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const authorPlayer = { 'x-dev-role': 'player', 'x-dev-user': 'author-1' };
@@ -758,13 +761,28 @@ describe('notes pagination (e2e, issue #608)', () => {
   });
 
   it('pages thousands of rows with stable cursors under interleaved inserts', async () => {
-    // Sequential seed — the Nest test HTTP server resets under large Promise.all bursts.
-    for (let i = 0; i < 1100; i++) {
-      const res = await request(server())
-        .post(`/api/v1/campaigns/${campaignId}/notes`)
-        .set(authorPlayer)
-        .send({ body: `Bulk note ${i}`, visibility: 'private' });
-      expect(res.status).toBe(201);
+    // Seed via DB — 1100 sequential HTTP creates reset the in-process Nest server
+    // (ECONNRESET) and are too slow for CI; pagination itself is exercised over HTTP.
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const ts = nowIso();
+    const BATCH = 100;
+    for (let start = 0; start < 1100; start += BATCH) {
+      const rows = Array.from({ length: Math.min(BATCH, 1100 - start) }, (_, j) => {
+        const i = start + j;
+        return {
+          campaignId,
+          authorUserId: 'dev:author-1',
+          authorName: 'author-1',
+          kind: 'note' as const,
+          visibility: 'private' as const,
+          body: `Bulk note ${i}`,
+          resolved: false,
+          resolvedNote: '',
+          createdAt: ts,
+          updatedAt: ts,
+        };
+      });
+      await db.insert(notes).values(rows);
     }
 
     const seen = new Set<number>();

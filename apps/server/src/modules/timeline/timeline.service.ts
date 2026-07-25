@@ -1,17 +1,19 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, count, eq, gt, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import { TimelineEventCreate, TimelineEventUpdate, TimelineCalendarUpdate } from '@campfire/schema';
-import type { TimelineEvent, TimelineCalendar, Role } from '@campfire/schema';
+import type { TimelineEvent, TimelineCalendar, Role, TimelineListPage } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { timelineEvents, timelineCalendars } from '../../db/schema';
 import { nowIso } from '../../common/time';
 import { redactSecret, redactSecrets, filterHidden, isVisibleTo, resolveCreateHidden } from '../../common/redact';
+import { buildCursorListPage } from '../../common/cursor-pagination';
 import { AuditService } from '../audit/audit.service';
 import { auditActor } from '../../common/user.types';
 import type { RequestUser } from '../../common/user.types';
 import { MISSING_REVISION, nextUpdatedAt, staleWrite } from '../../common/stale-write';
 import { RevisionsService } from '../revisions/revisions.service';
+import { clampTimelineListLimit, decodeTimelineCursor } from './timeline-pagination';
 
 type EventCreateInput = z.infer<typeof TimelineEventCreate>;
 type EventUpdateInput = z.infer<typeof TimelineEventUpdate>;
@@ -53,10 +55,57 @@ export class TimelineService {
 
   // ---------- events ----------
 
+  /**
+   * Returns a bounded narrative-order page (`items` / `total` / `hasMore` / `nextCursor`)
+   * — never an unbounded array. Default page size is 50; pass `cursor` from a previous
+   * `nextCursor` to continue. Hidden events are excluded in SQL for non-DM before paging.
+   */
+  async listEventsPage(
+    campaignId: number,
+    role: Role,
+    opts: { limit?: number; cursor?: string } = {},
+  ): Promise<TimelineListPage> {
+    const limit = clampTimelineListLimit(opts.limit);
+    const cursor = decodeTimelineCursor(opts.cursor);
+
+    const visibilityConds = [eq(timelineEvents.campaignId, campaignId)];
+    if (role !== 'dm') visibilityConds.push(eq(timelineEvents.hidden, false));
+
+    const pageConds = [...visibilityConds];
+    if (cursor) {
+      pageConds.push(
+        or(
+          gt(timelineEvents.sortIndex, cursor.s),
+          and(eq(timelineEvents.sortIndex, cursor.s), gt(timelineEvents.id, cursor.i)),
+        )!,
+      );
+    }
+
+    const [countRows, fetched] = await Promise.all([
+      this.db
+        .select({ value: count() })
+        .from(timelineEvents)
+        .where(and(...visibilityConds)),
+      this.db
+        .select()
+        .from(timelineEvents)
+        .where(and(...pageConds))
+        .orderBy(asc(timelineEvents.sortIndex), asc(timelineEvents.id))
+        .limit(limit + 1),
+    ]);
+
+    const total = countRows[0]?.value ?? 0;
+    const items = redactSecrets(filterHidden(fetched.map(toEventDomain), role), role);
+    return buildCursorListPage(items, limit, total, (last) => ({
+      v: 1,
+      m: 'sort',
+      s: last.sortIndex,
+      i: last.id,
+    }));
+  }
+
+  /** Full timeline for internal consumers (search, export, campaign summaries). */
   async listEvents(campaignId: number, role: Role): Promise<TimelineEvent[]> {
-    // Order along the narrative by DM-controlled sortIndex (free-text in-world dates
-    // aren't sortable), id as a stable tiebreaker. Drop hidden events wholesale for
-    // non-DM BEFORE redacting dmSecret (issue #42 convention).
     const rows = await this.db
       .select()
       .from(timelineEvents)

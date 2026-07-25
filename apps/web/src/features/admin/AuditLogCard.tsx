@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Full server admin audit log — extracted from AdminPage.tsx as part of the
  * /admin/* page split (issue #350). Lives on /admin/audit. (The /admin overview
@@ -9,11 +10,12 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import type { AuditEntry } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Skeleton } from '../../components/ui';
 import { ActorRoleBadge } from './ActorRoleBadge';
 
 export function AuditLogCard() {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +24,7 @@ export function AuditLogCard() {
     try {
       setEntries(await api.get<AuditEntry[]>(`${API}/admin/audit`));
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't load the audit log.");
+      setError(translateApiError(err, t, { fallbackKey: 'errors.loadFailed' }));
     }
   }, []);
 

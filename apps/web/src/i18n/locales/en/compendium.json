@@ -1,0 +1,22 @@
+{
+  "compendium": {
+    "title": "Compendium",
+    "searchPlaceholder": "Search creatures, spells, items…",
+    "errors": {
+      "search": "Couldn't search the compendium.",
+      "loadMore": "Couldn't load more results.",
+      "updateIcon": "Couldn't update the icon.",
+      "loadEntry": "Couldn't load this entry.",
+      "loadCampaign": "Couldn't load this campaign. Check your connection and retry."
+    },
+    "notFound": "Entry not found.",
+    "a11y": {
+      "searchLabel": "Search compendium",
+      "typeFilterLabel": "Filter by type",
+      "loadMoreLabel": "Load more compendium results"
+    },
+    "provenance": {
+      "sourceUnavailable": "Source unavailable"
+    }
+  }
+}

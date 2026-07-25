@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 /**
  * Generate-encounter wizard (issue #412) — a DM preview-and-tune surface layered over the
  * server generator (#304 / #58). Reachable from the encounter list (and quest/location prep via
@@ -22,7 +23,7 @@ import type {
   EncounterTuneOp,
   EncounterWithCombatants,
 } from '@campfire/schema';
-import { api, API, ApiError } from '../../lib/api';
+import { api, API, translateApiError } from '../../lib/api';
 import { Card, Btn, Chip, ErrorNote } from '../../components/ui';
 import { Field } from '../../components/Field';
 import { AudienceField, audienceToHidden, type AudienceValue } from '../../components/AudienceField';
@@ -71,6 +72,7 @@ export function GenerateEncounterWizard({
   presetLocationId?: number;
   presetQuestId?: number;
 }) {
+  const { t } = useTranslation();
   const navigate = useNavigate();
 
   // ── generation params ──
@@ -159,7 +161,7 @@ export function GenerateEncounterWizard({
         setPreview(result);
         if (liveRegion.current) liveRegion.current.textContent = `${result.explanation.label}. ${result.roster.length} slot(s).`;
       } catch (err) {
-        setError(err instanceof ApiError ? err.message : "Couldn't build a preview.");
+        setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.preview' }));
       } finally {
         setLoading(false);
       }
@@ -188,7 +190,7 @@ export function GenerateEncounterWizard({
       );
       navigate(`/c/${campaignId}/encounters/${res.encounter.id}`);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Couldn't commit the encounter.");
+      setError(translateApiError(err, t, { fallbackKey: 'encounters.errors.commit' }));
       setCommitting(false);
     }
   }, [preview, campaignId, idempotencyKey, name, locationId, questId, sessionId, audience, navigate]);
