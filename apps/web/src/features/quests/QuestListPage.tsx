@@ -188,20 +188,26 @@ export default function QuestListPage() {
             <div key={q.id} data-testid={`quest-card-${q.id}`} className="card elev-sm quest-list-card">
               <div className="quest-card-heading">
                 <QuestStatusBadge status={q.status} />
-                <ListDetailLink
-                  to={`/c/${cid}/quests/${q.id}`}
+                <h2
                   className="quest-card-title"
                   style={{
-                    color: 'var(--color-text)',
+                    margin: 0,
                     fontFamily: 'var(--font-heading)',
                     fontWeight: 500,
                     fontSize: 16,
-                    textDecoration: 'none',
                     opacity: q.status === 'completed' || q.status === 'failed' ? 0.7 : 1,
                   }}
                 >
-                  {q.title}
-                </ListDetailLink>
+                  <ListDetailLink
+                    to={`/c/${cid}/quests/${q.id}`}
+                    style={{
+                      color: 'var(--color-text)',
+                      textDecoration: 'none',
+                    }}
+                  >
+                    {q.title}
+                  </ListDetailLink>
+                </h2>
                 <ChangeBadge quest={q} kind={changes.get(q.id)} />
                 {isDm && q.hidden && (
                   <span className="tag tag-outline" style={{ fontSize: 10 }} title={t('quests.hiddenFromPlayers')}>
@@ -257,13 +263,15 @@ export default function QuestListPage() {
               )}
               {kids.map((s) => (
                 <div key={s.id} className="quest-subquest-row">
-                  <span className="text-muted">↳</span>
-                  <ListDetailLink
-                    to={`/c/${cid}/quests/${s.id}`}
-                    style={{ color: 'var(--color-neutral-200)', fontSize: 13.5, textDecoration: 'none', overflowWrap: 'anywhere', minWidth: 0 }}
-                  >
-                    {s.title}
-                  </ListDetailLink>
+                  <span className="text-muted" aria-hidden="true">↳</span>
+                  <h3 style={{ margin: 0, minWidth: 0, fontSize: 13.5, fontWeight: 500 }}>
+                    <ListDetailLink
+                      to={`/c/${cid}/quests/${s.id}`}
+                      style={{ color: 'var(--color-neutral-200)', textDecoration: 'none', overflowWrap: 'anywhere' }}
+                    >
+                      {s.title}
+                    </ListDetailLink>
+                  </h3>
                   <QuestStatusBadge status={s.status} />
                   <ChangeBadge quest={s} kind={changes.get(s.id)} />
                 </div>
