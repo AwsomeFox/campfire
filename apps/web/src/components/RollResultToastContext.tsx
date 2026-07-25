@@ -52,6 +52,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const [roll, setRoll] = useState<DiceRoll | null>(null);
   const [rollApplyHandler, setRollApplyHandler] = useState<ApplyDamageHandler | null>(null);
   const [applyHandler, setApplyHandler] = useState<ApplyDamageHandler | null>(null);
+  const applyHandlerRef = useRef<ApplyDamageHandler | null>(null);
   const [overlay, setOverlay] = useState<OverlayState | null>(null);
 
   const overlayRef = useRef<OverlayState | null>(null);
@@ -86,9 +87,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
   const applyToast = useCallback(
     (r: DiceRoll, options?: ShowRollOptions) => {
       setRoll(r);
-      const handler =
-        options?.onApply ?? (looksLikeDamageRoll(r) && applyHandler ? applyHandler : null);
-      setRollApplyHandler(handler);
+      setRollApplyHandler(options?.onApply ?? applyHandler);
     },
     [applyHandler],
   );
@@ -145,10 +144,7 @@ export function RollResultToastProvider({ children }: { children: ReactNode }) {
     dismiss();
   }, [roll, rollApplyHandler, activeApplyHandler, dismiss]);
 
-  const canApply =
-    roll != null &&
-    activeApplyHandler != null &&
-    (rollApplyHandler != null || looksLikeDamageRoll(roll));
+  const canApply = roll != null && activeApplyHandler != null;
 
   const overlayDice = overlay
     ? buildOverlayDice(overlay.sides, overlay.values, overlay.kept)
