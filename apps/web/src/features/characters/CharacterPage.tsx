@@ -82,6 +82,7 @@ import {
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { initials } from './avatar';
 import { GameIcon } from '../../components/GameIcon';
@@ -620,6 +621,7 @@ export default function CharacterPage() {
         </div>
       </div>
 
+      <EntityDiscussion campaignId={cid} entityType="character" entityId={character.id} />
       {isOwner && <NotesRail campaignId={cid} entityType="character" entityId={character.id} />}
 
       {pendingUndo && (
