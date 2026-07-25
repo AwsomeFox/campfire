@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { z } from 'zod';
 import { ActiveEffect, AoeTemplate, CombatantCreate, CombatantTurnState, CombatantUpdate, ConditionInstance, EncounterCommit, EncounterCreate, EncounterPreviewRequest, EncounterReopen, EncounterUpdate, FogState, ManualRollRequest, PHYSICAL_ROLL_EXPR, RollRequest, STARFINDER_ADAPTER_ID, applyStarfinderDamage, actionEconomyForAdapter, buildDifficultyExplanation, deriveConditionNames, estimateEncounterDifficultyForRuleSystem, filterAoeTemplatesForViewer, initiativeModelForAdapter, isKnownCondition, normalizeStats, parseCr, pointInRevealedRegion, ruleSystemAdapter, LEGENDARY_ACTIONS_PER_ROUND, LEGENDARY_ACTION_SLOT, statblockSectionHasEntries } from '@campfire/schema';
 import { z as zod } from 'zod';
-import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
+import type { ActiveEffect as ActiveEffectType, AoeTemplate as AoeTemplateType, Combatant, CombatantTurnStatePatch as CombatantTurnStatePatchInput, DiceRoll, Encounter, EncounterCreatureInspection, EncounterDifficulty, EncounterDigest, EncounterEndTurn as EncounterEndTurnInput, EncounterEvent, EncounterEventMetadata, EncounterEventPerformedBy, EncounterEventPhase, EncounterEventType, EncounterGenerate, EncounterPreview, EncounterRollInitiativeResult, EncounterRosterSlot, EncounterStatus, EncounterSuggestion, EncounterTurnPhase, EncounterWithCombatants, FogRect, GridType, HpSyncConflict, MapPing, Role, RollResult, RuleSystemAdapter, StarfinderStatblockData, TokenSize, TurnActor, TurnSuggestedAction, TurnWorkspace } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { attachments, campaigns, characters, combatants, encounterEvents, encounters, locations, npcs, quests, ruleEntries, rulePacks, sessions } from '../../db/schema';
 import { nowIso } from '../../common/time';
@@ -271,6 +271,11 @@ function eventToDomain(row: typeof encounterEvents.$inferSelect): EncounterEvent
     actorId: row.actorId ?? null,
     targetId: row.targetId ?? null,
     detail: row.detail,
+    chainId: row.chainId ?? null,
+    parentEventId: row.parentEventId ?? null,
+    phase: (row.phase as EncounterEventPhase | null) ?? null,
+    performedBy: row.performedByJson ? (JSON.parse(row.performedByJson) as EncounterEventPerformedBy) : null,
+    metadata: row.metadataJson ? (JSON.parse(row.metadataJson) as EncounterEventMetadata) : {},
     createdAt: row.createdAt,
   };
 }
@@ -658,6 +663,11 @@ export class EncountersService {
       actorId?: number | null;
       targetId?: number | null;
       detail?: string;
+      chainId?: string | null;
+      parentEventId?: number | null;
+      phase?: EncounterEventPhase | null;
+      performedBy?: EncounterEventPerformedBy | null;
+      metadata?: EncounterEventMetadata;
     },
   ): Promise<void> {
     await this.db.insert(encounterEvents).values({
@@ -669,6 +679,11 @@ export class EncountersService {
       actorId: fields.actorId ?? null,
       targetId: fields.targetId ?? null,
       detail: fields.detail ?? '',
+      chainId: fields.chainId ?? null,
+      parentEventId: fields.parentEventId ?? null,
+      phase: fields.phase ?? null,
+      performedByJson: fields.performedBy ? JSON.stringify(fields.performedBy) : null,
+      metadataJson: fields.metadata && Object.keys(fields.metadata).length > 0 ? JSON.stringify(fields.metadata) : null,
       createdAt: nowIso(),
     });
   }

@@ -219,5 +219,34 @@ describe('list pagination (e2e, issue #71)', () => {
       const res = await request(ctx.app.getHttpServer()).get(`/api/v1/campaigns/${campaignId}/audit?offset=abc`).set(dm);
       expect(res.status).toBe(400);
     });
+
+    it('envelope=1 returns cursor-paginated shape and filters by action', async () => {
+      const server = ctx.app.getHttpServer();
+      const page1 = await request(server)
+        .get(`/api/v1/campaigns/${campaignId}/audit?envelope=1&limit=2&action=note.create`)
+        .set(dm);
+      expect(page1.status).toBe(200);
+      expect(page1.body).toMatchObject({
+        limit: 2,
+        total: expect.any(Number),
+        hasMore: expect.any(Boolean),
+        nextCursor: page1.body.hasMore ? expect.any(String) : null,
+        items: expect.any(Array),
+      });
+      expect(page1.body.items.every((row: { action: string }) => row.action === 'note.create')).toBe(true);
+
+      if (page1.body.hasMore && page1.body.nextCursor) {
+        const page2 = await request(server)
+          .get(
+            `/api/v1/campaigns/${campaignId}/audit?envelope=1&limit=2&action=note.create&cursor=${encodeURIComponent(page1.body.nextCursor)}`,
+          )
+          .set(dm);
+        expect(page2.status).toBe(200);
+        const ids1 = page1.body.items.map((r: { id: number }) => r.id);
+        const ids2 = page2.body.items.map((r: { id: number }) => r.id);
+        expect(ids1.every((id: number) => !ids2.includes(id))).toBe(true);
+        expect(Math.min(...ids1)).toBeGreaterThan(Math.max(...ids2));
+      }
+    });
   });
 });
