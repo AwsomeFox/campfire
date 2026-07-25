@@ -752,6 +752,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
   } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [pendingUndo, setPendingUndo] = useState<{ message: string; ids: number[] } | null>(null);
+  const [undoGeneration, setUndoGeneration] = useState(0);
   const markDisplayedRef = useRef<HTMLButtonElement>(null);
   const initialActionFocusRef = useRef(false);
 
@@ -802,6 +803,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
     if (!panelMountedRef.current) return;
     if (res.updated > 0) {
       setMarkAllAnnouncement(typeof successMessage === 'function' ? successMessage(res) : successMessage);
+      setUndoGeneration((generation) => generation + 1);
       setPendingUndo({
         message: `Marked ${res.updated} notification${res.updated === 1 ? '' : 's'} as read.`,
         ids: res.updatedIds,
@@ -1080,6 +1082,7 @@ function OpenNotificationsPanel({ notifications }: { notifications: Notification
         </div>
         {pendingUndo && (
           <UndoSnackbar
+            key={undoGeneration}
             message={pendingUndo.message}
             onUndo={handleUndo}
             onExpire={() => setPendingUndo(null)}
