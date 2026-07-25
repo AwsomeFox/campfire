@@ -10,7 +10,8 @@ import diceEn from '../../src/i18n/locales/en/dice.json';
 
 function mockT(key: string, opts?: Record<string, unknown>): string {
   const short = key.startsWith('dice.') ? key.slice('dice.'.length) : key;
-  let template = (diceEn.dice as Record<string, string>)[short] ?? key;
+  const entry = (diceEn.dice as Record<string, unknown>)[short];
+  let template = typeof entry === 'string' ? entry : key;
   if (opts) {
     for (const [k, v] of Object.entries(opts)) {
       template = template.replace(new RegExp(`{{${k}}}`, 'g'), String(v));

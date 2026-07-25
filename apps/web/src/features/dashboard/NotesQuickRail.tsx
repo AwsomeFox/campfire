@@ -9,6 +9,7 @@ import { GameIcon } from '../../components/GameIcon';
 import { NOTE_VISIBILITY_ICON } from '../../lib/uiIcons';
 import { Markdown } from '../../components/Markdown';
 import { EntityPicker, type EntityLink } from '../notes/EntityPicker';
+import { useKeyboardCommandHint } from '../../components/KeyboardCommandProvider';
 
 const visMeta: Record<Note['visibility'], { chip: ChipVariant; slug: string; label: string }> = {
   private: { chip: 'private', slug: NOTE_VISIBILITY_ICON.private, label: 'Private' },
@@ -49,6 +50,7 @@ export function NotesQuickRail({
   // unanchored — the DM links them on resolve — so this only applies to private notes.
   const [attach, setAttach] = useState<EntityLink | null>(null);
   const [attachResetKey, setAttachResetKey] = useState(0);
+  const quickCaptureHint = useKeyboardCommandHint('quickCapture');
 
   const load = useCallback(async () => {
     // Exact recent-five query (issue #608) — newest-first page, not fetch-all-then-slice.
@@ -191,6 +193,8 @@ export function NotesQuickRail({
             setQuickNote(e.target.value);
             setSavedTo(null);
           }}
+          aria-keyshortcuts={quickCaptureHint.ariaKeyshortcuts}
+          title={`Quick note${quickCaptureHint.titleSuffix}`}
         />
         <Btn type="submit" className="!min-h-0 !py-2 text-sm shrink-0" disabled={saving || !quickNote.trim()}>
           {dest === 'inbox' ? 'Send' : 'Save'}
