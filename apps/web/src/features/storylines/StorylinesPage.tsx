@@ -306,10 +306,21 @@ export default function StorylinesPage() {
     [next[index], next[target]] = [next[target], next[index]];
     setArcs(next);
     try {
-      await Promise.all(patch.map((p) => api.patch(`${API}/arcs/${p.id}`, { sortOrder: p.sortOrder })));
+      await Promise.all(
+        patch.map((p) => {
+          const arc = arcs.find((a) => a.id === p.id);
+          if (!arc) return Promise.resolve();
+          return api.patch(`${API}/arcs/${p.id}`, { sortOrder: p.sortOrder, expectedUpdatedAt: arc.updatedAt });
+        }),
+      );
       await load();
       announce(`Moved arc ${movedTitle}.`);
-    } catch {
+    } catch (err) {
+      if (isStaleWrite(err)) {
+        await load();
+        setArcReorderError('This arc changed elsewhere. The list was refreshed — try again.');
+        return;
+      }
       setArcReorderError("Couldn't reorder arcs. The list was refreshed.");
       await load();
     } finally {

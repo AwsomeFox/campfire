@@ -19,7 +19,7 @@ async function listArcs(page: Page, campaignId: number): Promise<CreatedArc[]> {
 /** Document order of arc sections by id (issue #1312). */
 async function arcSectionOrder(page: Page, arcIds: number[]): Promise<number[]> {
   return page.evaluate((ids) => {
-    const sections = [...document.querySelectorAll<HTMLElement>('[id^="entity-arc-"]')];
+    const sections = Array.from(document.querySelectorAll<HTMLElement>('[id^="entity-arc-"]'));
     const positions = new Map(sections.map((el, index) => [el.id, index]));
     return ids.map((id) => positions.get(`entity-arc-${id}`) ?? -1);
   }, arcIds);
@@ -31,7 +31,7 @@ async function beatTitleOrder(page: Page, arcId: number, beatIds: number[]): Pro
     ({ arcId: aid, beatIds: bids }) => {
       const arc = document.getElementById(`entity-arc-${aid}`);
       if (!arc) return bids.map(() => -1);
-      const beats = [...arc.querySelectorAll<HTMLElement>('[id^="entity-beat-"]')];
+      const beats = Array.from(arc.querySelectorAll<HTMLElement>('[id^="entity-beat-"]'));
       const positions = new Map(beats.map((el, index) => [el.id, index]));
       return bids.map((id) => positions.get(`entity-beat-${id}`) ?? -1);
     },
@@ -65,10 +65,10 @@ test.describe('storylines reorder (issue #1312)', () => {
     await expect(page.locator(`#entity-arc-${arcBeta.id}`)).toBeVisible();
     await expect(page.locator(`#entity-arc-${arcGamma.id}`)).toBeVisible();
 
-    let arcPositions = await arcSectionOrder(page, [arcAlpha.id, arcBeta.id, arcGamma.id]);
+    const arcPositions = await arcSectionOrder(page, [arcAlpha.id, arcBeta.id, arcGamma.id]);
     expectAscending(arcPositions);
 
-    let beatPositions = await beatTitleOrder(page, arcAlpha.id, [beatOne.id, beatTwo.id, beatThree.id]);
+    const beatPositions = await beatTitleOrder(page, arcAlpha.id, [beatOne.id, beatTwo.id, beatThree.id]);
     expectAscending(beatPositions);
 
     const betaMoveUp = page.locator(`#entity-arc-${arcBeta.id}`).getByRole('button', {
