@@ -918,7 +918,7 @@ export function deriveEndTurnPrompts(c: TurnPromptCombatant, slots: readonly Act
   }
   if (c.conditionInstances) {
     for (const cond of c.conditionInstances) {
-      if (cond.roundsRemaining !== null && cond.roundsRemaining <= 1) {
+      if (cond.roundsRemaining !== null && cond.roundsRemaining <= 1 && cond.timing !== 'start-of-turn') {
         prompts.push({
           id: `expiring-cond:${c.id}:${cond.id}`,
           kind: 'expiring-effect',

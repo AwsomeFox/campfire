@@ -2450,10 +2450,11 @@ export function resourceVocabularyForAdapter(
   if (character?.resources) {
     for (const [key, res] of Object.entries(character.resources)) {
       if (!seenKeys.has(key)) {
+        const rechargeParsed = AdapterResourceDef.shape.recharge.safeParse(res.recharge);
         result.push({
           key,
           name: res.name || key,
-          recharge: (res.recharge as AdapterResourceDef['recharge']) || 'long-rest',
+          recharge: rechargeParsed.success ? rechargeParsed.data : 'long-rest',
           defaultMax: res.max,
         });
         seenKeys.add(key);

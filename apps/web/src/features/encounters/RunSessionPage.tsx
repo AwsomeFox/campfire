@@ -3877,7 +3877,11 @@ function CombatantRow({
                   <span>
                     {inst.name}
                     {inst.stacks > 1 && <strong style={{ marginLeft: 3 }}>×{inst.stacks}</strong>}
-                    {inst.isConcentration && <span title="Concentration linked" style={{ marginLeft: 4 }}>🔮</span>}
+                    {inst.isConcentration && (
+                      <span role="img" aria-label="Concentration linked" title="Concentration linked" style={{ marginLeft: 4 }}>
+                        🔮
+                      </span>
+                    )}
                     {inst.roundsRemaining != null && (
                       <span className="tag tag-neutral text-[10px]" style={{ marginLeft: 4, padding: '0 4px' }}>
                         {inst.roundsRemaining}r
