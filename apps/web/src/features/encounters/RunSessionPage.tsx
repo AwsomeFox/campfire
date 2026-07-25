@@ -295,10 +295,9 @@ function linkLabel(kind: 'location' | 'quest' | 'session', row: LinkRow): string
 }
 
 /**
- * Encounter location/quest/session links (issue #126). Shows the current attachments as
- * chips; the DM can expand an inline editor to (re)attach or clear each link, persisted
- * via PATCH /encounters/:id. Non-DM members see the chips read-only (nothing at all when
- * an encounter is unlinked, so the header stays clean).
+ * Encounter location/quest/session links (issue #126, #480). Shows the current attachments as
+ * chips with server-resolved labels so every role sees navigable names in read mode; the DM can
+ * expand an inline editor to (re)attach or clear each link, persisted via PATCH /encounters/:id.
  */
 function EncounterLinks({
   campaignId,
@@ -326,7 +325,7 @@ function EncounterLinks({
   const hasLink = encounter.locationId != null || encounter.questId != null || encounter.sessionId != null;
 
   useEffect(() => {
-    if ((!editing && !hasLink) || linkListsLoaded) return;
+    if (!editing || linkListsLoaded) return;
     let cancelled = false;
     void Promise.all([
       api.get<LinkRow[]>(`${API}/campaigns/${campaignId}/locations`).catch(() => []),
@@ -342,11 +341,36 @@ function EncounterLinks({
     return () => {
       cancelled = true;
     };
-  }, [editing, hasLink, campaignId, linkListsLoaded]);
+  }, [editing, campaignId, linkListsLoaded]);
 
-  const locName = locations.find((l) => l.id === encounter.locationId);
-  const questName = quests.find((q) => q.id === encounter.questId);
-  const sessName = sessions.find((s) => s.id === encounter.sessionId);
+  const locLabel =
+    encounter.locationLink?.label ??
+    (editing ? locations.find((l) => l.id === encounter.locationId) : undefined);
+  const questLabelResolved =
+    encounter.questLink?.label ??
+    (editing ? quests.find((q) => q.id === encounter.questId) : undefined);
+  const sessLabelResolved =
+    encounter.sessionLink?.label ??
+    (editing ? sessions.find((s) => s.id === encounter.sessionId) : undefined);
+
+  const locDisplay =
+    typeof locLabel === 'string'
+      ? locLabel
+      : locLabel
+        ? linkLabel('location', locLabel)
+        : null;
+  const questDisplay =
+    typeof questLabelResolved === 'string'
+      ? questLabelResolved
+      : questLabelResolved
+        ? linkLabel('quest', questLabelResolved)
+        : null;
+  const sessDisplay =
+    typeof sessLabelResolved === 'string'
+      ? sessLabelResolved
+      : sessLabelResolved
+        ? linkLabel('session', sessLabelResolved)
+        : null;
 
   async function save(patch: Record<string, number | null>) {
     setSaving(true);
@@ -361,9 +385,9 @@ function EncounterLinks({
     }
   }
 
-  const showLoc = encounter.locationId != null && (canEdit || locName != null);
-  const showQuest = encounter.questId != null && (canEdit || questName != null);
-  const showSess = encounter.sessionId != null && (canEdit || sessName != null);
+  const showLoc = encounter.locationId != null && (canEdit || locDisplay != null);
+  const showQuest = encounter.questId != null && (canEdit || questDisplay != null);
+  const showSess = encounter.sessionId != null && (canEdit || sessDisplay != null);
   const hasVisibleLink = showLoc || showQuest || showSess;
 
   if (!canEdit && !hasVisibleLink) return null;
@@ -371,36 +395,36 @@ function EncounterLinks({
   return (
     <div className="flex items-center gap-2 flex-wrap" style={{ fontSize: 'var(--type-meta)' }}>
       {showLoc && (
-        locName ? <Link
+        locDisplay ? <Link
           to={entityHref(campaignId, { type: 'location', id: encounter.locationId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('location', locName)}
+          {locDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="treasure-map" size={11} className="inline align-text-bottom mr-1" />
           Location #{encounter.locationId} (unavailable)
         </span>
       )}
       {showQuest && (
-        questName ? <Link
+        questDisplay ? <Link
           to={entityHref(campaignId, { type: 'quest', id: encounter.questId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('quest', questName)}
+          {questDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="scroll-unfurled" size={11} className="inline align-text-bottom mr-1" />
           Quest #{encounter.questId} (unavailable)
         </span>
       )}
       {showSess && (
-        sessName ? <Link
+        sessDisplay ? <Link
           to={entityHref(campaignId, { type: 'session', id: encounter.sessionId })}
           className="tag tag-outline hover:border-accent"
         >
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
-          {linkLabel('session', sessName)}
+          {sessDisplay}
         </Link> : <span className="tag tag-outline text-muted">
           <GameIcon slug="book-cover" size={11} className="inline align-text-bottom mr-1" />
           Session #{encounter.sessionId} (unavailable)

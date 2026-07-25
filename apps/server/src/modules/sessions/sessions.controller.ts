@@ -11,6 +11,7 @@ import { requireWriteMode } from '../../common/proposed.util';
 import { Proposable } from '../../common/decorators/proposable.decorator';
 import { parsePageParams } from '../../common/pagination';
 import { SessionsService } from './sessions.service';
+import { EncountersService } from '../encounters/encounters.service';
 import { SessionCreateDto, SessionUpdateDto, SessionAttendanceSetDto } from './sessions.dto';
 
 /** Upper bound for `?limit` on the sessions list (issue #71). */
@@ -88,6 +89,7 @@ export class SessionsController {
     private readonly sessions: SessionsService,
     private readonly access: CampaignAccessService,
     private readonly proposals: ProposalRecordsService,
+    private readonly encounters: EncountersService,
   ) {}
 
   @Get(':id')
@@ -96,7 +98,9 @@ export class SessionsController {
   async get(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     const row = await this.sessions.getRowOrThrow(id);
     const role = await this.access.requireMember(user, row.campaignId);
-    return this.sessions.getOrThrow(id, role);
+    const session = await this.sessions.getOrThrow(id, role);
+    const linkedEncounters = await this.encounters.listBacklinks(row.campaignId, { sessionId: id }, role);
+    return { ...session, linkedEncounters };
   }
 
   @Patch(':id')
