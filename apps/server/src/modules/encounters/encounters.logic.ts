@@ -346,6 +346,42 @@ export type InitiativeTiebreak = (
  * - otherwise (preparing/ended): plain sortOrder asc.
  * Returns a new array; the input is never mutated.
  */
+/** Campaign encounter-list status grouping (issue #490): active fights surface first. */
+const ENCOUNTER_LIST_STATUS_RANK: Record<EncounterStatus, number> = {
+  running: 0,
+  preparing: 1,
+  ended: 2,
+};
+
+export type EncounterListSortRow = {
+  id: number;
+  status: EncounterStatus;
+  updatedAt: string;
+};
+
+/**
+ * Default encounter-list ordering (issue #490): `running → preparing → ended`, then
+ * `updatedAt` desc within each group. Optionally pin the campaign's authoritative
+ * running fight to the very top (issue #744 legacy drift).
+ */
+export function sortEncountersForList<T extends EncounterListSortRow>(
+  rows: T[],
+  opts?: { pinActiveId?: number | null },
+): T[] {
+  const pinId = opts?.pinActiveId ?? null;
+  return [...rows].sort((a, b) => {
+    if (pinId != null) {
+      if (a.id === pinId && b.id !== pinId) return -1;
+      if (b.id === pinId && a.id !== pinId) return 1;
+    }
+    const statusDiff = ENCOUNTER_LIST_STATUS_RANK[a.status] - ENCOUNTER_LIST_STATUS_RANK[b.status];
+    if (statusDiff !== 0) return statusDiff;
+    const atDiff = new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    if (atDiff !== 0) return atDiff;
+    return b.id - a.id;
+  });
+}
+
 export function sortCombatants(
   rows: Combatant[],
   status: EncounterStatus,

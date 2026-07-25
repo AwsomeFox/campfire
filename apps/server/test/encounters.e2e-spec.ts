@@ -4467,4 +4467,111 @@ describe('encounter linking, campaign-summary digest & difficulty (e2e, issues #
       await request(server()).post(`/api/v1/encounters/${next}/end`).set(dm);
     });
   });
+
+  describe('encounter list filter/sort/search (issue #490)', () => {
+    let listCampId: number;
+    let runningId: number;
+    let preparingId: number;
+    let endedGoblinId: number;
+
+    beforeAll(async () => {
+      const server = ctx.app.getHttpServer();
+      const db = ctx.app.get<DrizzleDb>(DB);
+      const campRes = await request(server).post('/api/v1/campaigns').set(dm).send({ name: 'List Filter Campaign' });
+      expect(campRes.status).toBe(201);
+      listCampId = campRes.body.id;
+
+      const ts = new Date().toISOString();
+      const endedRows = Array.from({ length: 50 }, (_, i) => ({
+        campaignId: listCampId,
+        name: `Ended fight ${i + 1}`,
+        status: 'ended' as const,
+        round: 1,
+        turnIndex: 0,
+        createdAt: ts,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      }));
+      await db.insert(encountersTable).values(endedRows);
+
+      const preparing = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Prep Ambush', hidden: false });
+      expect(preparing.status).toBe(201);
+      preparingId = preparing.body.id;
+
+      const running = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Live Boss Fight', hidden: false });
+      expect(running.status).toBe(201);
+      runningId = running.body.id;
+      const runningMonster = await request(server)
+        .post(`/api/v1/encounters/${runningId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Boss', hpMax: 100 });
+      expect(runningMonster.status).toBe(201);
+      const roll = await request(server).post(`/api/v1/encounters/${runningId}/roll-initiative`).set(dm);
+      expect(roll.status).toBe(201);
+      const start = await request(server).post(`/api/v1/encounters/${runningId}/start`).set(dm);
+      expect(start.status).toBe(201);
+
+      const endedNamed = await request(server)
+        .post(`/api/v1/campaigns/${listCampId}/encounters`)
+        .set(dm)
+        .send({ name: 'Goblin Skirmish', hidden: false });
+      expect(endedNamed.status).toBe(201);
+      endedGoblinId = endedNamed.body.id;
+      const goblin = await request(server)
+        .post(`/api/v1/encounters/${endedGoblinId}/combatants`)
+        .set(dm)
+        .send({ kind: 'monster', name: 'Goblin', hpMax: 7 });
+      expect(goblin.status).toBe(201);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/roll-initiative`).set(dm);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/start`).set(dm);
+      await request(server).post(`/api/v1/encounters/${endedGoblinId}/end`).set(dm);
+    });
+
+    it('surfaces the running encounter ahead of dozens of ended fights', async () => {
+      const server = ctx.app.getHttpServer();
+      const list = await request(server).get(`/api/v1/campaigns/${listCampId}/encounters`).set(dm);
+      expect(list.status).toBe(200);
+      expect(list.body.length).toBeGreaterThanOrEqual(52);
+      expect(list.body[0].id).toBe(runningId);
+      expect(list.body[0].status).toBe('running');
+    });
+
+    it('filters by status', async () => {
+      const server = ctx.app.getHttpServer();
+      const preparing = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ status: 'preparing' })
+        .set(dm);
+      expect(preparing.status).toBe(200);
+      expect(preparing.body.every((e: { status: string }) => e.status === 'preparing')).toBe(true);
+      expect(preparing.body.some((e: { id: number }) => e.id === preparingId)).toBe(true);
+      expect(preparing.body.some((e: { id: number }) => e.id === runningId)).toBe(false);
+    });
+
+    it('searches by name substring', async () => {
+      const server = ctx.app.getHttpServer();
+      const search = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ q: 'goblin' })
+        .set(dm);
+      expect(search.status).toBe(200);
+      expect(search.body).toHaveLength(1);
+      expect(search.body[0].id).toBe(endedGoblinId);
+      expect(search.body[0].name).toBe('Goblin Skirmish');
+    });
+
+    it('rejects an invalid status filter', async () => {
+      const server = ctx.app.getHttpServer();
+      const res = await request(server)
+        .get(`/api/v1/campaigns/${listCampId}/encounters`)
+        .query({ status: 'bogus' })
+        .set(dm);
+      expect(res.status).toBe(400);
+    });
+  });
 });
