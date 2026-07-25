@@ -219,6 +219,11 @@ export class QuestsService {
     return { since, quests: changed };
   }
 
+  /** Latest session reference instant — exposed for catch-up (#549) and other since-based diffs. */
+  async referenceSessionDate(campaignId: number): Promise<string | null> {
+    return this.latestSessionDate(campaignId);
+  }
+
   /**
    * Embed each quest's objectives WITHOUT an N+1 (#72): the previous version ran
    * one objectives query per quest — O(quests) round-trips on the single most-called

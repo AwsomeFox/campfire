@@ -2480,6 +2480,27 @@ function migrateAuditLogForRequestId(sqlite: Database.Database): void {
   sqlite.exec('CREATE INDEX IF NOT EXISTS idx_audit_request_id ON audit_log(request_id)');
 }
 
+/**
+ * Issue #549 — per-user, per-campaign catch-up cursor for the dashboard
+ * "since you were last here" panel. Fresh DBs get the table from BOOTSTRAP_SQL;
+ * upgraded installs create it here.
+ */
+function migrateCampaignCatchUpCursorsTable(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_catch_up_cursors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      last_caught_up_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, campaign_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaign_catch_up_campaign
+      ON campaign_catch_up_cursors(campaign_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -2573,6 +2594,7 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0091_audit_log_request_id', run: migrateAuditLogForRequestId },
   { name: '0092_dice_rolls_manual_provenance', run: migrateDiceRollsTableForManualProvenance },
   { name: '0093_proposals_base_snapshot', run: migrateProposalsTableForBaseSnapshot },
+  { name: '0094_campaign_catch_up_cursors', run: migrateCampaignCatchUpCursorsTable },
 ];
 
 /**

@@ -1,0 +1,27 @@
+{
+  "catchUp": {
+    "title": "Since you were last here",
+    "summary": "{{count}} update across the campaign since {{time}}.",
+    "summary_plural": "{{count}} updates across the campaign since {{time}}.",
+    "markCaughtUp": "Mark caught up",
+    "marking": "Marking…",
+    "markFailed": "Couldn't update catch-up.",
+    "loadFailed": "Couldn't load catch-up.",
+    "truncated": "Showing the first {{limit}} in each category — open the section for the full list.",
+    "sinceLastVisit": "Since your last visit",
+    "sinceLastSession": "Since last session",
+    "kindNew": "New",
+    "kindChanged": "Updated",
+    "kindResolved": "Resolved",
+    "kindLabel": "{{kind}} — {{title}}",
+    "questsHeading": "Quests",
+    "sessionsHeading": "Session recaps",
+    "timelineHeading": "Timeline",
+    "schedulesHeading": "Schedule",
+    "sessionNumber": "Session {{number}}",
+    "scheduleAt": "Scheduled {{time}}",
+    "announceSummary": "{{count}} campaign updates since you were last here.",
+    "today": "your last visit",
+    "timeAgo": "{{time}} ago"
+  }
+}

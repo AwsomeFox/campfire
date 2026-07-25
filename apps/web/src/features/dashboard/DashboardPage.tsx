@@ -26,6 +26,7 @@ import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
+import { CatchUpPanel } from './CatchUpPanel';
 import { GameIcon } from '../../components/GameIcon';
 
 // Slow fallback poll for summary entities that do not have campaign events yet.
@@ -191,6 +192,8 @@ export default function DashboardPage() {
 
       <InstallHintBanner />
       <OfflinePackBanner campaignId={id} />
+
+      <CatchUpPanel campaignId={id} />
 
       {/* Design: two-column grid (~7/5 split), left = map/quests/sessions, right = party/npcs/notes.
           See Campfire.dc.html ~L435-536 (dashCols). Single column below lg per design's mobile spec. */}

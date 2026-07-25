@@ -1227,6 +1227,74 @@ export const TimelineCalendarUpdate = z.object({
 });
 export type TimelineCalendarUpdate = z.infer<typeof TimelineCalendarUpdate>;
 
+// ---------- catch-up (#549) ----------
+// Per-user, per-campaign "since you were last here" diff for returning players.
+// `since` is the reference instant used for this response; `lastCaughtUpAt` is the
+// stored cursor (null when never marked caught up). Each group carries a `kind` so
+// the UI can distinguish new-to-you, edited, and resolved-since-last-visit items.
+// All entity payloads reuse existing list shapes and inherit role redaction/hidden
+// filtering from their source services — nothing here widens visibility.
+export const CatchUpChangeKind = z.enum(['new', 'changed', 'resolved']);
+export type CatchUpChangeKind = z.infer<typeof CatchUpChangeKind>;
+
+export const CatchUpQuestItem = z.object({
+  kind: CatchUpChangeKind,
+  quest: Quest,
+});
+export type CatchUpQuestItem = z.infer<typeof CatchUpQuestItem>;
+
+export const CatchUpSessionItem = z.object({
+  kind: CatchUpChangeKind,
+  session: SessionListItem,
+});
+export type CatchUpSessionItem = z.infer<typeof CatchUpSessionItem>;
+
+export const CatchUpTimelineItem = z.object({
+  kind: CatchUpChangeKind,
+  event: TimelineEvent,
+});
+export type CatchUpTimelineItem = z.infer<typeof CatchUpTimelineItem>;
+
+export const CatchUpScheduleItem = z.object({
+  kind: CatchUpChangeKind,
+  schedule: ScheduledSessionWithRsvps,
+});
+export type CatchUpScheduleItem = z.infer<typeof CatchUpScheduleItem>;
+
+export const CampaignCatchUp = z.object({
+  since: IsoDate.nullable(),
+  lastCaughtUpAt: IsoDate.nullable(),
+  quests: z.array(CatchUpQuestItem),
+  sessions: z.array(CatchUpSessionItem),
+  timeline: z.array(CatchUpTimelineItem),
+  schedules: z.array(CatchUpScheduleItem),
+  totalCount: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type CampaignCatchUp = z.infer<typeof CampaignCatchUp>;
+
+export const CatchUpMark = z.object({
+  at: IsoDate.optional(),
+});
+export type CatchUpMark = z.infer<typeof CatchUpMark>;
+
+export const CatchUpCursor = z.object({
+  lastCaughtUpAt: IsoDate.nullable(),
+});
+export type CatchUpCursor = z.infer<typeof CatchUpCursor>;
+
+/** Classify a catch-up row relative to the reference instant. */
+export function catchUpChangeKind(
+  createdAt: string,
+  updatedAt: string,
+  since: string,
+  resolved = false,
+): CatchUpChangeKind {
+  if (resolved) return 'resolved';
+  if (createdAt >= since) return 'new';
+  return 'changed';
+}
+
 // ---------- session zero / table charter (safety tools & expectations) — issue #122 ----------
 // Session zero is where a table agrees on the content it will and won't play through
 // and the tools it will use to steer in the moment. Before this, none of that had a
