@@ -7527,6 +7527,27 @@ export const AuditEntry = z.object({
 });
 export type AuditEntry = z.infer<typeof AuditEntry>;
 
+/** Default page size for cursor-paginated campaign audit lists (issue #443). */
+export const AUDIT_LIST_DEFAULT_LIMIT = 50;
+/** Hard cap for `?limit=` on campaign audit lists — clients page with `cursor`, not a huge page. */
+export const AUDIT_LIST_MAX_LIMIT = 200;
+
+/**
+ * Paginated campaign audit list response (issue #443).
+ *
+ * Returned when the client requests the envelope (`envelope=1`) or passes filter/cursor
+ * params. Bare GET (no query) and legacy `?limit`/`?offset` paging still return a bare
+ * `AuditEntry[]` for backward compatibility.
+ */
+export const AuditListPage = z.object({
+  items: z.array(AuditEntry),
+  total: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(512).nullable(),
+  limit: z.number().int().positive(),
+});
+export type AuditListPage = z.infer<typeof AuditListPage>;
+
 // ---------- admin observability (issue #22) ----------
 // Server-wide operational snapshot for the admin console (GET /admin/metrics,
 // @ServerRoles('admin')). Everything here is cheap to compute — COUNT(*) per
