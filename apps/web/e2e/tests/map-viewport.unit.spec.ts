@@ -7,7 +7,6 @@ import { resolve } from 'node:path';
 import {
   applyPinch,
   applyWheelZoom,
-  clampPan,
   DEFAULT_MAP_VIEWPORT,
   fitViewport,
   formatViewportZoomPercent,
