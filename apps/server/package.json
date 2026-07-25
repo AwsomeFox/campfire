@@ -8,7 +8,7 @@
     "build": "nest build",
     "start": "node dist/main.js",
     "test": "nest build && NODE_OPTIONS=--experimental-vm-modules jest",
-    "test:cov": "nest build && NODE_OPTIONS=\"--experimental-vm-modules --max-old-space-size=4096\" jest --coverage --maxWorkers=50% --workerIdleMemoryLimit=1024MB",
+    "test:cov": "sh test/run-test-cov.sh",
     "test:watch": "NODE_OPTIONS=--experimental-vm-modules jest --watch",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json"
@@ -52,6 +52,7 @@
     "drizzle-kit": "^0.30.1",
     "express": "^5.2.1",
     "ical.js": "^2.2.1",
+    "istanbul-lib-coverage": "^3.2.2",
     "jest": "^29.7.0",
     "jose": "^6.2.3",
     "supertest": "^7.0.0",
@@ -59,6 +60,7 @@
     "ts-loader": "^9.5.1",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "v8-to-istanbul": "^9.3.0"
   }
 }
