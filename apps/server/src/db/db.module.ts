@@ -1206,6 +1206,40 @@ function migrateNpcsTableForPortraitUrl(sqlite: Database.Database): void {
 }
 
 /**
+ * Migration for DBs created before faction portraits (issue #1324): `factions.portrait_url`
+ * didn't exist. Plain nullable ADD COLUMN — existing factions get NULL, preserving the
+ * initials fallback until a DM uploads an emblem.
+ */
+function migrateFactionsTableForPortraitUrl(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='factions'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(factions)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'portrait_url')) return;
+
+  sqlite.exec('ALTER TABLE factions ADD COLUMN portrait_url TEXT');
+}
+
+/**
+ * Migration for DBs created before location portraits (issue #1324): `locations.portrait_url`
+ * didn't exist. Plain nullable ADD COLUMN — existing locations get NULL, preserving the
+ * status-colored placeholder until a DM uploads landmark art.
+ */
+function migrateLocationsTableForPortraitUrl(sqlite: Database.Database): void {
+  const hasTable = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    .get();
+  if (!hasTable) return; // fresh DB — BOOTSTRAP_SQL below creates it correctly.
+
+  const columns = sqlite.prepare('PRAGMA table_info(locations)').all() as Array<{ name: string }>;
+  if (columns.some((c) => c.name === 'portrait_url')) return;
+
+  sqlite.exec('ALTER TABLE locations ADD COLUMN portrait_url TEXT');
+}
+
+/**
  * Migration for DBs created before AI provider config storage (issue #310): the
  * `ai_provider_configs` table didn't exist. This is a NEW table (not an ADD COLUMN),
  * so — like the `factions` table (see migrateNpcsTableForFactionId's note) —
@@ -2734,6 +2768,8 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0098_combatants_statblock_json', run: migrateCombatantsTableForStatblockJson },
   { name: '0099_campaign_library_monsters', run: migrateCampaignLibraryMonstersTable },
   { name: '0100_campaign_library_monsters_fk', run: migrateCampaignLibraryMonstersForeignKeys },
+  { name: '0101_factions_portrait_url', run: migrateFactionsTableForPortraitUrl },
+  { name: '0102_locations_portrait_url', run: migrateLocationsTableForPortraitUrl },
 ];
 
 /**
