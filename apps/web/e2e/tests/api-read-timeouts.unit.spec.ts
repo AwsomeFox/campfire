@@ -34,6 +34,12 @@ function installLocalStorage(): void {
     configurable: true,
     value: { getItem: () => null },
   });
+  // Unit workers may lack a real browser online bit; transient network errors
+  // only map to "stale" when the client believes it is online (#581).
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { onLine: true },
+  });
 }
 
 function abortAwareFetch(hang: boolean): typeof fetch {
@@ -163,6 +169,47 @@ test.describe('fetchWithBudget (#581)', () => {
       }
       expect(err).toMatchObject({ name: 'AbortError' });
       expect(isReadTimeout(err)).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('stalled response body aborts read with TimeoutError', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (_url, init) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Headers resolve immediately; body never produces bytes.
+          init?.signal?.addEventListener(
+            'abort',
+            () => controller.error(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        },
+      });
+      return Promise.resolve(
+        new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    };
+    try {
+      const res = await fetchWithBudget(
+        '/api/v1/campaigns/1/summary',
+        { method: 'GET' },
+        'read',
+        { connectMs: 50, headersMs: 50, overallMs: 30 } as unknown as typeof API_READ_BUDGET,
+      );
+      let err: unknown;
+      try {
+        await res.text();
+        throw new Error('should throw');
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ApiReadTimeoutError);
+      expect(err).toMatchObject({ name: 'TimeoutError', phase: 'overall' });
     } finally {
       globalThis.fetch = originalFetch;
     }

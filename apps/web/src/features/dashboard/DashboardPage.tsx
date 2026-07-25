@@ -27,6 +27,11 @@ import { HandoutsCard } from './HandoutsCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 import { CatchUpPanel } from './CatchUpPanel';
+import {
+  dashboardCatchUpOptions,
+  failureAfterCancel,
+  shouldShowSkeletonRetry,
+} from './dashboardLoadPolicy';
 import { GameIcon } from '../../components/GameIcon';
 import { EntityDiscussion } from '../comments/EntityDiscussion';
 
@@ -128,6 +133,10 @@ export default function DashboardPage() {
     loadAbortRef.current = null;
     setLoadPending(false);
     setRevalidating(false);
+    // Cancel with no projection used to leave bare skeletons and no Retry.
+    if (projectionRef.current?.campaignId !== activeCampaignId.current) {
+      setFailure(failureAfterCancel(activeCampaignId.current));
+    }
   }, []);
 
   useEffect(() => {
@@ -149,17 +158,19 @@ export default function DashboardPage() {
   // One campaign stream invalidates each affected authoritative read. Scheduling
   // events refetch the whole dashboard projection; this is also the reconnect
   // catch-up path for anything changed while this tab was offline (#790).
+  // Catch-up MUST be background: foreground load() aborts the in-flight first
+  // summary and can leave Home on skeletons forever when the SSE stream flaps.
   useCampaignEvents(Number.isFinite(id) ? id : undefined, {
     onEvent: useCallback((event) => {
       if (event.type === 'schedule.updated') {
-        void load();
+        void load(dashboardCatchUpOptions());
       }
     }, [load]),
     onReconnect: useCallback(() => {
-      void load();
+      void load(dashboardCatchUpOptions());
     }, [load]),
     onStreamRecovery: useCallback(() => {
-      void load();
+      void load(dashboardCatchUpOptions());
     }, [load]),
     onStatusChange: useCallback((status: CampaignEventsStatus) => setEventStatus(status), []),
   });
@@ -193,6 +204,11 @@ export default function DashboardPage() {
   }
 
   if (!summary && !error) {
+    const stranded = shouldShowSkeletonRetry({
+      hasSummary: false,
+      error,
+      loadPending,
+    });
     return (
       <div className="max-w-7xl mx-auto px-4 mt-5 space-y-5">
         {loadPending && (
@@ -204,6 +220,18 @@ export default function DashboardPage() {
               className="font-semibold text-[var(--color-neutral-500)] hover:underline shrink-0"
             >
               Cancel
+            </button>
+          </div>
+        )}
+        {stranded && (
+          <div role="status" className="cf-inset text-sm text-[var(--color-neutral-400)] flex items-center justify-between gap-3">
+            <span>Dashboard didn&apos;t finish loading.</span>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="font-semibold text-[var(--cf-accent)] hover:underline shrink-0"
+            >
+              Retry
             </button>
           </div>
         )}
