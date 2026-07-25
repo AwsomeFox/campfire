@@ -2629,7 +2629,7 @@ export class EncountersService {
     // fresh row, so two concurrent condition changes (one adds while another
     // removes a different condition) compose instead of the loser's whole-array
     // write silently clobbering the winner's (issue #747, same class as #86/#657).
-    let conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
+    const conditionsTouched = patch.addConditions !== undefined || patch.removeConditions !== undefined;
     const conditionInstancesTouched =
       patch.addConditionInstance !== undefined ||
       patch.removeConditionInstanceId !== undefined ||
@@ -2688,8 +2688,8 @@ export class EncountersService {
     let beforeHp = 0;
     let beforeTemp = 0;
     let beforeDeath = 'none';
-    let beforeSucc = 0;
-    let beforeFail = 0;
+    let _beforeSucc = 0;
+    let _beforeFail = 0;
     let afterHp = 0;
     let afterTemp = 0;
     let afterDeath = 'none';
@@ -2705,8 +2705,8 @@ export class EncountersService {
       beforeHp = fresh.hpCurrent;
       beforeTemp = fresh.hpTemp;
       beforeDeath = fresh.deathState;
-      beforeSucc = fresh.deathSaveSuccesses;
-      beforeFail = fresh.deathSaveFailures;
+      _beforeSucc = fresh.deathSaveSuccesses;
+      _beforeFail = fresh.deathSaveFailures;
       const writeSet: Partial<typeof combatants.$inferInsert> = { ...staticUpdate };
       if (conditionsTouched) {
         if (
