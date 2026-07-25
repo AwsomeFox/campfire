@@ -7,7 +7,7 @@
  */
 import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test';
 import type { Campaign } from '@campfire/schema';
-import { stateFor } from './seed';
+import { seed, stateFor } from './seed';
 
 const MOBILE = { width: 390, height: 844 };
 
@@ -74,16 +74,10 @@ test.describe('Design-system visual geometry (#674)', () => {
       expect(borderRadius).toBe(8);
     });
 
-    test('quest detail page loads with consolidated card shell', async ({ page, request }) => {
-      const campaign = await firstCampaign(request);
-      const quests = await json<Array<{ id: number; title: string }>>(
-        await request.get(`/api/v1/campaigns/${campaign.id}/quests`),
-        'list quests',
-      );
-      const quest = quests[0];
-      test.skip(!quest, 'seed must provide a quest');
-      await page.goto(`/c/${campaign.id}/quests/${quest!.id}`);
-      await expect(page.getByRole('heading', { level: 1 })).toBeVisible({ timeout: 15_000 });
+    test('quest detail page loads with consolidated card shell', async ({ page }) => {
+      const fixture = seed();
+      await page.goto(`/c/${fixture.campaignId}/quests/${fixture.navigation.questId}`);
+      await expect(page.getByRole('heading', { level: 3 })).toBeVisible({ timeout: 15_000 });
       const cardCount = await page.locator('.card, section.cf-card').count();
       expect(cardCount).toBeGreaterThan(0);
     });
