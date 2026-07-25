@@ -1735,7 +1735,7 @@ export default function RunSessionPage() {
             setPendingApply(null);
           }}
           onApplyToAll={(combatantIds, delta) => {
-            const actorId = hpLogActorId(pendingApply.actorCombatantId ?? currentCombatantId, combatantIds[0]);
+            const actorId = pendingApply.actorCombatantId ?? currentCombatantId ?? undefined;
             void applyHpDeltaBulk(combatantIds, delta, actorId)
               .then(() => setPendingApply(null))
               .catch(() => undefined);

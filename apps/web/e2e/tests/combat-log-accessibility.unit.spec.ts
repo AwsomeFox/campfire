@@ -39,7 +39,7 @@ test.describe('combat-log accessibility formatting', () => {
       { value: event(3, 'heal', { target: 'Mira', detail: 'healed 4 HP' }), expected: 'Target: Mira. Outcome: healed 4 HP' },
       { value: event(4, 'condition', { target: 'Ash Hound', detail: 'gained Prone' }), expected: 'Target: Ash Hound. Outcome: gained Prone' },
       { value: event(5, 'death', { target: 'Ash Hound', detail: 'dropped to 0 HP' }), expected: 'Target: Ash Hound. Outcome: dropped to 0 HP' },
-      { value: event(5, 'death', { actor: 'Mira', target: 'Ash Hound', detail: 'dropped to 0 HP' }), expected: 'Actor: Mira. Target: Ash Hound. Outcome: dropped to 0 HP' },
+      { value: event(9, 'death', { actor: 'Mira', target: 'Ash Hound', detail: 'dropped to 0 HP' }), expected: 'Actor: Mira. Target: Ash Hound. Outcome: dropped to 0 HP' },
       { value: event(6, 'note', { actor: 'Mira', detail: 'The bridge is unstable' }), expected: 'Actor: Mira. Outcome: The bridge is unstable' },
       { value: event(7, 'override', { actor: 'Game Master', target: 'Ash Hound', detail: 'set initiative to 12' }), expected: 'Actor: Game Master. Target: Ash Hound. Outcome: set initiative to 12' },
       { value: event(8, 'correction', { actor: 'Game Master', target: 'Ash Hound', detail: 'corrected damage to 4' }), expected: 'Actor: Game Master. Target: Ash Hound. Outcome: corrected damage to 4' },
