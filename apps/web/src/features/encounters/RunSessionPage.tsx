@@ -39,6 +39,7 @@ import type {
   RulePack,
   TokenSize,
 } from '@campfire/schema';
+import { LAIR_INITIATIVE_COUNT, LEGENDARY_ACTION_SLOT } from '@campfire/schema';
 import { ruleSystemAdapter, STARFINDER_ADAPTER_ID, applyStarfinderDamage } from '@campfire/schema';
 import { entityTargetProps, entityHref } from '../../lib/entityLinks';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -941,6 +942,14 @@ export default function RunSessionPage() {
     },
   });
 
+  const combatantTurnState = useMutation({
+    mutationFn: ({ combatantId, patch }: { combatantId: number; patch: Record<string, unknown> }) =>
+      api.post(`${API}/encounters/${eid}/combatants/${combatantId}/turn-state`, patch),
+    onMutate: () => setActionError(null),
+    onError: reportError,
+    onSettled: () => invalidateEncounter(queryClient, eid),
+  });
+
   // Optimistic HP steppers (issue #73) — the headline fix. onMutate writes the guessed HP
   // straight into the query cache so the click lands instantly (no round-trip wait, no
   // disabled control); onError rolls back to the pre-click snapshot; onSettled reconciles
@@ -1007,6 +1016,11 @@ export default function RunSessionPage() {
   const patchCombatant = useCallback(
     (combatantId: number, patch: Record<string, unknown>) => combatantPatch.mutate({ combatantId, patch }),
     [combatantPatch],
+  );
+
+  const patchCombatantTurnState = useCallback(
+    (combatantId: number, patch: Record<string, unknown>) => combatantTurnState.mutate({ combatantId, patch }),
+    [combatantTurnState],
   );
 
   /**
@@ -1357,6 +1371,7 @@ export default function RunSessionPage() {
         {encounter.status === 'running' && (
           <span className="tag tag-neutral">
             Round {encounter.round}
+            {encounter.turnPhase === 'lair' ? ` · Lair (init ${LAIR_INITIATIVE_COUNT})` : ''}
           </span>
         )}
         <DifficultyBadge difficulty={difficulty} />
@@ -1563,6 +1578,29 @@ export default function RunSessionPage() {
 
       {/* Current-turn workspace (issue #413): "what can I do now?" + player End-turn. Only
           while running; the component self-hides when there's no current combatant. */}
+      {encounter.status === 'running' && encounter.turnPhase === 'lair' && (
+        <div
+          className="card elev-sm"
+          data-testid="lair-action-slot"
+          style={{
+            padding: '12px 14px',
+            borderLeft: '2px solid var(--color-accent)',
+            background: 'color-mix(in srgb, var(--color-accent) 10%, transparent)',
+          }}
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-white">Lair action</span>
+            <span className="tag tag-accent">initiative {LAIR_INITIATIVE_COUNT}</span>
+            <span className="text-sm text-muted">Resolve the lair effect, then advance the turn.</span>
+            {canDmWrite && (
+              <Btn className="ml-auto" disabled={headerBusy} onClick={nextTurn}>
+                Done →
+              </Btn>
+            )}
+          </div>
+        </div>
+      )}
+
       {encounter.status === 'running' && (
         <TurnWorkspace
           encounterId={eid}
@@ -1707,6 +1745,17 @@ export default function RunSessionPage() {
               onSetHpMax={(value) => patchCombatant(c.id, { hpMax: value })}
               onSetTokenSize={(size) => setTokenSize(c.id, size)}
               onPatchCombatant={(patch) => patchCombatant(c.id, patch)}
+              legendaryActions={c.legendaryActions}
+              onUseLegendary={
+                canDmWrite && c.legendaryActions
+                  ? () => patchCombatantTurnState(c.id, { useSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
+              onReleaseLegendary={
+                canDmWrite && c.legendaryActions && c.legendaryActions.used > 0
+                  ? () => patchCombatantTurnState(c.id, { releaseSlot: LEGENDARY_ACTION_SLOT })
+                  : undefined
+              }
               onRemove={() => setConfirmRemoveCombatantId(c.id)}
             />
           ))
@@ -3539,6 +3588,9 @@ function CombatantRow({
   onSetHpMax,
   onSetTokenSize,
   onPatchCombatant,
+  legendaryActions,
+  onUseLegendary,
+  onReleaseLegendary,
   onRemove,
 }: {
   rowRef?: (el: HTMLDivElement | null) => void;
@@ -3584,6 +3636,9 @@ function CombatantRow({
   onSetHpMax: (value: number) => void;
   onSetTokenSize: (size: TokenSize) => void;
   onPatchCombatant?: (patch: Record<string, unknown>) => void;
+  legendaryActions?: Combatant['legendaryActions'];
+  onUseLegendary?: () => void;
+  onReleaseLegendary?: () => void;
   onRemove: () => void;
 }) {
   const [addingCondition, setAddingCondition] = useState(false);
@@ -3812,6 +3867,39 @@ function CombatantRow({
             <span className={kindTagClass}>
               {kindLabel}
             </span>
+            {legendaryActions && (
+              <span
+                className="tag tag-neutral"
+                data-testid={`legendary-actions-${combatant.id}`}
+                title="Legendary actions used this round"
+              >
+                Legendary {legendaryActions.max - legendaryActions.used}/{legendaryActions.max}
+              </span>
+            )}
+            {legendaryActions && (onUseLegendary || onReleaseLegendary) && (
+              <span className="flex gap-1 items-center">
+                {onUseLegendary && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    disabled={busy || legendaryActions.used >= legendaryActions.max}
+                    onClick={onUseLegendary}
+                  >
+                    −1 leg
+                  </button>
+                )}
+                {onReleaseLegendary && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost !min-h-0 !py-0.5 text-[11px]"
+                    disabled={busy}
+                    onClick={onReleaseLegendary}
+                  >
+                    +1 leg
+                  </button>
+                )}
+              </span>
+            )}
             {(isStarfinder || combatant.eac != null || combatant.kac != null) && (
               <span className="tag tag-neutral" style={{ fontSize: 10 }} title="Energy AC (EAC) / Kinetic AC (KAC)" data-testid="starfinder-ac-tag">
                 EAC {combatant.eac ?? '—'} · KAC {combatant.kac ?? '—'}
