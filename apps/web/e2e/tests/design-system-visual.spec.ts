@@ -77,7 +77,9 @@ test.describe('Design-system visual geometry (#674)', () => {
     test('quest detail page loads with consolidated card shell', async ({ page }) => {
       const fixture = seed();
       await page.goto(`/c/${fixture.campaignId}/quests/${fixture.navigation.questId}`);
-      await expect(page.getByRole('heading', { level: 3 })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('heading', { name: 'DLRNAV Grand Route', level: 3 })).toBeVisible({
+        timeout: 15_000,
+      });
       const cardCount = await page.locator('.card, section.cf-card').count();
       expect(cardCount).toBeGreaterThan(0);
     });
