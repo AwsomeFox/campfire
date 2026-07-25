@@ -1,11 +1,11 @@
-import type { KeyboardEvent, RefObject } from 'react';
+import type { KeyboardEvent, MutableRefObject } from 'react';
 import {
   CHARACTER_SHEET_TAB_LABEL,
   CHARACTER_SHEET_TAB_ORDER,
   type CharacterSheetTab,
 } from './characterSheetTabs';
 
-type TabRefs = RefObject<Record<CharacterSheetTab, HTMLButtonElement | null>>;
+type TabRefs = MutableRefObject<Record<CharacterSheetTab, HTMLButtonElement | null>>;
 
 export function CharacterSheetNav({
   tab,
