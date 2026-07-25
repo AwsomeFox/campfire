@@ -36,6 +36,8 @@ import {
 } from '../features/notifications/NotificationsBell';
 import { AiDmLiveActivityProvider, useAiDmLiveActivityState } from '../features/ai-dm/useAiDmLiveActivity';
 import { GameIcon } from '../components/GameIcon';
+import { BrandMark } from '../components/BrandMark';
+import { UIIcon } from '../components/UIIcon';
 import { EntityDeepLinkFocus } from './EntityDeepLinkFocus';
 import { RouteChangeFocus } from './RouteChangeFocus';
 import { SkipToMainLink } from './SkipToMainLink';
@@ -50,19 +52,6 @@ import {
   type NavGroup,
   type NavItem,
 } from './campaignNav';
-
-function FlameMark({ size = 20 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="shrink-0">
-      <path
-        d="M12 3c1.8 2.6 4.6 4.2 4.6 8a4.6 4.6 0 0 1-9.2 0c0-1.5.5-2.7 1.3-3.9.3 1 .9 1.7 1.7 2.2C10.2 7 10.7 4.9 12 3z"
-        stroke="var(--color-accent)"
-        strokeWidth="1.4"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
 
 function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
@@ -675,7 +664,7 @@ function LayoutContent() {
               style={{ borderRadius: 'var(--radius-md)' }}
               aria-label={t('nav.switchCampaign')}
             >
-              <FlameMark size={22} />
+              <BrandMark size={22} variant="mark" className="shrink-0" />
               <span className="min-w-0 leading-tight">
                 <span
                   className="block truncate text-[15px]"
@@ -774,7 +763,7 @@ function LayoutContent() {
             className="flex items-center gap-2"
             aria-label={campaignId !== undefined ? t('nav.switchCampaign') : t('nav.home')}
           >
-            <FlameMark />
+            <BrandMark variant="mark" className="shrink-0" />
           </Link>
           <div className="leading-tight min-w-0">
             <div style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 14 }}>
@@ -835,7 +824,7 @@ function LayoutContent() {
             style={{ borderColor: 'var(--color-divider)' }}
           >
             <Link to="/" className="flex items-center gap-2.5">
-              <FlameMark />
+              <BrandMark variant="mark" className="shrink-0" />
               <span style={{ fontFamily: 'var(--font-heading)', fontWeight: 500, fontSize: 15 }}>Campfire</span>
             </Link>
             <span className="tag tag-outline" style={{ fontSize: 10 }}>{t('nav.selfHosted')}</span>
@@ -940,7 +929,7 @@ function LayoutContent() {
             </NavLink>
           ) : (
             <button onClick={() => setMoreOpen(true)} aria-haspopup="dialog" aria-expanded={moreOpen}>
-              <span className="ico">⋯</span>{t('nav.more')}
+              <span className="ico"><UIIcon name="more" size="md" /></span>{t('nav.more')}
             </button>
           )}
         </nav>
@@ -1044,9 +1033,9 @@ function MoreSheet({
             aria-label={t('nav.closeMenu')}
             onClick={onClose}
             className="shrink-0 -mt-1 -mr-1 flex items-center justify-center rounded-md"
-            style={{ width: 32, height: 32, color: 'var(--color-text)', fontSize: 18, lineHeight: 1 }}
+            style={{ width: 32, height: 32, color: 'var(--color-text)', lineHeight: 1 }}
           >
-            ✕
+            <UIIcon name="close" size="md" />
           </button>
         </div>
         <div className="flex flex-col overflow-y-auto" style={{ gap: 4, margin: '0 -4px', padding: '0 4px' }}>
