@@ -31,6 +31,7 @@ import { LocationStatusLabel, LOCATION_STATUS_LABEL } from '../../components/Loc
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ImageUpload, attachmentFileUrl } from '../../components/ImageUpload';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
@@ -796,6 +797,8 @@ export default function LocationPage() {
                   </div>
                 </Card>
               )}
+
+              <EntityDiscussion campaignId={cid} entityType="location" entityId={id} />
             </div>
 
             <div className="space-y-4 min-w-0">

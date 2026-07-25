@@ -15,6 +15,7 @@ import { Card, Chip, Btn, Skeleton, ErrorNote, DmPanel, EmptyState } from '../..
 import { NotFoundState } from '../../components/NotFoundState';
 import { Markdown } from '../../components/Markdown';
 import { NotesRail } from '../../components/NotesRail';
+import { EntityDiscussion } from '../comments/EntityDiscussion';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { UndoSnackbar } from '../../components/UndoSnackbar';
 import { RevisionHistoryPanel } from '../../components/RevisionHistoryPanel';
@@ -399,6 +400,8 @@ export default function FactionPage() {
                   </div>
                 )}
               </Card>
+
+              <EntityDiscussion campaignId={cid} entityType="faction" entityId={id} />
             </div>
 
             <div className="space-y-4 min-w-0">
