@@ -153,7 +153,7 @@ function AiModePopover({
     <div
       id={id}
       ref={popoverRef}
-      className="card elev-md overflow-y-auto"
+      className="card elev-md"
       style={{
         position: 'fixed',
         top: position?.top ?? 0,
@@ -162,6 +162,7 @@ function AiModePopover({
         width: 'min(300px, calc(100vw - 24px))',
         maxHeight: position?.maxHeight,
         padding: 4,
+        overflow: 'hidden',
         visibility: position ? 'visible' : 'hidden',
       }}
       role="dialog"
@@ -169,7 +170,13 @@ function AiModePopover({
       tabIndex={-1}
       data-placement={position?.placement}
     >
-      <AiTransparencyNote />
+      <div
+        className="overflow-y-auto"
+        style={{ maxHeight: position?.maxHeight != null ? Math.max(0, position.maxHeight - 8) : undefined }}
+        tabIndex={0}
+      >
+        <AiTransparencyNote />
+      </div>
     </div>
   );
 }

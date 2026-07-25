@@ -629,7 +629,7 @@ export default function AiTablePage() {
       style={{ height: 'calc(100dvh - 60px)' }}
     >
       {/* Header: scene, status pill, token budget, DM pause/resume */}
-      <Card className="!p-4">
+      <Card density="default">
         <div className="flex items-start gap-3 flex-wrap">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -697,7 +697,7 @@ export default function AiTablePage() {
 
       {/* Transcript — named log landmark with aria-live=off so token deltas
           never spam SRs. The sr-only mirror below owns polite additions. */}
-      <Card className="!p-0 flex-1 min-h-0 flex flex-col overflow-hidden relative">
+      <Card density="comfortable" flush className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
         <div
           ref={transcriptRef}
           {...NARRATION_VISUAL_TRANSCRIPT}

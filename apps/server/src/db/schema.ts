@@ -107,6 +107,7 @@ export const characters = sqliteTable('characters', {
   skills: text('skills').notNull().default('{}'),
   actions: text('actions').notNull().default('[]'),
   spellSlots: text('spell_slots').notNull().default('{}'),
+  resources: text('resources').notNull().default('{}'),
   portraitUrl: text('portrait_url'),
   ddbId: text('ddb_id'),
   notes: text('notes').notNull().default(''),
@@ -1242,6 +1243,8 @@ export const combatants = sqliteTable('combatants', {
   // null = defaults (EMPTY_TURN_STATE / []).
   turnState: text('turn_state'),
   activeEffects: text('active_effects'),
+  // Issue #423: structured condition instances as a JSON ConditionInstance[] blob.
+  conditionInstances: text('condition_instances'),
 });
 
 // Persistent per-encounter combat log (issue #61) — see modules/encounters. One row

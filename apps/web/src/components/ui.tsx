@@ -1,23 +1,72 @@
 /**
  * Campfire UI primitives — mirror the design package (design/tokens.html).
- * Feature screens compose these; do not restyle them locally.
+ * Feature screens compose these; do not restyle geometry locally (issue #674).
  */
 import { forwardRef, useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes, type HTMLAttributes, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { createPortal } from 'react-dom';
 import { GameIcon } from './GameIcon';
 import { chipClass, type ChipVariant } from './chipVariants';
+import { densityClass, elevClass, type UiDensity, type UiElevation } from './density';
 import { SKELETON_TEST_IDS } from './loadingSkeletonState';
+import { useDialog } from './useDialog';
 export type { ChipVariant } from './chipVariants';
+export type { UiDensity, UiElevation } from './density';
 
-export function Card({ children, className = '', ...props }: HTMLAttributes<HTMLElement> & { children: ReactNode }) {
-  return <section className={`cf-card p-5 ${className}`} {...props}>{children}</section>;
+type DensityProps = { density?: UiDensity };
+
+export function Card({
+  children,
+  className = '',
+  density = 'comfortable',
+  elev,
+  hover = false,
+  flush = false,
+  ...props
+}: HTMLAttributes<HTMLElement> & DensityProps & {
+  children: ReactNode;
+  elev?: UiElevation;
+  hover?: boolean;
+  /** Drop shell padding so inner regions control inset (cover tiles, menus). */
+  flush?: boolean;
+}) {
+  return (
+    <section
+      className={`cf-card ${densityClass(density)} ${flush ? 'cf-card-flush' : ''} ${elevClass(elev)} ${hover ? 'cf-card-hover' : ''} ${className}`.trim()}
+      {...props}
+    >
+      {children}
+    </section>
+  );
 }
 
-export function Inset({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`cf-inset p-3 ${className}`}>{children}</div>;
+export function Inset({
+  children,
+  className = '',
+  density = 'default',
+}: {
+  children: ReactNode;
+  className?: string;
+  density?: UiDensity;
+}) {
+  return <div className={`cf-inset ${densityClass(density)} ${className}`.trim()}>{children}</div>;
 }
 
-export function Chip({ variant, children, className = '' }: { variant: ChipVariant; children: ReactNode; className?: string }) {
-  return <span className={`cf-chip ${chipClass[variant]} ${className}`}>{children}</span>;
+export function Chip({
+  variant,
+  children,
+  className = '',
+  density = 'default',
+}: {
+  variant: ChipVariant;
+  children: ReactNode;
+  className?: string;
+  density?: UiDensity;
+}) {
+  return (
+    <span className={`cf-chip ${chipClass[variant]} ${densityClass(density)} ${className}`.trim()}>
+      {children}
+    </span>
+  );
 }
 
 /** Map domain statuses to chip variants. */
@@ -30,7 +79,7 @@ export function statusVariant(status: string): ChipVariant {
   }
 }
 
-type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & DensityProps & {
   ghost?: boolean;
   danger?: boolean;
   /** Marks an in-flight action and keeps it natively disabled until it settles. */
@@ -38,11 +87,11 @@ type BtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
-  function Btn({ ghost, danger, busy = false, disabled = false, className = '', ...rest }, ref) {
+  function Btn({ ghost, danger, busy = false, disabled = false, density = 'default', className = '', ...rest }, ref) {
     return (
       <button
         ref={ref}
-        className={`cf-btn ${ghost ? 'cf-btn-ghost' : ''} ${danger ? 'cf-btn-danger' : ''} ${className}`}
+        className={`cf-btn ${densityClass(density)} ${ghost ? 'cf-btn-ghost' : ''} ${danger ? 'cf-btn-danger' : ''} ${className}`.trim()}
         {...rest}
         disabled={disabled || busy}
         aria-busy={busy || undefined}
@@ -51,17 +100,77 @@ export const Btn = forwardRef<HTMLButtonElement, BtnProps>(
   },
 );
 
-export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement>>(
-  function TextInput({ className = '', dir = 'auto', ...props }, ref) {
-    return <input ref={ref} dir={dir} className={`cf-input ${className}`} {...props} />;
+export const TextInput = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & DensityProps>(
+  function TextInput({ className = '', dir = 'auto', density = 'comfortable', ...props }, ref) {
+    return <input ref={ref} dir={dir} className={`cf-input ${densityClass(density)} ${className}`.trim()} {...props} />;
   },
 );
 
-export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(
-  function TextArea({ className = '', dir = 'auto', ...props }, ref) {
-    return <textarea ref={ref} dir={dir} className={`cf-textarea ${className}`} {...props} />;
+export const TextArea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & DensityProps>(
+  function TextArea({ className = '', dir = 'auto', density = 'comfortable', ...props }, ref) {
+    return <textarea ref={ref} dir={dir} className={`cf-textarea ${densityClass(density)} ${className}`.trim()} {...props} />;
   },
 );
+
+/**
+ * Accessible modal shell — the `.dialog` / `.dialog-backdrop` pattern from
+ * nocturne.css with canonical density (issue #674). Prefer this over hand-rolled
+ * dialog markup; ConfirmDialog composes it for destructive flows.
+ */
+export function Dialog({
+  title,
+  titleId,
+  children,
+  actions,
+  density = 'default',
+  onBackdropClick,
+  className = '',
+  backdropClassName = '',
+  'data-overlay': dataOverlay = 'dialog',
+}: {
+  title?: ReactNode;
+  titleId?: string;
+  children?: ReactNode;
+  actions?: ReactNode;
+  density?: UiDensity;
+  onBackdropClick?: () => void;
+  className?: string;
+  backdropClassName?: string;
+  'data-overlay'?: string;
+}) {
+  const dialogRef = useDialog<HTMLDivElement>({
+    onClose: onBackdropClick ?? (() => {}),
+    disabled: !onBackdropClick,
+    autoFocus: true,
+    inertBackground: true,
+  });
+
+  return createPortal(
+    <div
+      className={`dialog-backdrop ${backdropClassName}`.trim()}
+      data-overlay={dataOverlay}
+      onClick={onBackdropClick}
+    >
+      <div
+        ref={dialogRef}
+        className={`dialog ${densityClass(density)} ${className}`.trim()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {title && (
+          <p className="dialog-title" id={titleId}>
+            {title}
+          </p>
+        )}
+        {children && <div className="dialog-body">{children}</div>}
+        {actions && <div className="dialog-actions">{actions}</div>}
+      </div>
+    </div>,
+    document.body,
+  );
+}
 
 /**
  * HP bar tone for a current/max pair (issue #642).
@@ -104,9 +213,9 @@ export function HpBar({ current, max }: { current: number; max: number }) {
 }
 
 /** Accent-tinted DM-only panel. Render ONLY when the effective role is dm and content is non-empty. */
-export function DmPanel({ children }: { children: ReactNode }) {
+export function DmPanel({ children, density = 'default' }: { children: ReactNode; density?: UiDensity }) {
   return (
-    <div className="cf-dm-panel p-4 space-y-1.5">
+    <div className={`cf-dm-panel ${densityClass(density)} space-y-1.5`}>
       <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-accent)]">
         <GameIcon slug="padlock" size={13} reserveSpace /> DM only
       </p>
@@ -121,15 +230,17 @@ export function EmptyState({
   hint,
   action,
   children,
+  density = 'comfortable',
 }: {
   icon?: string;
   title: string;
   hint?: string;
   action?: React.ReactNode;
   children?: React.ReactNode;
+  density?: UiDensity;
 }) {
   return (
-    <div className="cf-inset border-dashed p-6 text-center space-y-2">
+    <div className={`cf-inset border-dashed ${densityClass(density)} text-center space-y-2`}>
       <p className="flex justify-center text-[var(--color-neutral-500)]">
         <GameIcon slug={icon} size={30} reserveSpace />
       </p>
@@ -307,6 +418,7 @@ export function ErrorNote({
   onDismiss,
   pending = false,
   context,
+  density = 'default',
 }: {
   message: string;
   onRetry?: () => void | Promise<void>;
@@ -316,9 +428,10 @@ export function ErrorNote({
   pending?: boolean;
   /** Light secondary context (e.g. relative time) shown after the message. */
   context?: string;
+  density?: UiDensity;
 }) {
   return (
-    <div role="alert" className="cf-inset p-3 text-sm text-[var(--color-neutral-400)]">
+    <div role="alert" className={`cf-inset ${densityClass(density)} text-sm text-[var(--color-neutral-400)]`}>
       <span>{message}</span>
       {context && (
         <span className="text-[var(--color-neutral-500)]">

@@ -26,20 +26,9 @@ import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { NewCampaignWizard } from './NewCampaignWizard';
 import type { Campaign, PermanentDeletionResult, Role } from '@campfire/schema';
 import { PageTitle } from '../../components/PageTitle';
+import { CampaignCover } from '../../components/CampaignCover';
 
 /** Deterministic cover gradient per campaign, echoing the design's cc.cover swatches. */
-const COVERS = [
-  'linear-gradient(135deg, var(--color-accent-800), var(--color-accent-600))',
-  'linear-gradient(135deg, var(--color-accent-2-800), var(--color-accent-2-600))',
-  'linear-gradient(135deg, var(--color-neutral-800), var(--color-neutral-600))',
-  'linear-gradient(135deg, #1f3d38, #2f6f5e)',
-  'linear-gradient(135deg, #3a2a4a, #6c4f8f)',
-];
-
-function coverFor(id: number): string {
-  return COVERS[id % COVERS.length];
-}
-
 function NewCampaignTile({ onClick }: { onClick: () => void }) {
   return (
     <button
@@ -203,9 +192,12 @@ function CampaignTile({
   onNavigate?: (event: { preventDefault(): void }) => void;
 }) {
   return (
-    <div
-      className="card elev-sm text-left overflow-hidden flex flex-col"
-      style={{ padding: 0, gap: 0, ...(archived ? { opacity: 0.72 } : {}) }}
+    <Card
+      density="compact"
+      elev="sm"
+      flush
+      className="text-left overflow-hidden flex flex-col gap-0"
+      style={archived ? { opacity: 0.72 } : undefined}
     >
       <Link
         to={href}
@@ -213,16 +205,12 @@ function CampaignTile({
         className="text-left overflow-hidden flex-1"
         style={{ color: 'inherit', textDecoration: 'none' }}
       >
-        <div
-          className="h-[88px] grid place-items-center"
-          style={{ background: coverFor(campaign.id), ...(archived ? { filter: 'saturate(0.45)' } : {}) }}
-        >
-          <span
-            style={{ fontFamily: 'var(--font-heading)', fontSize: 30, color: 'var(--color-accent-100)' }}
-          >
-            {campaign.name.charAt(0).toUpperCase()}
-          </span>
-        </div>
+        <CampaignCover
+          campaignId={campaign.id}
+          name={campaign.name}
+          variant="tile"
+          archived={archived}
+        />
         <div className="flex flex-col gap-2.5" style={{ padding: '14px 16px 12px' }}>
           <div>
             <div className="card-title" style={{ fontSize: 16 }}>{campaign.name}</div>
@@ -248,13 +236,12 @@ function CampaignTile({
         <Link
           to={dashboardHref}
           onClick={onNavigate}
-          className="btn btn-ghost"
-          style={{ fontSize: 12, minHeight: 36, width: '100%', justifyContent: 'center' }}
+          className="cf-btn cf-btn-ghost cf-density-compact text-xs inline-flex w-full justify-center no-underline"
         >
           Dashboard
         </Link>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -347,7 +334,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
       </div>
       <div className="flex flex-col gap-2">
         {trashed.map((c) => (
-          <div key={c.id} className="card elev-sm flex items-center gap-3" style={{ opacity: 0.85 }}>
+          <Card key={c.id} density="compact" elev="sm" className="flex items-center gap-3" style={{ opacity: 0.85 }}>
             <div className="flex-1 min-w-0">
               <div className="card-title" style={{ fontSize: 14 }}>{c.name}</div>
               <div className="text-muted" style={{ fontSize: 11.5 }}>
@@ -370,7 +357,7 @@ function TrashSection({ onChanged }: { onChanged: () => void | Promise<void> }) 
             >
               Delete permanently
             </button>
-          </div>
+          </Card>
         ))}
       </div>
       {error && <ErrorNote message={error} />}
@@ -508,7 +495,7 @@ export function HomePage() {
   const filtersActive = filters.query.trim() !== '' || filters.role !== 'all' || filters.status !== 'all';
 
   return (
-    <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5">
+    <div className="w-full max-w-[960px] mx-auto px-5 pt-7 pb-12 flex flex-col gap-4.5 cf-authed-shell">
       <div>
         <PageTitle style={{ margin: 0 }}>Your campaigns</PageTitle>
         <p className="text-muted" style={{ margin: '4px 0 0', fontSize: 13 }}>

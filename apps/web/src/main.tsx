@@ -8,6 +8,10 @@ import "@fontsource/inter/500.css";
 import "@fontsource/inter/600.css";
 import "@fontsource/inter/700.css";
 import "@fontsource/inter/800.css";
+// Display serif for brand/page-title moments (issue #676) — self-hosted like Inter (#433).
+import "@fontsource/fraunces/600.css";
+import "@fontsource/fraunces/700.css";
+import "@fontsource/fraunces/800.css";
 import App from "./App";
 import { ensureDeferredInstallPromptCapture } from "./features/dashboard/deferredInstallPrompt";
 import { initPwaRegistration } from "./lib/pwaUpdate";
