@@ -141,6 +141,34 @@ for (const viewport of [
       await page.mouse.move(box!.x + box!.width * 0.5 + 60, box!.y + box!.height * 0.5 + 30);
       await page.mouse.up();
       await expect.poll(() => viewportTransform(mapViewport)).not.toBe(before);
+
+      await page.getByTestId('map-viewport-reset').click();
+      await page.getByTestId('map-viewport-zoom-in').click();
+      const beforeTouch = await viewportTransform(mapViewport);
+      const cx = box!.x + box!.width * 0.5;
+      const cy = box!.y + box!.height * 0.5;
+      await page.evaluate(
+        ({ cx, cy }) => {
+          const surface = document.querySelector<HTMLElement>('[data-testid="battle-map-surface"]');
+          if (!surface) throw new Error('missing surface');
+          const mk = (type: string, x: number, y: number) =>
+            new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+              pointerId: 1,
+              pointerType: 'touch',
+              isPrimary: true,
+              buttons: type === 'pointerup' ? 0 : 1,
+            });
+          surface.dispatchEvent(mk('pointerdown', cx, cy));
+          surface.dispatchEvent(mk('pointermove', cx + 60, cy + 30));
+          surface.dispatchEvent(mk('pointerup', cx + 60, cy + 30));
+        },
+        { cx, cy },
+      );
+      await expect.poll(() => viewportTransform(mapViewport)).not.toBe(beforeTouch);
     });
   });
 }
