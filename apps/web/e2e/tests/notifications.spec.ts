@@ -58,7 +58,8 @@ test.describe('shared notification controller', () => {
     await bell.press('Enter');
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    const markAllRead = dialog.getByRole('button', { name: 'Mark all read' });
+    const markDisplayedRead = dialog.getByRole('button', { name: 'Mark displayed (2) read' });
+    const markCampaignRead = dialog.getByRole('button', { name: 'Mark campaign read' });
     const firstItem = dialog.getByRole('button', { name: /The western road changed/ });
     const lastItem = dialog.getByRole('button', { name: /The eastern road changed/ });
 
@@ -66,16 +67,17 @@ test.describe('shared notification controller', () => {
     await expect(dialog).toHaveAttribute('aria-modal', 'true');
     await expect(dialog).toHaveAccessibleDescription('2 items.');
     await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
-    await expect(markAllRead).toBeFocused();
+    await expect(markDisplayedRead).toBeFocused();
     await expect(bell).toHaveAttribute('aria-expanded', 'true');
     const controlledId = await bell.getAttribute('aria-controls');
     expect(controlledId).toBeTruthy();
     await expect(dialog).toHaveAttribute('id', controlledId!);
     await expect.poll(() => bell.evaluate((element) => element.closest('[inert]') !== null)).toBe(true);
 
-    // Focus cycle now includes the always-present close button (issue #664):
-    // Mark all read -> Close -> first item -> last item -> (wrap) Mark all read.
+    // Focus cycle: Mark displayed -> Mark campaign -> Close -> items -> wrap.
     const closeButton = dialog.getByRole('button', { name: 'Close notifications' });
+    await page.keyboard.press('Tab');
+    await expect(markCampaignRead).toBeFocused();
     await page.keyboard.press('Tab');
     await expect(closeButton).toBeFocused();
     await page.keyboard.press('Tab');
@@ -83,7 +85,7 @@ test.describe('shared notification controller', () => {
     await page.keyboard.press('Tab');
     await expect(lastItem).toBeFocused();
     await page.keyboard.press('Tab');
-    await expect(markAllRead).toBeFocused();
+    await expect(markDisplayedRead).toBeFocused();
     await page.keyboard.press('Shift+Tab');
     await expect(lastItem).toBeFocused();
 
@@ -192,17 +194,19 @@ test.describe('shared notification controller', () => {
     expect(listRequests).toBe(2);
   });
 
-  test('announces mark all read in the dialog status region', async ({ page }) => {
+  test('announces mark displayed read in the dialog status region', async ({ page }) => {
     const { campaignId } = seed();
-    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 2 } }));
+    let unreadCount = 2;
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: unreadCount } }));
     await page.route(LIST_URL, (route) => route.fulfill({
       json: [
         notification('First unread', 9921),
         notification('Second unread', 9922),
       ],
     }));
-    await page.route('**/api/v1/notifications/read-all', async (route) => {
-      await route.fulfill({ json: { ok: true } });
+    await page.route('**/api/v1/notifications/mark-read', async (route) => {
+      unreadCount = 0;
+      await route.fulfill({ json: { updated: 2, updatedIds: [9921, 9922] } });
     });
 
     await page.goto(`/c/${campaignId}`);
@@ -210,9 +214,38 @@ test.describe('shared notification controller', () => {
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
     await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
-    await dialog.getByRole('button', { name: 'Mark all read' }).click();
-    await expect(dialog.locator('span[role="status"]')).toHaveText('All notifications marked as read.');
+    await dialog.getByRole('button', { name: 'Mark displayed (2) read' }).click();
+    await expect(dialog.locator('span[role="status"]')).toHaveText('Marked 2 displayed notifications as read.');
     // Trigger sits under inert background while the dialog is open.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
+  });
+
+  test('confirms mark all read when undisplayed rows exist', async ({ page }) => {
+    const { campaignId } = seed();
+    const items30 = Array.from({ length: 30 }, (_, index) => notification(`Notice ${index + 1}`, 9800 + index));
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 35 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ json: items30 }));
+    await page.route('**/api/v1/notifications/mark-read', async (route) => {
+      const body = route.request().postDataJSON() as { all?: boolean };
+      if (body.all) {
+        await route.fulfill({ json: { updated: 35, updatedIds: items30.map((item) => item.id) } });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto(`/c/${campaignId}`);
+    await page.getByRole('button', { name: 'Notifications (35 unread)' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Notifications' });
+    await dialog.getByRole('button', { name: 'Mark all (35) read' }).click();
+    const confirm = page.getByRole('dialog').filter({ hasText: 'Mark all 35 notifications as read?' });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: 'Mark all 35 read' }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect(dialog.getByRole('status')).toHaveText('All notifications marked as read.');
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
@@ -220,27 +253,31 @@ test.describe('shared notification controller', () => {
 
   test('announces mark all read failure in the dialog status region', async ({ page }) => {
     const { campaignId } = seed();
-    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 2 } }));
-    await page.route(LIST_URL, (route) => route.fulfill({
-      json: [
-        notification('First unread', 9921),
-        notification('Second unread', 9922),
-      ],
-    }));
-    await page.route('**/api/v1/notifications/read-all', async (route) => {
-      await route.fulfill({ status: 503, json: { message: 'Unavailable' } });
+    const items30 = Array.from({ length: 30 }, (_, index) => notification(`Notice ${index + 1}`, 9800 + index));
+    await page.route(COUNT_URL, (route) => route.fulfill({ json: { count: 35 } }));
+    await page.route(LIST_URL, (route) => route.fulfill({ json: items30 }));
+    await page.route('**/api/v1/notifications/mark-read', async (route) => {
+      const body = route.request().postDataJSON() as { all?: boolean };
+      if (body.all) {
+        await route.fulfill({ status: 503, json: { message: 'Unavailable' } });
+        return;
+      }
+      await route.continue();
     });
 
     await page.goto(`/c/${campaignId}`);
-    await page.getByRole('button', { name: 'Notifications (2 unread)' }).click();
+    await page.getByRole('button', { name: 'Notifications (35 unread)' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'Notifications' });
-    await expect(dialog.locator('span[role="status"]')).toHaveText('2 items.');
-    await dialog.getByRole('button', { name: 'Mark all read' }).click();
-    await expect(dialog.locator('span[role="status"]')).toHaveText("Couldn't mark all notifications as read.");
+    await expect(dialog.locator('span[role="status"]')).toHaveText('30 items.');
+    await dialog.getByRole('button', { name: 'Mark all (35) read' }).click();
+    const confirm = page.getByRole('dialog').filter({ hasText: 'Mark all 35 notifications as read?' });
+    await confirm.getByRole('button', { name: 'Mark all 35 read' }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect(dialog.getByRole('status')).toHaveText("Couldn't mark all notifications as read.");
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Notifications (2 unread)' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Notifications (35 unread)' })).toBeVisible();
   });
 
   test('announces loading before items arrive', async ({ page }) => {
