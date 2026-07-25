@@ -39,7 +39,8 @@ export function NewCharacterForm({
   const [ddbRef, setDdbRef] = useState('');
   const [importing, setImporting] = useState(false);
 
-  const levelNum = Math.max(1, Math.min(adapter.maxLevel === Infinity ? 20 : adapter.maxLevel, Number(level) || 1));
+  const levelCap = adapter.maxLevel === Infinity ? 99 : adapter.maxLevel;
+  const levelNum = Math.max(1, Math.min(levelCap, Number(level) || 1));
   const templatesAtLevel = useMemo(() => starterTemplatesForAdapter(adapter, levelNum), [adapter, levelNum]);
   const selectedTemplate = findStarterTemplate(adapter, templateId, levelNum) ?? templatesAtLevel[0];
 

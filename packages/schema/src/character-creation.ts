@@ -88,13 +88,21 @@ export function isCharacterSheetComplete(
   return hasAbilityScores(character, adapter);
 }
 
+function checklistDefenseLabel(adapter: RuleSystemAdapter): string {
+  if (adapter.id === STARFINDER_ADAPTER_ID) {
+    return 'Energy and kinetic armor class (EAC / KAC)';
+  }
+  const defense = adapter.presentation?.defense;
+  if (!defense) return 'Defense';
+  return defense.short ? `${defense.full} (${defense.short})` : defense.full;
+}
+
 /** Completion checklist for draft characters — plain-language, ruleset-aware. */
 export function characterCompletionChecklist(
   character: Character,
   adapter: RuleSystemAdapter,
 ): CharacterChecklistItem[] {
-  const defenseLabel =
-    adapter.id === STARFINDER_ADAPTER_ID ? 'Energy and kinetic armor class (EAC / KAC)' : `${adapter.label} defense (AC)`;
+  const defenseLabel = checklistDefenseLabel(adapter);
 
   return [
     {

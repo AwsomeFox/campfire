@@ -44,7 +44,7 @@ export function abilityScore(character: Character, ability: Ability): number | n
   return raw;
 }
 
-/** Modifier for a set ability score; returns 0 when the score is unset. */
+/** Modifier for a set ability score; returns null when the score is unset. */
 export function modOf(adapter: RuleSystemAdapter, character: Character, ability: Ability): number | null {
   const score = abilityScore(character, ability);
   if (score === null) return null;

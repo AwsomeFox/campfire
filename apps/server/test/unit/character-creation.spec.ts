@@ -74,6 +74,16 @@ describe('character-creation (issue #719)', () => {
       expect(checklist.find((i) => i.id === 'abilities')?.done).toBe(false);
     });
 
+    it('uses adapter-native defense labels', () => {
+      const blank = blankCharacterCreate({ name: 'Sketch', level: 1 });
+      expect(characterCompletionChecklist(blank as never, Dnd5eAdapter).find((i) => i.id === 'defense')?.label).toBe(
+        'Armor Class (AC)',
+      );
+      expect(characterCompletionChecklist(blank as never, OpenLegendAdapter).find((i) => i.id === 'defense')?.label).toBe(
+        'Guard',
+      );
+    });
+
     it('marks template sheets complete when all essentials are set', () => {
       const template = findStarterTemplate(Dnd5eAdapter, '5e-fighter')!;
       const sheet = characterCreateFromTemplate(template, { name: 'Bryn', level: 1 });
