@@ -2,6 +2,41 @@ import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
 import { seed, stateFor, restoreSeedEncounter } from './seed';
 
+const SURFACE_KEYS = [
+  'quest',
+  'npc',
+  'faction',
+  'location',
+  'character',
+  'session',
+  'encounter',
+  'campaign',
+] as const;
+
+type SurfaceKey = (typeof SURFACE_KEYS)[number];
+
+function surfacePath(key: SurfaceKey): string {
+  const { campaignId: c, navigation: n } = seed();
+  switch (key) {
+    case 'quest':
+      return `/c/${c}/quests/${n.questId}`;
+    case 'npc':
+      return `/c/${c}/npcs/${n.npcId}`;
+    case 'faction':
+      return `/c/${c}/factions/${n.factionId}`;
+    case 'location':
+      return `/c/${c}/locations/${n.locationId}`;
+    case 'character':
+      return `/c/${c}/characters/${n.characterId}`;
+    case 'session':
+      return `/c/${c}/sessions?session=${n.sessionId}`;
+    case 'encounter':
+      return `/c/${c}/encounters/${n.encounterId}`;
+    case 'campaign':
+      return `/c/${c}`;
+  }
+}
+
 test.describe('entity discussions (issue #439)', () => {
   test.use({ storageState: stateFor('player') });
 
@@ -12,26 +47,12 @@ test.describe('entity discussions (issue #439)', () => {
     await context.close();
   });
 
-  const surfaces = () => {
-    const { campaignId: c, navigation: n } = seed();
-    return [
-      { label: 'quest', path: `/c/${c}/quests/${n.questId}` },
-      { label: 'npc', path: `/c/${c}/npcs/${n.npcId}` },
-      { label: 'faction', path: `/c/${c}/factions/${n.factionId}` },
-      { label: 'location', path: `/c/${c}/locations/${n.locationId}` },
-      { label: 'character', path: `/c/${c}/characters/${n.characterId}` },
-      { label: 'session', path: `/c/${c}/sessions?session=${n.sessionId}` },
-      { label: 'encounter', path: `/c/${c}/encounters/${n.encounterId}` },
-      { label: 'campaign', path: `/c/${c}` },
-    ] as const;
-  };
-
-  for (const { label, path } of surfaces()) {
+  for (const label of SURFACE_KEYS) {
     test(`mounts Discussion on ${label}`, async ({ page }) => {
-      await page.goto(path);
+      await page.goto(surfacePath(label));
       const discussion = page.getByRole('region', { name: 'Discussion' });
       await expect(discussion).toBeVisible();
-      await expect(discussion.getByPlaceholder(/discussion/i)).toBeVisible();
+      await expect(discussionCompose(discussion)).toBeVisible();
     });
   }
 
@@ -40,7 +61,7 @@ test.describe('entity discussions (issue #439)', () => {
     const body = `Quest thread ${Date.now()}`;
     await page.goto(`/c/${campaignId}/quests/${navigation.questId}`);
     const discussion = page.getByRole('region', { name: 'Discussion' });
-    await discussion.getByPlaceholder('Add to the discussion…').fill(body);
+    await discussionCompose(discussion).fill(body);
     await discussion.getByRole('button', { name: 'Post' }).last().click();
     await expect(discussion.getByText(body)).toBeVisible();
 
@@ -76,3 +97,7 @@ test.describe('entity discussions (issue #439)', () => {
     expect(results.violations).toEqual([]);
   });
 });
+
+function discussionCompose(discussion: import('@playwright/test').Locator) {
+  return discussion.getByPlaceholder('Add to the discussion…');
+}
