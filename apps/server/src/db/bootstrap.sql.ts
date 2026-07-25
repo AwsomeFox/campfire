@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS timeline_events (
   sort_index INTEGER NOT NULL DEFAULT 0,
   dm_secret TEXT NOT NULL DEFAULT '',
   hidden INTEGER NOT NULL DEFAULT 0,
+  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -427,6 +428,7 @@ CREATE TABLE IF NOT EXISTS users (
   accent_color TEXT,
   text_size TEXT NOT NULL DEFAULT 'default',
   time_format TEXT NOT NULL DEFAULT 'system',
+  dice_theme TEXT NOT NULL DEFAULT 'nocturne',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

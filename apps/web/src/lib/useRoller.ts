@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import type { DiceRoll, CheckRollResponse } from '@campfire/schema';
 import { api, API, ApiError } from './api';
 import { useAnnounce } from '../components/Announcer';
+import { useRollResultToast, type ShowRollOptions } from '../components/RollResultToastContext';
 import { formatDiceRollAnnouncement } from '../features/dice/diceLogAccessibility';
 import { rememberLocalDiceAnnouncement } from '../features/dice/localDiceAnnouncements';
 
@@ -22,7 +23,7 @@ export type CheckRollMode = 'flat' | 'advantage' | 'disadvantage';
 
 export interface Roller {
   /** POST the expression to the shared dice log with a character-attributed label. */
-  roll: (expr: string, label: string) => Promise<DiceRoll | null>;
+  roll: (expr: string, label: string, options?: ShowRollOptions) => Promise<DiceRoll | null>;
   /**
    * Issue #415: roll a CATALOG check server-side. The server resolves the authoritative
    * modifier + expression from the rule-system adapter (the client sends only a checkId +
@@ -44,33 +45,38 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
   const [last, setLast] = useState<DiceRoll | null>(null);
   const { t } = useTranslation();
   const announce = useAnnounce();
+  const { beginRollAnimation, cancelRollAnimation, showRoll } = useRollResultToast();
 
   const roll = useCallback(
-    async (expr: string, label: string): Promise<DiceRoll | null> => {
+    async (expr: string, label: string, options?: ShowRollOptions): Promise<DiceRoll | null> => {
       setRolling(true);
       onError(null);
+      beginRollAnimation(expr);
       try {
         const result = await api.post<DiceRoll>(`${API}/campaigns/${campaignId}/roll`, { expr, label });
         setLast(result);
+        showRoll(result, options);
         rememberLocalDiceAnnouncement(campaignId, result.id);
         announce(formatDiceRollAnnouncement(result, t), {
           dedupeKey: `dice-roll:${campaignId}:1:${result.id}:${result.id}`,
         });
         return result;
       } catch (err) {
+        cancelRollAnimation();
         onError(err instanceof ApiError ? err.message : "Couldn't roll the dice.");
         return null;
       } finally {
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, t],
+    [campaignId, onError, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
   const rollCheck = useCallback(
     async (characterId: number, checkId: string, mode: CheckRollMode = 'flat', dc?: number): Promise<CheckRollResponse | null> => {
       setRolling(true);
       onError(null);
+      beginRollAnimation(mode === 'advantage' || mode === 'disadvantage' ? '2d20kh1' : '1d20');
       try {
         const res = await api.post<CheckRollResponse>(`${API}/characters/${characterId}/checks/roll`, {
           checkId,
@@ -78,19 +84,21 @@ export function useRoller(campaignId: number, onError: (msg: string | null) => v
           ...(dc != null ? { dc } : {}),
         });
         setLast(res.roll);
+        showRoll(res.roll);
         rememberLocalDiceAnnouncement(campaignId, res.roll.id);
         announce(formatDiceRollAnnouncement(res.roll, t), {
           dedupeKey: `dice-roll:${campaignId}:1:${res.roll.id}:${res.roll.id}`,
         });
         return res;
       } catch (err) {
+        cancelRollAnimation();
         onError(err instanceof ApiError ? err.message : "Couldn't roll the check.");
         return null;
       } finally {
         setRolling(false);
       }
     },
-    [campaignId, onError, announce, t],
+    [campaignId, onError, announce, beginRollAnimation, cancelRollAnimation, showRoll, t],
   );
 
   return { roll, rollCheck, rolling, last, dismiss: () => setLast(null) };

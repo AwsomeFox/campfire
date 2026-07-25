@@ -290,13 +290,14 @@ export type CampaignImport = z.infer<typeof CampaignImport>;
 
 // ---------- per-campaign trash (issue #269) ----------
 // The soft-delete/undo feature (#116) gave every trashable entity a `deleted_at`
-// column + a POST /<type>/:id/restore endpoint, but the only Trash UI was for whole
+// column + a POST /<route>/:id/restore endpoint, but the only Trash UI was for whole
 // trashed *campaigns* on the home page — a soft-deleted entity was unrecoverable once
 // its Undo toast expired. GET /campaigns/:id/trash lists a campaign's soft-deleted
 // child entities (DM-only) as these lightweight rows: enough to render a Trash page
-// and drive Restore (POST /<type>/:id/restore). `type` is the entity kind, mapped to
-// its restore route by pluralizing (session -> /sessions/:id/restore, etc.).
-export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location']);
+// and drive Restore. `type` is the entity kind; restore routes are mapped (usually
+// the plural resource name — session -> /sessions/:id/restore — with exceptions such
+// as timeline_event -> /timeline/:id/restore).
+export const TrashedEntityType = z.enum(['session', 'character', 'quest', 'npc', 'location', 'timeline_event']);
 export type TrashedEntityType = z.infer<typeof TrashedEntityType>;
 
 export const TrashedEntity = z.object({
@@ -4089,6 +4090,17 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const TextSize = z.enum(['default', 'comfortable', 'large']);
 export type TextSize = z.infer<typeof TextSize>;
 
+export const DiceTheme = z.enum([
+  'nocturne',
+  'obsidian_gold',
+  'arcane_amethyst',
+  'dragon_ruby',
+  'celestial_pearl',
+  'cyberpunk_neon',
+  'eldritch_void',
+  'mahogany_wood',
+]);
+export type DiceTheme = z.infer<typeof DiceTheme>;
 export { TimeFormat, DEFAULT_TIME_FORMAT } from './timeFormat';
 import { TimeFormat } from './timeFormat';
 
@@ -4102,6 +4114,8 @@ export const User = z.object({
   accentColor: HexColor.nullable().default(null),
   // Personal reading preference (per-user semantic typography).
   textSize: TextSize.default('default'),
+  /** Per-player custom 3D dice texture/skin theme. */
+  diceTheme: DiceTheme.default('nocturne'),
   /** Clock rendering: system locale default, pinned 12-hour, or pinned 24-hour (issue #634). */
   timeFormat: TimeFormat.default('system'),
   ...timestamps,
@@ -4126,6 +4140,7 @@ export const PreferencesUpdate = z.object({
   displayName: z.string().max(120).optional(),
   accentColor: HexColor.nullable().optional(),
   textSize: TextSize.optional(),
+  diceTheme: DiceTheme.optional(),
   timeFormat: TimeFormat.optional(),
 });
 export type PreferencesUpdate = z.infer<typeof PreferencesUpdate>;

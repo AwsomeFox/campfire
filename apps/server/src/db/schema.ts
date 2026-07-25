@@ -189,6 +189,8 @@ export const timelineEvents = sqliteTable('timeline_events', {
   sortIndex: integer('sort_index').notNull().default(0),
   dmSecret: text('dm_secret').notNull().default(''),
   hidden: integer('hidden', { mode: 'boolean' }).notNull().default(false),
+  // Soft-delete / trash timestamp (issue #116 / #693).
+  deletedAt: text('deleted_at'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -524,6 +526,8 @@ export const users = sqliteTable('users', {
   textSize: text('text_size').notNull().default('default'),
   // Clock rendering preference: 'system' | '12h' | '24h' (issue #634).
   timeFormat: text('time_format').notNull().default('system'),
+  // Per-player dice overlay skin (issue #1315).
+  diceTheme: text('dice_theme').notNull().default('nocturne'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
