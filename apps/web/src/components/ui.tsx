@@ -174,7 +174,7 @@ function SkeletonStatus({
       className={className}
       role="status"
       aria-busy="true"
-      {...(testId ? { 'data-testid': testId } : {})}
+      data-testid={testId}
     >
       <span className="sr-only">{label}</span>
       {children}
@@ -221,7 +221,7 @@ export function SkeletonCard({
   label?: string;
 }) {
   return (
-    <section className="cf-card p-5" data-testid={SKELETON_TEST_IDS.card}>
+    <section className="card elev-sm" data-testid={SKELETON_TEST_IDS.card}>
       <SkeletonStatus label={label} className="space-y-4">
         {Array.from({ length: sections }, (_, section) => (
           <div key={section} className={section > 0 ? 'space-y-2 pt-3 border-t border-[var(--color-neutral-800)]' : 'space-y-2'}>
