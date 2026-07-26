@@ -4,7 +4,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { RequestUser } from '../../common/user.types';
 import { CampaignAccessService } from './campaign-access.service';
 import { MembersService } from './members.service';
-import { MemberCreateDto, MemberUpdateDto } from './members.dto';
+import { GuestDmGrantCreateDto, MemberCreateDto, MemberUpdateDto } from './members.dto';
 
 @ApiTags('members')
 @Controller('campaigns/:campaignId/members')
@@ -32,8 +32,56 @@ export class MembersController {
     @Body() body: MemberCreateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, campaignId, 'dm');
+    await this.access.requireCampaignPermission(user, campaignId, 'membership_admin');
     return this.members.create(campaignId, body, user);
+  }
+
+  @Get('grants')
+  @ApiOperation({ summary: 'List temporary guest DM grants', description: 'Membership-admin campaign permission required.' })
+  @ApiResponse({ status: 200, description: 'Guest DM grants, including expired/revoked handoff records.' })
+  async listGuestDmGrants(@Param('campaignId', ParseIntPipe) campaignId: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireCampaignPermission(user, campaignId, 'membership_admin', { allowArchived: true });
+    return this.members.listGuestDmGrants(campaignId);
+  }
+
+  @Post('grants')
+  @ApiOperation({
+    summary: 'Grant temporary guest/co-DM authority',
+    description:
+      'Membership-admin campaign permission required. Default scope grants time-bounded DM play authority but excludes membership administration and destructive campaign lifecycle actions.',
+  })
+  @ApiResponse({ status: 201, description: 'Created grant.' })
+  async createGuestDmGrant(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Body() body: GuestDmGrantCreateDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireCampaignPermission(user, campaignId, 'membership_admin');
+    return this.members.createGuestDmGrant(campaignId, body, user);
+  }
+
+  @Post('grants/:grantId/revoke')
+  @ApiOperation({ summary: 'Revoke a guest DM grant', description: 'Membership-admin campaign permission required.' })
+  @ApiResponse({ status: 201, description: 'Revoked grant.' })
+  async revokeGuestDmGrant(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('grantId', ParseIntPipe) grantId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireCampaignPermission(user, campaignId, 'membership_admin');
+    return this.members.revokeGuestDmGrant(campaignId, grantId, user);
+  }
+
+  @Post('grants/:grantId/handback')
+  @ApiOperation({ summary: 'Hand back a guest DM grant', description: 'The grantee may end their own temporary authority early.' })
+  @ApiResponse({ status: 201, description: 'Handed-back grant.' })
+  async handBackGuestDmGrant(
+    @Param('campaignId', ParseIntPipe) campaignId: number,
+    @Param('grantId', ParseIntPipe) grantId: number,
+    @CurrentUser() user: RequestUser,
+  ) {
+    await this.access.requireMember(user, campaignId);
+    return this.members.handBackGuestDmGrant(campaignId, grantId, user);
   }
 
   @Patch(':memberId')
@@ -47,7 +95,7 @@ export class MembersController {
     @Body() body: MemberUpdateDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, campaignId, 'dm');
+    await this.access.requireCampaignPermission(user, campaignId, 'membership_admin');
     return this.members.update(campaignId, memberId, body, user);
   }
 
@@ -78,7 +126,7 @@ export class MembersController {
     if (selfLeave) {
       await this.access.requireMember(user, campaignId);
     } else {
-      await this.access.requireRole(user, campaignId, 'dm');
+      await this.access.requireCampaignPermission(user, campaignId, 'membership_admin');
     }
     await this.members.remove(campaignId, memberId, user, { selfLeave });
   }

@@ -6,12 +6,12 @@ import {
   OnApplicationBootstrap,
   UnauthorizedException,
 } from '@nestjs/common';
-import { and, eq, isNull, lt } from 'drizzle-orm';
+import { and, eq, gt, isNull, lt, lte } from 'drizzle-orm';
 import type { z } from 'zod';
 import { SetupRequest, LoginRequest, SignupRequest } from '@campfire/schema';
-import type { Me } from '@campfire/schema';
+import type { GuestDmGrantScope, Me } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
-import { users, userSessions, campaignMembers, campaigns } from '../../db/schema';
+import { users, userSessions, campaignMembers, campaigns, campaignGuestDmGrants } from '../../db/schema';
 import { randomBytes } from 'node:crypto';
 import { nowIso } from '../../common/time';
 import { hashPassword, verifyPassword, generateSessionToken, hashSessionToken } from '../../common/crypto';
@@ -275,6 +275,19 @@ export class AuthService implements OnApplicationBootstrap {
     await this.db.delete(userSessions).where(eq(userSessions.tokenHash, hashSessionToken(token)));
   }
 
+  private parseGrantScopes(raw: string): GuestDmGrantScope[] {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(
+        (scope): scope is GuestDmGrantScope =>
+          scope === 'dm' || scope === 'membership_admin' || scope === 'destructive',
+      );
+    } catch {
+      return [];
+    }
+  }
+
   /**
    * Resolves a session cookie token to a RequestUser, sliding both `lastSeenAt`
    * and `expiresAt` at most once per {@link SESSION_SLIDING_UPDATE_INTERVAL_MS}
@@ -342,9 +355,27 @@ export class AuthService implements OnApplicationBootstrap {
       .from(campaignMembers)
       .innerJoin(campaigns, eq(campaigns.id, campaignMembers.campaignId))
       .where(and(eq(campaignMembers.userId, userId), isNull(campaigns.deletedAt)));
+    const now = new Date().toISOString();
+    const activeGrants = await this.db
+      .select({ campaignId: campaignGuestDmGrants.campaignId, scopes: campaignGuestDmGrants.scopes })
+      .from(campaignGuestDmGrants)
+      .where(
+        and(
+          eq(campaignGuestDmGrants.granteeUserId, userId),
+          lte(campaignGuestDmGrants.startsAt, now),
+          gt(campaignGuestDmGrants.expiresAt, now),
+          isNull(campaignGuestDmGrants.revokedAt),
+          isNull(campaignGuestDmGrants.handedBackAt),
+        ),
+      );
+    const guestDmCampaignIds = new Set(
+      activeGrants
+        .filter((grant) => this.parseGrantScopes(grant.scopes).includes('dm'))
+        .map((grant) => grant.campaignId),
+    );
     let memberships = rows.map((m) => ({
       campaignId: m.membership.campaignId,
-      role: m.membership.role as Me['memberships'][number]['role'],
+      role: (guestDmCampaignIds.has(m.membership.campaignId) ? 'dm' : m.membership.role) as Me['memberships'][number]['role'],
       characterId: m.membership.characterId,
     }));
     // Issue #723: the install/data-generation identity rides on every /me so the

@@ -108,7 +108,7 @@ describe('membership usable-DM concurrency (real SQLite, REST + MCP)', () => {
         .send({ role: 'player' }),
     ]);
     expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
-    expect(results.find((result) => result.status === 409)?.body.message).toBe('Cannot demote the last dm of this campaign');
+    expect(results.find((result) => result.status === 409)?.body.message).toBe('Cannot demote the protected campaign owner');
     await expectExactlyOneUsableDm(campaignId);
   });
 

@@ -485,10 +485,27 @@ CREATE TABLE IF NOT EXISTS campaign_members (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   role TEXT NOT NULL,
   character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  is_primary_owner INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(campaign_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS campaign_guest_dm_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  grantee_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  granted_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  scopes TEXT NOT NULL DEFAULT '["dm"]',
+  starts_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  handed_back_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_guest_dm_grants_active
+  ON campaign_guest_dm_grants(campaign_id, grantee_user_id, starts_at, expires_at);
 
 -- Issue #549 — per-user, per-campaign catch-up cursor (independent of auth sessions).
 CREATE TABLE IF NOT EXISTS campaign_catch_up_cursors (

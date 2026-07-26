@@ -31,6 +31,7 @@ import {
   combatants,
   proposals,
   campaignMembers,
+  campaignGuestDmGrants,
   apiTokens,
   attachments,
   rulePacks,
@@ -3200,6 +3201,7 @@ export class CampaignsService {
         tx.delete(sessions).where(eq(sessions.campaignId, id)).run();
         tx.delete(scheduledSessions).where(eq(scheduledSessions.campaignId, id)).run();
         tx.delete(proposals).where(eq(proposals.campaignId, id)).run();
+        tx.delete(campaignGuestDmGrants).where(eq(campaignGuestDmGrants.campaignId, id)).run();
         tx.delete(campaignMembers).where(eq(campaignMembers.campaignId, id)).run();
         tx.delete(campaignInvites).where(eq(campaignInvites.campaignId, id)).run();
         tx.delete(apiTokens).where(eq(apiTokens.campaignId, id)).run();

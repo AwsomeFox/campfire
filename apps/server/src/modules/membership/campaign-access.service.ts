@@ -1,6 +1,6 @@
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq } from 'drizzle-orm';
-import type { Role } from '@campfire/schema';
+import type { GuestDmGrantScope, Role } from '@campfire/schema';
 import { DB, type DrizzleDb } from '../../db/db.module';
 import { campaigns } from '../../db/schema';
 import { roleAtLeast, type RequestUser } from '../../common/user.types';
@@ -27,6 +27,8 @@ export type CampaignAccessOpts = {
    */
   allowTrashed?: boolean;
 };
+
+export type CampaignPermission = Extract<GuestDmGrantScope, 'membership_admin' | 'destructive'>;
 
 /**
  * Thin convenience wrapper around RoleResolver for domain services: resolve
@@ -166,5 +168,30 @@ export class CampaignAccessService {
     }
     if (!opts?.allowArchived) await this.assertWritable(campaignId);
     return role;
+  }
+
+  /**
+   * Scoped campaign authority for issue #545. A permanent DM keeps the existing
+   * broad powers. A temporary guest/co-DM may pass only when their active grant
+   * explicitly carries the requested scope; the default grant scope intentionally
+   * omits membership administration and destructive campaign lifecycle actions.
+   */
+  async requireCampaignPermission(
+    user: RequestUser,
+    campaignId: number,
+    permission: CampaignPermission,
+    opts?: CampaignAccessOpts,
+  ): Promise<Role> {
+    const memberRole = await this.requireMember(user, campaignId, {
+      allowTrashed: opts?.allowTrashed,
+    });
+    const permanentRole = await this.roleResolver.permanentEffectiveRole(user, campaignId);
+    const allowedByPermanentDm = permanentRole != null && roleAtLeast(permanentRole, 'dm');
+    const allowedByGrant = await this.roleResolver.activeGrantHasScope(user, campaignId, permission);
+    if (!allowedByPermanentDm && !allowedByGrant) {
+      throw new ForbiddenException(`Requires campaign permission: ${permission}`);
+    }
+    if (!opts?.allowArchived) await this.assertWritable(campaignId);
+    return memberRole;
   }
 }

@@ -145,9 +145,16 @@ export class CampaignsController {
     @CurrentUser() user: RequestUser,
     @Query('revokeInvites') revokeInvites?: string,
   ) {
-    // allowArchived: this is the un-archive path (PATCH {status:'active'}) —
-    // CampaignsService.update() restricts an archived campaign to status-only patches.
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    // Status/invite-suspension changes alter campaign lifecycle/access and are
+    // destructive-scoped for temporary guest DMs (#545). Ordinary metadata edits
+    // stay available to active guest DMs.
+    if (body.status !== undefined || truthyQuery(revokeInvites)) {
+      await this.access.requireCampaignPermission(user, id, 'destructive', { allowArchived: true });
+    } else {
+      // allowArchived: this is the un-archive path (PATCH {status:'active'}) —
+      // CampaignsService.update() restricts an archived campaign to status-only patches.
+      await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    }
     return this.campaigns.update(id, body, user, { revokeInvites: truthyQuery(revokeInvites) });
   }
 
@@ -165,7 +172,7 @@ export class CampaignsController {
     @Query('revokeInvites') revokeInvites?: string,
   ) {
     // allowArchived: trashing an archived campaign must not require un-archiving it first.
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true });
+    await this.access.requireCampaignPermission(user, id, 'destructive', { allowArchived: true });
     return this.campaigns.remove(id, user, { revokeInvites: truthyQuery(revokeInvites) });
   }
 
@@ -180,7 +187,7 @@ export class CampaignsController {
   async restore(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
     // allowTrashed: this is one of the three Trash exemptions (issue #867).
     // allowArchived: writability is not required to clear deletedAt.
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true, allowTrashed: true });
+    await this.access.requireCampaignPermission(user, id, 'destructive', { allowArchived: true, allowTrashed: true });
     return this.campaigns.restore(id, user);
   }
 
@@ -200,7 +207,7 @@ export class CampaignsController {
     @Body() body: CampaignPurgeDto,
     @CurrentUser() user: RequestUser,
   ) {
-    await this.access.requireRole(user, id, 'dm', { allowArchived: true, allowTrashed: true });
+    await this.access.requireCampaignPermission(user, id, 'destructive', { allowArchived: true, allowTrashed: true });
     const outcome = await this.campaigns.purge(id, user, body);
     return { filesPending: outcome.filesPending, pendingPaths: outcome.pendingPaths };
   }

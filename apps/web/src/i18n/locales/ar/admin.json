@@ -41,6 +41,7 @@
       "loadCampaigns": "تعذّر تحميل campaigns.",
       "loadAuditLog": "تعذّر تحميل the audit log.",
       "loadCharacters": "تعذّر تحميل characters for linking.",
+      "loadGuestDmGrants": "تعذّر تحميل guest DM grants.",
       "loadAiConsole": "تعذّر تحميل the AI console.",
       "toggleKillSwitch": "Couldn't toggle the kill switch.",
       "saveCap": "تعذّر الحفظ the cap.",

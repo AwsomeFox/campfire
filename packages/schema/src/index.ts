@@ -4728,6 +4728,9 @@ export const CampaignMember = z.object({
   userId: Id,
   role: Role, // dm | player | viewer — per campaign
   characterId: Id.nullable().default(null),
+  // The protected campaign owner/creator seat. Ordinary DM and temporary guest
+  // authority cannot demote/remove this seat; see MembersService (#545).
+  primaryOwner: z.boolean().default(false),
   username: z.string().default(''), // denormalized for display
   displayName: z.string().default(''),
   disabled: z.boolean().default(false), // unusable accounts never count as DM authority (#849)
@@ -4752,6 +4755,40 @@ export const MemberUpdate = z.object({
   characterId: Id.nullable().optional(),
   confirmTransfer: z.boolean().optional(),
 });
+
+export const GuestDmGrantScope = z.enum(['dm', 'membership_admin', 'destructive']);
+export type GuestDmGrantScope = z.infer<typeof GuestDmGrantScope>;
+
+export const GuestDmGrant = z.object({
+  id: Id,
+  campaignId: Id,
+  granteeUserId: Id,
+  grantedByUserId: Id.nullable().default(null),
+  scopes: z.array(GuestDmGrantScope).default(['dm']),
+  startsAt: IsoDate,
+  expiresAt: IsoDate,
+  revokedAt: IsoDate.nullable().default(null),
+  handedBackAt: IsoDate.nullable().default(null),
+  username: z.string().default(''),
+  displayName: z.string().default(''),
+  ...timestamps,
+});
+export type GuestDmGrant = z.infer<typeof GuestDmGrant>;
+
+const GuestDmGrantScopesInput = z
+  .array(GuestDmGrantScope)
+  .min(1)
+  .max(3)
+  .default(['dm'])
+  .transform((scopes) => [...new Set(scopes)]);
+
+export const GuestDmGrantCreate = z.object({
+  granteeUserId: Id,
+  scopes: GuestDmGrantScopesInput.optional(),
+  startsAt: IsoDate.optional(),
+  expiresAt: IsoDate,
+});
+export type GuestDmGrantCreate = z.infer<typeof GuestDmGrantCreate>;
 
 // Server-admin-only membership integrity diagnostics/recovery (#849). These
 // shapes expose operational metadata only: campaign identity/name, account ids,

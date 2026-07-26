@@ -121,6 +121,19 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(columnNames(sqlite, 'participant_support_preferences')).toEqual(
         expect.arrayContaining(['campaign_id', 'owner_user_id', 'owner_name', 'support_text', 'visibility', 'ai_use_consent']),
       );
+      expect(columnNames(sqlite, 'campaign_members')).toContain('is_primary_owner');
+      expect(columnNames(sqlite, 'campaign_guest_dm_grants')).toEqual(
+        expect.arrayContaining([
+          'campaign_id',
+          'grantee_user_id',
+          'granted_by_user_id',
+          'scopes',
+          'starts_at',
+          'expires_at',
+          'revoked_at',
+          'handed_back_at',
+        ]),
+      );
     } finally {
       sqlite.close();
     }
@@ -335,6 +348,7 @@ describe('db migrations (real SQLite, old-shaped DB)', () => {
       expect(MIGRATION_NAMES).toContain('0068_inventory_qty_idempotency');
       expect(MIGRATION_NAMES).toContain('0069_inventory_qty_idempotency_created_at');
       expect(MIGRATION_NAMES).toContain('0070_notifications_data');
+      expect(MIGRATION_NAMES).toContain('0106_guest_dm_handoff_545');
       expect(MIGRATION_NAMES).toContain('0071_ai_dm_usage_history');
       expect(MIGRATION_NAMES).toContain('0085_combatants_condition_instances');
       expect(MIGRATION_NAMES).toContain('0086_encounters_boss_turn_phase');
