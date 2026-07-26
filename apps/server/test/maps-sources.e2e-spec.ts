@@ -4,10 +4,18 @@ import { createTestApp, closeTestApp, type TestAppContext } from './test-app';
 const dm = { 'x-dev-role': 'dm', 'x-dev-user': 'dm-1' };
 const viewer = { 'x-dev-role': 'viewer', 'x-dev-user': 'v-1' };
 
-const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-/** Smallest buffer the magic-byte sniff (sniffImageMime) accepts as a PNG — enough to import. */
+/**
+ * Smallest REAL PNG (1x1, 8-bit RGB). A bare magic-byte prefix used to be enough
+ * here, but since issue #604 the import path validates the image HEADER (so a
+ * decompression bomb is rejected before anything decodes it) — a fixture must
+ * therefore actually be a decodable image.
+ */
 function tinyPng(): Buffer {
-  return Buffer.concat([PNG_MAGIC, Buffer.from('one-page-dungeon-entry-bytes')]);
+  return Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000010000000108020000009077' +
+      '53de0000000c4944415408d763f8ffff3f0005fe02fea1399e1e0000000049454e44ae426082',
+    'hex',
+  );
 }
 
 /**

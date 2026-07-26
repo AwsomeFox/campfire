@@ -7,6 +7,8 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { BackupService } from '../../src/modules/backup/backup.service';
 import { AiProviderConfigService } from '../../src/modules/ai-provider-config/ai-provider-config.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+// Issue #604: AttachmentsService now delegates responsive derivative generation.
+import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { BACKUP_CADENCE_KEY, type BackupCadenceState } from '../../src/modules/backup/backup-cadence';
 import { settings } from '../../src/db/schema';
@@ -124,7 +126,7 @@ describe('scheduled backup catch-up (issue #732, real SQLite + settings row)', (
       holder,
       audit,
       new SettingsService(db),
-      new AttachmentsService(db, audit, new FsDeletionService(db, audit)),
+      new AttachmentsService(db, audit, new FsDeletionService(db, audit), new AttachmentDerivativesService(db)),
       aiProviderConfig,
     );
   }

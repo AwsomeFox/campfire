@@ -7,6 +7,8 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { CampaignEventsService } from '../../src/modules/events/campaign-events.service';
 import { RollsService } from '../../src/modules/rolls/rolls.service';
 import { AttachmentsService } from '../../src/modules/attachments/attachments.service';
+// Issue #604: AttachmentsService now delegates responsive derivative generation.
+import { AttachmentDerivativesService } from '../../src/modules/attachments/attachment-derivatives.service';
 import { FsDeletionService } from '../../src/modules/attachments/fs-deletion.service';
 import { RevisionsService } from '../../src/modules/revisions/revisions.service';
 import { CampaignLibraryService } from '../../src/modules/campaign-library/campaign-library.service';
@@ -47,7 +49,7 @@ describe('encounter link validation on create (real SQLite, issue #864)', () => 
     const events = new CampaignEventsService();
     const rolls = new RollsService(orm);
     const revisions = new RevisionsService(orm);
-    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit));
+    const attachments = new AttachmentsService(orm, audit, new FsDeletionService(orm, audit), new AttachmentDerivativesService(orm));
     const campaignLibrary = new CampaignLibraryService(orm, audit);
     const encountersService = new EncountersService(orm, audit, events, rolls, revisions, attachments, campaignLibrary);
     // Capture SSE emits without needing a live subscriber — reject paths must not emit.
