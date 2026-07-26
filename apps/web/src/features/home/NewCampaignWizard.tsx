@@ -12,7 +12,12 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, API } from '../../lib/api';
 import type { Campaign, RulePack } from '@campfire/schema';
-import { mechanicsForPackSlug } from '../../lib/rules';
+import {
+  capabilityStatusLabel,
+  mechanicsForPackSlug,
+  rulesetCapabilitiesForSelection,
+  type RulesetCapabilityProfile,
+} from '../../lib/rules';
 import { useAuth } from '../../app/auth';
 import { adminRulesHref, NEW_CAMPAIGN_SETUP_PATH } from '../../lib/adminNavigation';
 import { useAnnounce } from '../../components/Announcer';
@@ -120,10 +125,13 @@ export function NewCampaignWizard({
     }
   }
 
+  const selectedProfile =
+    packs === null ? null : rulesetCapabilitiesForSelection(ruleSystem, packs);
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col"
-      style={{ background: 'var(--color-bg)' }}
+      style={{ background: 'var(--color-bg)', overflowY: 'auto' }}
     >
       <header
         className="flex items-center gap-2.5"
@@ -211,123 +219,38 @@ export function NewCampaignWizard({
             <div className="card elev-sm">
               {packs === null ? (
                 <p className="text-muted" style={{ fontSize: 13 }}>Loading installed rule systems…</p>
-              ) : packs.length === 0 ? (
-                <div className="flex flex-col gap-2">
-                  <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-                    {packsError ?? 'No rule systems are installed on this server yet.'}
-                  </p>
-                  <div
-                    className="flex items-center gap-2.5"
-                    style={{ padding: '10px 14px', border: '1px solid var(--color-divider)', borderRadius: 'var(--radius-md)', fontSize: 12 }}
-                  >
-                    <span className="text-muted">
-                      {isAdmin ? (
-                        <>
-                          Install one from{' '}
-                          <Link
-                            to={adminRulesHref(NEW_CAMPAIGN_SETUP_PATH)}
-                            style={{ color: 'var(--color-text)', textDecoration: 'underline' }}
-                          >
-                            Server admin → Rule systems
-                          </Link>
-                        </>
-                      ) : (
-                        <>Ask a server admin to install a rule system</>
-                      )}
-                      . You can still create this campaign and run it homebrew.
-                    </span>
-                  </div>
-                </div>
               ) : (
-                <div className="flex flex-col gap-2">
-                  {packs.map((pack) => (
-                    <button
-                      key={pack.id}
-                      type="button"
-                      onClick={() => setRuleSystem(pack.slug)}
-                      className="flex items-start gap-2.5 text-left"
-                      style={{
-                        padding: '11px 12px',
-                        border: `1px solid ${ruleSystem === pack.slug ? 'var(--color-accent)' : 'var(--color-divider)'}`,
-                        borderRadius: 'var(--radius-md)',
-                        background: ruleSystem === pack.slug ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-                        font: 'inherit',
-                        color: 'var(--color-text)',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <span
-                        className="flex-none grid place-items-center"
-                        style={{
-                          width: 15,
-                          height: 15,
-                          marginTop: 1,
-                          borderRadius: '50%',
-                          border: `1.5px solid ${ruleSystem === pack.slug ? 'var(--color-accent)' : 'var(--color-divider)'}`,
-                        }}
-                      >
-                        <span
-                          style={{
-                            width: 7,
-                            height: 7,
-                            borderRadius: '50%',
-                            background: ruleSystem === pack.slug ? 'var(--color-accent)' : 'transparent',
-                          }}
+                <div className="flex flex-col gap-3">
+                  {packs.length === 0 && (
+                    <EmptyRulePacksNotice isAdmin={isAdmin} packsError={packsError} />
+                  )}
+                  {packs.length > 0 && (
+                    <div className="flex flex-col gap-2" role="group" aria-label="Installed rule systems">
+                      {packs.map((pack) => (
+                        <RuleSystemChoice
+                          key={pack.id}
+                          selected={ruleSystem === pack.slug}
+                          onSelect={() => setRuleSystem(pack.slug)}
+                          title={pack.name}
+                          meta={`v${pack.version} · ${pack.license} · ${pack.entryCount} entries`}
+                          description={mechanicsForPackSlug(pack.slug)}
                         />
-                      </span>
-                      <span style={{ minWidth: 0 }}>
-                        <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13.5 }}>{pack.name}</span>
-                        <span className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
-                          v{pack.version} · {pack.license} · {pack.entryCount} entries
-                        </span>
-                        {mechanicsForPackSlug(pack.slug) && (
-                          <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2, opacity: 0.85 }}>
-                            {mechanicsForPackSlug(pack.slug)}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setRuleSystem(null)}
-                    className="flex items-start gap-2.5 text-left"
-                    style={{
-                      padding: '11px 12px',
-                      border: `1px solid ${ruleSystem === null ? 'var(--color-accent)' : 'var(--color-divider)'}`,
-                      borderRadius: 'var(--radius-md)',
-                      background: ruleSystem === null ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
-                      font: 'inherit',
-                      color: 'var(--color-text)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <span
-                      className="flex-none grid place-items-center"
-                      style={{
-                        width: 15,
-                        height: 15,
-                        marginTop: 1,
-                        borderRadius: '50%',
-                        border: `1.5px solid ${ruleSystem === null ? 'var(--color-accent)' : 'var(--color-divider)'}`,
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 7,
-                          height: 7,
-                          borderRadius: '50%',
-                          background: ruleSystem === null ? 'var(--color-accent)' : 'transparent',
-                        }}
-                      />
-                    </span>
-                    <span style={{ minWidth: 0 }}>
-                      <span style={{ display: 'block', fontSize: 13.5 }}>None / homebrew</span>
-                      <span className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
-                        No installed rules text — sheets, dice and notes still work.
-                      </span>
-                    </span>
-                  </button>
+                      ))}
+                    </div>
+                  )}
+                  <RuleSystemChoice
+                    selected={ruleSystem === null}
+                    onSelect={() => setRuleSystem(null)}
+                    title="None / homebrew"
+                    meta="No installed compendium or rules text"
+                    description="Sheets, dice and notes still work; combat and difficulty use disclosed fallback behavior."
+                  />
+                  {selectedProfile && (
+                    <RulesetCapabilityDisclosure
+                      profile={selectedProfile}
+                      comparingAgainstInstalledPack={selectedProfile.isHomebrew && packs.length > 0}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -351,5 +274,188 @@ export function NewCampaignWizard({
         )}
       </section>
     </div>
+  );
+}
+
+function RuleSystemChoice({
+  selected,
+  onSelect,
+  title,
+  meta,
+  description,
+}: {
+  selected: boolean;
+  onSelect: () => void;
+  title: string;
+  meta: string;
+  description?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className="flex items-start gap-2.5 text-left"
+      style={{
+        padding: '11px 12px',
+        border: `1px solid ${selected ? 'var(--color-accent)' : 'var(--color-divider)'}`,
+        borderRadius: 'var(--radius-md)',
+        background: selected ? 'color-mix(in srgb, var(--color-accent) 8%, transparent)' : 'transparent',
+        font: 'inherit',
+        color: 'var(--color-text)',
+        cursor: 'pointer',
+      }}
+    >
+      <span
+        className="flex-none grid place-items-center"
+        aria-hidden="true"
+        style={{
+          width: 15,
+          height: 15,
+          marginTop: 1,
+          borderRadius: '50%',
+          border: `1.5px solid ${selected ? 'var(--color-accent)' : 'var(--color-divider)'}`,
+        }}
+      >
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            background: selected ? 'var(--color-accent)' : 'transparent',
+          }}
+        />
+      </span>
+      <span style={{ minWidth: 0 }}>
+        <span style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 13.5 }}>
+          {title}
+          {selected && <span className="sr-only"> selected</span>}
+        </span>
+        <span className="text-muted" style={{ display: 'block', fontSize: 11.5, marginTop: 2 }}>
+          {meta}
+        </span>
+        {description && (
+          <span className="text-muted" style={{ display: 'block', fontSize: 11, marginTop: 2, opacity: 0.85 }}>
+            {description}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+function EmptyRulePacksNotice({
+  isAdmin,
+  packsError,
+}: {
+  isAdmin: boolean;
+  packsError: string | null;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
+        {packsError ?? 'No rule systems are installed on this server yet.'}
+      </p>
+      <div
+        className="flex items-center gap-2.5"
+        style={{ padding: '10px 14px', border: '1px solid var(--color-divider)', borderRadius: 'var(--radius-md)', fontSize: 12 }}
+      >
+        <span className="text-muted">
+          {isAdmin ? (
+            <>
+              Install one from{' '}
+              <Link
+                to={adminRulesHref(NEW_CAMPAIGN_SETUP_PATH)}
+                style={{ color: 'var(--color-text)', textDecoration: 'underline' }}
+              >
+                Server admin → Rule systems
+              </Link>
+              , then return here, or choose None / homebrew below.
+            </>
+          ) : (
+            <>
+              Ask a server admin to install a rule system from Server admin → Rule systems.
+              Suggested request: "Please install the rules pack for this campaign, then I can select it during setup."
+              You can still choose None / homebrew below.
+            </>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function RulesetCapabilityDisclosure({
+  profile,
+  comparingAgainstInstalledPack,
+}: {
+  profile: RulesetCapabilityProfile;
+  comparingAgainstInstalledPack: boolean;
+}) {
+  return (
+    <section
+      aria-labelledby="ruleset-capability-heading"
+      className="flex flex-col gap-2"
+      style={{
+        border: '1px solid var(--color-divider)',
+        borderRadius: 'var(--radius-md)',
+        padding: '12px',
+        fontSize: 11.5,
+      }}
+    >
+      <div className="flex flex-col gap-1">
+        <h3 id="ruleset-capability-heading" style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>
+          {profile.isHomebrew ? 'Before you create with None / homebrew' : `Before you create with ${profile.name}`}
+        </h3>
+        <p className="text-muted" style={{ margin: 0 }}>
+          {profile.mechanicsSummary}
+        </p>
+        {comparingAgainstInstalledPack && (
+          <p className="text-muted" style={{ margin: 0 }}>
+            Compared with selecting an installed pack, these capabilities are missing, limited, or using fallbacks:
+          </p>
+        )}
+      </div>
+
+      <ul className="flex flex-col gap-1.5" style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        {profile.capabilities.map((capability) => (
+          <li
+            key={capability.key}
+            className="flex gap-2"
+            style={{
+              borderTop: '1px solid color-mix(in srgb, var(--color-divider) 70%, transparent)',
+              paddingTop: 6,
+            }}
+          >
+            <span
+              className="tag tag-neutral"
+              style={{ fontSize: 10, height: 'fit-content', minWidth: 72, justifyContent: 'center' }}
+            >
+              {capabilityStatusLabel(capability.status)}
+            </span>
+            <span>
+              <strong style={{ color: 'var(--color-text)' }}>{capability.label}:</strong>{' '}
+              <span className="text-muted">{capability.summary}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+
+      <div
+        style={{
+          borderTop: '1px solid color-mix(in srgb, var(--color-divider) 70%, transparent)',
+          paddingTop: 8,
+        }}
+      >
+        <p style={{ margin: '0 0 4px', color: 'var(--color-text)', fontWeight: 600 }}>
+          Change later in Settings
+        </p>
+        <ul className="text-muted" style={{ margin: 0, paddingLeft: '1rem' }}>
+          {profile.migrationPreview.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      </div>
+    </section>
   );
 }
