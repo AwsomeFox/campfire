@@ -24,6 +24,7 @@ import { SessionLog } from './SessionLog';
 import { NotesQuickRail } from './NotesQuickRail';
 import { DiceWidget } from './DiceWidget';
 import { HandoutsCard } from './HandoutsCard';
+import { CampaignOnboardingCard } from './CampaignOnboardingCard';
 import { AiDmDashboardActivity } from '../ai-dm/AiDmDashboardActivity';
 import { AiDmDashboardOnboarding } from '../ai-dm/AiSetupChecklist';
 import { CatchUpPanel } from './CatchUpPanel';
@@ -312,6 +313,8 @@ export default function DashboardPage() {
           a DM-only "review it" nudge the instant the AI files a proposal. Renders nothing
           when the seat isn't in Driver mode. */}
       <AiDmDashboardActivity campaignId={id} isDm={role === 'dm'} />
+
+      <CampaignOnboardingCard campaignId={id} summary={summary} isDm={role === 'dm'} />
 
       {/* Onboarding nudge (#343) — DM-only, dismissible, shown only while the seat is off. */}
       <AiDmDashboardOnboarding campaignId={id} isDm={role === 'dm'} isAdmin={isAdmin} />

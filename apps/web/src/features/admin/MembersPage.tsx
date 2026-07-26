@@ -400,7 +400,7 @@ function InviteCard({ campaignId }: { campaignId: number }) {
   const maxDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   return (
-    <Card className="space-y-2.5" data-testid="invite-card">
+    <Card id="invite" className="space-y-2.5" data-testid="invite-card">
       <p className="card-kicker mb-0">Invite</p>
 
       {!invitesEnabled && (
