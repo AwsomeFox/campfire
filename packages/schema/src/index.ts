@@ -5354,11 +5354,16 @@ export const AiDmSeat = z.object({
   enabled: z.boolean().default(false), // per-campaign on/off (in addition to the server flag)
   model: z.string().max(120).default(''), // informational label of the model/agent occupying the seat
   instructions: z.string().max(20_000).default(''), // the DM persona / house rules the connected agent should follow
-  // Per-campaign metering, in tokens. tokenBudget is a HARD cap: a turn whose cost
-  // would push tokensUsed past it is rejected (403). 0 = no budget → no turns allowed
-  // (a positive budget must be configured to run the seat).
+  // Per-campaign metering, in tokens. tokenBudget is a HARD cap enforced by
+  // reserving capacity before provider contact (#563). 0 = no budget → no turns
+  // allowed (a positive budget must be configured to run the seat).
   tokenBudget: z.number().int().nonnegative().max(1_000_000_000).default(0),
   tokensUsed: z.number().int().nonnegative().default(0),
+  tokensReserved: z.number().int().nonnegative().default(0), // active in-flight provider reservations
+  tokensRefunded: z.number().int().nonnegative().default(0), // cumulative unused reservation returned
+  tokensUnknown: z.number().int().nonnegative().default(0), // conservative spend when provider usage is unknown
+  tokensOverage: z.number().int().nonnegative().default(0), // known usage above its pre-call reservation
+  budgetRemaining: z.number().int().nonnegative().default(0), // after used + reserved + unknown
   turnCount: z.number().int().nonnegative().default(0),
   lastTurnAt: IsoDate.nullable().default(null),
   proactiveSettings: AiDmProactiveSettings.default({}),
@@ -5658,6 +5663,11 @@ export const AiUsageCampaignRow = z.object({
   model: z.string(),
   tokenBudget: z.number().int().nonnegative(), // per-campaign hard cap (0 = seat can't run)
   tokensUsed: z.number().int().nonnegative(),
+  tokensReserved: z.number().int().nonnegative().default(0),
+  tokensRefunded: z.number().int().nonnegative().default(0),
+  tokensUnknown: z.number().int().nonnegative().default(0),
+  tokensOverage: z.number().int().nonnegative().default(0),
+  budgetRemaining: z.number().int().nonnegative().default(0),
   turnCount: z.number().int().nonnegative(),
   lastTurnAt: IsoDate.nullable(),
 });
@@ -5675,6 +5685,10 @@ export type AiUsageModelRow = z.infer<typeof AiUsageModelRow>;
 // The full usage rollup (GET /settings/ai/usage) — aggregated live from seat counters.
 export const AiUsageRollup = z.object({
   totalTokensUsed: z.number().int().nonnegative(),
+  totalTokensReserved: z.number().int().nonnegative().default(0),
+  totalTokensRefunded: z.number().int().nonnegative().default(0),
+  totalTokensUnknown: z.number().int().nonnegative().default(0),
+  totalTokensOverage: z.number().int().nonnegative().default(0),
   totalTurns: z.number().int().nonnegative(),
   seatCount: z.number().int().nonnegative(), // configured seats (persisted rows)
   activeSeatCount: z.number().int().nonnegative(), // seats with enabled=true

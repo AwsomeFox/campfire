@@ -1193,6 +1193,10 @@ export const aiDmSeats = sqliteTable('ai_dm_seats', {
   instructions: text('instructions').notNull().default(''),
   tokenBudget: integer('token_budget').notNull().default(0),
   tokensUsed: integer('tokens_used').notNull().default(0),
+  tokensReserved: integer('tokens_reserved').notNull().default(0),
+  tokensRefunded: integer('tokens_refunded').notNull().default(0),
+  tokensUnknown: integer('tokens_unknown').notNull().default(0),
+  tokensOverage: integer('tokens_overage').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   lastTurnAt: text('last_turn_at'),
   /** Proactive DM settings per campaign (#1044). */
