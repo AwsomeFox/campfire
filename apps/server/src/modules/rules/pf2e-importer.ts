@@ -572,6 +572,12 @@ export async function fetchPf2eSection(
   while (byName.size < MAX_ENTRIES_PER_SECTION) {
     if (pagesFetched >= MAX_PAGES_PER_SECTION) {
       logger.warn(`${logPrefix} section "${section}": hit page cap (${MAX_PAGES_PER_SECTION} pages) after ${byName.size} entries — stopping`);
+      // Counted as a skip so the truncation is VISIBLE to the caller: rules.service's
+      // manifestIsComplete() treats skippedCount === 0 as part of its proof that the fetch
+      // is the complete upstream set before it authorises deleting installed rows. Stopping
+      // early here means we may have left entries behind, exactly like a malformed-row skip,
+      // and must not be mistaken for a clean full fetch.
+      skippedCount += 1;
       break;
     }
     pagesFetched += 1;

@@ -132,7 +132,34 @@ interface ImportJobProgress {
   preview?: RulePackUpdatePreview;
 }
 
-type PersistPackResult = RulePack & {
+/**
+ * What a caller of persistPack is willing to let a re-import do to an ALREADY-INSTALLED pack.
+ * Both flags default to off (the safe, purely additive behaviour) and are independent — an
+ * upload declares the pack's provenance but never authorises deletion; a truncated upstream
+ * fetch authorises neither.
+ */
+type PersistPackOptions = {
+  /** Delete installed rows absent from this manifest. Only safe when the manifest is provably complete — see manifestIsComplete(). */
+  removeMissing?: boolean;
+  /**
+   * Replace the pack row's own provenance columns (name/license/sourceUrl) from this manifest.
+   * Only safe when the manifest describes the WHOLE pack: `meta` is derived from the sections
+   * fetched by THIS call, so rewriting from a partial add would narrow the pack's license and
+   * source to the newly-fetched sections and drop the terms still governing every retained entry.
+   */
+  rewritePackProvenance?: boolean;
+};
+
+export type PersistPackResult = RulePack & {
+  /**
+   * Which branch of persistPack produced this result: 'created' for a fresh install,
+   * 'updated' for a sync against an already-installed pack. An EXPLICIT discriminant —
+   * runJob used to infer it with `'added' in result`, which silently depends on the
+   * fresh-install branch never mentioning the key (even as `added: undefined`, which
+   * `in` still reports as present). The job outcome an operator sees is worth more than
+   * a structural guess, so the producing branch states it.
+   */
+  outcome: 'created' | 'updated';
   added?: number;
   skippedExisting?: number;
   changed?: number;
@@ -319,6 +346,42 @@ function manifestIsComplete(
   const requested = new Set<string>(requestedSections);
   if (!allSections.every((section) => requested.has(section))) return false;
   return sectionResults.every((r) => r.skippedCount === 0 && r.entries.length < perSectionCap);
+}
+
+/**
+ * The persistPack options a fetched-manifest importer should pass. Both destructive removal
+ * AND rewriting the pack's own provenance columns require the SAME proof — that this fetch is
+ * the complete pack, not one section of it — so they are derived from one `manifestIsComplete`
+ * call rather than being kept in sync by hand at ten call sites.
+ */
+function completeManifestOptions(
+  requestedSections: readonly string[],
+  allSections: readonly string[],
+  sectionResults: ReadonlyArray<{ entries: readonly unknown[]; skippedCount: number }>,
+  perSectionCap: number,
+): { removeMissing: boolean; rewritePackProvenance: boolean } {
+  const complete = manifestIsComplete(requestedSections, allSections, sectionResults, perSectionCap);
+  return { removeMissing: complete, rewritePackProvenance: complete };
+}
+
+/**
+ * A pack's `license` column is a de-duplicated, comma-joined list of the license terms its
+ * entries fall under (each importer builds it as `[...new Set(entryLicenses)].join(', ')`).
+ * When a PARTIAL re-import brings in a section under different terms, the pack-level label has
+ * to keep COVERING the retained sections as well as the new one — so the two labels are unioned
+ * rather than the new one replacing the old. Splitting on ',' is the exact inverse of that join
+ * and round-trips a single operator-authored label (even one containing commas) unchanged,
+ * because the parts are re-joined with the same separator in the same order.
+ */
+function unionLicenseLabels(existing: string, incoming: string): string {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  for (const term of [...existing.split(','), ...incoming.split(',')].map((t) => t.trim())) {
+    if (!term || seen.has(term)) continue;
+    seen.add(term);
+    terms.push(term);
+  }
+  return terms.join(', ') || incoming;
 }
 
 /**
@@ -646,11 +709,11 @@ export class RulesService implements OnModuleInit {
         this.runningJobs.delete(jobId);
         return;
       }
-      const isIncremental = 'added' in result;
-      const { added, skippedExisting, changed, removed, sourceHash, sourceVersion, preview, ...pack } = result;
+      const { outcome, added, skippedExisting, changed, removed, sourceHash, sourceVersion, preview, ...pack } = result;
+      const isIncremental = outcome === 'updated';
       this.markJobCompleted(
         jobId,
-        isIncremental ? 'updated' : 'created',
+        outcome,
         {
           added: added ?? preview?.added ?? 0,
           skippedExisting: skippedExisting ?? 0,
@@ -795,7 +858,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     this.assertSectionsForSource(input.source, input.sections);
     this.assertUrlForSource(input.source, input.url);
     switch (input.source) {
@@ -1158,7 +1221,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? OPEN5E_DEFAULT_BASE_URL;
     const sections: Open5eSection[] = input.sections?.length ? (input.sections as Open5eSection[]) : ALL_OPEN5E_SECTIONS;
     const slug = 'open5e-srd';
@@ -1192,7 +1255,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_OPEN5E_SECTIONS, sectionResults, MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_OPEN5E_SECTIONS, sectionResults, MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1209,7 +1272,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? PF2E_DEFAULT_BASE_URL;
     const sections: Pf2eSection[] = input.sections?.length
       ? (input.sections as Pf2eSection[])
@@ -1236,7 +1299,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1244,7 +1307,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? SF2E_DEFAULT_BASE_URL;
     const sections: Pf2eSection[] = input.sections?.length
       ? (input.sections as Pf2eSection[])
@@ -1271,7 +1334,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF2E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_PF2E_SECTIONS, sectionResults, PF2E_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1290,7 +1353,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? OPEN_LEGEND_DEFAULT_BASE_URL;
     const sections: OpenLegendSection[] = input.sections?.length
       ? (input.sections as OpenLegendSection[])
@@ -1324,7 +1387,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OL_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_OPEN_LEGEND_SECTIONS, sectionResults, OL_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_OPEN_LEGEND_SECTIONS, sectionResults, OL_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1341,7 +1404,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     this.assertUrlForSource(input.source, input.url);
     const baseUrl = input.url!;
     const sections: Pf1eSection[] = input.sections?.length ? (input.sections as Pf1eSection[]) : ALL_PF1E_SECTIONS;
@@ -1367,7 +1430,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${PF1E_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_PF1E_SECTIONS, sectionResults, PF1E_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_PF1E_SECTIONS, sectionResults, PF1E_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1382,7 +1445,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? STARFINDER_DEFAULT_BASE_URL;
     const sections: StarfinderSection[] = input.sections?.length
       ? (input.sections as StarfinderSection[])
@@ -1416,7 +1479,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${STARFINDER_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_STARFINDER_SECTIONS, sectionResults, STARFINDER_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_STARFINDER_SECTIONS, sectionResults, STARFINDER_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1431,7 +1494,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? ARCHMAGE_DEFAULT_BASE_URL;
     const sections: ArchmageSection[] = input.sections?.length
       ? (input.sections as ArchmageSection[])
@@ -1458,7 +1521,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${ARCHMAGE_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_ARCHMAGE_SECTIONS, sectionResults, ARCHMAGE_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1475,7 +1538,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const source = osrSource(input.system);
     const baseUrl = input.url ?? source.sourceUrl;
     const sections: OsrSection[] = input.sections?.length ? (input.sections as OsrSection[]) : ALL_OSR_SECTIONS;
@@ -1505,7 +1568,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${OSR_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_OSR_SECTIONS, sectionResults, OSR_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_OSR_SECTIONS, sectionResults, OSR_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1523,7 +1586,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const baseUrl = input.url ?? CEPHEUS_DEFAULT_BASE_URL;
     // Cepheus imports the whole SRD; its mdBook "books" are progress groups, not a selectable
     // per-statblock filter (a foreign `sections` value was already rejected 400 before enqueue).
@@ -1561,7 +1624,7 @@ export class RulesService implements OnModuleInit {
       // Cepheus always requests every book, but the mdBook parser still skips chapters/blocks
       // it cannot read; a short parse must not be mistaken for upstream deletions. No
       // per-section entry cap applies here (chapters are split, never truncated away).
-      { removeMissing: manifestIsComplete(sections, ALL_CEPHEUS_SECTIONS, sectionResults, Number.POSITIVE_INFINITY) },
+      completeManifestOptions(sections, ALL_CEPHEUS_SECTIONS, sectionResults, Number.POSITIVE_INFINITY),
     );
   }
 
@@ -1579,7 +1642,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackInstall,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     const url = input.url ?? DATASWORN_STARFORGED_URL;
     const sections: DataswornSection[] = input.sections?.length
       ? (input.sections as DataswornSection[])
@@ -1613,7 +1676,7 @@ export class RulesService implements OnModuleInit {
       allEntries,
       user,
       `(cap ${DATASWORN_MAX_ENTRIES_PER_SECTION}/section, ${totalSkipped} skipped)`,
-      { removeMissing: manifestIsComplete(sections, ALL_DATASWORN_SECTIONS, sectionResults, DATASWORN_MAX_ENTRIES_PER_SECTION) },
+      completeManifestOptions(sections, ALL_DATASWORN_SECTIONS, sectionResults, DATASWORN_MAX_ENTRIES_PER_SECTION),
     );
   }
 
@@ -1629,7 +1692,7 @@ export class RulesService implements OnModuleInit {
     input: RulePackUpload,
     user: RequestUser,
     onSectionDone?: (section: string, imported: number) => void,
-  ): Promise<RulePack & { added?: number; skippedExisting?: number }> {
+  ): Promise<PersistPackResult> {
     this.assertOpenLicense(input.pack.license);
     this.assertEntriesOpenLicensed(input);
 
@@ -1687,7 +1750,13 @@ export class RulesService implements OnModuleInit {
       // intend a deletion. Turning that into "delete everything not in this file" would be
       // an unrequested destructive change with no opt-out. If full-replace uploads are ever
       // wanted, they need an explicit opt-in flag on RulePackUpload that defaults to off.
-      { removeMissing: false },
+      //
+      // Pack PROVENANCE is a separate question from the entry set, and an upload does carry
+      // authority there: `pack.name`/`pack.license`/`pack.sourceUrl` are required, operator-
+      // authored fields describing the whole pack (install even refuses a non-open pack
+      // license), so a re-upload is how an operator corrects a pack's license or source.
+      // That stays authoritative — only deletion is withheld.
+      { removeMissing: false, rewritePackProvenance: true },
     );
   }
 
@@ -1704,7 +1773,7 @@ export class RulesService implements OnModuleInit {
     rawEntries: ImportedEntry[],
     user: RequestUser,
     detailSuffix: string,
-    options: { removeMissing?: boolean } = {},
+    options: PersistPackOptions = {},
   ): Promise<PersistPackResult> {
     // De-dupe the incoming entries by (type, slug), keeping the first occurrence. Importers
     // only de-dupe WITHIN a section, but several sources map two sections onto one entry
@@ -1798,7 +1867,7 @@ export class RulesService implements OnModuleInit {
       detail: `${entries.length} entries from ${meta.sectionLabels.join(',')} ${detailSuffix}; source=${meta.sourceUrl || 'upload'} version=${meta.version} manifest=${sourceHash.slice(0, 12)}`,
     });
 
-    return { ...packToDomain(pack), sourceHash, sourceVersion: meta.version, preview: previewForFresh };
+    return { ...packToDomain(pack), outcome: 'created', sourceHash, sourceVersion: meta.version, preview: previewForFresh };
   }
 
   /**
@@ -1813,9 +1882,33 @@ export class RulesService implements OnModuleInit {
     fetchedEntries: ImportedEntry[],
     sourceHash: string,
     user: RequestUser,
-    options: { removeMissing?: boolean } = {},
+    options: PersistPackOptions = {},
   ): Promise<PersistPackResult> {
     const ts = nowIso();
+
+    // The pack row's provenance columns describe the WHOLE pack, but `meta` is derived from
+    // only the sections this call fetched — the admin UI's "Add sections to <pack>" flow means
+    // an operator can install `monsters` today and add `spells` next week, and each importer
+    // computes its pack license from just the entries it pulled. Rewriting the pack row from
+    // that partial manifest would narrow the pack's license/source onto the new sections and
+    // drop the terms that still govern every retained entry — and pack.license is not
+    // decorative: it is the documented fallback for an entry whose own license is blank, the
+    // label the AI source line prints, and what compendium export/import records as a
+    // dependency's license. So provenance is replaced only when the caller proved this
+    // manifest speaks for the whole pack (completeManifestOptions, or an operator-declared
+    // upload). On a partial add we keep the pack's existing name + sourceUrl and UNION in the
+    // new license terms, so the label still covers the retained sections while gaining
+    // whatever the new one adds.
+    //
+    // `version` and `entryCount` always move: they describe this install and the pack's
+    // current size, not where the content came from. This is also what the pre-#500
+    // addEntriesToExistingPack did — the #500 work traded that preservation for provenance
+    // updates, which is right for a full upstream refresh and wrong for a partial add.
+    const nextName = options.rewritePackProvenance ? meta.name : packRow.name;
+    const nextSourceUrl = options.rewritePackProvenance ? meta.sourceUrl : packRow.sourceUrl;
+    const nextLicense = options.rewritePackProvenance
+      ? meta.license
+      : unionLicenseLabels(packRow.license, meta.license);
 
     let updatedPack = packRow;
     let preview: RulePackUpdatePreview = {
@@ -1909,10 +2002,10 @@ export class RulesService implements OnModuleInit {
         const [row] = tx
           .update(rulePacks)
           .set({
-            name: meta.name,
+            name: nextName,
             version: meta.version,
-            license: meta.license,
-            sourceUrl: meta.sourceUrl,
+            license: nextLicense,
+            sourceUrl: nextSourceUrl,
             entryCount: nextEntryCount,
           })
           .where(eq(rulePacks.id, packRow.id))
@@ -1968,6 +2061,7 @@ export class RulesService implements OnModuleInit {
         });
         return {
           ...packToDomain(updatedPack),
+          outcome: 'updated',
           added: 0,
           skippedExisting: 0,
           changed: 0,
@@ -1979,15 +2073,17 @@ export class RulesService implements OnModuleInit {
       }
     }
 
-    // An update rewrites the pack's own provenance columns (name/license/sourceUrl) from the
-    // incoming manifest. A license or source change is exactly the kind of thing an operator
-    // must be able to discover after the fact — issue #500 asks for provenance/license changes
-    // to be AUDITED, not silently swallowed — so record the before→after explicitly rather than
-    // leaving the new value to be inferred from whatever the pack row happens to say now.
+    // A license or source change is exactly the kind of thing an operator must be able to
+    // discover after the fact — issue #500 asks for provenance/license changes to be AUDITED,
+    // not silently swallowed — so record the before→after explicitly rather than leaving the
+    // new value to be inferred from whatever the pack row happens to say now. These compare
+    // against what was actually WRITTEN (next*), not against the raw manifest, so a partial
+    // add that deliberately preserved the pack's provenance reports no change instead of
+    // claiming one the pack row doesn't reflect.
     const provenanceChanges = [
-      ['license', packRow.license, meta.license],
-      ['sourceUrl', packRow.sourceUrl, meta.sourceUrl],
-      ['name', packRow.name, meta.name],
+      ['license', packRow.license, nextLicense],
+      ['sourceUrl', packRow.sourceUrl, nextSourceUrl],
+      ['name', packRow.name, nextName],
       ['version', packRow.version, meta.version],
     ]
       .filter(([, before, after]) => before !== after)
@@ -2007,6 +2103,7 @@ export class RulesService implements OnModuleInit {
 
     return {
       ...packToDomain(updatedPack),
+      outcome: 'updated',
       added: preview.added,
       skippedExisting: preview.changed + preview.unchanged,
       changed: preview.changed,

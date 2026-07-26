@@ -9,6 +9,7 @@ import {
   startFakeOpen5eWithBadPagination,
   startFakeOpen5eFlaky,
   startFakeOpen5eMultiDoc,
+  startFakeOpen5eMixedLicense,
   type FakeOpen5e,
   type FakeOpen5eWithBadPagination,
   type FakeOpen5eFlaky,
@@ -1376,6 +1377,103 @@ describe('rules / rule packs — incremental install (e2e, fake Open5e server)',
     expect(reinstallConditions.added).toBe(0);
     expect(reinstallConditions.skippedExisting).toBe(4);
     expect(reinstallConditions.pack.entryCount).toBe(6); // unchanged by the no-op reinstall
+
+    await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
+  });
+});
+
+/**
+ * Issue #500 follow-up: the update path rewrites the pack row's provenance columns from the
+ * incoming manifest, but that manifest only covers the sections fetched by THIS call — and
+ * the admin UI's "Add sections to <pack>" flow makes partial adds a first-class action. A
+ * partial add must NOT narrow the pack's license/source onto the newly-fetched sections:
+ * pack.license is the documented fallback for entries whose own license is blank, the label
+ * the AI source line prints, and what compendium export records as a dependency's license,
+ * so narrowing it silently mis-licenses every retained entry.
+ *
+ * A COMPLETE re-import is the opposite case and must still move (and audit) provenance —
+ * that's the #500 behaviour this must not regress.
+ */
+describe('rules / rule packs — a partial section add must not narrow pack provenance (issue #500)', () => {
+  let ctx: TestAppContext;
+  let origin: FakeOpen5e;
+  let mirror: FakeOpen5e;
+  const dmHeaders = { 'x-dev-role': 'dm', 'x-dev-user': 'provenance-dm' };
+
+  beforeAll(async () => {
+    ctx = await createTestApp();
+    // Two upstreams serving the same mixed-license catalogue on different origins, so the
+    // second install varies BOTH the license set and the sourceUrl.
+    origin = await startFakeOpen5eMixedLicense();
+    mirror = await startFakeOpen5eMixedLicense();
+  });
+
+  afterAll(async () => {
+    await origin.close();
+    await mirror.close();
+    await closeTestApp(ctx);
+  });
+
+  it('adding a differently-licensed section keeps the pack license/source covering the first section', async () => {
+    const server = ctx.app.getHttpServer();
+
+    // 1. Install ONLY spells, which this upstream serves under the OGL SRD 5.1 document.
+    const spellsJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: origin.baseUrl, sections: ['spells'] });
+    expect(spellsJob.outcome).toBe('created');
+    expect(spellsJob.pack.license).toBe('Open Game License v1.0a');
+    expect(spellsJob.pack.sourceUrl).toBe(origin.baseUrl);
+    const packId = spellsJob.pack.id;
+
+    // 2. Later, add ONLY monsters — CC-BY content, fetched from a mirror. Before the fix the
+    //    pack row was rewritten wholesale from this monsters-only manifest: license became
+    //    "Creative Commons Attribution 4.0" and sourceUrl became the mirror, dropping the OGL
+    //    terms that still govern the retained spells.
+    const monstersJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl, sections: ['monsters'] });
+    expect(monstersJob.outcome).toBe('updated');
+    expect(monstersJob.pack.id).toBe(packId);
+    expect(monstersJob.added).toBe(2);
+    expect(monstersJob.removed).toBe(0);
+
+    // The pack label still COVERS the retained spells, and now also covers the new monsters.
+    expect(monstersJob.pack.license).toContain('Open Game License v1.0a');
+    expect(monstersJob.pack.license).toContain('Creative Commons Attribution 4.0');
+    // Name + source stay on the pack's established provenance — a partial add is not a
+    // re-homing of the pack.
+    expect(monstersJob.pack.sourceUrl).toBe(origin.baseUrl);
+    expect(monstersJob.pack.name).toBe('Open5e SRD');
+    // ...but the counters that describe THIS install still move.
+    expect(monstersJob.pack.entryCount).toBe(2 + 2);
+
+    // The retained spells keep their own OGL license, and the pack they inherit from agrees.
+    const spellRes = await request(server).get('/api/v1/rules/search').query({ q: 'fireball', type: 'spell' }).set(dmHeaders);
+    const fireball = searchItems(spellRes.body).find((e: { name: string }) => e.name === 'Fireball');
+    expect(fireball.license).toBe('Open Game License v1.0a');
+
+    // 3. A COMPLETE re-import (every section, nothing skipped or truncated) IS authoritative:
+    //    provenance moves to the mirror and the change is audited (issue #500's requirement).
+    const fullJob = await installOpen5e(server, dmHeaders, { source: 'open5e', url: mirror.baseUrl });
+    expect(fullJob.outcome).toBe('updated');
+    expect(fullJob.pack.sourceUrl).toBe(mirror.baseUrl);
+    expect(fullJob.pack.license).toContain('Open Game License v1.0a');
+    expect(fullJob.pack.license).toContain('Creative Commons Attribution 4.0');
+
+    const db = ctx.app.get<DrizzleDb>(DB);
+    const auditDetails = db
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.entityId, packId))
+      .all()
+      .map((row) => row.detail);
+    // The complete re-import audits the re-homing...
+    expect(auditDetails.some((d) => d.includes(`sourceUrl:"${origin.baseUrl}"->"${mirror.baseUrl}"`))).toBe(true);
+    // ...and the partial add records the license UNION it actually applied while reporting no
+    // name/source change, because it deliberately preserved those. The audit must describe the
+    // pack row as it now stands, never a rewrite the row didn't take.
+    const partialAudit = auditDetails.find((d) => d.includes('+2 ~0 -0'));
+    expect(partialAudit).toBeDefined();
+    expect(partialAudit).toContain('license:"Open Game License v1.0a"->"Open Game License v1.0a, Creative Commons Attribution 4.0"');
+    expect(partialAudit).not.toContain('sourceUrl:"');
+    expect(partialAudit).not.toContain('name:"');
 
     await request(server).delete(`/api/v1/rules/packs/${packId}`).set(dmHeaders);
   });
