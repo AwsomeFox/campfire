@@ -1,9 +1,25 @@
-import { Body, Controller, Get, HttpCode, Param, ParseIntPipe, Post, Sse, type MessageEvent } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiProduces } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseIntPipe,
+  Post,
+  Query,
+  Sse,
+  type MessageEvent,
+} from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiQuery, ApiResponse, ApiProduces } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { NarrationLanguage } from '@campfire/schema';
+import {
+  AI_DM_TRANSCRIPT_CLIENT_REF_MAX,
+  AI_DM_TRANSCRIPT_LIST_MAX_LIMIT,
+  NarrationLanguage,
+} from '@campfire/schema';
 import { interval, merge, map, type Observable } from 'rxjs';
 import { filter, takeUntil } from 'rxjs/operators';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -15,6 +31,7 @@ import { AiDriverService, toPublicAiDmSessionState } from './ai-driver.service';
 import { AiDmStreamService } from './ai-driver-stream.service';
 import { ProactiveService } from './proactive.service';
 import { projectAiDmToolEventForRole } from './ai-dm-tool-resource';
+import { AiDmTranscriptService, projectTranscriptEventForRole } from './ai-driver-transcript.service';
 
 /** Player action submitted to the AI DM seat (POST /ai-dm/message). */
 const AiDmMessageRequest = z
@@ -25,9 +42,48 @@ const AiDmMessageRequest = z
     maxSteps: z.number().int().min(1).max(12).optional().describe('Cap on tool-loop iterations this turn.'),
     maxTokens: z.number().int().min(1).max(4096).optional().describe('Cap on each provider call’s output tokens (clamped to remaining budget).'),
     narrationLanguage: NarrationLanguage.optional().describe('Per-run override of the campaign narration language (#635).'),
+    clientRef: z
+      .string()
+      .min(1)
+      .max(AI_DM_TRANSCRIPT_CLIENT_REF_MAX)
+      .optional()
+      .describe(
+        'Optimistic-echo correlation token minted by the sending client (#572). Echoed back verbatim on the ' +
+          'persisted `player.action` transcript event so the sender replaces its local optimistic entry instead of ' +
+          'rendering the action twice. A token, not content equality — two players typing the same words must still ' +
+          'produce two transcript lines.',
+      ),
+    characterName: z
+      .string()
+      .max(200)
+      .optional()
+      .describe('Speaker attribution recorded on the transcript line (display only; the server fences the input).'),
+    displayText: z
+      .string()
+      .max(20_000)
+      .optional()
+      .describe(
+        'What the player actually typed, for the shared transcript (#572). `input` is what the MODEL receives and ' +
+          'carries a speaker prefix (#317); this is the clean line the table reads. Defaults to `input`.',
+      ),
   })
   .strict();
 class AiDmMessageDto extends createZodDto(AiDmMessageRequest) {}
+
+/** Query params for the transcript list (GET /ai-dm/transcript, #572). */
+const AiDmTranscriptListQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(AI_DM_TRANSCRIPT_LIST_MAX_LIMIT).optional(),
+    cursor: z.string().max(512).optional(),
+    after: z.coerce
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Reconnect watermark: return every event with seq greater than this, oldest-first.'),
+  })
+  .strict();
+class AiDmTranscriptListDto extends createZodDto(AiDmTranscriptListQuery) {}
 
 /** Pause/resume the seat (POST /ai-dm/pause). */
 const AiDmPauseRequest = z.object({ paused: z.boolean() }).strict();
@@ -145,6 +201,7 @@ export class AiDriverController {
     private readonly access: CampaignAccessService,
     private readonly events: CampaignEventsService,
     private readonly proactive: ProactiveService,
+    private readonly transcript: AiDmTranscriptService,
   ) {}
 
   @Post('message')
@@ -171,6 +228,11 @@ export class AiDriverController {
       maxTokens: body.maxTokens,
       characterId: body.characterId,
       narrationLanguage: body.narrationLanguage,
+      // #572: carried through to the persisted `player.action` transcript event.
+      clientRef: body.clientRef,
+      actorName: user.name,
+      characterName: body.characterName,
+      displayText: body.displayText,
     });
   }
 
@@ -397,6 +459,62 @@ export class AiDriverController {
     return this.driver.resolveToolConfirmation(id, user, body.confirmationId, body.action, role);
   }
 
+  // ---- Authoritative table transcript (#572) --------------------------------------
+
+  @Get('transcript')
+  @ApiOperation({
+    summary: 'Read the authoritative AI-DM table transcript',
+    description:
+      'Requires campaign membership. Returns ONE ordered transcript every player at the table shares — accepted ' +
+      'player actions, narration steps, tool summaries, cancellations, votes and control changes — each with a stable ' +
+      '`eventId` and a per-campaign `seq`. `seq` is the ordering key AND the cursor: pass `after=<seq>` after a ' +
+      'reconnect to replay exactly the events you missed (oldest-first, gap-free), or omit it for the newest page ' +
+      'and follow `nextCursor` to scroll further back. Role redaction is applied HERE: DM-only events are withheld ' +
+      'from players and viewers, and a hidden encounter id inside a tool payload is stripped for non-DMs.',
+  })
+  @ApiQuery({ name: 'limit', required: false, description: 'Page size (default 50, max 200).' })
+  @ApiQuery({ name: 'cursor', required: false, description: "Opaque cursor from a previous page's nextCursor (scroll back)." })
+  @ApiQuery({ name: 'after', required: false, description: 'Reconnect watermark — return events with seq greater than this.' })
+  @ApiResponse({ status: 200, description: 'A page of transcript events (`items`, `total`, `hasMore`, `nextCursor`).' })
+  @ApiResponse({ status: 403, description: 'Not a member of this campaign.' })
+  async listTranscript(
+    @Param('id', ParseIntPipe) id: number,
+    @Query() query: AiDmTranscriptListDto,
+    @CurrentUser() user: RequestUser,
+  ) {
+    const role = await this.access.requireMember(user, id);
+    return this.transcript.list(id, role, { limit: query.limit, cursor: query.cursor, after: query.after });
+  }
+
+  @Get('transcript/export')
+  @ApiOperation({
+    summary: 'Export the retained AI-DM table transcript',
+    description:
+      'Requires campaign membership. Returns every event the campaign still retains, role-projected exactly like the ' +
+      'paged read — an export is a copy of what you may already see, never a redaction back door. Retention is ' +
+      'bounded per campaign; `retentionMaxEvents` reports the cap so a DM knows what has aged out.',
+  })
+  @ApiResponse({ status: 200, description: 'The role-projected transcript export.' })
+  async exportTranscript(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    const role = await this.access.requireMember(user, id);
+    return this.transcript.exportAll(id, role);
+  }
+
+  @Delete('transcript')
+  @ApiOperation({
+    summary: 'Erase the AI-DM table transcript',
+    description:
+      'DM only. Deletes every retained transcript event for the campaign and tells every open table to drop its local ' +
+      'copy (a purge resets the per-campaign `seq`, so a stale watermark would otherwise strand a connected client). ' +
+      'Transcript rows also cascade-delete with the campaign itself.',
+  })
+  @ApiResponse({ status: 200, description: 'How many events were deleted.' })
+  @ApiResponse({ status: 403, description: 'Not a DM.' })
+  async deleteTranscript(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: RequestUser) {
+    await this.access.requireRole(user, id, 'dm');
+    return { deleted: await this.transcript.purge(id) };
+  }
+
   @Sse('stream')
   @ApiOperation({
     summary: 'Subscribe to AI DM narration (SSE)',
@@ -432,6 +550,16 @@ export class AiDriverController {
     );
     return merge(
       this.stream.streamFor(id).pipe(
+        // #572: role redaction is enforced HERE, at the broadcast boundary. A withheld
+        // transcript event is DROPPED from this subscriber's stream entirely — a player is
+        // never handed a DM-only event and merely trusted not to render it.
+        map((event) => {
+          if (event.type !== 'transcript') return event;
+          const projected = projectTranscriptEventForRole(event.event, event.visibility, role);
+          // Strip the internal `visibility` hint: it never leaves the server.
+          return projected === null ? null : { type: 'transcript' as const, campaignId: event.campaignId, event: projected, at: event.at };
+        }),
+        filter((event): event is NonNullable<typeof event> => event !== null),
         map((event): MessageEvent => ({
           // Role-project tool frames so hidden encounter ids never reach non-DMs (#825 / #262).
           data: event.type === 'tool' ? projectAiDmToolEventForRole(event, role) : event,

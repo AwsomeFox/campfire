@@ -2908,6 +2908,62 @@ function migrateCastSessionsTable(sqlite: Database.Database): void {
   `);
 }
 
+/**
+ * Issue #572: the authoritative multi-player AI-DM table transcript.
+ *
+ * New table only — no existing table is touched, so the migration is CREATE ... IF NOT
+ * EXISTS plus a defensive column probe. The probe matters because an early build of this
+ * branch shipped the table WITHOUT the per-campaign `seq` / `turn_id` columns (it used
+ * the global row id as the cursor); a dev database created from that build must gain the
+ * columns and a backfilled per-campaign `seq` rather than silently failing every insert.
+ * `seq` is backfilled in (campaign_id, id) order — exactly the order the rows were written.
+ */
+function migrateAiDmTranscriptEventsTable572(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS ai_dm_transcript_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_name TEXT,
+      client_ref TEXT,
+      turn_id TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      visibility TEXT NOT NULL DEFAULT 'all',
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  const columns = sqlite.prepare('PRAGMA table_info(ai_dm_transcript_events)').all() as Array<{ name: string }>;
+  if (!columns.some((c) => c.name === 'turn_id')) {
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN turn_id TEXT');
+  }
+  if (!columns.some((c) => c.name === 'seq')) {
+    // SQLite cannot ADD a NOT NULL column without a default: add it nullable, backfill a
+    // dense per-campaign sequence in write order, then let the UNIQUE index enforce it.
+    sqlite.exec('ALTER TABLE ai_dm_transcript_events ADD COLUMN seq INTEGER');
+    sqlite.exec(`
+      UPDATE ai_dm_transcript_events
+      SET seq = (
+        SELECT COUNT(*)
+        FROM ai_dm_transcript_events AS earlier
+        WHERE earlier.campaign_id = ai_dm_transcript_events.campaign_id
+          AND earlier.id <= ai_dm_transcript_events.id
+      )
+      WHERE seq IS NULL
+    `);
+  }
+
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_campaign_seq
+      ON ai_dm_transcript_events (campaign_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
+      ON ai_dm_transcript_events (campaign_id, event_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database) => void }> = [
   { name: '0001_users_oidc', run: migrateUsersTableForOidc },
   { name: '0002_campaigns_rule_system', run: migrateCampaignsTableForRuleSystem },
@@ -3021,6 +3077,10 @@ const MIGRATIONS: ReadonlyArray<{ name: string; run: (sqlite: Database.Database)
   { name: '0109_cast_sessions_547', run: migrateCastSessionsTable },
   // 0108/0109 both landed on main while this branch was open; derivatives take 0110.
   { name: '0110_attachment_derivatives_604', run: migrateAttachmentDerivativesTable604 },
+  // 0111–0113 are claimed by other in-flight branches that have not merged yet; the AI-DM
+  // transcript skips ahead to the first genuinely free ordinal so no two branches ever
+  // record the same migration name against different DDL.
+  { name: '0114_ai_dm_transcript_events_572', run: migrateAiDmTranscriptEventsTable572 },
 ];
 
 /**

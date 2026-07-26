@@ -1240,6 +1240,41 @@ export const aiDmUsageHistory = sqliteTable('ai_dm_usage_history', {
   createdAt: text('created_at').notNull(),
 });
 
+// Authoritative multi-player AI-DM table transcript (issue #572). One row per durable
+// transcript event, written by AiDmTranscriptService BEFORE the matching frame is
+// broadcast on the narration SSE channel — so a client that reconnects and pages from
+// its last seq can never miss an event other clients already rendered.
+//
+// `seq` is a PER-CAMPAIGN monotonic counter assigned inside the same synchronous
+// better-sqlite3 transaction as the insert: the ordering key, the pagination cursor and
+// the reconnect watermark, all in one. Not `createdAt` (wall clock is not a total order)
+// and not the global `id` (it interleaves across campaigns). UNIQUE (campaignId, seq).
+// `eventId` is the stable client-visible identity (server-minted uuid, unique per
+// campaign) used to merge the same event arriving twice (live SSE + a page fetch).
+// `clientRef` is the sender's optimistic-echo CORRELATION token (not an idempotency
+// key) — echoed back so the submitting browser replaces its local entry in place.
+// `turnId` groups one driver turn's narration/tool/turn-end rows into one DM bubble.
+// `visibility` is row-level redaction ('all' | 'dm'); field-level redaction of a hidden
+// encounter id inside a tool payload reuses projectAiDmToolEventForRole instead.
+//
+// narration.delta is deliberately NOT stored — narration.message is the aggregated
+// authoritative text per step, and persisting every token chunk would blow the table up
+// ~100x per turn for no added information.
+export const aiDmTranscriptEvents = sqliteTable('ai_dm_transcript_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  campaignId: integer('campaign_id').notNull(),
+  seq: integer('seq').notNull(),
+  eventId: text('event_id').notNull(),
+  kind: text('kind').notNull(), // AiDmTranscriptEventKind
+  actorUserId: text('actor_user_id'),
+  actorName: text('actor_name'),
+  clientRef: text('client_ref'),
+  turnId: text('turn_id'),
+  payload: text('payload').notNull().default('{}'), // JSON-encoded, kind-specific
+  visibility: text('visibility').notNull().default('all'), // 'all' | 'dm'
+  createdAt: text('created_at').notNull(),
+});
+
 // AI provider config storage (issue #310): provider selection + ENCRYPTED API key
 // at two scopes — 'server' (one row, admin default) and 'campaign' (per-campaign
 // override, DM-managed, cascades on campaign delete). `encrypted_api_key` holds an

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Subject, type Observable } from 'rxjs';
 import { filter } from 'rxjs/operators';
+import type { AiDmTranscriptEvent, AiDmTranscriptVisibility } from '@campfire/schema';
 import { nowIso } from '../../common/time';
 
 /**
@@ -98,7 +99,28 @@ export type AiDmStreamEvent =
       confirmationId: string;
       tool: string;
       at: string;
-    };
+    }
+  // #572 — one durably-persisted transcript event, broadcast AFTER its row commits. This
+  // is the authoritative multi-player table log: it carries the accepted PLAYER ACTION
+  // (which had no frame at all before #572, so only the sender ever saw it) alongside
+  // narration steps, tool summaries, cancellations, votes and control changes, each with
+  // a stable `eventId` and a per-campaign `seq` a client can merge and resume from.
+  //
+  // `visibility` is an INTERNAL row-level redaction hint: the controller drops 'dm' frames
+  // for players/viewers via `projectTranscriptEventForRole` and strips this field before
+  // the frame reaches the wire. A player must never be handed a DM-only event and merely
+  // trusted not to render it.
+  | {
+      type: 'transcript';
+      campaignId: number;
+      event: AiDmTranscriptEvent;
+      visibility: AiDmTranscriptVisibility;
+      at: string;
+    }
+  // #572 — the DM erased the transcript. Purging resets the per-campaign `seq`, so every
+  // open table must drop its local copy and refetch rather than resume from a watermark
+  // that no longer refers to anything.
+  | { type: 'transcript.reset'; campaignId: number; at: string };
 
 /**
  * In-process pub/sub for the AI DM driver's narration stream (#312), modelled on the

@@ -113,6 +113,17 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
   );
 
   const seededRef = useRef(false);
+  /**
+   * A hydrate dispatched by the key effect below has not been applied yet.
+   *
+   * The key effect, the save effect and the seed effect all run in the SAME commit, and
+   * effects see the pre-dispatch `transcript`. Without this latch the seed effect read
+   * `entries.length === 0` on the very pass that queued a hydrate of the cached scrollback,
+   * seeded a 2-line join-context placeholder over it, and then persisted that placeholder —
+   * destroying the cached transcript for every surface sharing the store. Skip exactly one
+   * pass so the seed decision is made against the hydrated state.
+   */
+  const pendingHydrateRef = useRef(false);
 
   // Reset activity + transcript when campaign or driver mode changes.
   const prevKeyRef = useRef<string>('');
@@ -122,6 +133,7 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       prevKeyRef.current = key;
       setState((s) => ({ ...INITIAL_STATE, mode: s.mode }));
       seededRef.current = false;
+      pendingHydrateRef.current = true;
       if (campaignId !== undefined) {
         dispatchTranscript({ type: 'hydrate', state: enabled ? loadTranscript(campaignId) : emptyTranscript });
       } else {
@@ -147,6 +159,12 @@ export function useAiDmLiveActivityState(campaignId: number | undefined): AiDmLi
       return;
     }
     if (seededRef.current) return;
+    // A hydrate is queued but not yet applied — deciding "empty, so seed" here would
+    // overwrite the scrollback that hydrate is about to restore (see pendingHydrateRef).
+    if (pendingHydrateRef.current) {
+      pendingHydrateRef.current = false;
+      return;
+    }
     if (!seatQuery.isFetched || !sessionQuery.isFetched) return;
     if (session?.scene || session?.lastNarration) {
       dispatchTranscript({ type: 'seed', scene: session.scene, lastNarration: session.lastNarration });

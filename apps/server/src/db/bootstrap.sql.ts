@@ -1002,6 +1002,70 @@ CREATE TABLE IF NOT EXISTS ai_dm_usage_history (
 CREATE INDEX IF NOT EXISTS idx_ai_dm_usage_history_campaign_created
   ON ai_dm_usage_history (campaign_id, created_at DESC, id DESC);
 
+-- Issue #572: the AUTHORITATIVE multi-player AI-DM table transcript. Before this the
+-- transcript was client-local (assembled in the browser from the SSE stream plus a local
+-- echo of that one client's own submissions, cached in localStorage) — so a player who
+-- joined late, reloaded, or reconnected saw a different transcript from everyone else,
+-- and nobody but the sender ever saw the player action an AI answer was responding to.
+--
+-- ORDERING. seq is a PER-CAMPAIGN monotonic counter assigned server-side inside the
+-- same synchronous better-sqlite3 transaction as the insert (see AiDmTranscriptService).
+-- It is the ordering key, the pagination cursor, and the reconnect watermark. It is
+-- deliberately NOT created_at (wall clock has no total order under concurrency) and
+-- deliberately NOT the global autoincrement id (which interleaves across campaigns, so
+-- a per-campaign cursor built on it would leak server-wide write volume). UNIQUE
+-- (campaign_id, seq) makes a duplicate assignment a hard error rather than silent
+-- transcript corruption.
+--
+-- event_id is the stable, client-visible identity (a server-minted uuid) used for
+-- idempotent client-side merge when the same event arrives twice (live SSE plus a page
+-- fetch after reconnect).
+--
+-- client_ref is the sender's optimistic-echo correlation token: the composer mints it,
+-- POSTs it with the action, and the server echoes it back on the persisted event so the
+-- sending client REPLACES its local optimistic entry instead of rendering the action
+-- twice. A token, not content equality — two players typing the same words in the same
+-- second must still produce two distinct lines.
+--
+-- turn_id groups the narration/tool/turn-end rows of ONE driver turn, so a client that
+-- rebuilds the transcript from a REST page assembles the same DM bubble the live stream
+-- produced.
+--
+-- visibility is row-level role redaction ('all' | 'dm'), enforced server-side at BOTH
+-- the REST read and the SSE broadcast boundary. FIELD-level redaction (e.g. a hidden
+-- encounter's id inside a tool payload) reuses the existing projectAiDmToolEventForRole
+-- mechanism rather than inventing a second one.
+--
+-- Deliberately NOT stored: narration.delta. Persisting every streamed token chunk would
+-- multiply this table ~100x per turn for zero added information — narration.message is the
+-- aggregated authoritative text of each step and is what the transcript renders.
+--
+-- RETENTION: bounded to AI_DM_TRANSCRIPT_RETENTION_MAX_EVENTS rows per campaign, pruned
+-- in the same transaction as each insert; cascades on campaign delete; DM-purgeable via
+-- DELETE /campaigns/:id/ai-dm/transcript.
+CREATE TABLE IF NOT EXISTS ai_dm_transcript_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  campaign_id INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,
+  event_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  actor_user_id TEXT,
+  actor_name TEXT,
+  client_ref TEXT,
+  turn_id TEXT,
+  payload TEXT NOT NULL DEFAULT '{}',
+  visibility TEXT NOT NULL DEFAULT 'all',
+  created_at TEXT NOT NULL
+);
+-- The index that matters: every read is "this campaign, ordered by seq" — page back for
+-- late join, page forward from a seq for reconnect gap-fill — and the retention prune and
+-- the next-seq probe are the same keyset scan. UNIQUE also guards the counter.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_campaign_seq
+  ON ai_dm_transcript_events (campaign_id, seq);
+-- Stable event ids are unique per campaign so a client can merge by id with no tiebreak.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_dm_transcript_events_event_id
+  ON ai_dm_transcript_events (campaign_id, event_id);
+
 -- AI provider config: encrypted API-key + provider storage (issue #310). Two
 -- scopes -- 'server' (one row, the admin-managed default) and 'campaign' (a
 -- per-campaign override, DM-managed, cascading on campaign delete). The API key
